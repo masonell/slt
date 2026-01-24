@@ -11,10 +11,6 @@ This spec defines a VPN that:
 * requires explicit client authentication at the VPN protocol layer before any tunneled data is accepted,
 * prefers UDP-QSP for data, with TCP fallback, and performs a UDP-QSP “verify” step before switching active transport.
 
-This spec intentionally leaves one area as **TBD**:
-
-* client-side QUIC library selection for the nginx wire-shape step (handshake only).
-
 ## 1. Terminology
 
 * **Wrapper**: the front process that owns public sockets and routes traffic to either VPN handlers or nginx.
@@ -247,6 +243,13 @@ TLS library: **BoringSSL** via `boring-sys` (patched client hook to set `legacy_
   * Payload length sufficient for the 16-byte HP sample (pad if needed).
 * Interop: UDP-QSP is **not** compatible with standard QUIC stacks.
 
+Client-side QUIC library (wire-shape handshake only): **quiche** (vendored + patched as needed).
+
+Constraints / patch notes for `quiche`:
+* Must allow controlling Initial DCID length to match Chrome.
+* Must allow including unknown transport parameters (or an escape hatch to append raw TP bytes).
+* Must not require owning a socket (quiche is acceptable; quinn is not due to `SocketAddr` requirements and `ring` dependency).
+
 ## 6. VPN Protocol (Application Layer)
 
 ### 6.1 Common rules
@@ -466,4 +469,4 @@ nftables concept:
 
 ## 13. Open Items (Explicit TBD)
 
-1. Client-side QUIC library selection for nginx wire-shape step (handshake only).
+1. none (pending implementation details only).
