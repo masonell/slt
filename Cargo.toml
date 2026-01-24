@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+boring-sys = "5.0.0-alpha.2"
+
+[patch.crates-io]
+boring-sys = { path = "vendor/boring-sys" }
