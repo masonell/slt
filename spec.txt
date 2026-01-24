@@ -11,10 +11,9 @@ This spec defines a VPN that:
 * requires explicit client authentication at the VPN protocol layer before any tunneled data is accepted,
 * prefers UDP-QSP for data, with TCP fallback, and performs a UDP-QSP “verify” step before switching active transport.
 
-This spec intentionally leaves two areas as **TBD**:
+This spec intentionally leaves one area as **TBD**:
 
-* which concrete TLS library to use for the TCP control channel,
-* the exact “claim predicate” used by the wrapper to decide whether to route a TCP connection to VPN or to nginx.
+* client-side QUIC library selection for the nginx wire-shape step (handshake only).
 
 ## 1. Terminology
 
@@ -89,15 +88,24 @@ part1 = MAC(random[0:N] || server_secret)
 part2 = MAC(key_share || server_secret)
 ```
 
-Where `random` is the ClientHello's 32-byte random field (first N bytes used), and `key_share` is extracted from the `key_share` extension (x25519 group value).
+Parameters (fixed):
+* `legacy_session_id` length is **32 bytes**.
+* `MAC` is HMAC-SHA256, truncated to 16 bytes.
+* `N = 16` (bytes from the ClientHello `random` field).
+* `part1_len = 16`, `part2_len = 16`.
+* `key_share` is **x25519 only** (32-byte key share).
+
+Where `random` is the ClientHello's 32-byte random field (first N bytes used), and `key_share` is extracted from the `key_share` extension.
 
 Classification logic:
 1. Extract `legacy_session_id` from ClientHello
-2. Parse and verify `part1` using `random[0:N]`
-3. If `part1` invalid → `PASS` (early return)
-4. Parse `key_share` extension and verify `part2`
-5. If `part2` invalid → `PASS`
-6. Both valid → `CLAIM`
+2. If `legacy_session_id` length != 32 → `PASS` (early return)
+3. Parse and verify `part1` using `random[0:N]`
+4. If `part1` invalid → `PASS` (early return)
+5. Parse `key_share` extension and verify `part2`
+6. If `key_share` missing, not x25519, or not 32 bytes → `PASS`
+7. If `part2` invalid → `PASS`
+8. Both valid → `CLAIM`
 
 Failed claims route to nginx normally, making VPN and nginx traffic indistinguishable to observers.
 
@@ -224,7 +232,7 @@ For every tunneled packet received from a client session:
 * VPN TCP handler terminates TLS and runs VPN protocol over the TLS stream.
 * Unknown TCP connections are passed through to nginx without termination.
 
-(TLS library choice: TBD.)
+TLS library: **BoringSSL** via `boring-sys` (patched client hook to set `legacy_session_id` after `random` and `key_share` are ready, before ClientHello transcript hashing).
 
 ### 5.2 UDP-QSP (QUIC-shaped, custom)
 
@@ -458,6 +466,4 @@ nftables concept:
 
 ## 13. Open Items (Explicit TBD)
 
-1. TLS library selection for TCP control channel.
-2. Client-side QUIC library selection for nginx wire-shape step (handshake only).
-3. Classification parameter `N` (number of bytes from ClientHello `random` field used in `part1` computation).
+1. Client-side QUIC library selection for nginx wire-shape step (handshake only).
