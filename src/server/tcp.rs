@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
 
 use crate::classifier::{Verdict, classify_tcp_client_hello};
 use crate::config::ServerConfig;
@@ -52,14 +53,18 @@ impl TcpFrontDoor {
     /// Run the TCP accept loop and route connections by classification.
     ///
     /// Claimed connections are handed to `claim_handler`; other traffic is
-    /// proxied to the nginx upstream.
+    /// proxied to the nginx upstream. The loop exits once `cancel` is canceled.
     pub async fn run(
         &self,
+        cancel: CancellationToken,
         claim_handler: impl Fn(TcpStream, SocketAddr) + Send + Sync + 'static,
     ) -> io::Result<()> {
         let claim_handler = Arc::new(claim_handler);
         loop {
-            let (stream, addr) = self.listener.accept().await?;
+            let (stream, addr) = tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                res = self.listener.accept() => res?,
+            };
             let server_secret = self.server_secret;
             let upstream = self.config.nginx_tcp_upstream;
             let claim_handler = claim_handler.clone();

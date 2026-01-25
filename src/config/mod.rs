@@ -2,6 +2,7 @@
 
 pub mod client;
 mod serde_hex;
+mod serde_secret;
 pub mod server;
 
 pub use client::{ClientConfig, UpgradePreferences};

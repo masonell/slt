@@ -14,6 +14,8 @@ humantime-serde = "1.1.1"
 quiche = { version = "0.24.8", features = ["boringssl-boring-crate"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["full"] }
+tokio-util = "0.7.16"
+toml = "0.9.8"
 
 [patch.crates-io]
 boring = { path = "vendor/boring" }

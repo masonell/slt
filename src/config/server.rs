@@ -20,6 +20,9 @@ pub struct ServerClient {
 /// Static server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// 32-byte secret for ClientHello classification.
+    #[serde(with = "crate::config::serde_secret")]
+    pub server_secret: [u8; 32],
     /// TCP listener for TLS-wrapped VPN traffic.
     pub listen_tcp: SocketAddr,
     /// UDP listener for QUIC-based VPN traffic.
