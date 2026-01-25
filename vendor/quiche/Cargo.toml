@@ -108,7 +108,7 @@ name = "server"
 path = "examples/server.rs"
 
 [dependencies.boring]
-version = "4.3"
+version = "5.0.0-alpha.2"
 optional = true
 
 [dependencies.either]
