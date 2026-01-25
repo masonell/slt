@@ -13,6 +13,7 @@ hex = "0.4.3"
 humantime-serde = "1.1.1"
 quiche = { version = "0.24.8", features = ["boringssl-boring-crate"] }
 serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.49.0", features = ["full"] }
 
 [patch.crates-io]
 boring = { path = "vendor/boring" }
