@@ -609,6 +609,11 @@ pub struct Config {
     track_unknown_transport_params: Option<usize>,
 
     initial_rtt: Duration,
+
+    #[cfg(feature = "boringssl-boring-crate")]
+    tls_configure: Option<
+        Box<dyn Fn(&mut boring::ssl::SslRef) -> Result<()> + Send + Sync>,
+    >,
 }
 
 // See https://quicwg.org/base-drafts/rfc9000.html#section-15
@@ -684,6 +689,9 @@ impl Config {
 
             track_unknown_transport_params: None,
             initial_rtt: DEFAULT_INITIAL_RTT,
+
+            #[cfg(feature = "boringssl-boring-crate")]
+            tls_configure: None,
         })
     }
 
@@ -850,6 +858,19 @@ impl Config {
             protos_list.iter().map(|s| s.to_vec()).collect();
 
         self.tls_ctx.set_alpn(protos_list)
+    }
+
+    /// Sets a callback to configure the per-connection SSL object.
+    ///
+    /// This is useful for options that are only available on `SSL`, not
+    /// `SSL_CTX` (for example ECH grease or ALPS).
+    #[cfg(feature = "boringssl-boring-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    pub fn set_tls_configure_callback<F>(&mut self, cb: F)
+    where
+        F: Fn(&mut boring::ssl::SslRef) -> Result<()> + Send + Sync + 'static,
+    {
+        self.tls_configure = Some(Box::new(cb));
     }
 
     /// Configures the list of supported application protocols using wire
@@ -1784,7 +1805,11 @@ impl<F: BufFactory> Connection<F> {
         scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
         peer: SocketAddr, config: &mut Config, is_server: bool,
     ) -> Result<Connection<F>> {
-        let tls = config.tls_ctx.new_handshake()?;
+        let mut tls = config.tls_ctx.new_handshake()?;
+        #[cfg(feature = "boringssl-boring-crate")]
+        if let Some(cb) = &config.tls_configure {
+            cb(tls.ssl_mut())?;
+        }
         Connection::with_tls(scid, odcid, local, peer, config, tls, is_server)
     }
 
