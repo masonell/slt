@@ -474,6 +474,9 @@ const DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN: usize = 3;
 // frames size. We enforce the recommendation for forward compatibility.
 const MAX_DGRAM_FRAME_SIZE: u64 = 65536;
 
+// Maximum length for GREASE transport parameter values.
+const MAX_GREASE_TP_LEN: usize = 16;
+
 // The length of the payload length field.
 const PAYLOAD_LENGTH_LEN: usize = 2;
 
@@ -792,6 +795,16 @@ impl Config {
     /// [keylog]: https://developer.mozilla.org/en-US/docs/Mozilla/Projects/NSS/Key_Log_Format
     pub fn log_keys(&mut self) {
         self.tls_ctx.enable_keylog();
+    }
+
+    /// Returns reference to local transport parameters.
+    pub fn local_transport_params(&self) -> &TransportParams {
+        &self.local_transport_params
+    }
+
+    /// Replaces local transport parameters.
+    pub fn set_local_transport_params(&mut self, params: TransportParams) {
+        self.local_transport_params = params;
     }
 
     /// Configures the session ticket key material.
@@ -2008,7 +2021,7 @@ impl<F: BufFactory> Connection<F> {
         // Derive initial secrets for the client. We can do this here because
         // we already generated the random destination connection ID.
         if !is_server {
-            let mut dcid = [0; 16];
+            let mut dcid = [0; 8];
             rand::rand_bytes(&mut dcid[..]);
 
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
@@ -8940,6 +8953,12 @@ pub struct TransportParams {
     pub retry_source_connection_id: Option<ConnectionId<'static>>,
     /// DATAGRAM frame extension parameter, if any.
     pub max_datagram_frame_size: Option<u64>,
+    /// Google QUIC version transport parameter (non-standard).
+    pub google_quic_version: Option<[u8; 4]>,
+    /// Version information transport parameter (RFC 9368), raw bytes.
+    pub version_information: Option<Vec<u8>>,
+    /// Whether to inject a random GREASE transport parameter.
+    pub grease: bool,
     /// Unknown peer transport parameters and values, if any.
     pub unknown_params: Option<UnknownTransportParameters>,
     // pub preferred_address: ...,
@@ -8965,6 +8984,9 @@ impl Default for TransportParams {
             initial_source_connection_id: None,
             retry_source_connection_id: None,
             max_datagram_frame_size: None,
+            google_quic_version: None,
+            version_information: None,
+            grease: false,
             unknown_params: Default::default(),
         }
     }
@@ -9276,6 +9298,22 @@ impl TransportParams {
             TransportParams::encode_param(&mut b, 0x000c, 0)?;
         }
 
+        if tp.grease {
+            let max_id = (1u64 << 62) - 31;
+            let mut grease_id = rand::rand_u64_uniform(max_id);
+            grease_id = (grease_id / 31) * 31 + 27;
+
+            let grease_len =
+                rand::rand_u64_uniform(MAX_GREASE_TP_LEN as u64) as usize;
+
+            TransportParams::encode_param(&mut b, grease_id, grease_len)?;
+            if grease_len > 0 {
+                let mut grease = [0u8; MAX_GREASE_TP_LEN];
+                rand::rand_bytes(&mut grease[..grease_len]);
+                b.put_bytes(&grease[..grease_len])?;
+            }
+        }
+
         // TODO: encode preferred_address
 
         if tp.active_conn_id_limit != 2 {
@@ -9308,6 +9346,20 @@ impl TransportParams {
                 octets::varint_len(max_datagram_frame_size),
             )?;
             b.put_varint(max_datagram_frame_size)?;
+        }
+
+        if let Some(google_quic_version) = tp.google_quic_version {
+            TransportParams::encode_param(&mut b, 0x4752, 4)?;
+            b.put_bytes(&google_quic_version)?;
+        }
+
+        if let Some(version_information) = &tp.version_information {
+            TransportParams::encode_param(
+                &mut b,
+                0x0011,
+                version_information.len(),
+            )?;
+            b.put_bytes(version_information)?;
         }
 
         let out_len = b.off();
