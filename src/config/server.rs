@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 /// Per-client entry in the server allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

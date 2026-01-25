@@ -67,8 +67,7 @@ pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict 
         return v;
     }
 
-    let part1 = match hmac_sha256(server_secret, &random[..RANDOM_PREFIX_LEN])
-    {
+    let part1 = match hmac_sha256(server_secret, &random[..RANDOM_PREFIX_LEN]) {
         Ok(v) => v,
         Err(_) => return Verdict::Pass,
     };
@@ -129,10 +128,7 @@ pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict 
                     Err(_) => return Verdict::Pass,
                 };
 
-                return if memcmp::eq(
-                    &session_id[PART_LEN..],
-                    &part2[..PART_LEN],
-                ) {
+                return if memcmp::eq(&session_id[PART_LEN..], &part2[..PART_LEN]) {
                     Verdict::Claim
                 } else {
                     Verdict::Pass
@@ -153,10 +149,7 @@ pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict 
     Verdict::Pass
 }
 
-fn parse_key_share(
-    hs: &mut HandshakeReader,
-    ext_len: usize,
-) -> Result<Option<[u8; 32]>, Verdict> {
+fn parse_key_share(hs: &mut HandshakeReader, ext_len: usize) -> Result<Option<[u8; 32]>, Verdict> {
     if ext_len < 2 {
         hs.skip(ext_len)?;
         return Ok(None);
@@ -287,10 +280,7 @@ impl<'a> RecordReader<'a> {
             return Err(Verdict::Pass);
         }
 
-        let len = u16::from_be_bytes([
-            self.buf[self.pos + 3],
-            self.buf[self.pos + 4],
-        ]) as usize;
+        let len = u16::from_be_bytes([self.buf[self.pos + 3], self.buf[self.pos + 4]]) as usize;
 
         self.pos += 5;
 
@@ -347,9 +337,9 @@ impl<'a> HandshakeReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::client_hello::client_hello_session_id_callback;
     use boring::ssl::{HandshakeError, Ssl, SslContextBuilder, SslMethod, SslVerifyMode};
     use std::io::{self, Read, Write};
-    use crate::crypto::client_hello::client_hello_session_id_callback;
 
     #[derive(Default, Debug)]
     struct CaptureStream {

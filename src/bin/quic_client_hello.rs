@@ -1,9 +1,8 @@
-use boring::rand::rand_bytes;
 use clap::Parser;
+use quiche::ConnectionId;
 use slt::crypto::quic_client_chrome_config;
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::Duration;
-use quiche::ConnectionId;
 
 #[derive(Parser, Debug)]
 #[command(about = "Emit a QUIC ClientHello over UDP.")]

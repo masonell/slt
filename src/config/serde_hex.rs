@@ -1,4 +1,4 @@
-use serde::{de, Deserialize, Deserializer, Serializer};
+use serde::{Deserialize, Deserializer, Serializer, de};
 
 pub fn serialize<const N: usize, S>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
 where

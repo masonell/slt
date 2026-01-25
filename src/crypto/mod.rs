@@ -2,11 +2,13 @@
 
 pub mod client_hello;
 
-use std::io::{Cursor, Write};
 use boring::error::ErrorStack;
-use boring::ssl::{CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef};
-use foreign_types::ForeignTypeRef;
+use boring::ssl::{
+    CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef,
+};
 use boring_sys as ffi;
+use foreign_types::ForeignTypeRef;
+use std::io::{Cursor, Write};
 
 const ALPN_H2_HTTP1: &[u8] = b"\x02h2\x08http/1.1";
 const CHROME_SIGALGS: &str = "ecdsa_secp256r1_sha256:\
@@ -41,13 +43,10 @@ const CHROME_QUIC_CURVE_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
 /// This uses a BoringSSL context (for Chrome fingerprint parity) and applies
 /// the currently known defaults for Chrome QUIC transport parameters.
 pub fn quic_client_chrome_config() -> quiche::Result<quiche::Config> {
-    let tls_ctx = quic_client_chrome_ctx_builder()
-        .map_err(|_| quiche::Error::TlsFail)?;
+    let tls_ctx = quic_client_chrome_ctx_builder().map_err(|_| quiche::Error::TlsFail)?;
 
-    let mut config = quiche::Config::with_boring_ssl_ctx_builder(
-        quiche::PROTOCOL_VERSION,
-        tls_ctx,
-    )?;
+    let mut config =
+        quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, tls_ctx)?;
     config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL)?;
     config.set_tls_configure_callback(|ssl| {
         configure_quic_client_ssl(ssl).map_err(|_| quiche::Error::TlsFail)
@@ -67,8 +66,7 @@ pub fn quic_client_chrome_config() -> quiche::Result<quiche::Config> {
     tp.max_ack_delay = 0;
     tp.ack_delay_exponent = 0;
     tp.version_information = Some(vec![
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0xaa, 0x4a, 0x0a,
-        0x8a,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0xaa, 0x4a, 0x0a, 0x8a,
     ]);
     tp.grease = true;
 
