@@ -1,3 +1,7 @@
+//! TLS/QUIC crypto helpers.
+
+pub mod client_hello;
+
 use boring::ssl::{SslContextBuilder, SslMethod};
 
 /// Build a QUIC client config that mirrors Chrome's transport parameters.

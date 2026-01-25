@@ -1,7 +1,7 @@
 use boring::hash::hmac_sha256;
 use boring::memcmp;
 
-use crate::client_hello::{
+use crate::crypto::client_hello::{
     EXT_KEY_SHARE, GROUP_X25519, HANDSHAKE_TYPE_CLIENT_HELLO, LEGACY_SESSION_ID_LEN, PART_LEN,
     RANDOM_PREFIX_LEN,
 };
@@ -349,7 +349,7 @@ mod tests {
     use super::*;
     use boring::ssl::{HandshakeError, Ssl, SslContextBuilder, SslMethod, SslVerifyMode};
     use std::io::{self, Read, Write};
-    use crate::client_hello::client_hello_session_id_callback;
+    use crate::crypto::client_hello::client_hello_session_id_callback;
 
     #[derive(Default, Debug)]
     struct CaptureStream {
