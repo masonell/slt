@@ -1,1 +1,15 @@
 /target
+.idea
+.vscode
+.DS_Store
+*.swp
+*.swo
+*.swn
+*.tmp
+*.log
+*.bak
+*.orig
+*.rs.bk
+.direnv
+/result
+/result-*
