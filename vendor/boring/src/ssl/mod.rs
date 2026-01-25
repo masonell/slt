@@ -1646,6 +1646,28 @@ impl SslContextBuilder {
         }
     }
 
+    /// Sets a callback that can overwrite the legacy_session_id in the ClientHello on the client.
+    ///
+    /// The callback receives the raw ClientHello bytes (including the handshake header if present)
+    /// and a mutable slice pointing to the legacy_session_id field. It should overwrite the slice
+    /// in place. Returning an error will abort the handshake.
+    #[corresponds(SSL_CTX_set_client_hello_session_id_cb)]
+    pub fn set_client_hello_session_id_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<(), ErrorStack>
+            + Sync
+            + Send
+            + 'static,
+    {
+        unsafe {
+            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            ffi::SSL_CTX_set_client_hello_session_id_cb(
+                self.as_ptr(),
+                Some(callbacks::raw_client_hello_session_id::<F>),
+            );
+        }
+    }
+
     /// Registers a certificate compression algorithm.
     ///
     /// [`SSL_CTX_add_cert_compression_alg`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_CTX_add_cert_compression_alg

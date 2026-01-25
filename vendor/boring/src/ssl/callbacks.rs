@@ -387,6 +387,37 @@ where
     }
 }
 
+pub(super) unsafe extern "C" fn raw_client_hello_session_id<F>(
+    ssl: *mut ffi::SSL,
+    client_hello: *const c_uchar,
+    client_hello_len: usize,
+    session_id: *mut c_uchar,
+    session_id_len: usize,
+) -> c_int
+where
+    F: Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<(), ErrorStack> + Sync + Send + 'static,
+{
+    // SAFETY: boring provides valid inputs.
+    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
+    let client_hello =
+        unsafe { slice::from_raw_parts(client_hello, client_hello_len) };
+    let session_id =
+        unsafe { slice::from_raw_parts_mut(session_id, session_id_len) };
+
+    let ssl_context = ssl.ssl_context().to_owned();
+    let callback = ssl_context
+        .ex_data(SslContext::cached_ex_index::<F>())
+        .expect("BUG: client hello session id callback missing");
+
+    match callback(ssl, client_hello, session_id) {
+        Ok(()) => 1,
+        Err(e) => {
+            e.put();
+            0
+        }
+    }
+}
+
 pub(super) unsafe extern "C" fn raw_tlsext_status<F>(ssl: *mut ffi::SSL, _: *mut c_void) -> c_int
 where
     F: Fn(&mut SslRef) -> Result<bool, ErrorStack> + 'static + Sync + Send,
