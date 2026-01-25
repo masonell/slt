@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 boring = "5.0.0-alpha.2"
 boring-sys = "5.0.0-alpha.2"
+quiche = { version = "0.24.8", features = ["boringssl-boring-crate"] }
 
 [patch.crates-io]
 boring = { path = "vendor/boring" }
 boring-sys = { path = "vendor/boring-sys" }
+quiche = { path = "vendor/quiche" }
