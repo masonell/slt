@@ -12,19 +12,6 @@ use crate::config::ServerConfig;
 const PEEK_LEN: usize = 16 * 1024;
 const PEEK_ATTEMPTS: usize = 4;
 
-/// Result of accepting and classifying a TCP connection.
-#[derive(Debug)]
-pub enum TcpDecision {
-    /// Connection is claimed by the VPN server.
-    Claim { stream: TcpStream, addr: SocketAddr },
-    /// Connection should be passed through to the upstream.
-    Pass { stream: TcpStream, addr: SocketAddr },
-    /// Not enough data to classify yet.
-    Incomplete { stream: TcpStream, addr: SocketAddr },
-    /// Connection should be dropped.
-    Drop { addr: SocketAddr },
-}
-
 /// TCP acceptor and ClientHello classifier.
 #[derive(Debug)]
 pub struct TcpFrontDoor {
@@ -62,19 +49,42 @@ impl TcpFrontDoor {
         classify_tcp_client_hello(buf, &self.server_secret)
     }
 
-    /// Accept a connection and classify it using a peek buffer.
-    pub async fn accept(&self) -> io::Result<TcpDecision> {
-        let (stream, addr) = self.listener.accept().await?;
-        let verdict = self.classify_stream(&stream).await?;
-        Ok(match verdict {
-            Verdict::Claim => TcpDecision::Claim { stream, addr },
-            Verdict::Pass => TcpDecision::Pass { stream, addr },
-            Verdict::Drop => TcpDecision::Drop { addr },
-            Verdict::Incomplete => TcpDecision::Incomplete { stream, addr },
-        })
+    /// Run the TCP accept loop and route connections by classification.
+    ///
+    /// Claimed connections are handed to `claim_handler`; other traffic is
+    /// proxied to the nginx upstream.
+    pub async fn run(
+        &self,
+        claim_handler: impl Fn(TcpStream, SocketAddr) + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        let claim_handler = Arc::new(claim_handler);
+        loop {
+            let (stream, addr) = self.listener.accept().await?;
+            let server_secret = self.server_secret;
+            let upstream = self.config.nginx_tcp_upstream;
+            let claim_handler = claim_handler.clone();
+
+            tokio::spawn(async move {
+                match Self::classify_stream(&stream, server_secret).await {
+                    Ok(Verdict::Claim) => (claim_handler)(stream, addr),
+                    Ok(Verdict::Pass | Verdict::Incomplete) => {
+                        let _ = Self::proxy_to_upstream(stream, upstream).await;
+                    }
+                    Ok(Verdict::Drop) | Err(_) => {
+                        // Drop the connection.
+                    }
+                }
+            });
+        }
     }
 
-    async fn classify_stream(&self, stream: &TcpStream) -> io::Result<Verdict> {
+    async fn proxy_to_upstream(mut inbound: TcpStream, upstream: SocketAddr) -> io::Result<()> {
+        let mut outbound = TcpStream::connect(upstream).await?;
+        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await?;
+        Ok(())
+    }
+
+    async fn classify_stream(stream: &TcpStream, server_secret: [u8; 32]) -> io::Result<Verdict> {
         let mut buf = vec![0u8; PEEK_LEN];
         let mut last_len = 0usize;
 
@@ -84,7 +94,7 @@ impl TcpFrontDoor {
                 return Ok(Verdict::Drop);
             }
 
-            let verdict = self.classify(&buf[..n]);
+            let verdict = classify_tcp_client_hello(&buf[..n], &server_secret);
             if verdict != Verdict::Incomplete {
                 return Ok(verdict);
             }
