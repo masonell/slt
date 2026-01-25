@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 boring = "5.0.0-alpha.2"
 boring-sys = "5.0.0-alpha.2"
+brotli = "8.0.2"
+clap = { version = "4.5.54", features = ["derive"] }
+foreign-types = "0.5.0"
 hex = "0.4.3"
 humantime-serde = "1.1.1"
 quiche = { version = "0.24.8", features = ["boringssl-boring-crate"] }
