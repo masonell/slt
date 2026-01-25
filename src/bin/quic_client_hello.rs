@@ -3,6 +3,7 @@ use clap::Parser;
 use slt::crypto::quic_client_chrome_config;
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::Duration;
+use quiche::ConnectionId;
 
 #[derive(Parser, Debug)]
 #[command(about = "Emit a QUIC ClientHello over UDP.")]
@@ -48,17 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local = socket.local_addr()?;
 
     let mut config = quic_client_chrome_config()?;
-    config.set_application_protos(&[args.alpn.as_bytes()])?;
 
-    let scid = if let Some(hex) = args.scid_hex {
-        hex
+    let scid = if let Some(hex) = &args.scid_hex {
+        ConnectionId::from_ref(hex)
     } else {
-        let mut id = [0u8; 8];
-        rand_bytes(&mut id)?;
-        id
+        ConnectionId::from_ref(&[])
     };
 
-    let scid = quiche::ConnectionId::from_ref(&scid);
     let mut conn = quiche::connect(args.sni.as_deref(), &scid, local, peer, &mut config)?;
 
     let mut out = [0u8; 1350];
