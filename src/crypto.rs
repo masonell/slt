@@ -1,5 +1,9 @@
 use boring::ssl::{SslContextBuilder, SslMethod};
 
+/// Build a QUIC client config that mirrors Chrome's transport parameters.
+///
+/// This uses a BoringSSL context (for Chrome fingerprint parity) and applies
+/// the currently known defaults for Chrome QUIC transport parameters.
 pub fn quic_client_chrome_config() -> quiche::Result<quiche::Config> {
     let tls_ctx = SslContextBuilder::new(SslMethod::tls())
         .map_err(|_| quiche::Error::TlsFail)?;
