@@ -6,7 +6,10 @@ edition = "2024"
 [dependencies]
 boring = "5.0.0-alpha.2"
 boring-sys = "5.0.0-alpha.2"
+hex = "0.4.3"
+humantime-serde = "1.1.1"
 quiche = { version = "0.24.8", features = ["boringssl-boring-crate"] }
+serde = { version = "1.0.228", features = ["derive"] }
 
 [patch.crates-io]
 boring = { path = "vendor/boring" }
