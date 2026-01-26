@@ -20,6 +20,7 @@ pub const GROUP_X25519: u16 = 0x001d;
 ///
 /// Returns `None` if the buffer is malformed or does not contain an `X25519`
 /// `key_share`.
+#[must_use]
 pub fn parse_client_hello(client_hello: &[u8]) -> Option<([u8; 32], [u8; 32])> {
     if client_hello.len() < 4 {
         return None;

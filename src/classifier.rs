@@ -40,6 +40,7 @@ const QUIC_DCID_LEN: usize = 8;
 /// This uses QUIC invariants (fixed bit set) to recognize QUIC packets. Long
 /// headers are passed through. For short headers, the DCID length is assumed
 /// to be `QUIC_DCID_LEN`.
+#[must_use]
 pub fn classify_quic_datagram(input: &'_ [u8]) -> QuicVerdict<'_> {
     if input.is_empty() {
         return QuicVerdict::Drop;
@@ -70,6 +71,7 @@ pub fn classify_quic_datagram(input: &'_ [u8]) -> QuicVerdict<'_> {
 ///
 /// The classifier reads the first `ClientHello` from the stream and validates
 /// the `legacy_session_id` using `server_secret`.
+#[must_use]
 pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict {
     let mut record = RecordReader::new(input);
 
