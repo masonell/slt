@@ -8,6 +8,7 @@ use boring::ssl::{
     CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef,
 };
 use boring_sys as ffi;
+use brotli::enc::BrotliEncoderParams;
 use foreign_types::ForeignTypeRef;
 use std::io::{Cursor, Write};
 
@@ -154,7 +155,11 @@ impl CertificateCompressor for BrotliCertificateCompressor {
     where
         W: Write,
     {
-        brotli::BrotliCompress(&mut Cursor::new(input), output, &Default::default())?;
+        brotli::BrotliCompress(
+            &mut Cursor::new(input),
+            output,
+            &BrotliEncoderParams::default(),
+        )?;
         Ok(())
     }
 

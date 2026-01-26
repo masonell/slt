@@ -115,7 +115,7 @@ pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict 
     }
 
     let Ok(part1) = hmac_sha256(server_secret, &random[..RANDOM_PREFIX_LEN]) else {
-        return Verdict::Pass
+        return Verdict::Pass;
     };
 
     if !memcmp::eq(&session_id[..PART_LEN], &part1[..PART_LEN]) {
@@ -170,7 +170,7 @@ pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict 
 
             if let Some(key_share) = key_share {
                 let Ok(part2) = hmac_sha256(server_secret, &key_share) else {
-                    return Verdict::Pass
+                    return Verdict::Pass;
                 };
 
                 return if memcmp::eq(&session_id[PART_LEN..], &part2[..PART_LEN]) {

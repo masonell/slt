@@ -148,7 +148,7 @@ pub fn fill_legacy_session_id(
     }
 
     let Some((random, key_share)) = parse_client_hello(client_hello) else {
-        return Err(ErrorStack::get())
+        return Err(ErrorStack::get());
     };
 
     let part1 = hmac_sha256(secret, &random[..RANDOM_PREFIX_LEN])?;

@@ -151,7 +151,7 @@ pub fn decode_message(
     limits: MessageLimits,
 ) -> Result<Option<(Message<'_>, usize)>, MessageError> {
     let Some((frame, consumed)) = decode_frame(buf, limits.max_frame_len)? else {
-        return Ok(None)
+        return Ok(None);
     };
 
     if frame.ty == MessageType::Data && frame.payload.len() > limits.max_data_len {
