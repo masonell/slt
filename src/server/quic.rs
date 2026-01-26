@@ -6,13 +6,27 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::udp_qsp::CidMap;
+use crate::classifier::{QuicVerdict, classify_quic_datagram};
 use crate::config::ServerConfig;
 use lru::LruCache;
 use tokio::net::UdpSocket;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const QUIC_BUF_LEN: usize = 2 * 1024;
+
+/// Claimed UDP-QSP datagram metadata.
+#[derive(Debug, Clone)]
+pub struct UdpClaim {
+    /// Peer address.
+    pub peer: SocketAddr,
+    /// Destination connection ID.
+    pub dcid: Vec<u8>,
+    /// Raw datagram payload.
+    pub payload: Vec<u8>,
+}
 
 #[derive(Debug)]
 struct PeerEntry {
@@ -35,6 +49,7 @@ pub struct QuicEndpoint {
     nginx_upstream: SocketAddr,
     max_lru_entries: NonZeroUsize,
     idle_timeout: Duration,
+    cid_map: Arc<RwLock<CidMap>>,
 }
 
 impl QuicEndpoint {
@@ -59,6 +74,7 @@ impl QuicEndpoint {
             nginx_upstream: config.nginx_udp_upstream,
             max_lru_entries,
             idle_timeout: config.idle_timeout,
+            cid_map: Arc::new(RwLock::new(CidMap::new())),
         })
     }
 
@@ -68,14 +84,25 @@ impl QuicEndpoint {
         &self.socket
     }
 
+    /// Returns the CID map shared with the UDP-QSP handler.
+    #[must_use]
+    pub fn cid_map(&self) -> Arc<RwLock<CidMap>> {
+        self.cid_map.clone()
+    }
+
     /// Run the UDP accept loop and forward traffic to the nginx upstream.
     ///
     /// Each client gets a dedicated upstream socket to preserve 4-tuple state.
     /// The loop exits once `cancel` is canceled.
-    pub async fn run(&self, cancel: CancellationToken) -> io::Result<()> {
+    pub async fn run(
+        &self,
+        cancel: CancellationToken,
+        claim_handler: impl Fn(UdpClaim) + Send + Sync + 'static,
+    ) -> io::Result<()> {
         let mut buf = vec![0u8; QUIC_BUF_LEN];
         let mut state = QuicNatState::new(self.max_lru_entries);
         let mut sweep = tokio::time::interval(self.idle_timeout);
+        let claim_handler: Arc<dyn Fn(UdpClaim) + Send + Sync + 'static> = Arc::new(claim_handler);
 
         loop {
             let (len, peer) = tokio::select! {
@@ -90,8 +117,14 @@ impl QuicEndpoint {
                 }
                 res = self.socket.recv_from(&mut buf) => res?,
             };
-            self.handle_datagram(&mut state, cancel.clone(), peer, &buf[..len])
-                .await?;
+            self.handle_datagram(
+                &mut state,
+                cancel.clone(),
+                peer,
+                &buf[..len],
+                &claim_handler,
+            )
+            .await?;
         }
     }
 
@@ -101,11 +134,40 @@ impl QuicEndpoint {
         cancel: CancellationToken,
         peer: SocketAddr,
         payload: &[u8],
+        claim_handler: &Arc<dyn Fn(UdpClaim) + Send + Sync + 'static>,
     ) -> io::Result<()> {
-        let upstream_socket = state
-            .get_or_create_upstream(self.socket.clone(), self.nginx_upstream, peer, cancel)
-            .await?;
-        let _ = upstream_socket.send(payload).await;
+        match classify_quic_datagram(payload) {
+            QuicVerdict::Drop => return Ok(()),
+            QuicVerdict::Pass => {
+                let upstream_socket = state
+                    .get_or_create_upstream(self.socket.clone(), self.nginx_upstream, peer, cancel)
+                    .await?;
+                let _ = upstream_socket.send(payload).await;
+            }
+            QuicVerdict::Short { dcid } => {
+                let claimed = {
+                    let map = self.cid_map.read().await;
+                    map.get(dcid).is_some()
+                };
+                if claimed {
+                    (claim_handler)(UdpClaim {
+                        peer,
+                        dcid: dcid.to_vec(),
+                        payload: payload.to_vec(),
+                    });
+                } else {
+                    let upstream_socket = state
+                        .get_or_create_upstream(
+                            self.socket.clone(),
+                            self.nginx_upstream,
+                            peer,
+                            cancel,
+                        )
+                        .await?;
+                    let _ = upstream_socket.send(payload).await;
+                }
+            }
+        }
         Ok(())
     }
 

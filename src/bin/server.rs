@@ -1,6 +1,6 @@
 use clap::Parser;
 use slt::config::ServerConfig;
-use slt::server::quic::QuicEndpoint;
+use slt::server::quic::{QuicEndpoint, UdpClaim};
 use slt::server::tcp::TcpFrontDoor;
 use std::fs;
 use std::path::PathBuf;
@@ -50,7 +50,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut udp_task = {
         let cancel = cancel.clone();
-        tokio::spawn(async move { quic.run(cancel).await })
+        tokio::spawn(async move {
+            quic.run(cancel, move |claim: UdpClaim| {
+                eprintln!(
+                    "claimed udp datagram from {} (dcid_len={})",
+                    claim.peer,
+                    claim.dcid.len()
+                );
+                drop(claim);
+            })
+            .await
+        })
     };
 
     tokio::select! {
