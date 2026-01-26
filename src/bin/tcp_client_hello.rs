@@ -13,10 +13,10 @@ struct Args {
     /// SNI hostname to send.
     #[arg(long)]
     sni: Option<String>,
-    /// 32-byte secret hex used to fill legacy_session_id.
+    /// 32-byte secret hex used to fill `legacy_session_id`.
     #[arg(long = "secret-hex", value_parser = parse_hex_32)]
     secret_hex: Option<[u8; 32]>,
-    /// Disable legacy_session_id override.
+    /// Disable `legacy_session_id` override.
     #[arg(long = "no-session-id")]
     no_session_id: bool,
 }
@@ -68,13 +68,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match ssl.connect(stream) {
         Ok(_) => eprintln!("handshake completed"),
         Err(HandshakeError::WouldBlock(_)) => {
-            eprintln!("handshake would block")
+            eprintln!("handshake would block");
         }
         Err(HandshakeError::Failure(mid)) => {
-            eprintln!("handshake failed: {:?}", mid.error())
+            eprintln!("handshake failed: {:?}", mid.error());
         }
         Err(HandshakeError::SetupFailure(err)) => {
-            eprintln!("handshake setup failed: {err}")
+            eprintln!("handshake setup failed: {err}");
         }
     }
 

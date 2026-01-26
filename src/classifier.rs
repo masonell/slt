@@ -463,9 +463,11 @@ mod tests {
         let mut buf = Vec::new();
         buf.push(0xC0); // long header + fixed bit + Initial type
         buf.extend_from_slice(&quiche::PROTOCOL_VERSION.to_be_bytes());
-        buf.push(QUIC_DCID_LEN as u8);
+        #[allow(clippy::cast_possible_truncation)]
+        let dcid_len = QUIC_DCID_LEN as u8; // QUIC_DCID_LEN = 8, fits in u8
+        buf.push(dcid_len);
         buf.extend_from_slice(&[0x11; QUIC_DCID_LEN]);
-        buf.push(QUIC_DCID_LEN as u8);
+        buf.push(dcid_len);
         buf.extend_from_slice(&[0x22; QUIC_DCID_LEN]);
         buf.push(0x00); // token length = 0
 

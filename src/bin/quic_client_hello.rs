@@ -15,23 +15,6 @@ struct Args {
     /// ALPN protocol.
     #[arg(long, default_value = "h3")]
     alpn: String,
-    /// 8-byte SCID hex.
-    #[arg(long = "scid-hex", value_parser = parse_hex_8)]
-    scid_hex: Option<[u8; 8]>,
-}
-
-fn parse_hex_8(s: &str) -> Result<[u8; 8], String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| e.to_string())?;
-    if bytes.len() != 8 {
-        return Err(format!(
-            "expected 8 bytes (16 hex chars), got {} bytes",
-            bytes.len()
-        ));
-    }
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&bytes);
-    Ok(out)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,11 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = quic_client_chrome_config()?;
 
-    let scid = if let Some(hex) = &args.scid_hex {
-        ConnectionId::from_ref(hex)
-    } else {
-        ConnectionId::from_ref(&[])
-    };
+    let scid = ConnectionId::from_ref(&[]);
 
     let mut conn = quiche::connect(args.sni.as_deref(), &scid, local, peer, &mut config)?;
 
