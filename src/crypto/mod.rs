@@ -41,7 +41,7 @@ const CHROME_QUIC_CURVE_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
 
 /// Build a QUIC client config that mirrors Chrome's transport parameters.
 ///
-/// This uses a BoringSSL context (for Chrome fingerprint parity) and applies
+/// This uses a `BoringSSL` context (for Chrome fingerprint parity) and applies
 /// the currently known defaults for Chrome QUIC transport parameters.
 pub fn quic_client_chrome_config() -> quiche::Result<quiche::Config> {
     let tls_ctx = quic_client_chrome_ctx_builder().map_err(|_| quiche::Error::TlsFail)?;
@@ -105,7 +105,7 @@ fn configure_quic_client_ssl(ssl: &mut SslRef) -> Result<(), ErrorStack> {
     Ok(())
 }
 
-/// Configure ALPS (application_settings) on a client SSL object.
+/// Configure ALPS (`application_settings`) on a client SSL object.
 ///
 /// The ALPN list must already include `protocol` and the handshake must not
 /// have started. Use `SslContextBuilder::set_alpn_protos` or

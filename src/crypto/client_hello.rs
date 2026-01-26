@@ -2,24 +2,24 @@ use boring::error::ErrorStack;
 use boring::hash::hmac_sha256;
 use boring::ssl::SslRef;
 
-/// TLS HandshakeType value for ClientHello.
+/// TLS `HandshakeType` value for `ClientHello`.
 pub const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
-/// Expected legacy_session_id length used by the classifier.
+/// Expected `legacy_session_id` length used by the classifier.
 pub const LEGACY_SESSION_ID_LEN: usize = 32;
 /// Truncated HMAC length per part.
 pub const PART_LEN: usize = 16;
-/// Prefix length of ClientHello random used for the first HMAC.
+/// Prefix length of `ClientHello` random used for the first HMAC.
 pub const RANDOM_PREFIX_LEN: usize = 16;
-/// Extension type for key_share.
+/// Extension type for `key_share`.
 pub const EXT_KEY_SHARE: u16 = 0x0033;
-/// NamedGroup for X25519.
+/// `NamedGroup` for `X25519`.
 pub const GROUP_X25519: u16 = 0x001d;
 
-/// Parse a serialized ClientHello (including handshake header) and extract
-/// the legacy random and X25519 key_share.
+/// Parse a serialized `ClientHello` (including handshake header) and extract
+/// the legacy random and `X25519` `key_share`.
 ///
-/// Returns `None` if the buffer is malformed or does not contain an X25519
-/// key_share.
+/// Returns `None` if the buffer is malformed or does not contain an `X25519`
+/// `key_share`.
 pub fn parse_client_hello(client_hello: &[u8]) -> Option<([u8; 32], [u8; 32])> {
     if client_hello.len() < 4 {
         return None;
@@ -133,7 +133,7 @@ pub fn parse_client_hello(client_hello: &[u8]) -> Option<([u8; 32], [u8; 32])> {
     None
 }
 
-/// Fill the legacy_session_id based on ClientHello random and key_share.
+/// Fill the `legacy_session_id` based on `ClientHello` random and `key_share`.
 ///
 /// This computes two truncated HMAC-SHA256 parts and writes them into the
 /// provided `session_id` buffer.
@@ -160,10 +160,10 @@ pub fn fill_legacy_session_id(
     Ok(())
 }
 
-/// Helper to build a BoringSSL callback that overwrites legacy_session_id.
+/// Helper to build a `BoringSSL` callback that overwrites `legacy_session_id`.
 ///
-/// The callback uses `secret` to fill the session_id based on ClientHello
-/// random and X25519 key_share.
+/// The callback uses `secret` to fill the `session_id` based on `ClientHello`
+/// random and `X25519` `key_share`.
 pub fn client_hello_session_id_callback(
     secret: [u8; 32],
 ) -> impl Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<(), ErrorStack> + Sync + Send + 'static {

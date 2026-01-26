@@ -15,7 +15,7 @@ impl PacketRouter {
         Self
     }
 
-    /// Enforce src_ip == assigned_ipv4 for a session.
+    /// Enforce `src_ip == assigned_ipv4` for a session.
     #[must_use]
     pub fn validate_src_ipv4(session: &Session, src_ip: Ipv4Addr) -> bool {
         session.assigned_ipv4.addr() == src_ip

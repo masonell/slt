@@ -25,7 +25,7 @@ pub enum MessageType {
 }
 
 impl MessageType {
-    /// Convert a wire byte into a MessageType, if known.
+    /// Convert a wire byte into a `MessageType`, if known.
     #[must_use]
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {

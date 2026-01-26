@@ -215,12 +215,12 @@ impl AuthPayload {
     }
 }
 
-/// AUTH_OK payload (currently empty).
+/// `AUTH_OK` payload (currently empty).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthOkPayload;
 
 impl AuthOkPayload {
-    /// Decode an AUTH_OK payload.
+    /// Decode an `AUTH_OK` payload.
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if !payload.is_empty() {
             return Err(PayloadError::LengthMismatch {
@@ -231,11 +231,11 @@ impl AuthOkPayload {
         Ok(Self)
     }
 
-    /// Encode an AUTH_OK payload.
+    /// Encode an `AUTH_OK` payload.
     pub fn encode(&self, _out: &mut Vec<u8>) {}
 }
 
-/// AUTH_FAIL payload.
+/// `AUTH_FAIL` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthFailPayload {
     /// Failure reason code.
@@ -243,7 +243,7 @@ pub struct AuthFailPayload {
 }
 
 impl AuthFailPayload {
-    /// Decode an AUTH_FAIL payload.
+    /// Decode an `AUTH_FAIL` payload.
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != 1 {
             return Err(PayloadError::LengthMismatch {
@@ -256,13 +256,13 @@ impl AuthFailPayload {
         Ok(Self { code })
     }
 
-    /// Encode an AUTH_FAIL payload.
+    /// Encode an `AUTH_FAIL` payload.
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.push(self.code.as_u8());
     }
 }
 
-/// REGISTER_CID payload.
+/// `REGISTER_CID` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterCidPayload<'a> {
     /// Destination connection ID to reuse.
@@ -288,7 +288,7 @@ pub struct RegisterCidPayload<'a> {
 }
 
 impl<'a> RegisterCidPayload<'a> {
-    /// Decode a REGISTER_CID payload.
+    /// Decode a `REGISTER_CID` payload.
     pub fn decode(payload: &'a [u8]) -> Result<Self, PayloadError> {
         if payload.is_empty() {
             return Err(PayloadError::LengthTooShort {
@@ -376,7 +376,7 @@ impl<'a> RegisterCidPayload<'a> {
         })
     }
 
-    /// Encode a REGISTER_CID payload.
+    /// Encode a `REGISTER_CID` payload.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), PayloadError> {
         if self.dcid.is_empty() || self.dcid.len() > MAX_DCID_LEN {
             return Err(PayloadError::InvalidDcidLen(self.dcid.len()));
@@ -406,7 +406,7 @@ impl<'a> RegisterCidPayload<'a> {
     }
 }
 
-/// REGISTER_OK payload.
+/// `REGISTER_OK` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterOkPayload<'a> {
     /// The acknowledged CID.
@@ -414,7 +414,7 @@ pub struct RegisterOkPayload<'a> {
 }
 
 impl<'a> RegisterOkPayload<'a> {
-    /// Decode a REGISTER_OK payload.
+    /// Decode a `REGISTER_OK` payload.
     pub fn decode(payload: &'a [u8]) -> Result<Self, PayloadError> {
         if payload.is_empty() {
             return Err(PayloadError::LengthTooShort {
@@ -441,7 +441,7 @@ impl<'a> RegisterOkPayload<'a> {
         })
     }
 
-    /// Encode a REGISTER_OK payload.
+    /// Encode a `REGISTER_OK` payload.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), PayloadError> {
         if self.dcid.is_empty() || self.dcid.len() > MAX_DCID_LEN {
             return Err(PayloadError::InvalidDcidLen(self.dcid.len()));
@@ -453,7 +453,7 @@ impl<'a> RegisterOkPayload<'a> {
     }
 }
 
-/// REGISTER_FAIL payload.
+/// `REGISTER_FAIL` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterFailPayload {
     /// Failure reason code.
@@ -461,7 +461,7 @@ pub struct RegisterFailPayload {
 }
 
 impl RegisterFailPayload {
-    /// Decode a REGISTER_FAIL payload.
+    /// Decode a `REGISTER_FAIL` payload.
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != 1 {
             return Err(PayloadError::LengthMismatch {
@@ -474,7 +474,7 @@ impl RegisterFailPayload {
         Ok(Self { code })
     }
 
-    /// Encode a REGISTER_FAIL payload.
+    /// Encode a `REGISTER_FAIL` payload.
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.push(self.code.as_u8());
     }

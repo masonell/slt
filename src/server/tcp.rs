@@ -13,7 +13,7 @@ use crate::config::ServerConfig;
 const PEEK_LEN: usize = 16 * 1024;
 const PEEK_ATTEMPTS: usize = 4;
 
-/// TCP acceptor and ClientHello classifier.
+/// TCP acceptor and `ClientHello` classifier.
 #[derive(Debug)]
 pub struct TcpFrontDoor {
     listener: TcpListener,

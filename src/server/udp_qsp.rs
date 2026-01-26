@@ -21,7 +21,7 @@ pub struct CidEntry {
 }
 
 impl CidEntry {
-    /// Construct a CID entry from a REGISTER_CID payload.
+    /// Construct a CID entry from a `REGISTER_CID` payload.
     pub fn from_register(
         conn_handle: u64,
         payload: &RegisterCidPayload<'_>,

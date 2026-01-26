@@ -6,14 +6,14 @@ use crate::crypto::client_hello::{
     RANDOM_PREFIX_LEN,
 };
 
-/// Classification result for a parsed ClientHello.
+/// Classification result for a parsed `ClientHello`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// ClientHello matches the expected session_id scheme.
+    /// `ClientHello` matches the expected `session_id` scheme.
     Claim,
-    /// ClientHello does not match and should be passed on.
+    /// `ClientHello` does not match and should be passed on.
     Pass,
-    /// ClientHello is invalid and should be dropped.
+    /// `ClientHello` is invalid and should be dropped.
     Drop,
     /// Not enough data to decide yet.
     Incomplete,
@@ -68,8 +68,8 @@ pub fn classify_quic_datagram(input: &'_ [u8]) -> QuicVerdict<'_> {
 
 /// Classify a TCP stream buffer that starts with TLS records.
 ///
-/// The classifier reads the first ClientHello from the stream and validates
-/// the legacy_session_id using `server_secret`.
+/// The classifier reads the first `ClientHello` from the stream and validates
+/// the `legacy_session_id` using `server_secret`.
 pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict {
     let mut record = RecordReader::new(input);
 

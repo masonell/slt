@@ -169,7 +169,7 @@ impl UdpQspKeys {
         })
     }
 
-    /// Build UDP-QSP keys from a REGISTER_CID payload.
+    /// Build UDP-QSP keys from a `REGISTER_CID` payload.
     pub fn from_register(payload: &RegisterCidPayload<'_>) -> Result<Self, QspCryptoError> {
         Self::new(
             payload.cipher,
