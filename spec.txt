@@ -240,8 +240,11 @@ TLS library: **BoringSSL** via `boring-sys` (patched client hook to set `legacy_
   * Short header format with fixed bit = 1.
   * QUIC-style header protection (HP) to mask PN length / key phase / reserved bits.
   * QUIC-style AEAD payload protection with nonce = `IV XOR PN` and associated data = unmasked header.
-  * Payload length sufficient for the 16-byte HP sample (pad if needed).
+* Payload length sufficient for the 16-byte HP sample (pad if needed).
 * Interop: UDP-QSP is **not** compatible with standard QUIC stacks.
+* Packet number (PN) is encoded as 1-4 bytes per QUIC short header rules. Current implementations
+  treat PN as a u32; `pn_start` in `REGISTER_CID` must fit in 32 bits and sessions must re-register
+  or reconnect before wrapping. PN reconstruction (QUIC-style) is a future enhancement.
 
 Client-side QUIC library (wire-shape handshake only): **quiche** (vendored + patched as needed).
 

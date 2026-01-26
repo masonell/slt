@@ -1,6 +1,7 @@
 //! TLS/QUIC crypto helpers.
 
 pub mod client_hello;
+pub mod udp_qsp;
 
 use boring::error::ErrorStack;
 use boring::ssl::{

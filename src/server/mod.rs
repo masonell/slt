@@ -8,6 +8,7 @@ pub mod sessions;
 pub mod tcp;
 pub mod tls;
 pub mod tun;
+pub mod udp_qsp;
 
 use std::net::Ipv4Addr;
 
