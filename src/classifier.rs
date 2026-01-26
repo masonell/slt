@@ -19,7 +19,52 @@ pub enum Verdict {
     Incomplete,
 }
 
+/// Result of classifying a QUIC datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicVerdict<'a> {
+    /// Datagram is not QUIC and should be dropped.
+    Drop,
+    /// QUIC long-header packet should be passed through.
+    Pass,
+    /// QUIC short-header packet with extracted DCID.
+    Short { dcid: &'a [u8] },
+}
+
 const TLS_HANDSHAKE_CONTENT_TYPE: u8 = 0x16;
+// We patch quiche to always use an 8-byte DCID, so short-header parsing
+// assumes that fixed length here as well.
+const QUIC_DCID_LEN: usize = 8;
+
+/// Classify a UDP datagram and extract the DCID from a QUIC short header.
+///
+/// This uses QUIC invariants (fixed bit set) to recognize QUIC packets. Long
+/// headers are passed through. For short headers, the DCID length is assumed
+/// to be `QUIC_DCID_LEN`.
+pub fn classify_quic_datagram(input: &'_ [u8]) -> QuicVerdict<'_> {
+    if input.is_empty() {
+        return QuicVerdict::Drop;
+    }
+
+    let first = input[0];
+    let header_form_long = (first & 0x80) != 0;
+    let fixed_bit = (first & 0x40) != 0;
+
+    if !fixed_bit {
+        return QuicVerdict::Drop;
+    }
+
+    if header_form_long {
+        return QuicVerdict::Pass;
+    }
+
+    if input.len() < 1 + QUIC_DCID_LEN {
+        return QuicVerdict::Drop;
+    }
+
+    QuicVerdict::Short {
+        dcid: &input[1..1 + QUIC_DCID_LEN],
+    }
+}
 
 /// Classify a TCP stream buffer that starts with TLS records.
 ///
@@ -339,6 +384,7 @@ mod tests {
     use super::*;
     use crate::crypto::client_hello::client_hello_session_id_callback;
     use boring::ssl::{HandshakeError, Ssl, SslContextBuilder, SslMethod, SslVerifyMode};
+    use quiche::Header;
     use std::io::{self, Read, Write};
 
     #[derive(Default, Debug)]
@@ -404,5 +450,53 @@ mod tests {
             classify_tcp_client_hello(&client_hello, &wrong_secret),
             Verdict::Pass
         );
+    }
+
+    #[test]
+    fn quic_classifier_drops_non_quic() {
+        let buf = [0u8; 1];
+        assert_eq!(classify_quic_datagram(&buf), QuicVerdict::Drop);
+    }
+
+    #[test]
+    fn quic_classifier_passes_long_header() {
+        let mut buf = Vec::new();
+        buf.push(0xC0); // long header + fixed bit + Initial type
+        buf.extend_from_slice(&quiche::PROTOCOL_VERSION.to_be_bytes());
+        buf.push(QUIC_DCID_LEN as u8);
+        buf.extend_from_slice(&[0x11; QUIC_DCID_LEN]);
+        buf.push(QUIC_DCID_LEN as u8);
+        buf.extend_from_slice(&[0x22; QUIC_DCID_LEN]);
+        buf.push(0x00); // token length = 0
+
+        let header = Header::from_slice(&mut buf, 0).unwrap();
+        assert_eq!(header.ty, quiche::Type::Initial);
+
+        assert_eq!(classify_quic_datagram(&buf), QuicVerdict::Pass);
+    }
+
+    #[test]
+    fn quic_classifier_extracts_short_dcid() {
+        let mut buf = Vec::new();
+        buf.push(0x40); // short header + fixed bit
+        buf.extend_from_slice(&[0xAB; QUIC_DCID_LEN]);
+
+        let header = Header::from_slice(&mut buf, QUIC_DCID_LEN).unwrap();
+        assert_eq!(header.ty, quiche::Type::Short);
+
+        match classify_quic_datagram(&buf) {
+            QuicVerdict::Short { dcid } => {
+                assert_eq!(dcid, header.dcid.iter().as_slice());
+            }
+            other => panic!("expected Short, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quic_classifier_drops_short_too_small() {
+        let mut buf = vec![0x40];
+        buf.extend_from_slice(&[0xAB; QUIC_DCID_LEN - 1]);
+
+        assert_eq!(classify_quic_datagram(&buf), QuicVerdict::Drop);
     }
 }
