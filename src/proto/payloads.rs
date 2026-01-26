@@ -437,7 +437,7 @@ impl<'a> RegisterOkPayload<'a> {
         }
 
         Ok(Self {
-            dcid: &payload[1..1 + dcid_len],
+            dcid: &payload[1..=dcid_len],
         })
     }
 

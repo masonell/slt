@@ -63,7 +63,7 @@ pub fn classify_quic_datagram(input: &'_ [u8]) -> QuicVerdict<'_> {
     }
 
     QuicVerdict::Short {
-        dcid: &input[1..1 + QUIC_DCID_LEN],
+        dcid: &input[1..=QUIC_DCID_LEN],
     }
 }
 
