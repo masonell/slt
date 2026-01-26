@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn ping_pong_roundtrip() {
         let ping = PingPayload {
-            nonce: 0x1122334455667788,
+            nonce: 0x1122_3344_5566_7788,
         };
         let mut buf = Vec::new();
         ping.encode(&mut buf);
@@ -670,7 +670,7 @@ mod tests {
 
         buf.clear();
         let pong = PongPayload {
-            nonce: 0x1122334455667788,
+            nonce: 0x1122_3344_5566_7788,
         };
         pong.encode(&mut buf);
         let decoded_pong = PongPayload::decode(&buf).unwrap();
