@@ -1,3 +1,6 @@
+#![allow(clippy::cargo_common_metadata)]
+#![allow(clippy::multiple_crate_versions)]
+
 /// TCP `ClientHello` classifier and verdicts.
 pub mod classifier;
 pub mod crypto;
