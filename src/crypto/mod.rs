@@ -118,7 +118,7 @@ fn configure_alps(
 ) -> Result<(), ErrorStack> {
     unsafe {
         // SAFETY: FFI calls only borrow the buffers for the duration of the call.
-        ffi::SSL_set_alps_use_new_codepoint(ssl.as_ptr(), use_new_codepoint as _);
+        ffi::SSL_set_alps_use_new_codepoint(ssl.as_ptr(), use_new_codepoint.into());
         let ok = ffi::SSL_add_application_settings(
             ssl.as_ptr(),
             protocol.as_ptr(),

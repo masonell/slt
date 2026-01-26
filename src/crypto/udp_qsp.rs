@@ -194,7 +194,7 @@ impl UdpQspKeys {
             return Err(QspCryptoError::UnsupportedCipher);
         }
 
-        if pn > u32::MAX as u64 {
+        if pn > u64::from(u32::MAX) {
             return Err(QspCryptoError::InvalidPacketNumber);
         }
 
@@ -279,7 +279,7 @@ impl UdpQspKeys {
         for i in 0..pn_len {
             pn_bytes[MAX_PN_LEN - pn_len + i] = packet[pn_offset + i] ^ mask[1 + i];
         }
-        let pn = u32::from_be_bytes(pn_bytes) as u64;
+        let pn = u64::from(u32::from_be_bytes(pn_bytes));
 
         let key_phase = (first & KEY_PHASE_BIT) != 0;
         let mut header = Vec::with_capacity(pn_offset + pn_len);
@@ -359,7 +359,7 @@ mod tests {
 
         let dcid = [0xAB; 8];
         let payload = vec![0xCD; 32];
-        let pn = (u32::MAX as u64) + 1;
+        let pn = u64::from(u32::MAX) + 1;
         assert_eq!(
             keys.protect(&dcid, pn, false, &payload),
             Err(QspCryptoError::InvalidPacketNumber)

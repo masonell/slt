@@ -28,7 +28,7 @@ impl CidEntry {
         pn_start: u64,
         key_phase: bool,
     ) -> Result<Self, QspCryptoError> {
-        if pn_start > u32::MAX as u64 {
+        if pn_start > u64::from(u32::MAX) {
             return Err(QspCryptoError::InvalidPacketNumber);
         }
 
@@ -44,7 +44,7 @@ impl CidEntry {
     /// Protect an outbound payload, advancing the packet number.
     pub fn protect(&mut self, payload: &[u8]) -> Result<Vec<u8>, QspCryptoError> {
         let pn = self.next_pn;
-        if pn > u32::MAX as u64 {
+        if pn > u64::from(u32::MAX) {
             return Err(QspCryptoError::InvalidPacketNumber);
         }
         self.next_pn = pn + 1;
@@ -153,7 +153,7 @@ mod tests {
             key_phase: false,
         };
 
-        let pn_start = (u32::MAX as u64) + 1;
+        let pn_start = u64::from(u32::MAX) + 1;
         assert!(matches!(
             CidEntry::from_register(7, &payload, pn_start, false),
             Err(QspCryptoError::InvalidPacketNumber)
