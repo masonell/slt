@@ -669,12 +669,12 @@ mod tests {
         assert_eq!(decoded_ping, ping);
 
         buf.clear();
-        let pong = PongPayload {
+        let pong_response = PongPayload {
             nonce: 0x1122_3344_5566_7788,
         };
-        pong.encode(&mut buf);
-        let decoded_pong = PongPayload::decode(&buf).unwrap();
-        assert_eq!(decoded_pong, pong);
+        pong_response.encode(&mut buf);
+        let decoded_pong_response = PongPayload::decode(&buf).unwrap();
+        assert_eq!(decoded_pong_response, pong_response);
     }
 
     #[test]
