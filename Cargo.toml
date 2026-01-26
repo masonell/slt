@@ -23,3 +23,12 @@ toml = "0.9.8"
 boring = { path = "vendor/boring" }
 boring-sys = { path = "vendor/boring-sys" }
 quiche = { path = "vendor/quiche" }
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+pedantic = "warn"
+nursery = "warn"
+cargo = "warn"
