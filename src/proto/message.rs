@@ -146,6 +146,12 @@ impl From<FrameError> for MessageError {
 /// Decode a single message from the provided buffer.
 ///
 /// Returns `Ok(None)` if the buffer does not yet contain a full frame.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Frame decoding fails (see `decode_frame`)
+/// - The message is DATA and payload exceeds `max_data_len`
 pub fn decode_message(
     buf: &'_ [u8],
     limits: MessageLimits,
@@ -165,6 +171,10 @@ pub fn decode_message(
 }
 
 /// Encode a message into the provided output buffer.
+///
+/// # Errors
+///
+/// Propagates errors from `encode_frame` (e.g., payload length overflow).
 pub fn encode_message(message: Message<'_>, out: &mut Vec<u8>) -> Result<(), FrameError> {
     encode_frame(message.ty(), message.payload(), out)
 }

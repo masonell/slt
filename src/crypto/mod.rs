@@ -44,6 +44,11 @@ const CHROME_QUIC_CURVE_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
 ///
 /// This uses a `BoringSSL` context (for Chrome fingerprint parity) and applies
 /// the currently known defaults for Chrome QUIC transport parameters.
+///
+/// # Errors
+///
+/// Returns an error if TLS context creation fails or if setting application
+/// protocols fails.
 pub fn quic_client_chrome_config() -> quiche::Result<quiche::Config> {
     let tls_ctx = quic_client_chrome_ctx_builder().map_err(|_| quiche::Error::TlsFail)?;
 
@@ -78,6 +83,11 @@ pub fn quic_client_chrome_config() -> quiche::Result<quiche::Config> {
 }
 
 /// Build a TLS client context builder with Chrome-like defaults.
+///
+/// # Errors
+///
+/// Returns an error if SSL context builder creation fails or if setting
+/// cipher suites, signature algorithms, or compression algorithms fails.
 pub fn tcp_client_chrome_ctx_builder() -> Result<SslContextBuilder, ErrorStack> {
     let mut builder = SslContextBuilder::new(SslMethod::tls())?;
     builder.set_sigalgs_list(CHROME_SIGALGS)?;
@@ -92,6 +102,10 @@ pub fn tcp_client_chrome_ctx_builder() -> Result<SslContextBuilder, ErrorStack> 
 /// Apply Chrome-like per-connection SSL defaults.
 ///
 /// This configures ALPN and enables ALPS using the new codepoint (17613).
+///
+/// # Errors
+///
+/// Returns an error if setting ALPN protocols or ALPS configuration fails.
 pub fn configure_client_chrome_ssl(ssl: &mut SslRef) -> Result<(), ErrorStack> {
     ssl.set_enable_ech_grease(true);
     ssl.set_alpn_protos(ALPN_H2_HTTP1)?;

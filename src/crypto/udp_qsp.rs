@@ -143,6 +143,11 @@ pub struct UdpQspKeys {
 
 impl UdpQspKeys {
     /// Build UDP-QSP keys from raw key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns `QspCryptoError::UnsupportedCipher` if the cipher suite is not
+    /// `Aes128Gcm`.
     pub fn new(
         cipher: CipherSuite,
         hp_tx: [u8; HP_KEY_LEN],
@@ -170,6 +175,11 @@ impl UdpQspKeys {
     }
 
     /// Build UDP-QSP keys from a `REGISTER_CID` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `QspCryptoError::UnsupportedCipher` if the cipher suite is not
+    /// `Aes128Gcm`.
     pub fn from_register(payload: &RegisterCidPayload<'_>) -> Result<Self, QspCryptoError> {
         Self::new(
             payload.cipher,
@@ -183,6 +193,14 @@ impl UdpQspKeys {
     }
 
     /// Protect a UDP-QSP payload into a QUIC short-header packet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The cipher suite is not `Aes128Gcm`
+    /// - The packet number exceeds `u32::MAX`
+    /// - The packet is too short for header protection sampling
+    /// - AEAD encryption fails
     pub fn protect(
         &self,
         dcid: &[u8],
@@ -243,6 +261,14 @@ impl UdpQspKeys {
     }
 
     /// Unprotect a UDP-QSP short-header packet and return its plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The cipher suite is not `Aes128Gcm`
+    /// - The packet is too short for header protection sampling
+    /// - AEAD decryption fails (authentication failure)
+    /// - The packet number length is invalid
     pub fn open(&self, dcid_len: usize, packet: &[u8]) -> Result<OpenedPacket, QspCryptoError> {
         if self.cipher != CipherSuite::Aes128Gcm {
             return Err(QspCryptoError::UnsupportedCipher);

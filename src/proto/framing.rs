@@ -26,6 +26,12 @@ pub enum FrameError {
 /// Decode a single frame from the provided buffer.
 ///
 /// Returns `Ok(None)` if the buffer does not yet contain a full frame.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The message type byte is unknown
+/// - The payload length exceeds `max_len`
 pub fn decode_frame(
     buf: &'_ [u8],
     max_len: usize,
@@ -55,6 +61,10 @@ pub fn decode_frame(
 }
 
 /// Encode a frame into the provided output buffer.
+///
+/// # Errors
+///
+/// Returns `FrameError::LengthOverflow` if the payload length exceeds `u32::MAX`.
 pub fn encode_frame(ty: MessageType, payload: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
     let len = payload.len();
     if len > u32::MAX as usize {

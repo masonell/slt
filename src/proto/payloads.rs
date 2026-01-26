@@ -176,6 +176,11 @@ pub struct AuthPayload {
 
 impl AuthPayload {
     /// Decode an AUTH payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::LengthMismatch` if the payload length is not
+    /// exactly `AUTH_PAYLOAD_LEN` (241 bytes).
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != AUTH_PAYLOAD_LEN {
             return Err(PayloadError::LengthMismatch {
@@ -221,6 +226,10 @@ pub struct AuthOkPayload;
 
 impl AuthOkPayload {
     /// Decode an `AUTH_OK` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::LengthMismatch` if the payload is not empty.
     pub const fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if !payload.is_empty() {
             return Err(PayloadError::LengthMismatch {
@@ -244,6 +253,12 @@ pub struct AuthFailPayload {
 
 impl AuthFailPayload {
     /// Decode an `AUTH_FAIL` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The payload length is not exactly 1
+    /// - The failure code byte is invalid
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != 1 {
             return Err(PayloadError::LengthMismatch {
@@ -289,6 +304,14 @@ pub struct RegisterCidPayload<'a> {
 
 impl<'a> RegisterCidPayload<'a> {
     /// Decode a `REGISTER_CID` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The payload is too short
+    /// - The DCID length is 0 or exceeds `MAX_DCID_LEN`
+    /// - The payload length doesn't match the expected length
+    /// - The cipher suite is invalid
     pub fn decode(payload: &'a [u8]) -> Result<Self, PayloadError> {
         if payload.is_empty() {
             return Err(PayloadError::LengthTooShort {
@@ -377,6 +400,11 @@ impl<'a> RegisterCidPayload<'a> {
     }
 
     /// Encode a `REGISTER_CID` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::InvalidDcidLen` if the DCID is empty or exceeds
+    /// `MAX_DCID_LEN`.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), PayloadError> {
         if self.dcid.is_empty() || self.dcid.len() > MAX_DCID_LEN {
             return Err(PayloadError::InvalidDcidLen(self.dcid.len()));
@@ -415,6 +443,13 @@ pub struct RegisterOkPayload<'a> {
 
 impl<'a> RegisterOkPayload<'a> {
     /// Decode a `REGISTER_OK` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The payload is too short
+    /// - The DCID length is 0 or exceeds `MAX_DCID_LEN`
+    /// - The payload length doesn't match the expected length
     pub fn decode(payload: &'a [u8]) -> Result<Self, PayloadError> {
         if payload.is_empty() {
             return Err(PayloadError::LengthTooShort {
@@ -442,6 +477,11 @@ impl<'a> RegisterOkPayload<'a> {
     }
 
     /// Encode a `REGISTER_OK` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::InvalidDcidLen` if the DCID is empty or exceeds
+    /// `MAX_DCID_LEN`.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), PayloadError> {
         if self.dcid.is_empty() || self.dcid.len() > MAX_DCID_LEN {
             return Err(PayloadError::InvalidDcidLen(self.dcid.len()));
@@ -462,6 +502,12 @@ pub struct RegisterFailPayload {
 
 impl RegisterFailPayload {
     /// Decode a `REGISTER_FAIL` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The payload length is not exactly 1
+    /// - The failure code byte is invalid
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != 1 {
             return Err(PayloadError::LengthMismatch {
@@ -489,6 +535,11 @@ pub struct PingPayload {
 
 impl PingPayload {
     /// Decode a PING payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::LengthMismatch` if the payload length is not
+    /// exactly `PING_PAYLOAD_LEN` (8 bytes).
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != PING_PAYLOAD_LEN {
             return Err(PayloadError::LengthMismatch {
@@ -518,6 +569,11 @@ pub struct PongPayload {
 
 impl PongPayload {
     /// Decode a PONG payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::LengthMismatch` if the payload length is not
+    /// exactly `PING_PAYLOAD_LEN` (8 bytes).
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != PING_PAYLOAD_LEN {
             return Err(PayloadError::LengthMismatch {
@@ -547,6 +603,12 @@ pub struct ClosePayload {
 
 impl ClosePayload {
     /// Decode a CLOSE payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The payload length is not exactly `CLOSE_PAYLOAD_LEN` (1 byte)
+    /// - The close code byte is invalid
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != CLOSE_PAYLOAD_LEN {
             return Err(PayloadError::LengthMismatch {

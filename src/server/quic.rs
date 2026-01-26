@@ -54,6 +54,13 @@ pub struct QuicEndpoint {
 
 impl QuicEndpoint {
     /// Bind a UDP socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `udp_nat_max_entries` is zero
+    /// - `idle_timeout` is zero
+    /// - UDP socket binding fails
     pub async fn bind(config: &ServerConfig) -> io::Result<Self> {
         let max_lru_entries = NonZeroUsize::new(config.udp_nat_max_entries).ok_or_else(|| {
             io::Error::new(
@@ -94,6 +101,10 @@ impl QuicEndpoint {
     ///
     /// Each client gets a dedicated upstream socket to preserve 4-tuple state.
     /// The loop exits once `cancel` is canceled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if receiving from the UDP socket fails.
     pub async fn run(
         &self,
         cancel: CancellationToken,
@@ -202,7 +213,7 @@ impl QuicEndpoint {
 impl QuicNatState {
     fn new(lru_size: NonZeroUsize) -> Self {
         let (done_tx, done_rx) = mpsc::unbounded_channel();
-        QuicNatState {
+        Self {
             peers: LruCache::new(lru_size),
             done_rx,
             done_tx,
@@ -220,7 +231,7 @@ impl QuicNatState {
     fn sweep_idle(&mut self, idle_timeout: Duration) {
         let now = Instant::now();
         let mut stale = Vec::new();
-        for (peer, entry) in self.peers.iter() {
+        for (peer, entry) in &self.peers {
             if now.duration_since(entry.last_seen) >= idle_timeout {
                 stale.push(*peer);
             }

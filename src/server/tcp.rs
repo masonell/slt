@@ -23,6 +23,10 @@ pub struct TcpFrontDoor {
 
 impl TcpFrontDoor {
     /// Bind to the configured TCP listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if TCP listener binding fails.
     pub async fn bind(config: &ServerConfig) -> io::Result<Self> {
         let listener = TcpListener::bind(config.listen_tcp).await?;
         Ok(Self {
@@ -48,6 +52,10 @@ impl TcpFrontDoor {
     ///
     /// Claimed connections are handed to `claim_handler`; other traffic is
     /// proxied to the nginx upstream. The loop exits once `cancel` is canceled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if accepting a connection fails.
     pub async fn run(
         &self,
         cancel: CancellationToken,

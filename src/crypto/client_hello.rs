@@ -138,6 +138,13 @@ pub fn parse_client_hello(client_hello: &[u8]) -> Option<([u8; 32], [u8; 32])> {
 ///
 /// This computes two truncated HMAC-SHA256 parts and writes them into the
 /// provided `session_id` buffer.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The `session_id` buffer length is not exactly `LEGACY_SESSION_ID_LEN`
+/// - The `client_hello` is malformed or missing required extensions
+/// - HMAC computation fails
 pub fn fill_legacy_session_id(
     client_hello: &[u8],
     session_id: &mut [u8],

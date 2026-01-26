@@ -22,6 +22,12 @@ pub struct CidEntry {
 
 impl CidEntry {
     /// Construct a CID entry from a `REGISTER_CID` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `pn_start` exceeds `u32::MAX`
+    /// - Key extraction from the payload fails (see `UdpQspKeys::from_register`)
     pub fn from_register(
         conn_handle: u64,
         payload: &RegisterCidPayload<'_>,
@@ -42,6 +48,12 @@ impl CidEntry {
     }
 
     /// Protect an outbound payload, advancing the packet number.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The packet number exceeds `u32::MAX`
+    /// - Packet protection fails (see `UdpQspKeys::protect`)
     pub fn protect(&mut self, payload: &[u8]) -> Result<Vec<u8>, QspCryptoError> {
         let pn = self.next_pn;
         if pn > u64::from(u32::MAX) {
@@ -52,6 +64,10 @@ impl CidEntry {
     }
 
     /// Open an inbound UDP-QSP packet.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from `UdpQspKeys::open`.
     pub fn open(&self, packet: &[u8]) -> Result<OpenedPacket, QspCryptoError> {
         self.keys.open(self.dcid.len(), packet)
     }
