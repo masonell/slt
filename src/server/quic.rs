@@ -106,7 +106,7 @@ impl QuicEndpoint {
 
         loop {
             let (len, peer) = tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
+                () = cancel.cancelled() => return Ok(()),
                 Some((peer, token)) = state.done_rx.recv() => {
                     state.handle_reader_done(peer, token);
                     continue;
@@ -180,7 +180,7 @@ impl QuicEndpoint {
             let mut buf = vec![0u8; QUIC_BUF_LEN];
             loop {
                 let len = tokio::select! {
-                    _ = cancel.cancelled() => break,
+                    () = cancel.cancelled() => break,
                     res = upstream.recv(&mut buf) => match res {
                         Ok(len) => len,
                         Err(_) => break,

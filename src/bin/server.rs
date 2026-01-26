@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             res??;
             let _ = tcp_task.await;
         }
-        _ = cancel.cancelled() => {
+        () = cancel.cancelled() => {
             let _ = tcp_task.await;
             let _ = udp_task.await;
         }

@@ -56,7 +56,7 @@ impl TcpFrontDoor {
         let claim_handler = Arc::new(claim_handler);
         loop {
             let (stream, addr) = tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
+                () = cancel.cancelled() => return Ok(()),
                 res = self.listener.accept() => res?,
             };
             let server_secret = self.classification_secret;
