@@ -217,18 +217,19 @@ impl UdpQspKeys {
         }
 
         let pn_len = packet_number_len(pn);
-        if pn_len == 0 || pn_len > MAX_PN_LEN {
+        let pn_len_usize = usize::from(pn_len);
+        if pn_len_usize == 0 || pn_len_usize > MAX_PN_LEN {
             return Err(QspCryptoError::InvalidPacketNumber);
         }
 
-        let mut header = Vec::with_capacity(1 + dcid.len() + pn_len);
-        let mut first = FIXED_BIT | ((pn_len - 1) as u8 & PN_LEN_MASK);
+        let mut header = Vec::with_capacity(1 + dcid.len() + pn_len_usize);
+        let mut first = FIXED_BIT | ((pn_len - 1) & PN_LEN_MASK);
         if key_phase {
             first |= KEY_PHASE_BIT;
         }
         header.push(first);
         header.extend_from_slice(dcid);
-        header.extend_from_slice(&pn.to_be_bytes()[8 - pn_len..]);
+        header.extend_from_slice(&pn.to_be_bytes()[8 - pn_len_usize..]);
 
         let pn_offset = 1 + dcid.len();
         let header_len = header.len();
@@ -253,7 +254,7 @@ impl UdpQspKeys {
             .mask(&packet[sample_offset..sample_offset + HP_SAMPLE_LEN])?;
 
         packet[0] ^= mask[0] & 0x1f;
-        for i in 0..pn_len {
+        for i in 0..pn_len_usize {
             packet[pn_offset + i] ^= mask[1 + i];
         }
 
@@ -323,7 +324,7 @@ impl UdpQspKeys {
     }
 }
 
-const fn packet_number_len(pn: u64) -> usize {
+const fn packet_number_len(pn: u64) -> u8 {
     if pn <= 0xff {
         1
     } else if pn <= 0xffff {

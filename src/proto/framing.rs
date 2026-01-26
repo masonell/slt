@@ -67,13 +67,11 @@ pub fn decode_frame(
 /// Returns `FrameError::LengthOverflow` if the payload length exceeds `u32::MAX`.
 pub fn encode_frame(ty: MessageType, payload: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
     let len = payload.len();
-    if len > u32::MAX as usize {
-        return Err(FrameError::LengthOverflow(len));
-    }
+    let len_u32 = u32::try_from(len).map_err(|_| FrameError::LengthOverflow(len))?;
 
     out.reserve(HEADER_LEN + len);
     out.push(ty.as_u8());
-    out.extend_from_slice(&(len as u32).to_be_bytes());
+    out.extend_from_slice(&len_u32.to_be_bytes());
     out.extend_from_slice(payload);
     Ok(())
 }

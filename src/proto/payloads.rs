@@ -419,7 +419,9 @@ impl<'a> RegisterCidPayload<'a> {
             + 8
             + 1;
         out.reserve(expected_len);
-        out.push(self.dcid.len() as u8);
+        #[allow(clippy::cast_possible_truncation)]
+        let dcid_len = self.dcid.len() as u8; // bounded by MAX_DCID_LEN (<= 20)
+        out.push(dcid_len);
         out.extend_from_slice(self.dcid);
         out.push(self.cipher.as_u8());
         out.extend_from_slice(&self.hp_tx);
@@ -487,7 +489,9 @@ impl<'a> RegisterOkPayload<'a> {
             return Err(PayloadError::InvalidDcidLen(self.dcid.len()));
         }
         out.reserve(1 + self.dcid.len());
-        out.push(self.dcid.len() as u8);
+        #[allow(clippy::cast_possible_truncation)]
+        let dcid_len = self.dcid.len() as u8; // bounded by MAX_DCID_LEN (<= 20)
+        out.push(dcid_len);
         out.extend_from_slice(self.dcid);
         Ok(())
     }
