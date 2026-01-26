@@ -49,7 +49,7 @@ struct HeaderProtectionKey {
 }
 
 impl HeaderProtectionKey {
-    fn new(key: [u8; HP_KEY_LEN]) -> Self {
+    const fn new(key: [u8; HP_KEY_LEN]) -> Self {
         Self { key }
     }
 
@@ -89,7 +89,7 @@ struct PacketKey {
 }
 
 impl PacketKey {
-    fn new(key: [u8; AEAD_KEY_LEN], iv: [u8; AEAD_IV_LEN]) -> Self {
+    const fn new(key: [u8; AEAD_KEY_LEN], iv: [u8; AEAD_IV_LEN]) -> Self {
         Self { key, iv }
     }
 
@@ -297,7 +297,7 @@ impl UdpQspKeys {
     }
 }
 
-fn packet_number_len(pn: u64) -> usize {
+const fn packet_number_len(pn: u64) -> usize {
     if pn <= 0xff {
         1
     } else if pn <= 0xffff {

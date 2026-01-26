@@ -19,7 +19,7 @@ pub struct ClientId(pub [u8; 16]);
 impl ClientId {
     /// Returns the raw client id bytes.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 16] {
+    pub const fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
 }
@@ -31,7 +31,7 @@ pub struct AssignedIp(pub Ipv4Addr);
 impl AssignedIp {
     /// Returns the inner IPv4 address.
     #[must_use]
-    pub fn addr(&self) -> Ipv4Addr {
+    pub const fn addr(&self) -> Ipv4Addr {
         self.0
     }
 }

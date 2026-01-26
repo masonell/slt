@@ -29,7 +29,7 @@ pub enum Message<'a> {
 impl<'a> Message<'a> {
     /// Returns the message type.
     #[must_use]
-    pub fn ty(&self) -> MessageType {
+    pub const fn ty(&self) -> MessageType {
         match self {
             Message::Auth { .. } => MessageType::Auth,
             Message::AuthOk { .. } => MessageType::AuthOk,
@@ -46,7 +46,7 @@ impl<'a> Message<'a> {
 
     /// Returns the payload bytes (or packet bytes for DATA).
     #[must_use]
-    pub fn payload(&self) -> &'a [u8] {
+    pub const fn payload(&self) -> &'a [u8] {
         match self {
             Message::Data { packet } => packet,
             Message::Auth { payload }
@@ -120,7 +120,7 @@ pub struct MessageLimits {
 impl MessageLimits {
     /// Create message limits for a decoding context.
     #[must_use]
-    pub fn new(max_frame_len: usize, max_data_len: usize) -> Self {
+    pub const fn new(max_frame_len: usize, max_data_len: usize) -> Self {
         Self {
             max_frame_len,
             max_data_len,

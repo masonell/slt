@@ -11,7 +11,7 @@ pub struct PacketRouter;
 impl PacketRouter {
     /// Create a new packet router.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 

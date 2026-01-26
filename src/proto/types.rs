@@ -27,7 +27,7 @@ pub enum MessageType {
 impl MessageType {
     /// Convert a wire byte into a `MessageType`, if known.
     #[must_use]
-    pub fn from_u8(value: u8) -> Option<Self> {
+    pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0x01 => Some(Self::Auth),
             0x02 => Some(Self::AuthOk),
@@ -45,7 +45,7 @@ impl MessageType {
 
     /// Return the wire byte for this message type.
     #[must_use]
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }

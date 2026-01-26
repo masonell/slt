@@ -32,7 +32,7 @@ pub enum CipherSuite {
 impl CipherSuite {
     /// Convert a wire byte into a cipher suite, if known.
     #[must_use]
-    pub fn from_u8(value: u8) -> Option<Self> {
+    pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0x01 => Some(Self::Aes128Gcm),
             0x02 => Some(Self::ChaCha20Poly1305),
@@ -42,7 +42,7 @@ impl CipherSuite {
 
     /// Return the wire byte for this cipher suite.
     #[must_use]
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }
@@ -68,7 +68,7 @@ pub enum AuthFailCode {
 impl AuthFailCode {
     /// Convert a wire byte into an auth failure code.
     #[must_use]
-    pub fn from_u8(value: u8) -> Option<Self> {
+    pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0x00 => Some(Self::Unknown),
             0x01 => Some(Self::UnknownClient),
@@ -82,7 +82,7 @@ impl AuthFailCode {
 
     /// Return the wire byte for this failure code.
     #[must_use]
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }
@@ -106,7 +106,7 @@ pub enum RegisterFailCode {
 impl RegisterFailCode {
     /// Convert a wire byte into a register failure code.
     #[must_use]
-    pub fn from_u8(value: u8) -> Option<Self> {
+    pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0x00 => Some(Self::Unknown),
             0x01 => Some(Self::NotAuthenticated),
@@ -119,7 +119,7 @@ impl RegisterFailCode {
 
     /// Return the wire byte for this failure code.
     #[must_use]
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }
@@ -143,7 +143,7 @@ pub enum CloseCode {
 impl CloseCode {
     /// Convert a wire byte into a close reason code.
     #[must_use]
-    pub fn from_u8(value: u8) -> Option<Self> {
+    pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0x00 => Some(Self::Normal),
             0x01 => Some(Self::AuthTimeout),
@@ -156,7 +156,7 @@ impl CloseCode {
 
     /// Return the wire byte for this close reason.
     #[must_use]
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }
@@ -221,7 +221,7 @@ pub struct AuthOkPayload;
 
 impl AuthOkPayload {
     /// Decode an `AUTH_OK` payload.
-    pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
+    pub const fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if !payload.is_empty() {
             return Err(PayloadError::LengthMismatch {
                 expected: 0,
@@ -232,7 +232,7 @@ impl AuthOkPayload {
     }
 
     /// Encode an `AUTH_OK` payload.
-    pub fn encode(&self, _out: &mut Vec<u8>) {}
+    pub const fn encode(&self, _out: &mut Vec<u8>) {}
 }
 
 /// `AUTH_FAIL` payload.

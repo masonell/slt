@@ -265,7 +265,7 @@ struct RecordReader<'a> {
 }
 
 impl<'a> RecordReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    const fn new(buf: &'a [u8]) -> Self {
         Self {
             buf,
             pos: 0,
@@ -344,7 +344,7 @@ struct HandshakeReader<'a> {
 }
 
 impl<'a> HandshakeReader<'a> {
-    fn new(record: RecordReader<'a>, remaining: usize) -> Self {
+    const fn new(record: RecordReader<'a>, remaining: usize) -> Self {
         Self { record, remaining }
     }
 

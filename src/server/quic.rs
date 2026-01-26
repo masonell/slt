@@ -80,7 +80,7 @@ impl QuicEndpoint {
 
     /// Returns the underlying UDP socket.
     #[must_use]
-    pub fn socket(&self) -> &Arc<UdpSocket> {
+    pub const fn socket(&self) -> &Arc<UdpSocket> {
         &self.socket
     }
 

@@ -34,7 +34,7 @@ impl TcpFrontDoor {
 
     /// Return the bound listener.
     #[must_use]
-    pub fn listener(&self) -> &TcpListener {
+    pub const fn listener(&self) -> &TcpListener {
         &self.listener
     }
 
