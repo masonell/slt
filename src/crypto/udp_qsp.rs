@@ -340,7 +340,7 @@ mod tests {
         let opened = keys.open(dcid.len(), &packet).unwrap();
 
         assert_eq!(opened.pn, 1);
-        assert_eq!(opened.key_phase, false);
+        assert!(!opened.key_phase);
         assert_eq!(opened.payload, payload);
     }
 
