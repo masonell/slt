@@ -12,6 +12,7 @@ foreign-types = "0.5.0"
 hex = "0.4.3"
 humantime-serde = "1.1.1"
 lru = "0.16.3"
+parking_lot = "0.12.5"
 quiche = { version = "0.24.8", features = ["boringssl-boring-crate"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["full"] }

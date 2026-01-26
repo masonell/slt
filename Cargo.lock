@@ -737,6 +737,7 @@ dependencies = [
  "hex",
  "humantime-serde",
  "lru",
+ "parking_lot",
  "quiche",
  "serde",
  "tokio",

@@ -10,8 +10,8 @@ use super::udp_qsp::CidMap;
 use crate::classifier::{QuicVerdict, classify_quic_datagram};
 use crate::config::ServerConfig;
 use lru::LruCache;
+use parking_lot::RwLock;
 use tokio::net::UdpSocket;
-use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -145,10 +145,7 @@ impl QuicEndpoint {
                 let _ = upstream_socket.send(payload).await;
             }
             QuicVerdict::Short { dcid } => {
-                let claimed = {
-                    let map = self.cid_map.read().await;
-                    map.get(dcid).is_some()
-                };
+                let claimed = { self.cid_map.read().get(dcid).is_some() };
                 if claimed {
                     (claim_handler)(UdpClaim {
                         peer,
