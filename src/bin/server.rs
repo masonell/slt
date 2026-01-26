@@ -1,8 +1,8 @@
 use clap::Parser;
 use slt::config::ServerConfig;
+use slt::server::quic::QuicEndpoint;
 use slt::server::tcp::TcpFrontDoor;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -23,7 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config: ServerConfig = toml::from_str(&raw)?;
     let config = Arc::new(config);
 
-    let frontdoor = TcpFrontDoor::bind(config.clone(), config.server_secret).await?;
+    let frontdoor = TcpFrontDoor::bind(&config).await?;
+    let quic = QuicEndpoint::bind(&config).await?;
     let cancel = CancellationToken::new();
 
     let cancel_task = cancel.clone();
@@ -33,14 +34,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    frontdoor
-        .run(cancel, move |stream: TcpStream, addr: SocketAddr| {
-            tokio::spawn(async move {
-                eprintln!("claimed tcp connection from {addr}");
-                drop(stream);
-            });
+    let mut tcp_task = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            frontdoor
+                .run(cancel, move |stream: TcpStream, addr| {
+                    tokio::spawn(async move {
+                        eprintln!("claimed tcp connection from {addr}");
+                        drop(stream);
+                    });
+                })
+                .await
         })
-        .await?;
+    };
+
+    let mut udp_task = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { quic.run(cancel).await })
+    };
+
+    tokio::select! {
+        res = &mut tcp_task => {
+            cancel.cancel();
+            res??;
+            let _ = udp_task.await;
+        }
+        res = &mut udp_task => {
+            cancel.cancel();
+            res??;
+            let _ = tcp_task.await;
+        }
+        _ = cancel.cancelled() => {
+            let _ = tcp_task.await;
+            let _ = udp_task.await;
+        }
+    }
 
     Ok(())
 }

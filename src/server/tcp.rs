@@ -17,18 +17,18 @@ const PEEK_ATTEMPTS: usize = 4;
 #[derive(Debug)]
 pub struct TcpFrontDoor {
     listener: TcpListener,
-    config: Arc<ServerConfig>,
-    server_secret: [u8; 32],
+    classification_secret: [u8; 32],
+    nginx_tcp_upstream: SocketAddr,
 }
 
 impl TcpFrontDoor {
     /// Bind to the configured TCP listener.
-    pub async fn bind(config: Arc<ServerConfig>, server_secret: [u8; 32]) -> io::Result<Self> {
+    pub async fn bind(config: &ServerConfig) -> io::Result<Self> {
         let listener = TcpListener::bind(config.listen_tcp).await?;
         Ok(Self {
             listener,
-            config,
-            server_secret,
+            classification_secret: config.server_secret,
+            nginx_tcp_upstream: config.nginx_tcp_upstream,
         })
     }
 
@@ -38,16 +38,10 @@ impl TcpFrontDoor {
         &self.listener
     }
 
-    /// Return the server configuration.
-    #[must_use]
-    pub fn config(&self) -> &ServerConfig {
-        &self.config
-    }
-
     /// Classify a TCP buffer that starts with TLS records.
     #[must_use]
     pub fn classify(&self, buf: &[u8]) -> Verdict {
-        classify_tcp_client_hello(buf, &self.server_secret)
+        classify_tcp_client_hello(buf, &self.classification_secret)
     }
 
     /// Run the TCP accept loop and route connections by classification.
@@ -65,8 +59,8 @@ impl TcpFrontDoor {
                 _ = cancel.cancelled() => return Ok(()),
                 res = self.listener.accept() => res?,
             };
-            let server_secret = self.server_secret;
-            let upstream = self.config.nginx_tcp_upstream;
+            let server_secret = self.classification_secret;
+            let upstream = self.nginx_tcp_upstream;
             let claim_handler = claim_handler.clone();
 
             tokio::spawn(async move {

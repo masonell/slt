@@ -50,6 +50,8 @@ pub struct ServerConfig {
     /// UDP verification timeout.
     #[serde(with = "humantime_serde")]
     pub udp_verify_timeout: Duration,
+    /// Max number of UDP NAT peers to keep for nginx forwarding.
+    pub udp_nat_max_entries: usize,
     /// Configured client entries.
     pub clients: Vec<ServerClient>,
 }
