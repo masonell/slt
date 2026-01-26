@@ -150,9 +150,8 @@ pub fn decode_message(
     buf: &'_ [u8],
     limits: MessageLimits,
 ) -> Result<Option<(Message<'_>, usize)>, MessageError> {
-    let (frame, consumed) = match decode_frame(buf, limits.max_frame_len)? {
-        Some(frame) => frame,
-        None => return Ok(None),
+    let Some((frame, consumed)) = decode_frame(buf, limits.max_frame_len)? else {
+        return Ok(None)
     };
 
     if frame.ty == MessageType::Data && frame.payload.len() > limits.max_data_len {
