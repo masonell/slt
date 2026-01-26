@@ -31,14 +31,14 @@ where
 }
 
 fn read_secret_file<const N: usize>(path: &Path) -> Result<[u8; N], String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read {path:?}: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if bytes.len() == N {
         let mut out = [0u8; N];
         out.copy_from_slice(&bytes);
         return Ok(out);
     }
 
-    let text = std::str::from_utf8(&bytes).map_err(|e| format!("utf-8 {path:?}: {e}"))?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| format!("utf-8 {}: {e}", path.display()))?;
     crate::config::serde_hex::decode_hex::<N>(text)
 }
 
