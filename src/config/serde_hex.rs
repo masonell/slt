@@ -8,7 +8,7 @@ where
     serializer.serialize_str(&hex::encode(bytes))
 }
 
-pub(crate) fn decode_hex<const N: usize>(input: &str) -> Result<[u8; N], String> {
+pub fn decode_hex<const N: usize>(input: &str) -> Result<[u8; N], String> {
     let s = input.trim();
     let s = s.strip_prefix("0x").unwrap_or(s);
     let decoded = hex::decode(s).map_err(|e| e.to_string())?;
