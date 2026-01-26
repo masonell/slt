@@ -36,7 +36,6 @@ impl Authenticator {
     pub fn is_enabled(&self, client_id: &ClientId) -> bool {
         self.clients
             .get(client_id)
-            .map(|c| c.enabled)
-            .unwrap_or(false)
+            .is_some_and(|c| c.enabled)
     }
 }
