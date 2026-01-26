@@ -34,8 +34,6 @@ impl Authenticator {
     /// Returns true if the client exists and is enabled.
     #[must_use]
     pub fn is_enabled(&self, client_id: &ClientId) -> bool {
-        self.clients
-            .get(client_id)
-            .is_some_and(|c| c.enabled)
+        self.clients.get(client_id).is_some_and(|c| c.enabled)
     }
 }

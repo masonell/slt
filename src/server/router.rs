@@ -46,7 +46,6 @@ impl PacketRouter {
     /// Validate an IPv4 packet against the session's assigned address.
     #[must_use]
     pub fn validate_packet_src(session: &Session, packet: &[u8]) -> bool {
-        Self::extract_src_ipv4(packet)
-            .is_some_and(|src| Self::validate_src_ipv4(session, src))
+        Self::extract_src_ipv4(packet).is_some_and(|src| Self::validate_src_ipv4(session, src))
     }
 }
