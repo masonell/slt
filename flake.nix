@@ -22,10 +22,6 @@
             nasm
           ];
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-
-          shellHook = ''
-            exec fish
-          '';
         };
       };
     };
