@@ -2,7 +2,7 @@
 
 use std::net::Ipv4Addr;
 
-use super::sessions::Session;
+use super::sessions::ClientSession;
 
 /// Routes packets between TUN and sessions.
 #[derive(Debug, Default)]
@@ -17,7 +17,7 @@ impl PacketRouter {
 
     /// Enforce `src_ip == assigned_ipv4` for a session.
     #[must_use]
-    pub fn validate_src_ipv4(session: &Session, src_ip: Ipv4Addr) -> bool {
+    pub fn validate_src_ipv4(session: &ClientSession, src_ip: Ipv4Addr) -> bool {
         session.assigned_ipv4.addr() == src_ip
     }
 
@@ -45,7 +45,7 @@ impl PacketRouter {
 
     /// Validate an IPv4 packet against the session's assigned address.
     #[must_use]
-    pub fn validate_packet_src(session: &Session, packet: &[u8]) -> bool {
+    pub fn validate_packet_src(session: &ClientSession, packet: &[u8]) -> bool {
         Self::extract_src_ipv4(packet).is_some_and(|src| Self::validate_src_ipv4(session, src))
     }
 }

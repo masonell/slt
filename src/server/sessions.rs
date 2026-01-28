@@ -1,13 +1,21 @@
-//! Session tracking and lifecycle helpers.
+//! Client session tracking and lifecycle helpers.
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use super::{AssignedIp, ClientId};
 
+/// Active transport for a client session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveTransport {
+    /// TLS-over-TCP transport.
+    Tcp,
+    /// UDP-QSP transport.
+    UdpQsp,
+}
+
 /// A single authenticated client session.
 #[derive(Debug, Clone)]
-pub struct Session {
+pub struct ClientSession {
     /// Client identifier.
     pub client_id: ClientId,
     /// Assigned VPN IPv4 address.
@@ -16,48 +24,30 @@ pub struct Session {
     pub created_at: Instant,
     /// Last activity timestamp.
     pub last_activity: Instant,
+    /// Active data transport.
+    pub active_transport: ActiveTransport,
+    /// Whether UDP-QSP is verified for this session.
+    pub udp_verified: bool,
+    /// Whether the TCP control channel is still open.
+    pub tcp_open: bool,
 }
 
-/// Tracks active sessions.
-#[derive(Debug, Default)]
-pub struct SessionManager {
-    sessions: HashMap<ClientId, Session>,
-}
+/// Session store backing type (typically wrapped in `Arc<RwLock<...>>`).
+pub type ClientSessionMap = std::collections::HashMap<ClientId, ClientSession>;
 
-impl SessionManager {
-    /// Create a new empty session manager.
+impl ClientSession {
+    /// Create a new client session with TCP active.
+    #[allow(clippy::missing_const_for_fn)]
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(client_id: ClientId, assigned_ipv4: AssignedIp, now: Instant) -> Self {
         Self {
-            sessions: HashMap::new(),
-        }
-    }
-
-    /// Insert or replace a session.
-    pub fn insert(&mut self, session: Session) {
-        self.sessions.insert(session.client_id, session);
-    }
-
-    /// Fetch a session by client id.
-    #[must_use]
-    pub fn get(&self, client_id: &ClientId) -> Option<&Session> {
-        self.sessions.get(client_id)
-    }
-
-    /// Fetch a mutable session by client id.
-    pub fn get_mut(&mut self, client_id: &ClientId) -> Option<&mut Session> {
-        self.sessions.get_mut(client_id)
-    }
-
-    /// Remove a session by client id.
-    pub fn remove(&mut self, client_id: &ClientId) -> Option<Session> {
-        self.sessions.remove(client_id)
-    }
-
-    /// Update last activity timestamp.
-    pub fn touch(&mut self, client_id: &ClientId, now: Instant) {
-        if let Some(session) = self.sessions.get_mut(client_id) {
-            session.last_activity = now;
+            client_id,
+            assigned_ipv4,
+            created_at: now,
+            last_activity: now,
+            active_transport: ActiveTransport::Tcp,
+            udp_verified: false,
+            tcp_open: true,
         }
     }
 }
