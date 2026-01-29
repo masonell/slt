@@ -25,19 +25,14 @@ impl CidEntry {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - `pn_start` exceeds `u32::MAX`
-    /// - Key extraction from the payload fails (see `UdpQspKeys::from_register`)
+    /// Returns an error if key extraction from the payload fails (see
+    /// `UdpQspKeys::from_register`).
     pub fn from_register(
         conn_handle: u64,
         payload: &RegisterCidPayload<'_>,
         pn_start: u64,
         key_phase: bool,
     ) -> Result<Self, QspCryptoError> {
-        if pn_start > u64::from(u32::MAX) {
-            return Err(QspCryptoError::InvalidPacketNumber);
-        }
-
         Ok(Self {
             conn_handle,
             dcid: payload.dcid.to_vec(),
@@ -52,24 +47,26 @@ impl CidEntry {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The packet number exceeds `u32::MAX`
+    /// - The packet number would overflow
     /// - Packet protection fails (see `UdpQspKeys::protect`)
     pub fn protect(&mut self, payload: &[u8]) -> Result<Vec<u8>, QspCryptoError> {
         let pn = self.next_pn;
-        if pn > u64::from(u32::MAX) {
-            return Err(QspCryptoError::InvalidPacketNumber);
-        }
-        self.next_pn = pn + 1;
+        self.next_pn = pn
+            .checked_add(1)
+            .ok_or(QspCryptoError::InvalidPacketNumber)?;
         self.keys.protect(&self.dcid, pn, self.key_phase, payload)
     }
 
     /// Open an inbound UDP-QSP packet.
     ///
+    /// `expected_pn` should be the next packet number you expect to receive
+    /// (typically `largest_pn + 1`) to allow packet number reconstruction.
+    ///
     /// # Errors
     ///
     /// Propagates errors from `UdpQspKeys::open`.
-    pub fn open(&self, packet: &[u8]) -> Result<OpenedPacket, QspCryptoError> {
-        self.keys.open(self.dcid.len(), packet)
+    pub fn open(&self, packet: &[u8], expected_pn: u64) -> Result<OpenedPacket, QspCryptoError> {
+        self.keys.open(self.dcid.len(), packet, expected_pn)
     }
 }
 
@@ -154,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn cid_entry_rejects_large_pn_start() {
+    fn cid_entry_accepts_large_pn_start() {
         let dcid = [0xAA; 8];
         let payload = RegisterCidPayload {
             dcid: &dcid,
@@ -170,9 +167,30 @@ mod tests {
         };
 
         let pn_start = u64::from(u32::MAX) + 1;
-        assert!(matches!(
-            CidEntry::from_register(7, &payload, pn_start, false),
+        let entry = CidEntry::from_register(7, &payload, pn_start, false).unwrap();
+        assert_eq!(entry.next_pn, pn_start);
+    }
+
+    #[test]
+    fn cid_entry_rejects_pn_wrap() {
+        let dcid = [0xAA; 8];
+        let payload = RegisterCidPayload {
+            dcid: &dcid,
+            cipher: CipherSuite::Aes128Gcm,
+            hp_tx: [0x01; HP_KEY_LEN],
+            hp_rx: [0x02; HP_KEY_LEN],
+            aead_tx: [0x03; AEAD_KEY_LEN],
+            aead_rx: [0x04; AEAD_KEY_LEN],
+            iv_tx: [0x05; AEAD_IV_LEN],
+            iv_rx: [0x06; AEAD_IV_LEN],
+            pn_start: 0,
+            key_phase: false,
+        };
+
+        let mut entry = CidEntry::from_register(7, &payload, u64::MAX, false).unwrap();
+        assert_eq!(
+            entry.protect(&[0xAA; 4]),
             Err(QspCryptoError::InvalidPacketNumber)
-        ));
+        );
     }
 }
