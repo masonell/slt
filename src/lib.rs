@@ -9,3 +9,5 @@ pub mod config;
 pub mod proto;
 /// Server-side abstractions.
 pub mod server;
+/// Common types used across the codebase.
+pub mod types;

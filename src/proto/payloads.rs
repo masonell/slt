@@ -1,5 +1,7 @@
 use std::net::Ipv4Addr;
 
+use crate::types::ClientId;
+
 /// Maximum QUIC DCID length used by the protocol.
 pub const MAX_DCID_LEN: usize = 20;
 /// Length of the authentication challenge in bytes.
@@ -165,7 +167,7 @@ impl CloseCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthPayload {
     /// Client identifier.
-    pub client_id: [u8; 16],
+    pub client_id: ClientId,
     /// Assigned IPv4 address.
     pub assigned_ipv4: Ipv4Addr,
     /// Server-provided challenge bytes.
@@ -189,8 +191,9 @@ impl AuthPayload {
             });
         }
 
-        let mut client_id = [0u8; 16];
-        client_id.copy_from_slice(&payload[..16]);
+        let mut client_id_bytes = [0u8; 16];
+        client_id_bytes.copy_from_slice(&payload[..16]);
+        let client_id = ClientId(client_id_bytes);
 
         let assigned_ipv4 = Ipv4Addr::new(payload[16], payload[17], payload[18], payload[19]);
 
@@ -213,7 +216,7 @@ impl AuthPayload {
     /// Encode an AUTH payload.
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.reserve(AUTH_PAYLOAD_LEN);
-        out.extend_from_slice(&self.client_id);
+        out.extend_from_slice(self.client_id.as_bytes());
         out.extend_from_slice(&self.assigned_ipv4.octets());
         out.extend_from_slice(&self.challenge);
         out.extend_from_slice(&self.signature);
@@ -659,7 +662,7 @@ mod tests {
     #[test]
     fn auth_payload_roundtrip() {
         let payload = AuthPayload {
-            client_id: [0x11; 16],
+            client_id: ClientId([0x11; 16]),
             assigned_ipv4: Ipv4Addr::new(10, 10, 0, 2),
             challenge: [0x22; AUTH_CHALLENGE_LEN],
             signature: [0x33; AUTH_SIGNATURE_LEN],

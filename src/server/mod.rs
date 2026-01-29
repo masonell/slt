@@ -12,17 +12,8 @@ pub mod udp_qsp;
 
 use std::net::Ipv4Addr;
 
-/// Stable 16-byte client identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ClientId(pub [u8; 16]);
-
-impl ClientId {
-    /// Returns the raw client id bytes.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
-    }
-}
+// Re-export common types
+pub use crate::types::ClientId;
 
 /// Assigned VPN IPv4 address wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

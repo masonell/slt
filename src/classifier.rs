@@ -5,6 +5,7 @@ use crate::crypto::client_hello::{
     EXT_KEY_SHARE, GROUP_X25519, HANDSHAKE_TYPE_CLIENT_HELLO, LEGACY_SESSION_ID_LEN, PART_LEN,
     RANDOM_PREFIX_LEN,
 };
+use crate::types::SharedSecret;
 
 /// Classification result for a parsed `ClientHello`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,9 +71,9 @@ pub fn classify_quic_datagram(input: &'_ [u8]) -> QuicVerdict<'_> {
 /// Classify a TCP stream buffer that starts with TLS records.
 ///
 /// The classifier reads the first `ClientHello` from the stream and validates
-/// the `legacy_session_id` using `server_secret`.
+/// the `legacy_session_id` using `shared_secret`.
 #[must_use]
-pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict {
+pub fn classify_tcp_client_hello(input: &[u8], shared_secret: &SharedSecret) -> Verdict {
     let mut record = RecordReader::new(input);
 
     let hs_type = match record.read_u8() {
@@ -114,7 +115,7 @@ pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict 
         return v;
     }
 
-    let Ok(part1) = hmac_sha256(server_secret, &random[..RANDOM_PREFIX_LEN]) else {
+    let Ok(part1) = hmac_sha256(shared_secret.as_bytes(), &random[..RANDOM_PREFIX_LEN]) else {
         return Verdict::Pass;
     };
 
@@ -169,7 +170,7 @@ pub fn classify_tcp_client_hello(input: &[u8], server_secret: &[u8]) -> Verdict 
             };
 
             if let Some(key_share) = key_share {
-                let Ok(part2) = hmac_sha256(server_secret, &key_share) else {
+                let Ok(part2) = hmac_sha256(shared_secret.as_bytes(), &key_share) else {
                     return Verdict::Pass;
                 };
 
@@ -409,7 +410,7 @@ mod tests {
         }
     }
 
-    fn generate_client_hello(secret: [u8; 32]) -> Vec<u8> {
+    fn generate_client_hello(secret: SharedSecret) -> Vec<u8> {
         let mut ctx = SslContextBuilder::new(SslMethod::tls()).unwrap();
         ctx.set_verify(SslVerifyMode::NONE);
         ctx.set_curves_list("X25519").unwrap();
@@ -431,7 +432,7 @@ mod tests {
 
     #[test]
     fn classifier_claims_boring_client_hello() {
-        let secret = [0x42u8; 32];
+        let secret = SharedSecret([0x42u8; 32]);
         let client_hello = generate_client_hello(secret);
 
         assert_eq!(
@@ -442,9 +443,9 @@ mod tests {
 
     #[test]
     fn classifier_rejects_wrong_secret() {
-        let secret = [0x11u8; 32];
+        let secret = SharedSecret([0x11u8; 32]);
         let client_hello = generate_client_hello(secret);
-        let wrong_secret = [0x22u8; 32];
+        let wrong_secret = SharedSecret([0x22u8; 32]);
 
         assert_eq!(
             classify_tcp_client_hello(&client_hello, &wrong_secret),

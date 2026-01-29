@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use crate::types::{ClientId, PrivKeyEd25519, SharedSecret};
+
 /// Preferences for connection upgrade/fallback timing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpgradePreferences {
@@ -19,13 +21,13 @@ pub struct ClientConfig {
     /// Server address (host:port or name:port).
     pub server_addr: String,
     /// Stable 16-byte client identifier.
-    #[serde(with = "crate::config::serde_hex")]
-    pub client_id: [u8; 16],
+    pub client_id: ClientId,
+    /// Pre-shared secret for `ClientHello` classification.
+    pub shared_secret: SharedSecret,
     /// Assigned VPN IPv4 address.
     pub assigned_ipv4: Ipv4Addr,
     /// Ed25519 private key used for authentication.
-    #[serde(with = "crate::config::serde_hex")]
-    pub privkey_ed25519: [u8; 32],
+    pub privkey_ed25519: PrivKeyEd25519,
     /// TUN interface name.
     pub tun_name: String,
     /// TUN interface MTU.

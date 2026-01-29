@@ -328,25 +328,15 @@ mod tests {
         }
 
         impl SessionIo for TestIo {
-            fn send<'a>(
-                &'a mut self,
-                bytes: &'a [u8],
-            ) -> impl Future<Output = io::Result<()>> + Send + 'a {
-                async move {
-                    self.sent.push(bytes.to_vec());
-                    Ok(())
-                }
+            async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+                self.sent.push(bytes.to_vec());
+                Ok(())
             }
 
-            fn recv<'a>(
-                &'a mut self,
-                buf: &'a mut [u8],
-            ) -> impl Future<Output = io::Result<usize>> + Send + 'a {
-                async move {
-                    let len = self.packet.len();
-                    buf[..len].copy_from_slice(&self.packet);
-                    Ok(len)
-                }
+            async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let len = self.packet.len();
+                buf[..len].copy_from_slice(&self.packet);
+                Ok(len)
             }
         }
 

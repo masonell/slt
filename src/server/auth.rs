@@ -9,7 +9,7 @@ use super::ClientId;
 /// Simple allowlist-based authenticator.
 #[derive(Debug, Clone)]
 pub struct Authenticator {
-    clients: HashMap<ClientId, ServerClient>,
+    clients_config: HashMap<ClientId, ServerClient>,
 }
 
 impl Authenticator {
@@ -20,20 +20,24 @@ impl Authenticator {
             .clients
             .iter()
             .cloned()
-            .map(|client| (ClientId(client.client_id), client))
+            .map(|client| (client.client_id, client))
             .collect();
-        Self { clients }
+        Self {
+            clients_config: clients,
+        }
     }
 
     /// Returns the configured client entry, if present.
     #[must_use]
     pub fn get(&self, client_id: &ClientId) -> Option<&ServerClient> {
-        self.clients.get(client_id)
+        self.clients_config.get(client_id)
     }
 
     /// Returns true if the client exists and is enabled.
     #[must_use]
     pub fn is_enabled(&self, client_id: &ClientId) -> bool {
-        self.clients.get(client_id).is_some_and(|c| c.enabled)
+        self.clients_config
+            .get(client_id)
+            .is_some_and(|c| c.enabled)
     }
 }

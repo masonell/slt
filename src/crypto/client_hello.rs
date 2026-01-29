@@ -2,6 +2,8 @@ use boring::error::ErrorStack;
 use boring::hash::hmac_sha256;
 use boring::ssl::SslRef;
 
+use crate::types::SharedSecret;
+
 /// TLS `HandshakeType` value for `ClientHello`.
 pub const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
 /// Expected `legacy_session_id` length used by the classifier.
@@ -148,7 +150,7 @@ pub fn parse_client_hello(client_hello: &[u8]) -> Option<([u8; 32], [u8; 32])> {
 pub fn fill_legacy_session_id(
     client_hello: &[u8],
     session_id: &mut [u8],
-    secret: &[u8],
+    secret: &SharedSecret,
 ) -> Result<(), ErrorStack> {
     if session_id.len() != LEGACY_SESSION_ID_LEN {
         return Err(ErrorStack::get());
@@ -158,8 +160,8 @@ pub fn fill_legacy_session_id(
         return Err(ErrorStack::get());
     };
 
-    let part1 = hmac_sha256(secret, &random[..RANDOM_PREFIX_LEN])?;
-    let part2 = hmac_sha256(secret, &key_share)?;
+    let part1 = hmac_sha256(secret.as_bytes(), &random[..RANDOM_PREFIX_LEN])?;
+    let part2 = hmac_sha256(secret.as_bytes(), &key_share)?;
 
     session_id[..PART_LEN].copy_from_slice(&part1[..PART_LEN]);
     session_id[PART_LEN..].copy_from_slice(&part2[..PART_LEN]);
@@ -172,7 +174,7 @@ pub fn fill_legacy_session_id(
 /// The callback uses `secret` to fill the `session_id` based on `ClientHello`
 /// random and `X25519` `key_share`.
 pub fn client_hello_session_id_callback(
-    secret: [u8; 32],
+    secret: SharedSecret,
 ) -> impl Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<(), ErrorStack> + Sync + Send + 'static {
     move |_ssl, client_hello, session_id| fill_legacy_session_id(client_hello, session_id, &secret)
 }

@@ -3,6 +3,7 @@ use boring::ssl::{HandshakeError, Ssl, SslVerifyMode};
 use clap::Parser;
 use slt::crypto::client_hello::client_hello_session_id_callback;
 use slt::crypto::{configure_client_chrome_ssl, tcp_client_chrome_ctx_builder};
+use slt::types::SharedSecret;
 use std::net::ToSocketAddrs;
 
 #[derive(Parser, Debug)]
@@ -48,11 +49,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !args.no_session_id {
         let secret = if let Some(hex) = args.secret_hex {
-            hex
+            SharedSecret(hex)
         } else {
             let mut buf = [0u8; 32];
             rand_bytes(&mut buf)?;
-            buf
+            SharedSecret(buf)
         };
         ctx.set_client_hello_session_id_callback(client_hello_session_id_callback(secret));
     }

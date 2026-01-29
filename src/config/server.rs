@@ -2,15 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use crate::types::{ClientId, PubKeyEd25519, SharedSecret};
+
 /// Per-client entry in the server allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerClient {
     /// Stable 16-byte client identifier.
-    #[serde(with = "crate::config::serde_hex")]
-    pub client_id: [u8; 16],
+    pub client_id: ClientId,
     /// Ed25519 public key used for authentication.
-    #[serde(with = "crate::config::serde_hex")]
-    pub pubkey_ed25519: [u8; 32],
+    pub pubkey_ed25519: PubKeyEd25519,
     /// Assigned VPN IPv4 address.
     pub assigned_ipv4: Ipv4Addr,
     /// If false, the client is disabled without removing the entry.
@@ -20,9 +20,8 @@ pub struct ServerClient {
 /// Static server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// 32-byte secret for `ClientHello` classification.
-    #[serde(with = "crate::config::serde_secret")]
-    pub server_secret: [u8; 32],
+    /// Pre-shared secret for `ClientHello` classification.
+    pub server_secret: SharedSecret,
     /// TCP listener for TLS-wrapped VPN traffic.
     pub listen_tcp: SocketAddr,
     /// UDP listener for QUIC-based VPN traffic.

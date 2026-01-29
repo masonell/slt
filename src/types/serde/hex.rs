@@ -1,6 +1,10 @@
 use serde::{Deserialize, Deserializer, Serializer, de};
 
 /// Serialize a fixed-size byte array as lowercase hex.
+///
+/// # Errors
+///
+/// Returns the serializer's error if the string cannot be serialized.
 pub fn serialize<const N: usize, S>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -8,6 +12,11 @@ where
     serializer.serialize_str(&hex::encode(bytes))
 }
 
+/// Decode a hex string (optionally prefixed with `0x`) to a fixed-size byte array.
+///
+/// # Errors
+///
+/// Returns an error if the hex is invalid or the decoded length doesn't match `N`.
 pub fn decode_hex<const N: usize>(input: &str) -> Result<[u8; N], String> {
     let s = input.trim();
     let s = s.strip_prefix("0x").unwrap_or(s);
@@ -21,6 +30,10 @@ pub fn decode_hex<const N: usize>(input: &str) -> Result<[u8; N], String> {
 }
 
 /// Deserialize a fixed-size byte array from hex (optionally prefixed with 0x).
+///
+/// # Errors
+///
+/// Returns the deserializer's error if the input is not a valid string or contains invalid hex.
 pub fn deserialize<'de, const N: usize, D>(deserializer: D) -> Result<[u8; N], D::Error>
 where
     D: Deserializer<'de>,

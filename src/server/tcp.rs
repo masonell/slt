@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::classifier::{Verdict, classify_tcp_client_hello};
 use crate::config::ServerConfig;
+use crate::types::SharedSecret;
 
 const PEEK_LEN: usize = 16 * 1024;
 const PEEK_ATTEMPTS: usize = 4;
@@ -17,7 +18,7 @@ const PEEK_ATTEMPTS: usize = 4;
 #[derive(Debug)]
 pub struct TcpFrontDoor {
     listener: TcpListener,
-    classification_secret: [u8; 32],
+    classification_secret: SharedSecret,
     nginx_tcp_upstream: SocketAddr,
 }
 
@@ -91,7 +92,10 @@ impl TcpFrontDoor {
         Ok(())
     }
 
-    async fn classify_stream(stream: &TcpStream, server_secret: [u8; 32]) -> io::Result<Verdict> {
+    async fn classify_stream(
+        stream: &TcpStream,
+        server_secret: SharedSecret,
+    ) -> io::Result<Verdict> {
         let mut buf = vec![0u8; PEEK_LEN];
         let mut last_len = 0usize;
 

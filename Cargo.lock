@@ -810,6 +810,7 @@ dependencies = [
  "rusty-hook",
  "serde",
  "tokio",
+ "tokio-boring",
  "tokio-util",
  "toml 0.9.11+spec-1.1.0",
 ]
@@ -862,6 +863,17 @@ dependencies = [
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-boring"
+version = "5.0.0-alpha.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8366b0554ff26810c5a1b282cc6dc65c3f1f3c488f5e5aa310e92c1665defd0"
+dependencies = [
+ "boring",
+ "boring-sys",
+ "tokio",
 ]
 
 [[package]]

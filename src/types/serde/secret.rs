@@ -9,14 +9,22 @@ enum SecretRef {
 }
 
 /// Serialize the secret as lowercase hex.
+///
+/// # Errors
+///
+/// Returns the serializer's error if the string cannot be serialized.
 pub fn serialize<const N: usize, S>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    crate::config::serde_hex::serialize(bytes, serializer)
+    crate::types::serde::hex::serialize(bytes, serializer)
 }
 
 /// Deserialize the secret from hex or a file reference.
+///
+/// # Errors
+///
+/// Returns the deserializer's error if the input is not a valid hex string or a valid file reference.
 pub fn deserialize<'de, const N: usize, D>(deserializer: D) -> Result<[u8; N], D::Error>
 where
     D: Deserializer<'de>,
@@ -24,7 +32,7 @@ where
     let secret = SecretRef::deserialize(deserializer)?;
     match secret {
         SecretRef::Hex(s) => {
-            crate::config::serde_hex::decode_hex::<N>(&s).map_err(de::Error::custom)
+            crate::types::serde::hex::decode_hex::<N>(&s).map_err(de::Error::custom)
         }
         SecretRef::File { file } => read_secret_file::<N>(&file).map_err(de::Error::custom),
     }
@@ -39,7 +47,28 @@ fn read_secret_file<const N: usize>(path: &Path) -> Result<[u8; N], String> {
     }
 
     let text = std::str::from_utf8(&bytes).map_err(|e| format!("utf-8 {}: {e}", path.display()))?;
-    crate::config::serde_hex::decode_hex::<N>(text)
+    crate::types::serde::hex::decode_hex::<N>(text)
+}
+
+/// Newtype wrapper for serializing secrets as hex or file references.
+pub struct SerdeSecret<const N: usize>(pub [u8; N]);
+
+impl<const N: usize> serde::Serialize for SerdeSecret<N> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize(&self.0, serializer)
+    }
+}
+
+impl<'de, const N: usize> serde::Deserialize<'de> for SerdeSecret<N> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize(deserializer).map(SerdeSecret)
+    }
 }
 
 #[cfg(test)]
