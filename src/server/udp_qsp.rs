@@ -11,8 +11,10 @@ use crate::types::{Cid, CidPrefix};
 pub struct CidEntry {
     /// Opaque handle linking this CID to a connection/session.
     pub conn_handle: u64,
-    /// Destination connection ID used on the wire.
+    /// Destination connection ID for client->server packets.
     pub dcid: Cid,
+    /// Destination connection ID for server->client packets.
+    pub scid: Cid,
     /// Packet protection keys.
     pub keys: UdpQspKeys,
     /// Next packet number to use for outbound traffic.
@@ -37,6 +39,7 @@ impl CidEntry {
         Ok(Self {
             conn_handle,
             dcid: payload.dcid,
+            scid: payload.scid,
             keys: UdpQspKeys::from_register(payload)?,
             next_pn: pn_start,
             key_phase,
@@ -56,7 +59,7 @@ impl CidEntry {
             .checked_add(1)
             .ok_or(QspCryptoError::InvalidPacketNumber)?;
         self.keys
-            .protect(self.dcid.as_slice(), pn, self.key_phase, payload)
+            .protect(self.scid.as_slice(), pn, self.key_phase, payload)
     }
 
     /// Open an inbound UDP-QSP packet.
@@ -157,8 +160,10 @@ mod tests {
     #[test]
     fn cid_map_insert_lookup_remove() {
         let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
         let payload = RegisterCidPayload {
             dcid,
+            scid,
             cipher: CipherSuite::Aes128Gcm,
             hp_tx: [0x01; HP_KEY_LEN],
             hp_rx: [0x02; HP_KEY_LEN],
@@ -167,6 +172,7 @@ mod tests {
             iv_tx: [0x05; AEAD_IV_LEN],
             iv_rx: [0x06; AEAD_IV_LEN],
             pn_start: 0,
+            pn_start_rx: 0,
             key_phase: false,
         };
 
@@ -183,8 +189,10 @@ mod tests {
     #[test]
     fn cid_map_rejects_prefix_collision() {
         let dcid = Cid::from([0xAB; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
         let payload = RegisterCidPayload {
             dcid,
+            scid,
             cipher: CipherSuite::Aes128Gcm,
             hp_tx: [0x01; HP_KEY_LEN],
             hp_rx: [0x02; HP_KEY_LEN],
@@ -193,6 +201,7 @@ mod tests {
             iv_tx: [0x05; AEAD_IV_LEN],
             iv_rx: [0x06; AEAD_IV_LEN],
             pn_start: 0,
+            pn_start_rx: 0,
             key_phase: false,
         };
 
@@ -218,8 +227,10 @@ mod tests {
     #[test]
     fn cid_map_reports_duplicate_registration() {
         let dcid = Cid::from([0xAB; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
         let payload = RegisterCidPayload {
             dcid,
+            scid,
             cipher: CipherSuite::Aes128Gcm,
             hp_tx: [0x01; HP_KEY_LEN],
             hp_rx: [0x02; HP_KEY_LEN],
@@ -228,6 +239,7 @@ mod tests {
             iv_tx: [0x05; AEAD_IV_LEN],
             iv_rx: [0x06; AEAD_IV_LEN],
             pn_start: 0,
+            pn_start_rx: 0,
             key_phase: false,
         };
 
@@ -245,8 +257,10 @@ mod tests {
     #[test]
     fn cid_entry_accepts_large_pn_start() {
         let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
         let payload = RegisterCidPayload {
             dcid,
+            scid,
             cipher: CipherSuite::Aes128Gcm,
             hp_tx: [0x01; HP_KEY_LEN],
             hp_rx: [0x02; HP_KEY_LEN],
@@ -255,6 +269,7 @@ mod tests {
             iv_tx: [0x05; AEAD_IV_LEN],
             iv_rx: [0x06; AEAD_IV_LEN],
             pn_start: 0,
+            pn_start_rx: 0,
             key_phase: false,
         };
 
@@ -266,8 +281,10 @@ mod tests {
     #[test]
     fn cid_entry_rejects_pn_wrap() {
         let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
         let payload = RegisterCidPayload {
             dcid,
+            scid,
             cipher: CipherSuite::Aes128Gcm,
             hp_tx: [0x01; HP_KEY_LEN],
             hp_rx: [0x02; HP_KEY_LEN],
@@ -276,6 +293,7 @@ mod tests {
             iv_tx: [0x05; AEAD_IV_LEN],
             iv_rx: [0x06; AEAD_IV_LEN],
             pn_start: 0,
+            pn_start_rx: 0,
             key_phase: false,
         };
 

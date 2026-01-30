@@ -280,8 +280,10 @@ impl AuthFailPayload {
 /// `REGISTER_CID` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterCidPayload {
-    /// Destination connection ID to reuse.
+    /// Destination connection ID for client->server packets.
     pub dcid: Cid,
+    /// Destination connection ID for server->client packets.
+    pub scid: Cid,
     /// Cipher suite for packet protection.
     pub cipher: CipherSuite,
     /// Header protection key (tx).
@@ -296,13 +298,30 @@ pub struct RegisterCidPayload {
     pub iv_tx: [u8; AEAD_IV_LEN],
     /// AEAD IV (rx).
     pub iv_rx: [u8; AEAD_IV_LEN],
-    /// Initial packet number for the UDP-QSP flow.
+    /// Initial packet number for the server->client direction.
     pub pn_start: u64,
+    /// Initial packet number expected from the client.
+    pub pn_start_rx: u64,
     /// Initial key phase (false = 0, true = 1).
     pub key_phase: bool,
 }
 
 impl RegisterCidPayload {
+    fn read_u64(
+        payload: &[u8],
+        offset: &mut usize,
+        expected_len: usize,
+    ) -> Result<u64, PayloadError> {
+        let value = u64::from_be_bytes(payload[*offset..*offset + 8].try_into().map_err(|_| {
+            PayloadError::LengthMismatch {
+                expected: expected_len,
+                actual: payload.len(),
+            }
+        })?);
+        *offset += 8;
+        Ok(value)
+    }
+
     /// Decode a `REGISTER_CID` payload.
     ///
     /// # Errors
@@ -310,6 +329,8 @@ impl RegisterCidPayload {
     /// Returns an error if:
     /// - The payload is too short
     /// - The DCID length is shorter than `QUIC_DCID_PREFIX_LEN` or exceeds
+    ///   `MAX_DCID_LEN`
+    /// - The SCID length is shorter than `QUIC_DCID_PREFIX_LEN` or exceeds
     ///   `MAX_DCID_LEN`
     /// - The payload length doesn't match the expected length
     /// - The cipher suite is invalid
@@ -320,67 +341,71 @@ impl RegisterCidPayload {
                 actual: payload.len(),
             });
         }
-
         let dcid_len = payload[0] as usize;
         if !(QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN).contains(&dcid_len) {
             return Err(PayloadError::InvalidDcidLen(dcid_len));
         }
+        let scid_len_offset = 1 + dcid_len;
+        if payload.len() < scid_len_offset + 1 {
+            return Err(PayloadError::LengthTooShort {
+                min: scid_len_offset + 1,
+                actual: payload.len(),
+            });
+        }
 
-        let expected_len =
-            1 + dcid_len + 1 + (HP_KEY_LEN * 2) + (AEAD_KEY_LEN * 2) + (AEAD_IV_LEN * 2) + 8 + 1;
-
+        let scid_len = payload[scid_len_offset] as usize;
+        if !(QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN).contains(&scid_len) {
+            return Err(PayloadError::InvalidScidLen(scid_len));
+        }
+        let expected_len = 1
+            + dcid_len
+            + 1
+            + scid_len
+            + 1
+            + (HP_KEY_LEN * 2)
+            + (AEAD_KEY_LEN * 2)
+            + (AEAD_IV_LEN * 2)
+            + 8
+            + 8
+            + 1;
         if payload.len() != expected_len {
             return Err(PayloadError::LengthMismatch {
                 expected: expected_len,
                 actual: payload.len(),
             });
         }
-
         let mut offset = 1;
         let dcid = Cid::try_from(&payload[offset..offset + dcid_len])
             .map_err(|_| PayloadError::InvalidDcidLen(dcid_len))?;
         offset += dcid_len;
-
+        let scid_len = payload[offset] as usize;
+        offset += 1;
+        let scid = Cid::try_from(&payload[offset..offset + scid_len])
+            .map_err(|_| PayloadError::InvalidScidLen(scid_len))?;
+        offset += scid_len;
         let cipher = CipherSuite::from_u8(payload[offset])
             .ok_or(PayloadError::InvalidCipher(payload[offset]))?;
         offset += 1;
-
         let mut hp_tx = [0u8; HP_KEY_LEN];
         hp_tx.copy_from_slice(&payload[offset..offset + HP_KEY_LEN]);
         offset += HP_KEY_LEN;
-
         let mut hp_rx = [0u8; HP_KEY_LEN];
         hp_rx.copy_from_slice(&payload[offset..offset + HP_KEY_LEN]);
         offset += HP_KEY_LEN;
-
         let mut aead_tx = [0u8; AEAD_KEY_LEN];
         aead_tx.copy_from_slice(&payload[offset..offset + AEAD_KEY_LEN]);
         offset += AEAD_KEY_LEN;
-
         let mut aead_rx = [0u8; AEAD_KEY_LEN];
         aead_rx.copy_from_slice(&payload[offset..offset + AEAD_KEY_LEN]);
         offset += AEAD_KEY_LEN;
-
         let mut iv_tx = [0u8; AEAD_IV_LEN];
         iv_tx.copy_from_slice(&payload[offset..offset + AEAD_IV_LEN]);
         offset += AEAD_IV_LEN;
-
         let mut iv_rx = [0u8; AEAD_IV_LEN];
         iv_rx.copy_from_slice(&payload[offset..offset + AEAD_IV_LEN]);
         offset += AEAD_IV_LEN;
-
-        let pn_start = u64::from_be_bytes([
-            payload[offset],
-            payload[offset + 1],
-            payload[offset + 2],
-            payload[offset + 3],
-            payload[offset + 4],
-            payload[offset + 5],
-            payload[offset + 6],
-            payload[offset + 7],
-        ]);
-        offset += 8;
-
+        let pn_start = Self::read_u64(payload, &mut offset, expected_len)?;
+        let pn_start_rx = Self::read_u64(payload, &mut offset, expected_len)?;
         let key_phase = match payload[offset] {
             0 => false,
             1 => true,
@@ -389,6 +414,7 @@ impl RegisterCidPayload {
 
         Ok(Self {
             dcid,
+            scid,
             cipher,
             hp_tx,
             hp_rx,
@@ -397,6 +423,7 @@ impl RegisterCidPayload {
             iv_tx,
             iv_rx,
             pn_start,
+            pn_start_rx,
             key_phase,
         })
     }
@@ -411,9 +438,12 @@ impl RegisterCidPayload {
         let expected_len = 1
             + self.dcid.len()
             + 1
+            + self.scid.len()
+            + 1
             + (HP_KEY_LEN * 2)
             + (AEAD_KEY_LEN * 2)
             + (AEAD_IV_LEN * 2)
+            + 8
             + 8
             + 1;
         out.reserve(expected_len);
@@ -421,6 +451,10 @@ impl RegisterCidPayload {
         let dcid_len = self.dcid.len() as u8; // bounded by MAX_DCID_LEN (<= 20)
         out.push(dcid_len);
         out.extend_from_slice(self.dcid.as_slice());
+        #[allow(clippy::cast_possible_truncation)]
+        let scid_len = self.scid.len() as u8; // bounded by MAX_DCID_LEN (<= 20)
+        out.push(scid_len);
+        out.extend_from_slice(self.scid.as_slice());
         out.push(self.cipher.as_u8());
         out.extend_from_slice(&self.hp_tx);
         out.extend_from_slice(&self.hp_rx);
@@ -429,6 +463,7 @@ impl RegisterCidPayload {
         out.extend_from_slice(&self.iv_tx);
         out.extend_from_slice(&self.iv_rx);
         out.extend_from_slice(&self.pn_start.to_be_bytes());
+        out.extend_from_slice(&self.pn_start_rx.to_be_bytes());
         out.push(u8::from(self.key_phase));
         Ok(())
     }
@@ -637,6 +672,8 @@ pub enum PayloadError {
     LengthTooShort { min: usize, actual: usize },
     /// DCID length is invalid.
     InvalidDcidLen(usize),
+    /// SCID length is invalid.
+    InvalidScidLen(usize),
     /// Cipher identifier is unknown.
     InvalidCipher(u8),
     /// Auth failure code is unknown.
@@ -683,8 +720,10 @@ mod tests {
     #[test]
     fn register_cid_roundtrip() {
         let dcid = Cid::from([0x55u8; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x44u8; QUIC_DCID_PREFIX_LEN]);
         let payload = RegisterCidPayload {
             dcid,
+            scid,
             cipher: CipherSuite::Aes128Gcm,
             hp_tx: [0x01; HP_KEY_LEN],
             hp_rx: [0x02; HP_KEY_LEN],
@@ -693,6 +732,7 @@ mod tests {
             iv_tx: [0x05; AEAD_IV_LEN],
             iv_rx: [0x06; AEAD_IV_LEN],
             pn_start: 42,
+            pn_start_rx: 9001,
             key_phase: true,
         };
 
@@ -700,6 +740,7 @@ mod tests {
         payload.encode(&mut buf).unwrap();
         let decoded = RegisterCidPayload::decode(&buf).unwrap();
         assert_eq!(decoded.dcid, payload.dcid);
+        assert_eq!(decoded.scid, payload.scid);
         assert_eq!(decoded.cipher, payload.cipher);
         assert_eq!(decoded.hp_tx, payload.hp_tx);
         assert_eq!(decoded.hp_rx, payload.hp_rx);
@@ -708,6 +749,7 @@ mod tests {
         assert_eq!(decoded.iv_tx, payload.iv_tx);
         assert_eq!(decoded.iv_rx, payload.iv_rx);
         assert_eq!(decoded.pn_start, payload.pn_start);
+        assert_eq!(decoded.pn_start_rx, payload.pn_start_rx);
         assert_eq!(decoded.key_phase, payload.key_phase);
     }
 

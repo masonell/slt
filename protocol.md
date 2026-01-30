@@ -147,7 +147,9 @@ Empty payload (length 0).
 offset size field
 0      1    dcid_len (`QUIC_DCID_PREFIX_LEN`..=`MAX_DCID_LEN`)
 1      N    dcid
-1+N    1    cipher
+1+N    1    scid_len (`QUIC_DCID_PREFIX_LEN`..=`MAX_DCID_LEN`)
+2+N    M    scid
+...    1    cipher
 ...    16   hp_tx
 ...    16   hp_rx
 ...    16   aead_tx
@@ -155,13 +157,15 @@ offset size field
 ...    12   iv_tx
 ...    12   iv_rx
 ...    8    pn_start (u64, big-endian; MUST be <= 2^32-1)
+...    8    pn_start_rx (u64, big-endian; MUST be <= 2^32-1)
 ...    1    key_phase (0 or 1)
 ```
 
-Total length = `99 + dcid_len` bytes.
+Total length = `108 + dcid_len + scid_len` bytes.
 
 Server requirements:
 - `dcid_len` MUST be within `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
+- `scid_len` MUST be within `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
 - The server MUST reject `REGISTER_CID` if another active connection already
   uses the same `QUIC_DCID_PREFIX_LEN`-byte prefix. Retransmits or rekeys for
   the same connection MAY replace the existing entry.
@@ -170,6 +174,9 @@ Key direction:
 - For a client->server `REGISTER_CID`, `*_tx` are the keys the server uses to send
   packets to the client, and `*_rx` are the keys the server uses to open packets
   from the client. The client uses the opposite directions.
+- `dcid` is used for client->server packets; `scid` is used for server->client packets.
+- `pn_start` is the initial packet number for server->client traffic.
+- `pn_start_rx` is the initial packet number expected from the client.
 
 Cipher suites:
 - `0x01` AES-128-GCM (required)
