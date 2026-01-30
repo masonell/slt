@@ -5,7 +5,7 @@ use crate::crypto::client_hello::{
     EXT_KEY_SHARE, GROUP_X25519, HANDSHAKE_TYPE_CLIENT_HELLO, LEGACY_SESSION_ID_LEN, PART_LEN,
     RANDOM_PREFIX_LEN,
 };
-use crate::types::SharedSecret;
+use crate::types::{CidPrefix, QUIC_DCID_PREFIX_LEN, SharedSecret};
 
 /// Classification result for a parsed `ClientHello`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,27 +22,24 @@ pub enum Verdict {
 
 /// Result of classifying a QUIC datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuicVerdict<'a> {
+pub enum QuicVerdict {
     /// Datagram is not QUIC and should be dropped.
     Drop,
     /// QUIC long-header packet should be passed through.
     Pass,
-    /// QUIC short-header packet with extracted DCID.
-    Short { dcid: &'a [u8] },
+    /// QUIC short-header packet with extracted DCID prefix.
+    Short { dcid_prefix: CidPrefix },
 }
 
 const TLS_HANDSHAKE_CONTENT_TYPE: u8 = 0x16;
-// We patch quiche to always use an 8-byte DCID, so short-header parsing
-// assumes that fixed length here as well.
-const QUIC_DCID_LEN: usize = 8;
 
 /// Classify a UDP datagram and extract the DCID from a QUIC short header.
 ///
 /// This uses QUIC invariants (fixed bit set) to recognize QUIC packets. Long
 /// headers are passed through. For short headers, the DCID length is assumed
-/// to be `QUIC_DCID_LEN`.
+/// to be `QUIC_DCID_PREFIX_LEN`.
 #[must_use]
-pub fn classify_quic_datagram(input: &'_ [u8]) -> QuicVerdict<'_> {
+pub fn classify_quic_datagram(input: &[u8]) -> QuicVerdict {
     if input.is_empty() {
         return QuicVerdict::Drop;
     }
@@ -59,12 +56,14 @@ pub fn classify_quic_datagram(input: &'_ [u8]) -> QuicVerdict<'_> {
         return QuicVerdict::Pass;
     }
 
-    if input.len() < 1 + QUIC_DCID_LEN {
+    if input.len() < 1 + QUIC_DCID_PREFIX_LEN {
         return QuicVerdict::Drop;
     }
 
+    let mut dcid_bytes = [0u8; QUIC_DCID_PREFIX_LEN];
+    dcid_bytes.copy_from_slice(&input[1..=QUIC_DCID_PREFIX_LEN]);
     QuicVerdict::Short {
-        dcid: &input[1..=QUIC_DCID_LEN],
+        dcid_prefix: CidPrefix::from(dcid_bytes),
     }
 }
 
@@ -465,11 +464,11 @@ mod tests {
         buf.push(0xC0); // long header + fixed bit + Initial type
         buf.extend_from_slice(&quiche::PROTOCOL_VERSION.to_be_bytes());
         #[allow(clippy::cast_possible_truncation)]
-        let dcid_len = QUIC_DCID_LEN as u8; // QUIC_DCID_LEN = 8, fits in u8
+        let dcid_len = QUIC_DCID_PREFIX_LEN as u8; // QUIC_DCID_PREFIX_LEN = 8, fits in u8
         buf.push(dcid_len);
-        buf.extend_from_slice(&[0x11; QUIC_DCID_LEN]);
+        buf.extend_from_slice(&[0x11; QUIC_DCID_PREFIX_LEN]);
         buf.push(dcid_len);
-        buf.extend_from_slice(&[0x22; QUIC_DCID_LEN]);
+        buf.extend_from_slice(&[0x22; QUIC_DCID_PREFIX_LEN]);
         buf.push(0x00); // token length = 0
 
         let header = Header::from_slice(&mut buf, 0).unwrap();
@@ -482,14 +481,16 @@ mod tests {
     fn quic_classifier_extracts_short_dcid() {
         let mut buf = Vec::new();
         buf.push(0x40); // short header + fixed bit
-        buf.extend_from_slice(&[0xAB; QUIC_DCID_LEN]);
+        buf.extend_from_slice(&[0xAB; QUIC_DCID_PREFIX_LEN]);
 
-        let header = Header::from_slice(&mut buf, QUIC_DCID_LEN).unwrap();
+        let header = Header::from_slice(&mut buf, QUIC_DCID_PREFIX_LEN).unwrap();
         assert_eq!(header.ty, quiche::Type::Short);
 
         match classify_quic_datagram(&buf) {
-            QuicVerdict::Short { dcid } => {
-                assert_eq!(dcid, header.dcid.iter().as_slice());
+            QuicVerdict::Short { dcid_prefix } => {
+                let mut header_dcid = [0u8; QUIC_DCID_PREFIX_LEN];
+                header_dcid.copy_from_slice(header.dcid.iter().as_slice());
+                assert_eq!(dcid_prefix, CidPrefix::from(header_dcid));
             }
             other => panic!("expected Short, got {other:?}"),
         }
@@ -498,7 +499,7 @@ mod tests {
     #[test]
     fn quic_classifier_drops_short_too_small() {
         let mut buf = vec![0x40];
-        buf.extend_from_slice(&[0xAB; QUIC_DCID_LEN - 1]);
+        buf.extend_from_slice(&[0xAB; QUIC_DCID_PREFIX_LEN - 1]);
 
         assert_eq!(classify_quic_datagram(&buf), QuicVerdict::Drop);
     }

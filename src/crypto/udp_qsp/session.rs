@@ -4,6 +4,7 @@ use std::future::Future;
 use std::io;
 
 use super::{OpenedPacketRef, QspCryptoError, UdpQspKeys};
+use crate::types::Cid;
 
 /// Number of packets tracked for replay protection.
 pub const PN_REPLAY_WINDOW: usize = 1024;
@@ -168,8 +169,8 @@ const fn bit_position(pn: u64) -> (usize, u64) {
 #[derive(Debug)]
 pub struct QuicQspSession<I> {
     io: I,
-    scid: Vec<u8>,
-    dcid: Vec<u8>,
+    scid: Cid,
+    dcid: Cid,
     keys: UdpQspKeys,
     key_phase: bool,
     next_pn: u64,
@@ -187,8 +188,8 @@ impl<I: SessionIo> QuicQspSession<I> {
     #[must_use]
     pub const fn new(
         io: I,
-        scid: Vec<u8>,
-        dcid: Vec<u8>,
+        scid: Cid,
+        dcid: Cid,
         keys: UdpQspKeys,
         send_pn: u64,
         recv_expected_pn: u64,
@@ -209,13 +210,13 @@ impl<I: SessionIo> QuicQspSession<I> {
 
     /// Return the source connection ID.
     #[must_use]
-    pub fn scid(&self) -> &[u8] {
+    pub const fn scid(&self) -> &Cid {
         &self.scid
     }
 
     /// Return the destination connection ID.
     #[must_use]
-    pub fn dcid(&self) -> &[u8] {
+    pub const fn dcid(&self) -> &Cid {
         &self.dcid
     }
 
@@ -232,8 +233,13 @@ impl<I: SessionIo> QuicQspSession<I> {
         self.next_pn = pn
             .checked_add(1)
             .ok_or(QspSessionError::PacketNumberOverflow)?;
-        self.keys
-            .protect_into(&self.dcid, pn, self.key_phase, payload, &mut self.send_buf)?;
+        self.keys.protect_into(
+            self.dcid.as_slice(),
+            pn,
+            self.key_phase,
+            payload,
+            &mut self.send_buf,
+        )?;
         self.io.send(&self.send_buf).await?;
         Ok(())
     }
@@ -350,14 +356,14 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let dcid = vec![0xAB; 8];
-        let packet = keys.protect(&dcid, 7, false, b"hello").unwrap();
+        let dcid = Cid::from([0xAB; 8]);
+        let packet = keys.protect(dcid.as_slice(), 7, false, b"hello").unwrap();
 
         let io = TestIo {
             packet: packet.clone(),
             sent: Vec::new(),
         };
-        let mut session = QuicQspSession::new(io, vec![0xCD; 8], dcid, keys, 0, 7, false);
+        let mut session = QuicQspSession::new(io, Cid::from([0xCD; 8]), dcid, keys, 0, 7, false);
         let mut buf = vec![0u8; 1500];
 
         let opened = session.recv(&mut buf).await.unwrap();

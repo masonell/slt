@@ -53,9 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             quic.run(cancel, move |claim: UdpClaim| {
                 eprintln!(
-                    "claimed udp datagram from {} (dcid_len={})",
+                    "claimed udp datagram from {} (dcid_prefix={:02x?})",
                     claim.peer,
-                    claim.dcid.len()
+                    claim.dcid_prefix.as_bytes()
                 );
                 drop(claim);
             })

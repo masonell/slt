@@ -1,9 +1,6 @@
 use std::net::Ipv4Addr;
 
-use crate::types::ClientId;
-
-/// Maximum QUIC DCID length used by the protocol.
-pub const MAX_DCID_LEN: usize = 20;
+use crate::types::{Cid, ClientId, MAX_DCID_LEN, QUIC_DCID_PREFIX_LEN};
 /// Length of the authentication challenge in bytes.
 pub const AUTH_CHALLENGE_LEN: usize = 32;
 /// Length of the Ed25519 signature in bytes.
@@ -282,9 +279,9 @@ impl AuthFailPayload {
 
 /// `REGISTER_CID` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RegisterCidPayload<'a> {
+pub struct RegisterCidPayload {
     /// Destination connection ID to reuse.
-    pub dcid: &'a [u8],
+    pub dcid: Cid,
     /// Cipher suite for packet protection.
     pub cipher: CipherSuite,
     /// Header protection key (tx).
@@ -305,17 +302,18 @@ pub struct RegisterCidPayload<'a> {
     pub key_phase: bool,
 }
 
-impl<'a> RegisterCidPayload<'a> {
+impl RegisterCidPayload {
     /// Decode a `REGISTER_CID` payload.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The payload is too short
-    /// - The DCID length is 0 or exceeds `MAX_DCID_LEN`
+    /// - The DCID length is shorter than `QUIC_DCID_PREFIX_LEN` or exceeds
+    ///   `MAX_DCID_LEN`
     /// - The payload length doesn't match the expected length
     /// - The cipher suite is invalid
-    pub fn decode(payload: &'a [u8]) -> Result<Self, PayloadError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.is_empty() {
             return Err(PayloadError::LengthTooShort {
                 min: 1,
@@ -324,7 +322,7 @@ impl<'a> RegisterCidPayload<'a> {
         }
 
         let dcid_len = payload[0] as usize;
-        if dcid_len == 0 || dcid_len > MAX_DCID_LEN {
+        if !(QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN).contains(&dcid_len) {
             return Err(PayloadError::InvalidDcidLen(dcid_len));
         }
 
@@ -339,7 +337,8 @@ impl<'a> RegisterCidPayload<'a> {
         }
 
         let mut offset = 1;
-        let dcid = &payload[offset..offset + dcid_len];
+        let dcid = Cid::try_from(&payload[offset..offset + dcid_len])
+            .map_err(|_| PayloadError::InvalidDcidLen(dcid_len))?;
         offset += dcid_len;
 
         let cipher = CipherSuite::from_u8(payload[offset])
@@ -406,13 +405,9 @@ impl<'a> RegisterCidPayload<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `PayloadError::InvalidDcidLen` if the DCID is empty or exceeds
-    /// `MAX_DCID_LEN`.
+    /// Returns `PayloadError::InvalidDcidLen` if the DCID length is outside
+    /// `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), PayloadError> {
-        if self.dcid.is_empty() || self.dcid.len() > MAX_DCID_LEN {
-            return Err(PayloadError::InvalidDcidLen(self.dcid.len()));
-        }
-
         let expected_len = 1
             + self.dcid.len()
             + 1
@@ -425,7 +420,7 @@ impl<'a> RegisterCidPayload<'a> {
         #[allow(clippy::cast_possible_truncation)]
         let dcid_len = self.dcid.len() as u8; // bounded by MAX_DCID_LEN (<= 20)
         out.push(dcid_len);
-        out.extend_from_slice(self.dcid);
+        out.extend_from_slice(self.dcid.as_slice());
         out.push(self.cipher.as_u8());
         out.extend_from_slice(&self.hp_tx);
         out.extend_from_slice(&self.hp_rx);
@@ -441,21 +436,22 @@ impl<'a> RegisterCidPayload<'a> {
 
 /// `REGISTER_OK` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RegisterOkPayload<'a> {
+pub struct RegisterOkPayload {
     /// The acknowledged CID.
-    pub dcid: &'a [u8],
+    pub dcid: Cid,
 }
 
-impl<'a> RegisterOkPayload<'a> {
+impl RegisterOkPayload {
     /// Decode a `REGISTER_OK` payload.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The payload is too short
-    /// - The DCID length is 0 or exceeds `MAX_DCID_LEN`
+    /// - The DCID length is shorter than `QUIC_DCID_PREFIX_LEN` or exceeds
+    ///   `MAX_DCID_LEN`
     /// - The payload length doesn't match the expected length
-    pub fn decode(payload: &'a [u8]) -> Result<Self, PayloadError> {
+    pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.is_empty() {
             return Err(PayloadError::LengthTooShort {
                 min: 1,
@@ -464,7 +460,7 @@ impl<'a> RegisterOkPayload<'a> {
         }
 
         let dcid_len = payload[0] as usize;
-        if dcid_len == 0 || dcid_len > MAX_DCID_LEN {
+        if !(QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN).contains(&dcid_len) {
             return Err(PayloadError::InvalidDcidLen(dcid_len));
         }
 
@@ -477,7 +473,8 @@ impl<'a> RegisterOkPayload<'a> {
         }
 
         Ok(Self {
-            dcid: &payload[1..=dcid_len],
+            dcid: Cid::try_from(&payload[1..=dcid_len])
+                .map_err(|_| PayloadError::InvalidDcidLen(dcid_len))?,
         })
     }
 
@@ -485,17 +482,14 @@ impl<'a> RegisterOkPayload<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `PayloadError::InvalidDcidLen` if the DCID is empty or exceeds
-    /// `MAX_DCID_LEN`.
+    /// Returns `PayloadError::InvalidDcidLen` if the DCID length is outside
+    /// `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), PayloadError> {
-        if self.dcid.is_empty() || self.dcid.len() > MAX_DCID_LEN {
-            return Err(PayloadError::InvalidDcidLen(self.dcid.len()));
-        }
         out.reserve(1 + self.dcid.len());
         #[allow(clippy::cast_possible_truncation)]
         let dcid_len = self.dcid.len() as u8; // bounded by MAX_DCID_LEN (<= 20)
         out.push(dcid_len);
-        out.extend_from_slice(self.dcid);
+        out.extend_from_slice(self.dcid.as_slice());
         Ok(())
     }
 }
@@ -688,9 +682,9 @@ mod tests {
 
     #[test]
     fn register_cid_roundtrip() {
-        let dcid = [0x55u8; 8];
+        let dcid = Cid::from([0x55u8; QUIC_DCID_PREFIX_LEN]);
         let payload = RegisterCidPayload {
-            dcid: &dcid,
+            dcid,
             cipher: CipherSuite::Aes128Gcm,
             hp_tx: [0x01; HP_KEY_LEN],
             hp_rx: [0x02; HP_KEY_LEN],
@@ -719,8 +713,8 @@ mod tests {
 
     #[test]
     fn register_ok_roundtrip() {
-        let dcid = [0xAAu8; 8];
-        let payload = RegisterOkPayload { dcid: &dcid };
+        let dcid = Cid::from([0xAAu8; QUIC_DCID_PREFIX_LEN]);
+        let payload = RegisterOkPayload { dcid };
         let mut buf = Vec::new();
         payload.encode(&mut buf).unwrap();
         let decoded = RegisterOkPayload::decode(&buf).unwrap();

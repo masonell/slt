@@ -90,6 +90,7 @@ After `AUTH_OK`:
 ### 3.4 Payload schemas
 
 Constants:
+- `QUIC_DCID_PREFIX_LEN = 8` (classifier prefix length for UDP-QSP)
 - `MAX_DCID_LEN = 20`
 - `AUTH_CHALLENGE_LEN = 32`
 - `AUTH_SIGNATURE_LEN = 64`
@@ -144,7 +145,7 @@ Empty payload (length 0).
 
 ```
 offset size field
-0      1    dcid_len (1..MAX_DCID_LEN)
+0      1    dcid_len (`QUIC_DCID_PREFIX_LEN`..=`MAX_DCID_LEN`)
 1      N    dcid
 1+N    1    cipher
 ...    16   hp_tx
@@ -159,6 +160,12 @@ offset size field
 
 Total length = `99 + dcid_len` bytes.
 
+Server requirements:
+- `dcid_len` MUST be within `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
+- The server MUST reject `REGISTER_CID` if another active connection already
+  uses the same `QUIC_DCID_PREFIX_LEN`-byte prefix. Retransmits or rekeys for
+  the same connection MAY replace the existing entry.
+
 Key direction:
 - For a client->server `REGISTER_CID`, `*_tx` are the keys the server uses to send
   packets to the client, and `*_rx` are the keys the server uses to open packets
@@ -171,7 +178,7 @@ Cipher suites:
 #### REGISTER_OK payload
 
 ```
-0: dcid_len (1..MAX_DCID_LEN)
+0: dcid_len (`QUIC_DCID_PREFIX_LEN`..=`MAX_DCID_LEN`)
 1..: dcid
 ```
 
@@ -229,6 +236,8 @@ Short header first byte bits:
 Packet number length selection:
 - Sender MUST use the minimal length (1..4 bytes) to encode the packet number.
 - Maximum allowed packet number value is `2^32-1`.
+- For UDP-QSP, the first `QUIC_DCID_PREFIX_LEN` bytes of the DCID are used as
+  the classifier prefix.
 
 ### 4.2 Header protection (HP)
 

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use super::udp_qsp::CidMap;
 use crate::classifier::{QuicVerdict, classify_quic_datagram};
 use crate::config::ServerConfig;
+use crate::types::CidPrefix;
 use lru::LruCache;
 use parking_lot::RwLock;
 use tokio::net::UdpSocket;
@@ -22,8 +23,8 @@ const QUIC_BUF_LEN: usize = 2 * 1024;
 pub struct UdpClaim {
     /// Peer address.
     pub peer: SocketAddr,
-    /// Destination connection ID.
-    pub dcid: Vec<u8>,
+    /// Destination connection ID prefix.
+    pub dcid_prefix: CidPrefix,
     /// Raw datagram payload.
     pub payload: Vec<u8>,
 }
@@ -155,12 +156,12 @@ impl QuicEndpoint {
                     .await?;
                 let _ = upstream_socket.send(payload).await;
             }
-            QuicVerdict::Short { dcid } => {
-                let claimed = { self.cid_map.read().get(dcid).is_some() };
+            QuicVerdict::Short { dcid_prefix } => {
+                let claimed = { self.cid_map.read().get(dcid_prefix).is_some() };
                 if claimed {
                     (claim_handler)(UdpClaim {
                         peer,
-                        dcid: dcid.to_vec(),
+                        dcid_prefix,
                         payload: payload.to_vec(),
                     });
                 } else {

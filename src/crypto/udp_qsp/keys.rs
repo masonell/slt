@@ -231,7 +231,7 @@ impl UdpQspKeys {
     ///
     /// Returns `QspCryptoError::UnsupportedCipher` if the cipher suite is not
     /// `Aes128Gcm`.
-    pub fn from_register(payload: &RegisterCidPayload<'_>) -> Result<Self, QspCryptoError> {
+    pub fn from_register(payload: &RegisterCidPayload) -> Result<Self, QspCryptoError> {
         Self::new(
             payload.cipher,
             payload.hp_tx,
