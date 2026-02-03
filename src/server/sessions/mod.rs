@@ -1,10 +1,17 @@
 //! Client session tracking and lifecycle helpers.
 
+mod limits;
+mod udp_io;
+
+pub use self::limits::message_limits_from_mtu;
+pub use self::udp_io::UdpSocketIo;
+
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use self::udp_io::UdpIo;
 use fastrand;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
@@ -18,14 +25,12 @@ use super::registry::{CidInsertError, SessionRegistry};
 use super::router::PacketRouter;
 use super::tun::TunDeviceIo;
 use super::{AssignedIp, ClientId};
-use crate::crypto::udp_qsp::{QspSessionError, QuicQspSession, SessionIo, UdpQspKeys};
+use crate::crypto::udp_qsp::{QspSessionError, QuicQspSession, UdpQspKeys};
 use crate::proto::{
-    AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_PAYLOAD_LEN, CloseCode, ClosePayload, FrameError, HP_KEY_LEN,
-    Message, MessageError, MessageLimits, PayloadError, PingPayload, PongPayload,
-    RegisterCidPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload, decode_message,
-    encode_message,
+    CloseCode, ClosePayload, FrameError, Message, MessageError, MessageLimits, PayloadError,
+    PingPayload, PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload,
+    RegisterOkPayload, decode_message, encode_message,
 };
-use crate::types::MAX_DCID_LEN;
 
 /// Active transport for a client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,55 +80,6 @@ pub struct SessionTimeouts {
     pub idle_timeout: Duration,
     /// Timeout for UDP-QSP verification.
     pub udp_verify_timeout: Duration,
-}
-
-/// UDP socket interface used for session traffic.
-pub trait UdpSocketIo: Send + Sync + 'static {
-    /// Send bytes to a peer.
-    fn send_to<'a>(
-        &'a self,
-        buf: &'a [u8],
-        peer: SocketAddr,
-    ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a;
-}
-
-impl UdpSocketIo for UdpSocket {
-    fn send_to<'a>(
-        &'a self,
-        buf: &'a [u8],
-        peer: SocketAddr,
-    ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a {
-        self.send_to(buf, peer)
-    }
-}
-
-struct UdpIo<U: UdpSocketIo> {
-    socket: Arc<U>,
-    peer: SocketAddr,
-}
-
-impl<U: UdpSocketIo> UdpIo<U> {
-    const fn new(socket: Arc<U>, peer: SocketAddr) -> Self {
-        Self { socket, peer }
-    }
-
-    const fn set_peer(&mut self, peer: SocketAddr) {
-        self.peer = peer;
-    }
-}
-
-impl<U: UdpSocketIo> SessionIo for UdpIo<U> {
-    async fn send<'a>(&'a mut self, bytes: &'a [u8]) -> io::Result<()> {
-        let _ = self.socket.send_to(bytes, self.peer).await?;
-        Ok(())
-    }
-
-    async fn recv<'a>(&'a mut self, _buf: &'a mut [u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "direct recv not supported",
-        ))
-    }
 }
 
 /// A single authenticated client session.
@@ -691,25 +647,6 @@ fn map_payload_error(err: PayloadError) -> io::Error {
         io::ErrorKind::InvalidData,
         format!("payload error: {err:?}"),
     )
-}
-
-/// Compute message size limits based on TUN MTU.
-#[must_use]
-pub fn message_limits_from_mtu(mtu: u16) -> MessageLimits {
-    let max_data_len = mtu as usize;
-    let max_register_len = 1
-        + MAX_DCID_LEN
-        + 1
-        + MAX_DCID_LEN
-        + 1
-        + (HP_KEY_LEN * 2)
-        + (AEAD_KEY_LEN * 2)
-        + (AEAD_IV_LEN * 2)
-        + 8
-        + 8
-        + 1;
-    let max_frame_len = max_data_len.max(max_register_len).max(AUTH_PAYLOAD_LEN);
-    MessageLimits::new(max_frame_len, max_data_len)
 }
 
 #[cfg(test)]
