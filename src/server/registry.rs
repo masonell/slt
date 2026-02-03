@@ -197,3 +197,67 @@ impl Default for SessionRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+    use tokio::sync::mpsc;
+
+    use crate::types::QUIC_DCID_PREFIX_LEN;
+
+    fn make_tx() -> SessionTx {
+        let (tx, _rx) = mpsc::channel(1);
+        tx
+    }
+
+    #[test]
+    fn registry_replaces_session_and_cleans_routes() {
+        let registry = SessionRegistry::new();
+        let client_id = ClientId([0x11; 16]);
+        let ip_old = AssignedIp(Ipv4Addr::new(10, 0, 0, 1));
+        let ip_new = AssignedIp(Ipv4Addr::new(10, 0, 0, 2));
+
+        let (handle, old) = registry.register_session(client_id, ip_old, make_tx());
+        assert!(old.is_none());
+
+        let prefix = CidPrefix::from([0xAA; QUIC_DCID_PREFIX_LEN]);
+        registry
+            .insert_cid(handle.session_id, prefix, make_tx())
+            .unwrap();
+        assert!(registry.has_cid(prefix));
+        assert!(registry.lookup_ip(ip_old.addr()).is_some());
+
+        let (_handle_new, old) = registry.register_session(client_id, ip_new, make_tx());
+        assert!(old.is_some());
+        assert!(registry.lookup_ip(ip_old.addr()).is_none());
+        assert!(registry.lookup_ip(ip_new.addr()).is_some());
+        assert!(!registry.has_cid(prefix));
+    }
+
+    #[test]
+    fn registry_rejects_cid_collisions() {
+        let registry = SessionRegistry::new();
+        let prefix = CidPrefix::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+
+        registry.insert_cid(1, prefix, make_tx()).unwrap();
+        assert!(matches!(
+            registry.insert_cid(2, prefix, make_tx()),
+            Err(CidInsertError::PrefixCollision(p)) if p == prefix
+        ));
+    }
+
+    #[test]
+    fn registry_keeps_selected_cids() {
+        let registry = SessionRegistry::new();
+        let keep = CidPrefix::from([0xCC; QUIC_DCID_PREFIX_LEN]);
+        let drop = CidPrefix::from([0xDD; QUIC_DCID_PREFIX_LEN]);
+
+        registry.insert_cid(42, keep, make_tx()).unwrap();
+        registry.insert_cid(42, drop, make_tx()).unwrap();
+        registry.remove_cids_for_session_except(42, keep);
+
+        assert!(registry.has_cid(keep));
+        assert!(!registry.has_cid(drop));
+    }
+}
