@@ -660,7 +660,10 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
 
-    use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN};
+    use crate::proto::{
+        AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, CloseCode, ClosePayload, HP_KEY_LEN,
+        RegisterFailCode, RegisterFailPayload,
+    };
     use crate::types::{Cid, QUIC_DCID_PREFIX_LEN};
 
     #[derive(Clone)]
@@ -735,7 +738,7 @@ mod tests {
         (server_tls, client_tls)
     }
 
-    fn session_timeouts() -> SessionTimeouts {
+    fn default_timeouts() -> SessionTimeouts {
         SessionTimeouts {
             ping_min: Duration::from_secs(3600),
             ping_max: Duration::from_secs(3600),
@@ -752,6 +755,22 @@ mod tests {
         mpsc::Receiver<Vec<u8>>,
         MessageLimits,
         AssignedIp,
+        Arc<SessionRegistry>,
+    ) {
+        spawn_session_with_timeouts(default_timeouts()).await
+    }
+
+    async fn spawn_session_with_timeouts(
+        timeouts: SessionTimeouts,
+    ) -> (
+        tokio::task::JoinHandle<io::Result<()>>,
+        tokio_boring::SslStream<DuplexStream>,
+        SessionTx,
+        mpsc::Receiver<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+        MessageLimits,
+        AssignedIp,
+        Arc<SessionRegistry>,
     ) {
         let (server_tls, client_tls) = tls_pair().await;
         let (tun_tx, tun_rx) = mpsc::channel(8);
@@ -770,15 +789,17 @@ mod tests {
             server_tls,
             tun,
             Arc::new(TestUdpSocket { tx: udp_tx }),
-            registry,
+            registry.clone(),
             tx.clone(),
             rx,
             limits,
-            session_timeouts(),
+            timeouts,
             Vec::new(),
         );
         let join = tokio::spawn(async move { session.run().await });
-        (join, client_tls, tx, tun_rx, udp_rx, limits, assigned)
+        (
+            join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
+        )
     }
 
     async fn read_message_bytes(
@@ -822,9 +843,27 @@ mod tests {
         packet
     }
 
+    fn make_register_payload(dcid: Cid, scid: Cid, cipher: CipherSuite) -> RegisterCidPayload {
+        RegisterCidPayload {
+            dcid,
+            scid,
+            cipher,
+            hp_tx: [0x11; HP_KEY_LEN],
+            hp_rx: [0x11; HP_KEY_LEN],
+            aead_tx: [0x22; AEAD_KEY_LEN],
+            aead_rx: [0x22; AEAD_KEY_LEN],
+            iv_tx: [0x33; AEAD_IV_LEN],
+            iv_rx: [0x33; AEAD_IV_LEN],
+            pn_start: 0,
+            pn_start_rx: 0,
+            key_phase: false,
+        }
+    }
+
     #[tokio::test]
     async fn session_responds_to_tcp_ping() {
-        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned) = spawn_session().await;
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+            spawn_session().await;
         let nonce = 0xA1B2_C3D4_E5F6_0708;
         let ping = PingPayload { nonce };
         let mut payload = Vec::new();
@@ -855,7 +894,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_forwards_tcp_data_to_tun() {
-        let (join, mut client, tx, mut tun_rx, _udp_rx, _limits, assigned) = spawn_session().await;
+        let (join, mut client, tx, mut tun_rx, _udp_rx, _limits, assigned, _registry) =
+            spawn_session().await;
         let packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 1), 8);
         let mut frame = Vec::new();
         encode_message(Message::Data { packet: &packet }, &mut frame).unwrap();
@@ -873,7 +913,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_drops_spoofed_tcp_data() {
-        let (join, mut client, tx, mut tun_rx, _udp_rx, _limits, _assigned) = spawn_session().await;
+        let (join, mut client, tx, mut tun_rx, _udp_rx, _limits, _assigned, _registry) =
+            spawn_session().await;
         let packet = ipv4_packet(Ipv4Addr::new(10, 0, 0, 99), Ipv4Addr::new(192, 0, 2, 1), 8);
         let mut frame = Vec::new();
         encode_message(Message::Data { packet: &packet }, &mut frame).unwrap();
@@ -891,24 +932,12 @@ mod tests {
 
     #[tokio::test]
     async fn session_registers_udp_and_forwards_data() {
-        let (join, mut client, tx, _tun_rx, mut udp_rx, limits, assigned) = spawn_session().await;
+        let (join, mut client, tx, _tun_rx, mut udp_rx, limits, assigned, _registry) =
+            spawn_session().await;
 
         let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
         let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-        let register = RegisterCidPayload {
-            dcid,
-            scid,
-            cipher: CipherSuite::Aes128Gcm,
-            hp_tx: [0x11; HP_KEY_LEN],
-            hp_rx: [0x11; HP_KEY_LEN],
-            aead_tx: [0x22; AEAD_KEY_LEN],
-            aead_rx: [0x22; AEAD_KEY_LEN],
-            iv_tx: [0x33; AEAD_IV_LEN],
-            iv_rx: [0x33; AEAD_IV_LEN],
-            pn_start: 0,
-            pn_start_rx: 0,
-            key_phase: false,
-        };
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
 
         let mut reg_buf = Vec::new();
         register.encode(&mut reg_buf).unwrap();
@@ -1024,5 +1053,425 @@ mod tests {
 
         let _ = tx.send(SessionEvent::Shutdown).await;
         let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_register_rejects_invalid_cid() {
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+            spawn_session().await;
+
+        let payload = vec![1, 0xAA, 0x00];
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &payload }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::RegisterFail { payload } => {
+                let fail = RegisterFailPayload::decode(payload).unwrap();
+                assert_eq!(fail.code, RegisterFailCode::InvalidCid);
+            }
+            _ => panic!("expected register fail"),
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_register_rejects_invalid_keys() {
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+            spawn_session().await;
+
+        let dcid = Cid::from([0xAB; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xBC; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::ChaCha20Poly1305);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::RegisterFail { payload } => {
+                let fail = RegisterFailPayload::decode(payload).unwrap();
+                assert_eq!(fail.code, RegisterFailCode::InvalidKeys);
+            }
+            _ => panic!("expected register fail"),
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_register_rejects_prefix_collision() {
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, registry) =
+            spawn_session().await;
+
+        let dcid = Cid::from([0xCD; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xDE; QUIC_DCID_PREFIX_LEN]);
+        let (dummy_tx, _dummy_rx) = mpsc::channel(1);
+        registry.insert_cid(999, dcid.prefix(), dummy_tx).unwrap();
+
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::RegisterFail { payload } => {
+                let fail = RegisterFailPayload::decode(payload).unwrap();
+                assert_eq!(fail.code, RegisterFailCode::InvalidCid);
+            }
+            _ => panic!("expected register fail"),
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_udp_data_ignored_before_verification() {
+        let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+            spawn_session().await;
+
+        let dcid = Cid::from([0x11; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x22; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        assert!(matches!(message, Message::RegisterOk { .. }));
+
+        let keys = UdpQspKeys::from_register(&register).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 44444));
+        let packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 3), 12);
+        let mut data_frame = Vec::new();
+        encode_message(Message::Data { packet: &packet }, &mut data_frame).unwrap();
+        let udp_packet = keys
+            .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+            .unwrap();
+        let claim = UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: udp_packet,
+        };
+        tx.send(SessionEvent::Udp(claim)).await.unwrap();
+
+        match timeout(Duration::from_millis(200), tun_rx.recv()).await {
+            Ok(Some(_)) => panic!("unexpected tunneled packet"),
+            Ok(None) => panic!("tun channel closed unexpectedly"),
+            Err(_) => {}
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_idle_timeout_sends_close() {
+        let mut timeouts = default_timeouts();
+        timeouts.idle_timeout = Duration::from_millis(50);
+        timeouts.ping_min = Duration::from_secs(5);
+        timeouts.ping_max = Duration::from_secs(5);
+
+        let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+            spawn_session_with_timeouts(timeouts).await;
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::Close { payload } => {
+                let close = ClosePayload::decode(payload).unwrap();
+                assert_eq!(close.code, CloseCode::IdleTimeout);
+            }
+            _ => panic!("expected close"),
+        }
+
+        let result = timeout(Duration::from_secs(1), join)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn session_udp_verify_timeout_clears_cid() {
+        let mut timeouts = default_timeouts();
+        timeouts.udp_verify_timeout = Duration::from_millis(50);
+        timeouts.ping_min = Duration::from_secs(5);
+        timeouts.ping_max = Duration::from_secs(5);
+
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, registry) =
+            spawn_session_with_timeouts(timeouts).await;
+
+        let dcid = Cid::from([0x31; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x32; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        assert!(matches!(message, Message::RegisterOk { .. }));
+        assert!(registry.has_cid(register.dcid.prefix()));
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        tokio::task::yield_now().await;
+
+        assert!(!registry.has_cid(register.dcid.prefix()));
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_handles_close_message() {
+        let (join, mut client, _tx, _tun_rx, _udp_rx, _limits, _assigned, _registry) =
+            spawn_session().await;
+
+        let close = ClosePayload {
+            code: CloseCode::ProtocolError,
+        };
+        let mut payload = Vec::new();
+        close.encode(&mut payload);
+        let mut frame = Vec::new();
+        encode_message(Message::Close { payload: &payload }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let result = timeout(Duration::from_secs(1), join)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn session_rejects_unexpected_control_message() {
+        let (join, mut client, _tx, _tun_rx, _udp_rx, _limits, _assigned, _registry) =
+            spawn_session().await;
+
+        let mut frame = Vec::new();
+        encode_message(Message::AuthOk { payload: &[] }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let result = timeout(Duration::from_secs(1), join)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn session_sends_tcp_ping_on_schedule() {
+        let mut timeouts = default_timeouts();
+        timeouts.ping_min = Duration::from_millis(50);
+        timeouts.ping_max = Duration::from_millis(50);
+        timeouts.idle_timeout = Duration::from_secs(5);
+
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+            spawn_session_with_timeouts(timeouts).await;
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        assert!(matches!(message, Message::Ping { .. }));
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_sends_udp_ping_on_schedule() {
+        let mut timeouts = default_timeouts();
+        timeouts.ping_min = Duration::from_millis(200);
+        timeouts.ping_max = Duration::from_millis(200);
+        timeouts.idle_timeout = Duration::from_secs(5);
+
+        let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
+            spawn_session_with_timeouts(timeouts).await;
+
+        let dcid = Cid::from([0x41; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x42; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        assert!(matches!(message, Message::RegisterOk { .. }));
+
+        let keys = UdpQspKeys::from_register(&register).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 33333));
+
+        let packet = ipv4_packet(Ipv4Addr::new(10, 0, 0, 9), Ipv4Addr::new(192, 0, 2, 4), 8);
+        let mut data_frame = Vec::new();
+        encode_message(Message::Data { packet: &packet }, &mut data_frame).unwrap();
+        let packet = keys
+            .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+            .unwrap();
+        let claim = UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: packet,
+        };
+        tx.send(SessionEvent::Udp(claim)).await.unwrap();
+
+        let packet = timeout(Duration::from_secs(1), udp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let opened = keys
+            .open(register.dcid.len(), &packet, register.pn_start)
+            .unwrap();
+        let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+        assert_eq!(consumed, opened.payload.len());
+        let verify_nonce = match message {
+            Message::Ping { payload } => PingPayload::decode(payload).unwrap().nonce,
+            _ => panic!("expected verify ping"),
+        };
+        let server_expected_pn = opened.pn + 1;
+
+        let pong = PongPayload {
+            nonce: verify_nonce,
+        };
+        let mut pong_payload = Vec::new();
+        pong.encode(&mut pong_payload);
+        let mut pong_frame = Vec::new();
+        encode_message(
+            Message::Pong {
+                payload: &pong_payload,
+            },
+            &mut pong_frame,
+        )
+        .unwrap();
+        let packet = keys
+            .protect(register.dcid.as_slice(), 1, register.key_phase, &pong_frame)
+            .unwrap();
+        let claim = UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: packet,
+        };
+        tx.send(SessionEvent::Udp(claim)).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let packet = timeout(Duration::from_secs(1), udp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let opened = keys
+            .open(register.dcid.len(), &packet, server_expected_pn)
+            .unwrap();
+        let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+        assert_eq!(consumed, opened.payload.len());
+        assert!(matches!(message, Message::Ping { .. }));
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_cleans_registry_on_shutdown() {
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, assigned, registry) =
+            spawn_session().await;
+
+        let dcid = Cid::from([0x51; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x52; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        assert!(matches!(message, Message::RegisterOk { .. }));
+        assert!(registry.has_cid(register.dcid.prefix()));
+        assert!(registry.lookup_ip(assigned.addr()).is_some());
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+
+        assert!(registry.lookup_ip(assigned.addr()).is_none());
+        assert!(!registry.has_cid(register.dcid.prefix()));
     }
 }
