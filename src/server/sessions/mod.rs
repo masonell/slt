@@ -660,6 +660,9 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
 
+    use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN};
+    use crate::types::{Cid, QUIC_DCID_PREFIX_LEN};
+
     #[derive(Clone)]
     struct TestTun {
         tx: mpsc::Sender<Vec<u8>>,
@@ -678,7 +681,9 @@ mod tests {
         }
     }
 
-    struct TestUdpSocket;
+    struct TestUdpSocket {
+        tx: mpsc::Sender<Vec<u8>>,
+    }
 
     impl UdpSocketIo for TestUdpSocket {
         fn send_to<'a>(
@@ -686,7 +691,11 @@ mod tests {
             buf: &'a [u8],
             _peer: SocketAddr,
         ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a {
-            async move { Ok(buf.len()) }
+            let tx = self.tx.clone();
+            async move {
+                let _ = tx.send(buf.to_vec()).await;
+                Ok(buf.len())
+            }
         }
     }
 
@@ -740,11 +749,13 @@ mod tests {
         tokio_boring::SslStream<DuplexStream>,
         SessionTx,
         mpsc::Receiver<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
         MessageLimits,
         AssignedIp,
     ) {
         let (server_tls, client_tls) = tls_pair().await;
         let (tun_tx, tun_rx) = mpsc::channel(8);
+        let (udp_tx, udp_rx) = mpsc::channel(16);
         let tun = Arc::new(TestTun { tx: tun_tx });
         let registry = Arc::new(SessionRegistry::new());
         let (tx, rx) = mpsc::channel(8);
@@ -758,7 +769,7 @@ mod tests {
             assigned,
             server_tls,
             tun,
-            Arc::new(TestUdpSocket),
+            Arc::new(TestUdpSocket { tx: udp_tx }),
             registry,
             tx.clone(),
             rx,
@@ -767,7 +778,7 @@ mod tests {
             Vec::new(),
         );
         let join = tokio::spawn(async move { session.run().await });
-        (join, client_tls, tx, tun_rx, limits, assigned)
+        (join, client_tls, tx, tun_rx, udp_rx, limits, assigned)
     }
 
     async fn read_message_bytes(
@@ -813,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_responds_to_tcp_ping() {
-        let (join, mut client, tx, _tun_rx, limits, _assigned) = spawn_session().await;
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned) = spawn_session().await;
         let nonce = 0xA1B2_C3D4_E5F6_0708;
         let ping = PingPayload { nonce };
         let mut payload = Vec::new();
@@ -844,7 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_forwards_tcp_data_to_tun() {
-        let (join, mut client, tx, mut tun_rx, _limits, assigned) = spawn_session().await;
+        let (join, mut client, tx, mut tun_rx, _udp_rx, _limits, assigned) = spawn_session().await;
         let packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 1), 8);
         let mut frame = Vec::new();
         encode_message(Message::Data { packet: &packet }, &mut frame).unwrap();
@@ -862,7 +873,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_drops_spoofed_tcp_data() {
-        let (join, mut client, tx, mut tun_rx, _limits, _assigned) = spawn_session().await;
+        let (join, mut client, tx, mut tun_rx, _udp_rx, _limits, _assigned) = spawn_session().await;
         let packet = ipv4_packet(Ipv4Addr::new(10, 0, 0, 99), Ipv4Addr::new(192, 0, 2, 1), 8);
         let mut frame = Vec::new();
         encode_message(Message::Data { packet: &packet }, &mut frame).unwrap();
@@ -873,6 +884,143 @@ mod tests {
             Ok(None) => panic!("tun channel closed unexpectedly"),
             Err(_) => {}
         }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_registers_udp_and_forwards_data() {
+        let (join, mut client, tx, _tun_rx, mut udp_rx, limits, assigned) = spawn_session().await;
+
+        let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+        let register = RegisterCidPayload {
+            dcid,
+            scid,
+            cipher: CipherSuite::Aes128Gcm,
+            hp_tx: [0x11; HP_KEY_LEN],
+            hp_rx: [0x11; HP_KEY_LEN],
+            aead_tx: [0x22; AEAD_KEY_LEN],
+            aead_rx: [0x22; AEAD_KEY_LEN],
+            iv_tx: [0x33; AEAD_IV_LEN],
+            iv_rx: [0x33; AEAD_IV_LEN],
+            pn_start: 0,
+            pn_start_rx: 0,
+            key_phase: false,
+        };
+
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        assert!(matches!(message, Message::RegisterOk { .. }));
+
+        let keys = UdpQspKeys::from_register(&register).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 55555));
+
+        let ping_nonce = 0xA1B2_C3D4_E5F6_0708;
+        let ping = PingPayload { nonce: ping_nonce };
+        let mut ping_payload = Vec::new();
+        ping.encode(&mut ping_payload);
+        let mut ping_frame = Vec::new();
+        encode_message(
+            Message::Ping {
+                payload: &ping_payload,
+            },
+            &mut ping_frame,
+        )
+        .unwrap();
+        let packet = keys
+            .protect(register.dcid.as_slice(), 0, register.key_phase, &ping_frame)
+            .unwrap();
+        let claim = UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: packet,
+        };
+        tx.send(SessionEvent::Udp(claim)).await.unwrap();
+
+        let mut server_expected_pn = register.pn_start;
+        let mut verify_nonce = None;
+        for _ in 0..4 {
+            let packet = timeout(Duration::from_secs(1), udp_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let opened = keys
+                .open(register.dcid.len(), &packet, server_expected_pn)
+                .unwrap();
+            server_expected_pn = opened.pn + 1;
+            let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+            assert_eq!(consumed, opened.payload.len());
+            if let Message::Ping { payload } = message {
+                let ping = PingPayload::decode(payload).unwrap();
+                verify_nonce = Some(ping.nonce);
+                break;
+            }
+        }
+        let verify_nonce = verify_nonce.expect("expected UDP verify ping");
+
+        let pong = PongPayload {
+            nonce: verify_nonce,
+        };
+        let mut pong_payload = Vec::new();
+        pong.encode(&mut pong_payload);
+        let mut pong_frame = Vec::new();
+        encode_message(
+            Message::Pong {
+                payload: &pong_payload,
+            },
+            &mut pong_frame,
+        )
+        .unwrap();
+        let packet = keys
+            .protect(register.dcid.as_slice(), 1, register.key_phase, &pong_frame)
+            .unwrap();
+        let claim = UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: packet,
+        };
+        tx.send(SessionEvent::Udp(claim)).await.unwrap();
+
+        let data_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 2), 12);
+        tx.send(SessionEvent::TunPacket(data_packet.clone()))
+            .await
+            .unwrap();
+
+        let mut found = false;
+        for _ in 0..4 {
+            let packet = match timeout(Duration::from_millis(200), udp_rx.recv()).await {
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+            let opened = keys
+                .open(register.dcid.len(), &packet, server_expected_pn)
+                .unwrap();
+            server_expected_pn = opened.pn + 1;
+            let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+            assert_eq!(consumed, opened.payload.len());
+            if let Message::Data { packet } = message {
+                assert_eq!(packet, data_packet.as_slice());
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found, "expected UDP data after verification");
 
         let _ = tx.send(SessionEvent::Shutdown).await;
         let _ = join.await.unwrap();
