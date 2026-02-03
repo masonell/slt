@@ -2,8 +2,9 @@
 
 use std::net::Ipv4Addr;
 
-use super::sessions::ClientSessionBase;
+use super::sessions::{ClientSessionBase, UdpSocketIo};
 use super::tun::TunDeviceIo;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Routes packets between TUN and sessions.
 #[derive(Debug, Default)]
@@ -15,7 +16,12 @@ pub trait SessionMeta {
     fn assigned_ipv4(&self) -> Ipv4Addr;
 }
 
-impl<T: TunDeviceIo> SessionMeta for ClientSessionBase<T> {
+impl<T, S, U> SessionMeta for ClientSessionBase<T, S, U>
+where
+    T: TunDeviceIo,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    U: UdpSocketIo,
+{
     fn assigned_ipv4(&self) -> Ipv4Addr {
         self.assigned_ipv4.addr()
     }

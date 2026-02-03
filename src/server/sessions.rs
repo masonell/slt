@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fastrand;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::time;
@@ -77,13 +77,33 @@ pub struct SessionTimeouts {
     pub udp_verify_timeout: Duration,
 }
 
-struct UdpIo {
-    socket: Arc<UdpSocket>,
+/// UDP socket interface used for session traffic.
+pub trait UdpSocketIo: Send + Sync + 'static {
+    /// Send bytes to a peer.
+    fn send_to<'a>(
+        &'a self,
+        buf: &'a [u8],
+        peer: SocketAddr,
+    ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a;
+}
+
+impl UdpSocketIo for UdpSocket {
+    fn send_to<'a>(
+        &'a self,
+        buf: &'a [u8],
+        peer: SocketAddr,
+    ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a {
+        self.send_to(buf, peer)
+    }
+}
+
+struct UdpIo<U: UdpSocketIo> {
+    socket: Arc<U>,
     peer: SocketAddr,
 }
 
-impl UdpIo {
-    const fn new(socket: Arc<UdpSocket>, peer: SocketAddr) -> Self {
+impl<U: UdpSocketIo> UdpIo<U> {
+    const fn new(socket: Arc<U>, peer: SocketAddr) -> Self {
         Self { socket, peer }
     }
 
@@ -92,7 +112,7 @@ impl UdpIo {
     }
 }
 
-impl SessionIo for UdpIo {
+impl<U: UdpSocketIo> SessionIo for UdpIo<U> {
     async fn send<'a>(&'a mut self, bytes: &'a [u8]) -> io::Result<()> {
         let _ = self.socket.send_to(bytes, self.peer).await?;
         Ok(())
@@ -107,7 +127,11 @@ impl SessionIo for UdpIo {
 }
 
 /// A single authenticated client session.
-pub struct ClientSessionBase<T: TunDeviceIo> {
+pub struct ClientSessionBase<
+    T: TunDeviceIo,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static = TcpStream,
+    U: UdpSocketIo = UdpSocket,
+> {
     /// Client identifier.
     pub client_id: ClientId,
     /// Assigned VPN IPv4 address.
@@ -123,11 +147,11 @@ pub struct ClientSessionBase<T: TunDeviceIo> {
     session_id: u64,
     registry: Arc<SessionRegistry>,
     tx: SessionTx,
-    tcp: SslStream<TcpStream>,
+    tcp: SslStream<S>,
     tun: Arc<T>,
-    udp_socket: Arc<UdpSocket>,
+    udp_socket: Arc<U>,
     udp_peer: Option<SocketAddr>,
-    udp_session: Option<QuicQspSession<UdpIo>>,
+    udp_session: Option<QuicQspSession<UdpIo<U>>>,
     udp_verify: Option<UdpVerify>,
     rx: SessionRx,
     limits: MessageLimits,
@@ -139,7 +163,9 @@ pub struct ClientSessionBase<T: TunDeviceIo> {
 /// Default client session using a real TUN device.
 pub type ClientSession = ClientSessionBase<AsyncDevice>;
 
-impl<T: TunDeviceIo> ClientSessionBase<T> {
+impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
+    ClientSessionBase<T, S, U>
+{
     /// Create a new client session with TCP active.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -147,9 +173,9 @@ impl<T: TunDeviceIo> ClientSessionBase<T> {
         session_id: u64,
         client_id: ClientId,
         assigned_ipv4: AssignedIp,
-        tcp: SslStream<TcpStream>,
+        tcp: SslStream<S>,
         tun: Arc<T>,
-        udp_socket: Arc<UdpSocket>,
+        udp_socket: Arc<U>,
         registry: Arc<SessionRegistry>,
         tx: SessionTx,
         rx: SessionRx,
@@ -684,4 +710,234 @@ pub fn message_limits_from_mtu(mtu: u16) -> MessageLimits {
         + 1;
     let max_frame_len = max_data_len.max(max_register_len).max(AUTH_PAYLOAD_LEN);
     MessageLimits::new(max_frame_len, max_data_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boring::ssl::{SslAcceptor, SslConnector, SslFiletype, SslMethod, SslVerifyMode};
+    use std::net::Ipv4Addr;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+
+    #[derive(Clone)]
+    struct TestTun {
+        tx: mpsc::Sender<Vec<u8>>,
+    }
+
+    impl TunDeviceIo for TestTun {
+        fn send<'a>(
+            &'a self,
+            buf: &'a [u8],
+        ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a {
+            let tx = self.tx.clone();
+            async move {
+                let _ = tx.send(buf.to_vec()).await;
+                Ok(buf.len())
+            }
+        }
+    }
+
+    struct TestUdpSocket;
+
+    impl UdpSocketIo for TestUdpSocket {
+        fn send_to<'a>(
+            &'a self,
+            buf: &'a [u8],
+            _peer: SocketAddr,
+        ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a {
+            async move { Ok(buf.len()) }
+        }
+    }
+
+    fn cert_paths() -> (PathBuf, PathBuf) {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        (
+            root.join("vendor/boring/test/cert.pem"),
+            root.join("vendor/boring/test/key.pem"),
+        )
+    }
+
+    fn tls_acceptor() -> SslAcceptor {
+        let (cert, key) = cert_paths();
+        let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
+        builder.set_certificate_chain_file(cert).unwrap();
+        builder.set_private_key_file(key, SslFiletype::PEM).unwrap();
+        builder.check_private_key().unwrap();
+        builder.build()
+    }
+
+    fn tls_connector() -> SslConnector {
+        let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
+        builder.set_verify(SslVerifyMode::NONE);
+        builder.build()
+    }
+
+    async fn tls_pair() -> (
+        tokio_boring::SslStream<DuplexStream>,
+        tokio_boring::SslStream<DuplexStream>,
+    ) {
+        let acceptor = tls_acceptor();
+        let connector = tls_connector();
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio_boring::accept(&acceptor, server_io);
+        let client = tokio_boring::connect(connector.configure().unwrap(), "localhost", client_io);
+        let (server_tls, client_tls) = tokio::try_join!(server, client).unwrap();
+        (server_tls, client_tls)
+    }
+
+    fn session_timeouts() -> SessionTimeouts {
+        SessionTimeouts {
+            ping_min: Duration::from_secs(3600),
+            ping_max: Duration::from_secs(3600),
+            idle_timeout: Duration::from_secs(3600),
+            udp_verify_timeout: Duration::from_secs(3600),
+        }
+    }
+
+    async fn spawn_session() -> (
+        tokio::task::JoinHandle<io::Result<()>>,
+        tokio_boring::SslStream<DuplexStream>,
+        SessionTx,
+        mpsc::Receiver<Vec<u8>>,
+        MessageLimits,
+        AssignedIp,
+    ) {
+        let (server_tls, client_tls) = tls_pair().await;
+        let (tun_tx, tun_rx) = mpsc::channel(8);
+        let tun = Arc::new(TestTun { tx: tun_tx });
+        let registry = Arc::new(SessionRegistry::new());
+        let (tx, rx) = mpsc::channel(8);
+        let client_id = ClientId([0xA5; 16]);
+        let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
+        let (handle, _old) = registry.register_session(client_id, assigned, tx.clone());
+        let limits = message_limits_from_mtu(1500);
+        let session = ClientSessionBase::<TestTun, DuplexStream, TestUdpSocket>::new(
+            handle.session_id,
+            client_id,
+            assigned,
+            server_tls,
+            tun,
+            Arc::new(TestUdpSocket),
+            registry,
+            tx.clone(),
+            rx,
+            limits,
+            session_timeouts(),
+            Vec::new(),
+        );
+        let join = tokio::spawn(async move { session.run().await });
+        (join, client_tls, tx, tun_rx, limits, assigned)
+    }
+
+    async fn read_message_bytes(
+        stream: &mut tokio_boring::SslStream<DuplexStream>,
+        limits: MessageLimits,
+    ) -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tls closed"));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            match decode_message(&buf, limits) {
+                Ok(Some((_msg, _))) => return Ok(buf),
+                Ok(None) => continue,
+                Err(err) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("message error: {err:?}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, payload_len: usize) -> Vec<u8> {
+        let total_len = 20 + payload_len;
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2] = ((total_len >> 8) & 0xff) as u8;
+        packet[3] = (total_len & 0xff) as u8;
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&src.octets());
+        packet[16..20].copy_from_slice(&dst.octets());
+        if payload_len > 0 {
+            packet[20] = 0xAA;
+        }
+        packet
+    }
+
+    #[tokio::test]
+    async fn session_responds_to_tcp_ping() {
+        let (join, mut client, tx, _tun_rx, limits, _assigned) = spawn_session().await;
+        let nonce = 0xA1B2_C3D4_E5F6_0708;
+        let ping = PingPayload { nonce };
+        let mut payload = Vec::new();
+        ping.encode(&mut payload);
+        let mut frame = Vec::new();
+        encode_message(Message::Ping { payload: &payload }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::Pong { payload } => {
+                let pong = PongPayload::decode(payload).unwrap();
+                assert_eq!(pong.nonce, nonce);
+            }
+            _ => panic!("expected pong"),
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_forwards_tcp_data_to_tun() {
+        let (join, mut client, tx, mut tun_rx, _limits, assigned) = spawn_session().await;
+        let packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 1), 8);
+        let mut frame = Vec::new();
+        encode_message(Message::Data { packet: &packet }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let received = timeout(Duration::from_secs(1), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, packet);
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_drops_spoofed_tcp_data() {
+        let (join, mut client, tx, mut tun_rx, _limits, _assigned) = spawn_session().await;
+        let packet = ipv4_packet(Ipv4Addr::new(10, 0, 0, 99), Ipv4Addr::new(192, 0, 2, 1), 8);
+        let mut frame = Vec::new();
+        encode_message(Message::Data { packet: &packet }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        match timeout(Duration::from_millis(200), tun_rx.recv()).await {
+            Ok(Some(_)) => panic!("unexpected tunneled packet"),
+            Ok(None) => panic!("tun channel closed unexpectedly"),
+            Err(_) => {}
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
 }
