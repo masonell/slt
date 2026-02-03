@@ -16,6 +16,7 @@ use tun_rs::AsyncDevice;
 use super::quic::UdpClaim;
 use super::registry::{CidInsertError, SessionRegistry};
 use super::router::PacketRouter;
+use super::tun::TunDeviceIo;
 use super::{AssignedIp, ClientId};
 use crate::crypto::udp_qsp::{QspSessionError, QuicQspSession, SessionIo, UdpQspKeys};
 use crate::proto::{
@@ -106,7 +107,7 @@ impl SessionIo for UdpIo {
 }
 
 /// A single authenticated client session.
-pub struct ClientSession {
+pub struct ClientSessionBase<T: TunDeviceIo> {
     /// Client identifier.
     pub client_id: ClientId,
     /// Assigned VPN IPv4 address.
@@ -123,7 +124,7 @@ pub struct ClientSession {
     registry: Arc<SessionRegistry>,
     tx: SessionTx,
     tcp: SslStream<TcpStream>,
-    tun: Arc<AsyncDevice>,
+    tun: Arc<T>,
     udp_socket: Arc<UdpSocket>,
     udp_peer: Option<SocketAddr>,
     udp_session: Option<QuicQspSession<UdpIo>>,
@@ -135,7 +136,10 @@ pub struct ClientSession {
     tcp_write_buf: Vec<u8>,
 }
 
-impl ClientSession {
+/// Default client session using a real TUN device.
+pub type ClientSession = ClientSessionBase<AsyncDevice>;
+
+impl<T: TunDeviceIo> ClientSessionBase<T> {
     /// Create a new client session with TCP active.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -144,7 +148,7 @@ impl ClientSession {
         client_id: ClientId,
         assigned_ipv4: AssignedIp,
         tcp: SslStream<TcpStream>,
-        tun: Arc<AsyncDevice>,
+        tun: Arc<T>,
         udp_socket: Arc<UdpSocket>,
         registry: Arc<SessionRegistry>,
         tx: SessionTx,

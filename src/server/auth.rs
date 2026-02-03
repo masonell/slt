@@ -23,7 +23,8 @@ use crate::types::ClientId;
 
 use super::AssignedIp;
 use super::registry::SessionRegistry;
-use super::sessions::{ClientSession, SessionEvent, SessionTimeouts};
+use super::sessions::{ClientSessionBase, SessionEvent, SessionTimeouts};
+use super::tun::TunDeviceIo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthStep {
@@ -69,11 +70,11 @@ impl Authenticator {
 
 /// TLS + AUTH handler that creates client sessions.
 #[derive(Clone)]
-pub struct AuthHandler {
+pub struct AuthHandlerBase<T: TunDeviceIo> {
     acceptor: SslAcceptor,
     authenticator: Authenticator,
     registry: Arc<SessionRegistry>,
-    tun: Arc<AsyncDevice>,
+    tun: Arc<T>,
     udp_socket: Arc<tokio::net::UdpSocket>,
     limits: MessageLimits,
     session_timeouts: SessionTimeouts,
@@ -81,7 +82,10 @@ pub struct AuthHandler {
     session_queue_size: usize,
 }
 
-impl AuthHandler {
+/// Default auth handler using a real TUN device.
+pub type AuthHandler = AuthHandlerBase<AsyncDevice>;
+
+impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// Build a new auth handler.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -89,7 +93,7 @@ impl AuthHandler {
         acceptor: SslAcceptor,
         authenticator: Authenticator,
         registry: Arc<SessionRegistry>,
-        tun: Arc<AsyncDevice>,
+        tun: Arc<T>,
         udp_socket: Arc<tokio::net::UdpSocket>,
         limits: MessageLimits,
         session_timeouts: SessionTimeouts,
@@ -109,7 +113,7 @@ impl AuthHandler {
         }
     }
 
-    /// Perform TLS + AUTH and spawn a `ClientSession` on success.
+    /// Perform TLS + AUTH and spawn a client session on success.
     ///
     /// # Errors
     ///
@@ -211,7 +215,7 @@ impl AuthHandler {
                         let tls_stream = tls
                             .take()
                             .ok_or_else(|| io::Error::other("tls stream missing"))?;
-                        let session = ClientSession::new(
+                        let session = ClientSessionBase::new(
                             handle.session_id,
                             auth.client_id,
                             assigned_ip,

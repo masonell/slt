@@ -2,11 +2,24 @@
 
 use std::net::Ipv4Addr;
 
-use super::sessions::ClientSession;
+use super::sessions::ClientSessionBase;
+use super::tun::TunDeviceIo;
 
 /// Routes packets between TUN and sessions.
 #[derive(Debug, Default)]
 pub struct PacketRouter;
+
+/// Minimal session metadata needed for packet validation.
+pub trait SessionMeta {
+    /// Returns the assigned IPv4 address for the session.
+    fn assigned_ipv4(&self) -> Ipv4Addr;
+}
+
+impl<T: TunDeviceIo> SessionMeta for ClientSessionBase<T> {
+    fn assigned_ipv4(&self) -> Ipv4Addr {
+        self.assigned_ipv4.addr()
+    }
+}
 
 impl PacketRouter {
     /// Create a new packet router.
@@ -17,8 +30,8 @@ impl PacketRouter {
 
     /// Enforce `src_ip == assigned_ipv4` for a session.
     #[must_use]
-    pub fn validate_src_ipv4(session: &ClientSession, src_ip: Ipv4Addr) -> bool {
-        session.assigned_ipv4.addr() == src_ip
+    pub fn validate_src_ipv4<S: SessionMeta>(session: &S, src_ip: Ipv4Addr) -> bool {
+        session.assigned_ipv4() == src_ip
     }
 
     /// Extract the source IPv4 address from an inner packet.
@@ -45,7 +58,7 @@ impl PacketRouter {
 
     /// Validate an IPv4 packet against the session's assigned address.
     #[must_use]
-    pub fn validate_packet_src(session: &ClientSession, packet: &[u8]) -> bool {
+    pub fn validate_packet_src<S: SessionMeta>(session: &S, packet: &[u8]) -> bool {
         Self::extract_src_ipv4(packet).is_some_and(|src| Self::validate_src_ipv4(session, src))
     }
 }
