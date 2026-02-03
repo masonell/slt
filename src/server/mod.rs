@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod metrics;
 pub mod quic;
+pub mod registry;
 pub mod router;
 pub mod sessions;
 pub mod tcp;

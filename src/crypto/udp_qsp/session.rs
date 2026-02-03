@@ -262,7 +262,16 @@ impl<I: SessionIo> QuicQspSession<I> {
         self.open_packet(&packet_buf[..len])
     }
 
-    fn open_packet<'a>(
+    /// Open a protected UDP-QSP packet and update replay state.
+    ///
+    /// Returns a reference to the decrypted payload stored in the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - header protection / AEAD fails
+    /// - the packet is too old or a replay
+    pub fn open_packet<'a>(
         &'a mut self,
         packet: &[u8],
     ) -> Result<OpenedPacketRef<'a>, QspSessionError> {
@@ -284,6 +293,12 @@ impl<I: SessionIo> QuicQspSession<I> {
             Err(ReplayError::Replay) => Err(QspSessionError::Replay),
             Err(ReplayError::TooOld) => Err(QspSessionError::TooOld),
         }
+    }
+
+    /// Returns a mutable reference to the underlying IO transport.
+    #[must_use]
+    pub const fn io_mut(&mut self) -> &mut I {
+        &mut self.io
     }
 }
 

@@ -9,7 +9,9 @@ boring-sys = "5.0.0-alpha.2"
 tokio-boring = "5.0.0-alpha.1"
 brotli = "8.0.2"
 clap = { version = "4.5.54", features = ["derive"] }
+ed25519-dalek = "2.1.1"
 foreign-types = "0.5.0"
+fastrand = "2.3.0"
 hex = "0.4.3"
 humantime-serde = "1.1.1"
 lru = "0.16.3"
@@ -19,6 +21,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-util = "0.7.16"
 toml = "0.9.8"
+tun-rs = { version = "2.7.8", features = ["async_tokio"] }
 
 [dev-dependencies]
 rusty-hook = "0.11.2"

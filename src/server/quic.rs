@@ -6,12 +6,12 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::udp_qsp::CidMap;
+use super::registry::SessionRegistry;
+use super::sessions::SessionEvent;
 use crate::classifier::{QuicVerdict, classify_quic_datagram};
 use crate::config::ServerConfig;
 use crate::types::CidPrefix;
 use lru::LruCache;
-use parking_lot::RwLock;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -50,7 +50,7 @@ pub struct QuicEndpoint {
     nginx_upstream: SocketAddr,
     max_lru_entries: NonZeroUsize,
     idle_timeout: Duration,
-    cid_map: Arc<RwLock<CidMap>>,
+    registry: Arc<SessionRegistry>,
 }
 
 impl QuicEndpoint {
@@ -62,7 +62,7 @@ impl QuicEndpoint {
     /// - `udp_nat_max_entries` is zero
     /// - `idle_timeout` is zero
     /// - UDP socket binding fails
-    pub async fn bind(config: &ServerConfig) -> io::Result<Self> {
+    pub async fn bind(config: &ServerConfig, registry: Arc<SessionRegistry>) -> io::Result<Self> {
         let max_lru_entries = NonZeroUsize::new(config.udp_nat_max_entries).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -82,7 +82,7 @@ impl QuicEndpoint {
             nginx_upstream: config.nginx_udp_upstream,
             max_lru_entries,
             idle_timeout: config.idle_timeout,
-            cid_map: Arc::new(RwLock::new(CidMap::new())),
+            registry,
         })
     }
 
@@ -90,12 +90,6 @@ impl QuicEndpoint {
     #[must_use]
     pub const fn socket(&self) -> &Arc<UdpSocket> {
         &self.socket
-    }
-
-    /// Returns the CID map shared with the UDP-QSP handler.
-    #[must_use]
-    pub fn cid_map(&self) -> Arc<RwLock<CidMap>> {
-        self.cid_map.clone()
     }
 
     /// Run the UDP accept loop and forward traffic to the nginx upstream.
@@ -106,15 +100,10 @@ impl QuicEndpoint {
     /// # Errors
     ///
     /// Returns an error if receiving from the UDP socket fails.
-    pub async fn run(
-        &self,
-        cancel: CancellationToken,
-        claim_handler: impl Fn(UdpClaim) + Send + Sync + 'static,
-    ) -> io::Result<()> {
+    pub async fn run(&self, cancel: CancellationToken) -> io::Result<()> {
         let mut buf = vec![0u8; QUIC_BUF_LEN];
         let mut state = QuicNatState::new(self.max_lru_entries);
         let mut sweep = tokio::time::interval(self.idle_timeout);
-        let claim_handler: Arc<dyn Fn(UdpClaim) + Send + Sync + 'static> = Arc::new(claim_handler);
 
         loop {
             let (len, peer) = tokio::select! {
@@ -129,14 +118,8 @@ impl QuicEndpoint {
                 }
                 res = self.socket.recv_from(&mut buf) => res?,
             };
-            self.handle_datagram(
-                &mut state,
-                cancel.clone(),
-                peer,
-                &buf[..len],
-                &claim_handler,
-            )
-            .await?;
+            self.handle_datagram(&mut state, cancel.clone(), peer, &buf[..len])
+                .await?;
         }
     }
 
@@ -146,7 +129,6 @@ impl QuicEndpoint {
         cancel: CancellationToken,
         peer: SocketAddr,
         payload: &[u8],
-        claim_handler: &Arc<dyn Fn(UdpClaim) + Send + Sync + 'static>,
     ) -> io::Result<()> {
         match classify_quic_datagram(payload) {
             QuicVerdict::Drop => return Ok(()),
@@ -157,13 +139,12 @@ impl QuicEndpoint {
                 let _ = upstream_socket.send(payload).await;
             }
             QuicVerdict::Short { dcid_prefix } => {
-                let claimed = { self.cid_map.read().get(dcid_prefix).is_some() };
-                if claimed {
-                    (claim_handler)(UdpClaim {
+                if let Some(tx) = self.registry.lookup_cid(dcid_prefix) {
+                    let _ = tx.try_send(SessionEvent::Udp(UdpClaim {
                         peer,
                         dcid_prefix,
                         payload: payload.to_vec(),
-                    });
+                    }));
                 } else {
                     let upstream_socket = state
                         .get_or_create_upstream(

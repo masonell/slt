@@ -51,6 +51,13 @@ pub struct ServerConfig {
     pub udp_verify_timeout: Duration,
     /// Max number of UDP NAT peers to keep for nginx forwarding.
     pub udp_nat_max_entries: usize,
+    /// Bounded queue size for per-session event channels.
+    #[serde(default = "default_session_queue_size")]
+    pub session_queue_size: usize,
     /// Configured client entries.
     pub clients: Vec<ServerClient>,
+}
+
+const fn default_session_queue_size() -> usize {
+    256
 }

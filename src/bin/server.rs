@@ -1,6 +1,7 @@
 use clap::Parser;
 use slt::config::ServerConfig;
-use slt::server::quic::{QuicEndpoint, UdpClaim};
+use slt::server::quic::QuicEndpoint;
+use slt::server::registry::SessionRegistry;
 use slt::server::tcp::TcpFrontDoor;
 use std::fs;
 use std::path::PathBuf;
@@ -23,8 +24,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config: ServerConfig = toml::from_str(&raw)?;
     let config = Arc::new(config);
 
+    let registry = Arc::new(SessionRegistry::new());
     let frontdoor = TcpFrontDoor::bind(&config).await?;
-    let quic = QuicEndpoint::bind(&config).await?;
+    let quic = QuicEndpoint::bind(&config, registry).await?;
     let cancel = CancellationToken::new();
 
     let cancel_task = cancel.clone();
@@ -50,17 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut udp_task = {
         let cancel = cancel.clone();
-        tokio::spawn(async move {
-            quic.run(cancel, move |claim: UdpClaim| {
-                eprintln!(
-                    "claimed udp datagram from {} (dcid_prefix={:02x?})",
-                    claim.peer,
-                    claim.dcid_prefix.as_bytes()
-                );
-                drop(claim);
-            })
-            .await
-        })
+        tokio::spawn(async move { quic.run(cancel).await })
     };
 
     tokio::select! {
