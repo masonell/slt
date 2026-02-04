@@ -1019,7 +1019,7 @@ mod tests {
             buf.extend_from_slice(&chunk[..n]);
             match decode_message(&buf, limits) {
                 Ok(Some((_msg, _))) => return Ok(buf),
-                Ok(None) => continue,
+                Ok(None) => {}
                 Err(err) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -1032,10 +1032,12 @@ mod tests {
 
     fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, payload_len: usize) -> Vec<u8> {
         let total_len = 20 + payload_len;
+        let total_len_u16 = u16::try_from(total_len).expect("payload too large for IPv4 packet");
         let mut packet = vec![0u8; total_len];
         packet[0] = 0x45;
-        packet[2] = ((total_len >> 8) & 0xff) as u8;
-        packet[3] = (total_len & 0xff) as u8;
+        let [hi, lo] = total_len_u16.to_be_bytes();
+        packet[2] = hi;
+        packet[3] = lo;
         packet[8] = 64;
         packet[9] = 17;
         packet[12..16].copy_from_slice(&src.octets());
@@ -1068,11 +1070,17 @@ mod tests {
         let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
             spawn_session().await;
         let nonce = 0xA1B2_C3D4_E5F6_0708;
-        let ping = PingPayload { nonce };
-        let mut payload = Vec::new();
-        ping.encode(&mut payload);
+        let ping_payload = PingPayload { nonce };
+        let mut ping_payload_bytes = Vec::new();
+        ping_payload.encode(&mut ping_payload_bytes);
         let mut frame = Vec::new();
-        encode_message(Message::Ping { payload: &payload }, &mut frame).unwrap();
+        encode_message(
+            Message::Ping {
+                payload: &ping_payload_bytes,
+            },
+            &mut frame,
+        )
+        .unwrap();
         client.write_all(&frame).await.unwrap();
 
         let buf = timeout(
@@ -1085,8 +1093,8 @@ mod tests {
         let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
         match message {
             Message::Pong { payload } => {
-                let pong = PongPayload::decode(payload).unwrap();
-                assert_eq!(pong.nonce, nonce);
+                let response_payload = PongPayload::decode(payload).unwrap();
+                assert_eq!(response_payload.nonce, nonce);
             }
             _ => panic!("expected pong"),
         }
@@ -1134,6 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn session_registers_udp_and_forwards_data() {
         let (join, mut client, tx, _tun_rx, mut udp_rx, limits, assigned, _registry) =
             spawn_session().await;
@@ -1161,20 +1170,25 @@ mod tests {
         let keys = UdpQspKeys::from_register(&register).unwrap();
         let peer = SocketAddr::from(([127, 0, 0, 1], 55555));
 
-        let ping_nonce = 0xA1B2_C3D4_E5F6_0708;
-        let ping = PingPayload { nonce: ping_nonce };
-        let mut ping_payload = Vec::new();
-        ping.encode(&mut ping_payload);
-        let mut ping_frame = Vec::new();
+        let probe_nonce = 0xA1B2_C3D4_E5F6_0708;
+        let probe = PingPayload { nonce: probe_nonce };
+        let mut probe_payload = Vec::new();
+        probe.encode(&mut probe_payload);
+        let mut probe_frame = Vec::new();
         encode_message(
             Message::Ping {
-                payload: &ping_payload,
+                payload: &probe_payload,
             },
-            &mut ping_frame,
+            &mut probe_frame,
         )
         .unwrap();
         let packet = keys
-            .protect(register.dcid.as_slice(), 0, register.key_phase, &ping_frame)
+            .protect(
+                register.dcid.as_slice(),
+                0,
+                register.key_phase,
+                &probe_frame,
+            )
             .unwrap();
         let claim = UdpClaim {
             peer,
@@ -1197,28 +1211,33 @@ mod tests {
             let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
             assert_eq!(consumed, opened.payload.len());
             if let Message::Ping { payload } = message {
-                let ping = PingPayload::decode(payload).unwrap();
-                verify_nonce = Some(ping.nonce);
+                let decoded_ping = PingPayload::decode(payload).unwrap();
+                verify_nonce = Some(decoded_ping.nonce);
                 break;
             }
         }
         let verify_nonce = verify_nonce.expect("expected UDP verify ping");
 
-        let pong = PongPayload {
+        let response = PongPayload {
             nonce: verify_nonce,
         };
-        let mut pong_payload = Vec::new();
-        pong.encode(&mut pong_payload);
-        let mut pong_frame = Vec::new();
+        let mut response_payload = Vec::new();
+        response.encode(&mut response_payload);
+        let mut response_frame = Vec::new();
         encode_message(
             Message::Pong {
-                payload: &pong_payload,
+                payload: &response_payload,
             },
-            &mut pong_frame,
+            &mut response_frame,
         )
         .unwrap();
         let packet = keys
-            .protect(register.dcid.as_slice(), 1, register.key_phase, &pong_frame)
+            .protect(
+                register.dcid.as_slice(),
+                1,
+                register.key_phase,
+                &response_frame,
+            )
             .unwrap();
         let claim = UdpClaim {
             peer,
