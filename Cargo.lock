@@ -1347,6 +1347,7 @@ version = "0.1.0"
 dependencies = [
  "boring",
  "clap",
+ "ed25519-dalek",
  "slt-core",
  "tokio",
  "tokio-boring",

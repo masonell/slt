@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+mod auth;
 mod runtime;
 mod tcp;
 mod tun;

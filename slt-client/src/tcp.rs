@@ -20,6 +20,8 @@ pub struct TcpSession {
     pub peer: Option<SocketAddr>,
     /// SNI hostname used for the handshake.
     pub sni: Option<String>,
+    /// Buffered bytes read before handing off to the session loop.
+    pub read_buf: Vec<u8>,
 }
 
 /// Connect to the server and perform a TLS handshake.
@@ -55,7 +57,12 @@ pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
         .map_err(|err| map_handshake_error(&err))?;
 
     let sni = Some(config.hostname.clone());
-    Ok(TcpSession { stream, peer, sni })
+    Ok(TcpSession {
+        stream,
+        peer,
+        sni,
+        read_buf: Vec::new(),
+    })
 }
 
 async fn connect_stream(config: &ClientConfig) -> io::Result<TcpStream> {
