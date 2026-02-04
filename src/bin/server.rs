@@ -17,6 +17,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, trace, warn};
+use tracing_error::ErrorLayer;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tun_rs::DeviceBuilder;
 
 #[derive(Parser, Debug)]
@@ -29,11 +34,33 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_tracing();
     let args = Args::parse();
     let raw = fs::read_to_string(&args.config)?;
     let config: ServerConfig = toml::from_str(&raw)?;
     let config = Arc::new(config);
 
+    info!(
+        listen_tcp = %config.listen_tcp,
+        listen_udp = %config.listen_udp,
+        tun_name = %config.tun_name,
+        tun_mtu = config.tun_mtu,
+        "server starting"
+    );
+
+    run_server(config).await
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("slt=info"));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(ErrorLayer::default())
+        .init();
+}
+
+async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error::Error>> {
     let registry = Arc::new(SessionRegistry::new());
     let frontdoor = TcpFrontDoor::bind(&config).await?;
     let quic = QuicEndpoint::bind(&config, registry.clone()).await?;
@@ -65,42 +92,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let cancel = CancellationToken::new();
 
-    let cancel_task = cancel.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            cancel_task.cancel();
-        }
-    });
+    spawn_ctrl_c(cancel.clone());
 
-    let mut tcp_task = {
-        let cancel = cancel.clone();
-        let auth_handler = auth_handler.clone();
-        tokio::spawn(async move {
-            frontdoor
-                .run(cancel, move |stream: TcpStream, addr| {
-                    let auth_handler = auth_handler.clone();
-                    tokio::spawn(async move {
-                        if let Err(err) = auth_handler.handle(stream).await {
-                            eprintln!("auth handler error for {addr}: {err}");
-                        }
-                    });
-                })
-                .await
-        })
-    };
-
-    let mut udp_task = {
-        let cancel = cancel.clone();
-        tokio::spawn(async move { quic.run(cancel).await })
-    };
-
-    let mut tun_task = {
-        let cancel = cancel.clone();
-        let registry = registry.clone();
-        let tun = tun.clone();
-        let mtu = config.tun_mtu;
-        tokio::spawn(async move { run_tun_reader(tun, registry, cancel, mtu).await })
-    };
+    let mut tcp_task = spawn_tcp_task(frontdoor, auth_handler, cancel.clone());
+    let mut udp_task = spawn_udp_task(quic, cancel.clone());
+    let mut tun_task = spawn_tun_task(tun, registry, cancel.clone(), config.tun_mtu);
 
     tokio::select! {
         res = &mut tcp_task => {
@@ -129,6 +125,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn spawn_ctrl_c(cancel: CancellationToken) {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel.cancel();
+        }
+    });
+}
+
+fn spawn_tcp_task(
+    frontdoor: TcpFrontDoor,
+    auth_handler: Arc<AuthHandler>,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<io::Result<()>> {
+    tokio::spawn(async move {
+        frontdoor
+            .run(cancel, move |stream: TcpStream, addr| {
+                let auth_handler = auth_handler.clone();
+                tokio::spawn(async move {
+                    info!(peer = %addr, "claimed tcp connection");
+                    if let Err(err) = auth_handler.handle(stream).await {
+                        warn!(peer = %addr, error = %err, "auth handler error");
+                    }
+                });
+            })
+            .await
+    })
+}
+
+fn spawn_udp_task(
+    quic: QuicEndpoint,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<io::Result<()>> {
+    tokio::spawn(async move { quic.run(cancel).await })
+}
+
+fn spawn_tun_task(
+    tun: Arc<tun_rs::AsyncDevice>,
+    registry: Arc<SessionRegistry>,
+    cancel: CancellationToken,
+    mtu: u16,
+) -> tokio::task::JoinHandle<io::Result<()>> {
+    tokio::spawn(async move { run_tun_reader(tun, registry, cancel, mtu).await })
 }
 
 fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std::error::Error>> {
@@ -177,10 +217,19 @@ async fn run_tun_reader(
 
         let packet = &buf[..n];
         let Some(dst_ip) = PacketRouter::extract_dst_ipv4(packet) else {
+            debug!(len = n, "tun packet missing IPv4 dst");
             continue;
         };
+        trace!(len = n, dst_ip = %dst_ip, "tun packet received");
         if let Some(tx) = registry.lookup_ip(dst_ip) {
-            let _ = tx.try_send(SessionEvent::TunPacket(packet.to_vec()));
+            if tx
+                .try_send(SessionEvent::TunPacket(packet.to_vec()))
+                .is_err()
+            {
+                debug!(dst_ip = %dst_ip, "tun packet dropped (session queue full)");
+            }
+        } else {
+            debug!(dst_ip = %dst_ip, "tun packet dropped (no session)");
         }
     }
 }

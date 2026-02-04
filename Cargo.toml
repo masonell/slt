@@ -21,6 +21,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-util = "0.7.16"
 toml = "0.9.8"
+tracing = { version = "0.1.40", features = ["max_level_trace", "release_max_level_info"] }
+tracing-error = "0.2.0"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
 tun-rs = { version = "2.7.8", features = ["async_tokio"] }
 
 [dev-dependencies]
