@@ -119,11 +119,12 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     ///
     /// Returns an error if the TLS handshake, exporter, or socket IO fails.
     pub async fn handle(&self, stream: TcpStream) -> io::Result<()> {
-        let mut tls = Some(
-            tls_accept(&self.acceptor, stream)
-                .await
-                .map_err(|err| io::Error::other(format!("{err:?}")))?,
-        );
+        let tls = match time::timeout(self.auth_timeout, tls_accept(&self.acceptor, stream)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => return Err(io::Error::other(format!("{err:?}"))),
+            Err(_) => return Ok(()),
+        };
+        let mut tls = Some(tls);
 
         let mut challenge = [0u8; crate::proto::AUTH_CHALLENGE_LEN];
         let tls_ref = tls
@@ -426,6 +427,12 @@ mod tests {
             server_secret: SharedSecret([0xAA; 32]),
             listen_tcp: SocketAddr::from(([127, 0, 0, 1], 0)),
             listen_udp: SocketAddr::from(([127, 0, 0, 1], 0)),
+            tls_cert: crate::types::TlsMaterial::File {
+                file: "vendor/boring/test/cert.pem".into(),
+            },
+            tls_key: crate::types::TlsMaterial::File {
+                file: "vendor/boring/test/key.pem".into(),
+            },
             nginx_tcp_upstream: SocketAddr::from(([127, 0, 0, 1], 0)),
             nginx_udp_upstream: SocketAddr::from(([127, 0, 0, 1], 0)),
             tun_name: "test0".to_string(),

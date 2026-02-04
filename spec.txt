@@ -435,6 +435,9 @@ nftables concept:
 
 * `listen_tcp = "0.0.0.0:443"`
 * `listen_udp = "0.0.0.0:443"`
+* `tls_cert = { file = "/etc/slt/server.crt" }`
+* `tls_key = { file = "/etc/slt/server.key" }`
+* `tls_cert`/`tls_key` may also be provided as inline PEM strings.
 * `nginx_tcp_upstream = "127.0.0.1:8443"`
 * `nginx_udp_upstream = "127.0.0.1:8443"`
 * `tun_name = "tun0"`

@@ -1,13 +1,21 @@
+use boring::pkey::PKey;
+use boring::ssl::{SslAcceptor, SslFiletype, SslMethod};
+use boring::x509::X509;
 use clap::Parser;
 use slt::config::ServerConfig;
+use slt::server::auth::{AuthHandler, Authenticator};
 use slt::server::quic::QuicEndpoint;
 use slt::server::registry::SessionRegistry;
+use slt::server::sessions::{SessionTimeouts, message_limits_from_mtu};
 use slt::server::tcp::TcpFrontDoor;
+use slt::types::TlsMaterial;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
+use tun_rs::DeviceBuilder;
 
 #[derive(Parser, Debug)]
 #[command(about = "Run the SLT server front door.")]
@@ -26,7 +34,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let registry = Arc::new(SessionRegistry::new());
     let frontdoor = TcpFrontDoor::bind(&config).await?;
-    let quic = QuicEndpoint::bind(&config, registry).await?;
+    let quic = QuicEndpoint::bind(&config, registry.clone()).await?;
+    let acceptor = build_tls_acceptor(&config)?;
+    let authenticator = Authenticator::from_config(&config);
+    let tun = Arc::new(
+        DeviceBuilder::new()
+            .name(&config.tun_name)
+            .mtu(config.tun_mtu)
+            .build_async()?,
+    );
+    let session_timeouts = SessionTimeouts {
+        ping_min: config.ping_min,
+        ping_max: config.ping_max,
+        idle_timeout: config.idle_timeout,
+        udp_verify_timeout: config.udp_verify_timeout,
+    };
+    let limits = message_limits_from_mtu(config.tun_mtu);
+    let auth_handler = Arc::new(AuthHandler::new(
+        acceptor,
+        authenticator,
+        registry.clone(),
+        tun,
+        quic.socket().clone(),
+        limits,
+        session_timeouts,
+        config.auth_timeout,
+        config.session_queue_size,
+    ));
     let cancel = CancellationToken::new();
 
     let cancel_task = cancel.clone();
@@ -38,12 +72,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tcp_task = {
         let cancel = cancel.clone();
+        let auth_handler = auth_handler.clone();
         tokio::spawn(async move {
             frontdoor
                 .run(cancel, move |stream: TcpStream, addr| {
+                    let auth_handler = auth_handler.clone();
                     tokio::spawn(async move {
-                        eprintln!("claimed tcp connection from {addr}");
-                        drop(stream);
+                        if let Err(err) = auth_handler.handle(stream).await {
+                            eprintln!("auth handler error for {addr}: {err}");
+                        }
                     });
                 })
                 .await
@@ -73,4 +110,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std::error::Error>> {
+    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
+    match &config.tls_cert {
+        TlsMaterial::File { file } => builder.set_certificate_chain_file(file)?,
+        TlsMaterial::Pem(pem) => {
+            let mut certs = X509::stack_from_pem(pem.as_bytes())?;
+            let leaf = certs
+                .drain(..1)
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "tls_cert is empty"))?;
+            builder.set_certificate(&leaf)?;
+            for cert in certs {
+                builder.add_extra_chain_cert(cert)?;
+            }
+        }
+    }
+    match &config.tls_key {
+        TlsMaterial::File { file } => builder.set_private_key_file(file, SslFiletype::PEM)?,
+        TlsMaterial::Pem(pem) => {
+            let key = PKey::private_key_from_pem(pem.as_bytes())?;
+            builder.set_private_key(&key)?;
+        }
+    }
+    builder.check_private_key()?;
+    Ok(builder.build())
 }

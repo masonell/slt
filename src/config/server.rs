@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use crate::types::{ClientId, PubKeyEd25519, SharedSecret};
+use crate::types::{ClientId, PubKeyEd25519, SharedSecret, TlsMaterial};
 
 /// Per-client entry in the server allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +26,10 @@ pub struct ServerConfig {
     pub listen_tcp: SocketAddr,
     /// UDP listener for QUIC-based VPN traffic.
     pub listen_udp: SocketAddr,
+    /// TLS certificate chain (PEM) or file reference for server auth.
+    pub tls_cert: TlsMaterial,
+    /// TLS private key (PEM) or file reference for server auth.
+    pub tls_key: TlsMaterial,
     /// Nginx TCP upstream address for pass-through traffic.
     pub nginx_tcp_upstream: SocketAddr,
     /// Nginx UDP upstream address for pass-through traffic.
