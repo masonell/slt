@@ -6,6 +6,8 @@ use slt::config::ServerConfig;
 use slt::server::auth::{AuthHandler, Authenticator};
 use slt::server::quic::QuicEndpoint;
 use slt::server::registry::SessionRegistry;
+use slt::server::router::PacketRouter;
+use slt::server::sessions::SessionEvent;
 use slt::server::sessions::{SessionTimeouts, message_limits_from_mtu};
 use slt::server::tcp::TcpFrontDoor;
 use slt::types::TlsMaterial;
@@ -54,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         acceptor,
         authenticator,
         registry.clone(),
-        tun,
+        tun.clone(),
         quic.socket().clone(),
         limits,
         session_timeouts,
@@ -92,20 +94,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move { quic.run(cancel).await })
     };
 
+    let mut tun_task = {
+        let cancel = cancel.clone();
+        let registry = registry.clone();
+        let tun = tun.clone();
+        let mtu = config.tun_mtu;
+        tokio::spawn(async move { run_tun_reader(tun, registry, cancel, mtu).await })
+    };
+
     tokio::select! {
         res = &mut tcp_task => {
             cancel.cancel();
             res??;
             let _ = udp_task.await;
+            let _ = tun_task.await;
         }
         res = &mut udp_task => {
             cancel.cancel();
             res??;
             let _ = tcp_task.await;
+            let _ = tun_task.await;
+        }
+        res = &mut tun_task => {
+            cancel.cancel();
+            res??;
+            let _ = tcp_task.await;
+            let _ = udp_task.await;
         }
         () = cancel.cancelled() => {
             let _ = tcp_task.await;
             let _ = udp_task.await;
+            let _ = tun_task.await;
         }
     }
 
@@ -137,4 +156,31 @@ fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std:
     }
     builder.check_private_key()?;
     Ok(builder.build())
+}
+
+async fn run_tun_reader(
+    tun: Arc<tun_rs::AsyncDevice>,
+    registry: Arc<SessionRegistry>,
+    cancel: CancellationToken,
+    mtu: u16,
+) -> io::Result<()> {
+    let mut buf = vec![0u8; mtu as usize];
+    loop {
+        let n = tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            res = tun.recv(&mut buf) => res?,
+        };
+
+        if n == 0 {
+            continue;
+        }
+
+        let packet = &buf[..n];
+        let Some(dst_ip) = PacketRouter::extract_dst_ipv4(packet) else {
+            continue;
+        };
+        if let Some(tx) = registry.lookup_ip(dst_ip) {
+            let _ = tx.try_send(SessionEvent::TunPacket(packet.to_vec()));
+        }
+    }
 }
