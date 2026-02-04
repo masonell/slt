@@ -1,5 +1,6 @@
 use clap::Parser;
 use slt_core::config::ClientConfig;
+use slt_core::types::TlsMaterial;
 use std::fs;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -10,6 +11,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod runtime;
+mod tcp;
 mod tun;
 
 #[derive(Parser, Debug)]
@@ -37,7 +39,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_ctrl_c(cancel.clone());
 
     info!(
-        server_addr = %config.server_addr,
+        hostname = %config.hostname,
+        port = config.port,
+        ip = ?config.ip,
         tun_name = %config.tun_name,
         tun_mtu = config.tun_mtu,
         "client starting"
@@ -69,7 +73,10 @@ fn spawn_ctrl_c(cancel: CancellationToken) {
 
 fn log_config(config: &ClientConfig) {
     info!(
-        server_addr = %config.server_addr,
+        hostname = %config.hostname,
+        port = config.port,
+        ip = ?config.ip,
+        tls_ca = tls_material_source(&config.tls_ca),
         client_id = %config.client_id,
         assigned_ipv4 = %config.assigned_ipv4,
         tun_name = %config.tun_name,
@@ -77,6 +84,13 @@ fn log_config(config: &ClientConfig) {
         has_upgrade = config.upgrade.is_some(),
         "client config loaded (secrets redacted)"
     );
+}
+
+const fn tls_material_source(material: &TlsMaterial) -> &'static str {
+    match material {
+        TlsMaterial::Pem(_) => "pem",
+        TlsMaterial::File { .. } => "file",
+    }
 }
 
 async fn run_client(

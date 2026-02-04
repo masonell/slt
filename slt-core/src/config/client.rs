@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use crate::types::{ClientId, PrivKeyEd25519, SharedSecret};
+use crate::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
 
 /// Preferences for connection upgrade/fallback timing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,8 +18,14 @@ pub struct UpgradePreferences {
 /// Static client configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientConfig {
-    /// Server address (host:port or name:port).
-    pub server_addr: String,
+    /// Server hostname used for SNI and certificate verification.
+    pub hostname: String,
+    /// Server port to connect to.
+    pub port: u16,
+    /// Optional IP override for connecting without DNS.
+    pub ip: Option<IpAddr>,
+    /// Certificate authority or pinned certificate for server verification.
+    pub tls_ca: TlsMaterial,
     /// Stable 16-byte client identifier.
     pub client_id: ClientId,
     /// Pre-shared secret for `ClientHello` classification.
