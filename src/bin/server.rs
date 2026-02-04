@@ -17,6 +17,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpStream;
+use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use tracing_error::ErrorLayer;
@@ -100,6 +101,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     let mut tcp_task = spawn_tcp_task(frontdoor, auth_handler, cancel.clone());
     let mut udp_task = spawn_udp_task(quic, cancel.clone());
     let mut tun_task = spawn_tun_task(tun, registry, cancel.clone(), config.tun_mtu);
+    let mut metrics_task = spawn_metrics_task(metrics, cancel.clone());
 
     tokio::select! {
         res = &mut tcp_task => {
@@ -107,23 +109,34 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
             res??;
             let _ = udp_task.await;
             let _ = tun_task.await;
+            let _ = metrics_task.await;
         }
         res = &mut udp_task => {
             cancel.cancel();
             res??;
             let _ = tcp_task.await;
             let _ = tun_task.await;
+            let _ = metrics_task.await;
         }
         res = &mut tun_task => {
             cancel.cancel();
             res??;
             let _ = tcp_task.await;
             let _ = udp_task.await;
+            let _ = metrics_task.await;
+        }
+        res = &mut metrics_task => {
+            cancel.cancel();
+            res??;
+            let _ = tcp_task.await;
+            let _ = udp_task.await;
+            let _ = tun_task.await;
         }
         () = cancel.cancelled() => {
             let _ = tcp_task.await;
             let _ = udp_task.await;
             let _ = tun_task.await;
+            let _ = metrics_task.await;
         }
     }
 
@@ -172,6 +185,39 @@ fn spawn_tun_task(
     mtu: u16,
 ) -> tokio::task::JoinHandle<io::Result<()>> {
     tokio::spawn(async move { run_tun_reader(tun, registry, cancel, mtu).await })
+}
+
+fn spawn_metrics_task(
+    metrics: Arc<Metrics>,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<io::Result<()>> {
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return Ok(()),
+                _ = interval.tick() => {
+                    let snap = metrics.snapshot();
+                    info!(
+                        tcp_accepted = snap.tcp_accepted,
+                        udp_accepted = snap.udp_accepted,
+                        claimed = snap.claimed,
+                        passed = snap.passed,
+                        dropped = snap.dropped,
+                        auth_successes = snap.auth_successes,
+                        auth_failures = snap.auth_failures,
+                        tcp_to_udp = snap.transport_tcp_to_udp,
+                        udp_to_tcp = snap.transport_udp_to_tcp,
+                        disconnect_idle = snap.disconnect_idle_timeout,
+                        disconnect_close = snap.disconnect_close,
+                        disconnect_shutdown = snap.disconnect_shutdown,
+                        disconnect_error = snap.disconnect_error,
+                        "metrics snapshot"
+                    );
+                }
+            }
+        }
+    })
 }
 
 fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std::error::Error>> {

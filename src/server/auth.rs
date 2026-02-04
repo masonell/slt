@@ -125,7 +125,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     pub async fn handle(&self, stream: TcpStream) -> io::Result<()> {
         let tls = match time::timeout(self.auth_timeout, tls_accept(&self.acceptor, stream)).await {
             Ok(Ok(stream)) => stream,
-            Ok(Err(err)) => return Err(io::Error::other(format!("{err:?}"))),
+            Ok(Err(err)) => {
+                self.metrics.inc_auth_failures();
+                return Err(io::Error::other(format!("{err:?}")));
+            }
             Err(_) => {
                 self.metrics.inc_auth_failures();
                 return Ok(());
@@ -158,6 +161,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 res = tls_ref.read_buf(&mut buf) => {
                     let n = res?;
                     if n == 0 {
+                        self.metrics.inc_auth_failures();
                         return Ok(());
                     }
                 }
