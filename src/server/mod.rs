@@ -7,10 +7,10 @@ pub mod registry;
 pub mod router;
 pub mod sessions;
 pub mod tcp;
-pub mod tls;
 pub mod tun;
 pub mod udp_qsp;
 
+use std::fmt;
 use std::net::Ipv4Addr;
 
 // Re-export common types
@@ -25,5 +25,11 @@ impl AssignedIp {
     #[must_use]
     pub const fn addr(&self) -> Ipv4Addr {
         self.0
+    }
+}
+
+impl fmt::Display for AssignedIp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }

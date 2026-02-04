@@ -18,6 +18,7 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_boring::SslStream;
+use tracing::{debug, error, info, trace, warn};
 use tun_rs::AsyncDevice;
 
 use super::metrics::Metrics;
@@ -174,9 +175,27 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     ///
     /// Returns an error if the TCP stream or TUN device fails.
     pub async fn run(mut self) -> io::Result<()> {
+        info!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            assigned_ip = %self.assigned_ipv4,
+            "session created"
+        );
         let result = self.run_inner().await;
         if result.is_err() {
             self.metrics.inc_disconnect_error();
+            error!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                error = ?result.as_ref().err(),
+                "session terminated with error"
+            );
+        } else {
+            debug!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                "session terminated normally"
+            );
         }
         self.cleanup();
         result
@@ -203,6 +222,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     let n = res?;
                     if n == 0 {
                         self.metrics.inc_disconnect_close();
+                        info!(
+                            session_id = self.session_id,
+                            client_id = %self.client_id,
+                            reason = "tcp_close",
+                            "session disconnect"
+                        );
                         return Ok(());
                     }
                     self.note_activity();
@@ -221,6 +246,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     }
                     () = time::sleep_until(idle_deadline.into()) => {
                         self.metrics.inc_disconnect_idle_timeout();
+                        info!(
+                            session_id = self.session_id,
+                            client_id = %self.client_id,
+                            reason = "idle_timeout",
+                            "session disconnect"
+                        );
                         let _ = self.send_close(CloseCode::IdleTimeout).await;
                         return Ok(());
                     }
@@ -234,6 +265,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     let n = res?;
                     if n == 0 {
                         self.metrics.inc_disconnect_close();
+                        info!(
+                            session_id = self.session_id,
+                            client_id = %self.client_id,
+                            reason = "tcp_close",
+                            "session disconnect"
+                        );
                         return Ok(());
                     }
                     self.note_activity();
@@ -252,6 +289,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     }
                     () = time::sleep_until(idle_deadline.into()) => {
                         self.metrics.inc_disconnect_idle_timeout();
+                        info!(
+                            session_id = self.session_id,
+                            client_id = %self.client_id,
+                            reason = "idle_timeout",
+                            "session disconnect"
+                        );
                         let _ = self.send_close(CloseCode::IdleTimeout).await;
                         return Ok(());
                     }
@@ -293,6 +336,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             )),
             Message::Data { packet } => {
                 if self.active_transport != ActiveTransport::Tcp {
+                    trace!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        "TCP data dropped: not active transport"
+                    );
                     return Ok(SessionControl::Continue);
                 }
                 if PacketRouter::validate_packet_src(self, packet) {
@@ -328,6 +376,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             SessionEvent::Udp(claim) => self.handle_udp_claim(claim).await,
             SessionEvent::Shutdown => {
                 self.metrics.inc_disconnect_shutdown();
+                info!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    reason = "shutdown_request",
+                    "session disconnect"
+                );
                 Ok(SessionControl::Close)
             }
         }
@@ -335,6 +389,13 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 
     async fn handle_tun_packet(&mut self, packet: Vec<u8>) -> io::Result<SessionControl> {
         if packet.len() > self.limits.max_data_len {
+            trace!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                packet_len = packet.len(),
+                max_len = self.limits.max_data_len,
+                "TUN packet dropped: size limit exceeded"
+            );
             return Ok(SessionControl::Continue);
         }
 
@@ -355,6 +416,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         Ok(SessionControl::Continue)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_udp_claim(&mut self, claim: UdpClaim) -> io::Result<SessionControl> {
         let peer = claim.peer;
         let send_verify_nonce = if let Some(verify) = self.udp_verify
@@ -365,6 +427,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             None
         };
 
+        trace!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            peer = %peer,
+            dcid_prefix = ?claim.dcid_prefix,
+            "UDP claim received"
+        );
+
         let opened_payload = {
             let Some(session) = self.udp_session.as_mut() else {
                 return Ok(SessionControl::Continue);
@@ -373,9 +443,22 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             let opened = match session.open_packet(&claim.payload) {
                 Ok(opened) => opened,
                 Err(QspSessionError::Replay | QspSessionError::TooOld) => {
+                    trace!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        "UDP packet dropped: replay/too old"
+                    );
                     return Ok(SessionControl::Continue);
                 }
-                Err(_) => return Ok(SessionControl::Continue),
+                Err(err) => {
+                    trace!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        error = ?err,
+                        "UDP packet dropped: QSP error"
+                    );
+                    return Ok(SessionControl::Continue);
+                }
             };
 
             opened.payload.to_vec()
@@ -429,11 +512,22 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     self.udp_verified = true;
                     self.set_active_transport(ActiveTransport::UdpQsp);
                     self.udp_verify = None;
+                    info!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        nonce = pong_in.nonce,
+                        "UDP verification succeeded"
+                    );
                 }
                 Ok(SessionControl::Continue)
             }
             Message::Data { packet } => {
                 if !self.udp_verified {
+                    trace!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        "UDP data dropped: not verified"
+                    );
                     return Ok(SessionControl::Continue);
                 }
                 if PacketRouter::validate_packet_src(self, packet) {
@@ -444,6 +538,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             Message::Close { .. } => Ok(SessionControl::Close),
             Message::RegisterCid { payload } => {
                 if !self.udp_verified {
+                    trace!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        "register_cid dropped: not verified"
+                    );
                     return Ok(SessionControl::Continue);
                 }
                 self.handle_register_cid(payload, Transport::Udp).await
@@ -456,24 +555,48 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_register_cid(
         &mut self,
         payload: &[u8],
         transport: Transport,
     ) -> io::Result<SessionControl> {
         let Ok(register) = RegisterCidPayload::decode(payload) else {
+            warn!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                transport = ?transport,
+                reason = "decode_failed",
+                "register_cid rejected"
+            );
             self.send_register_fail(RegisterFailCode::InvalidCid, transport)
                 .await?;
             return Ok(SessionControl::Continue);
         };
 
         if register.pn_start > u64::from(u32::MAX) || register.pn_start_rx > u64::from(u32::MAX) {
+            warn!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                transport = ?transport,
+                pn_start = register.pn_start,
+                pn_start_rx = register.pn_start_rx,
+                reason = "invalid_packet_number",
+                "register_cid rejected"
+            );
             self.send_register_fail(RegisterFailCode::InvalidCid, transport)
                 .await?;
             return Ok(SessionControl::Continue);
         }
 
         let Ok(keys) = UdpQspKeys::from_register(&register) else {
+            warn!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                transport = ?transport,
+                reason = "invalid_keys",
+                "register_cid rejected"
+            );
             self.send_register_fail(RegisterFailCode::InvalidKeys, transport)
                 .await?;
             return Ok(SessionControl::Continue);
@@ -483,6 +606,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             self.registry
                 .insert_cid(self.session_id, register.dcid.prefix(), self.tx.clone())
         {
+            warn!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                transport = ?transport,
+                dcid_prefix = ?register.dcid.prefix(),
+                reason = "prefix_collision",
+                "register_cid rejected"
+            );
             self.send_register_fail(RegisterFailCode::InvalidCid, transport)
                 .await?;
             return Ok(SessionControl::Continue);
@@ -508,11 +639,22 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.udp_session = Some(udp);
         self.udp_verified = false;
         self.set_active_transport(ActiveTransport::Tcp);
+        let verify_nonce = fastrand::u64(..);
         self.udp_verify = Some(UdpVerify {
-            nonce: fastrand::u64(..),
+            nonce: verify_nonce,
             deadline: Instant::now() + self.timeouts.udp_verify_timeout,
             sent: false,
         });
+
+        debug!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            transport = ?transport,
+            dcid_prefix = ?register.dcid.prefix(),
+            scid = ?register.scid,
+            verify_nonce,
+            "register_cid accepted"
+        );
 
         let ok = RegisterOkPayload {
             dcid: register.dcid,
@@ -537,6 +679,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     }
 
     async fn send_udp_verify_ping(&mut self, nonce: u64) -> io::Result<()> {
+        debug!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            nonce,
+            "sending UDP verify ping"
+        );
         let ping = PingPayload { nonce };
         let mut buf = Vec::new();
         ping.encode(&mut buf);
@@ -561,6 +709,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         if Instant::now() < verify.deadline {
             return;
         }
+        warn!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            nonce = verify.nonce,
+            "UDP verification timed out"
+        );
         self.registry.remove_cids_for_session(self.session_id);
         self.udp_session = None;
         self.udp_peer = None;
@@ -576,9 +730,23 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         match (self.active_transport, transport) {
             (ActiveTransport::Tcp, ActiveTransport::UdpQsp) => {
                 self.metrics.inc_transport_tcp_to_udp();
+                info!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    from = "tcp",
+                    to = "udp",
+                    "transport switched"
+                );
             }
             (ActiveTransport::UdpQsp, ActiveTransport::Tcp) => {
                 self.metrics.inc_transport_udp_to_tcp();
+                debug!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    from = "udp",
+                    to = "tcp",
+                    "transport switched"
+                );
             }
             _ => {}
         }

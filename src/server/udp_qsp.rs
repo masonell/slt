@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use tracing::{debug, error, trace, warn};
+
 use crate::crypto::udp_qsp::{OpenedPacket, QspCryptoError, UdpQspKeys};
 use crate::proto::RegisterCidPayload;
 use crate::types::{Cid, CidPrefix};
@@ -36,11 +38,26 @@ impl CidEntry {
         pn_start: u64,
         key_phase: bool,
     ) -> Result<Self, QspCryptoError> {
+        debug!(
+            conn_handle,
+            dcid = ?payload.dcid,
+            scid = ?payload.scid,
+            pn_start,
+            key_phase,
+            cipher = ?payload.cipher,
+            "installing UDP-QSP keys"
+        );
+        let keys = UdpQspKeys::from_register(payload)?;
+        trace!(
+            conn_handle,
+            dcid_prefix = ?payload.dcid.prefix(),
+            "UDP-QSP keys installed successfully"
+        );
         Ok(Self {
             conn_handle,
             dcid: payload.dcid,
             scid: payload.scid,
-            keys: UdpQspKeys::from_register(payload)?,
+            keys,
             next_pn: pn_start,
             key_phase,
         })
@@ -55,11 +72,34 @@ impl CidEntry {
     /// - Packet protection fails (see `UdpQspKeys::protect`)
     pub fn protect(&mut self, payload: &[u8]) -> Result<Vec<u8>, QspCryptoError> {
         let pn = self.next_pn;
-        self.next_pn = pn
-            .checked_add(1)
-            .ok_or(QspCryptoError::InvalidPacketNumber)?;
+        trace!(
+            conn_handle = self.conn_handle,
+            scid = ?self.scid,
+            pn,
+            payload_len = payload.len(),
+            key_phase = self.key_phase,
+            "protecting outbound UDP-QSP packet"
+        );
+        self.next_pn = pn.checked_add(1).ok_or_else(|| {
+            error!(
+                conn_handle = self.conn_handle,
+                scid = ?self.scid,
+                pn,
+                "packet number overflow, cannot protect packet"
+            );
+            QspCryptoError::InvalidPacketNumber
+        })?;
         self.keys
             .protect(self.scid.as_slice(), pn, self.key_phase, payload)
+            .inspect_err(|&e| {
+                error!(
+                    conn_handle = self.conn_handle,
+                    scid = ?self.scid,
+                    pn,
+                    error = ?e,
+                    "UDP-QSP protect failed"
+                );
+            })
     }
 
     /// Open an inbound UDP-QSP packet.
@@ -71,7 +111,47 @@ impl CidEntry {
     ///
     /// Propagates errors from `UdpQspKeys::open`.
     pub fn open(&self, packet: &[u8], expected_pn: u64) -> Result<OpenedPacket, QspCryptoError> {
-        self.keys.open(self.dcid.len(), packet, expected_pn)
+        trace!(
+            conn_handle = self.conn_handle,
+            dcid = ?self.dcid,
+            expected_pn,
+            packet_len = packet.len(),
+            "opening inbound UDP-QSP packet"
+        );
+        self.keys
+            .open(self.dcid.len(), packet, expected_pn)
+            .inspect_err(|&e| {
+                // Log specific error types with appropriate levels
+                match &e {
+                    QspCryptoError::InvalidPacketNumber => {
+                        warn!(
+                            conn_handle = self.conn_handle,
+                            dcid = ?self.dcid,
+                            expected_pn,
+                            error = ?e,
+                            "UDP-QSP open failed: packet number window error"
+                        );
+                    }
+                    QspCryptoError::CryptoFail => {
+                        warn!(
+                            conn_handle = self.conn_handle,
+                            dcid = ?self.dcid,
+                            expected_pn,
+                            error = ?e,
+                            "UDP-QSP open failed: crypto operation failed (likely authentication)"
+                        );
+                    }
+                    _ => {
+                        error!(
+                            conn_handle = self.conn_handle,
+                            dcid = ?self.dcid,
+                            expected_pn,
+                            error = ?e,
+                            "UDP-QSP open failed"
+                        );
+                    }
+                }
+            })
     }
 
     /// Return the prefix used to classify the CID.

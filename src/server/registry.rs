@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use parking_lot::RwLock;
+use tracing::{debug, info, trace, warn};
 
 use super::sessions::SessionTx;
 use super::{AssignedIp, ClientId};
@@ -87,14 +88,46 @@ impl SessionRegistry {
         let old = inner.sessions.insert(client_id, handle.clone());
 
         if let Some(old_handle) = &old {
+            info!(
+                session_id = session_id,
+                old_session_id = old_handle.session_id,
+                client_id = %client_id,
+                assigned_ip = %assigned_ipv4.addr(),
+                old_assigned_ip = %old_handle.assigned_ipv4.addr(),
+                "replacing existing session"
+            );
             if old_handle.assigned_ipv4.addr() != assigned_ipv4.addr() {
+                trace!(
+                    old_session_id = old_handle.session_id,
+                    ip = %old_handle.assigned_ipv4.addr(),
+                    "removing old IP route"
+                );
                 inner.ip_routes.remove(&old_handle.assigned_ipv4.addr());
             }
+            let before = inner.cid_routes.len();
             inner
                 .cid_routes
                 .retain(|_, route| route.session_id != old_handle.session_id);
+            let removed_count = before - inner.cid_routes.len();
+            debug!(
+                old_session_id = old_handle.session_id,
+                removed_cid_routes = removed_count,
+                "removed CID routes for replaced session"
+            );
+        } else {
+            debug!(
+                session_id = session_id,
+                client_id = %client_id,
+                assigned_ip = %assigned_ipv4.addr(),
+                "registering new session"
+            );
         }
 
+        trace!(
+            session_id = session_id,
+            ip = %assigned_ipv4.addr(),
+            "inserting IP route"
+        );
         inner.ip_routes.insert(assigned_ipv4.addr(), handle.clone());
         drop(inner);
         (handle, old)
@@ -102,12 +135,19 @@ impl SessionRegistry {
 
     /// Remove a session entry if it still matches `session_id`.
     pub fn remove_session(&self, session_id: u64, client_id: ClientId, assigned_ipv4: AssignedIp) {
+        debug!(
+            session_id = session_id,
+            client_id = %client_id,
+            assigned_ip = %assigned_ipv4.addr(),
+            "removing session"
+        );
         let mut inner = self.inner.write();
         if inner
             .sessions
             .get(&client_id)
             .is_some_and(|handle| handle.session_id == session_id)
         {
+            trace!(session_id = session_id, client_id = %client_id, "removing session entry");
             inner.sessions.remove(&client_id);
         }
 
@@ -116,12 +156,25 @@ impl SessionRegistry {
             .get(&assigned_ipv4.addr())
             .is_some_and(|handle| handle.session_id == session_id)
         {
+            trace!(
+                session_id = session_id,
+                ip = %assigned_ipv4.addr(),
+                "removing IP route"
+            );
             inner.ip_routes.remove(&assigned_ipv4.addr());
         }
 
+        let before = inner.cid_routes.len();
         inner
             .cid_routes
             .retain(|_, route| route.session_id != session_id);
+        let removed_count = before - inner.cid_routes.len();
+        drop(inner);
+        trace!(
+            session_id = session_id,
+            removed_cid_routes = removed_count,
+            "removed CID routes for session"
+        );
     }
 
     /// Insert a CID prefix for routing.
@@ -142,8 +195,19 @@ impl SessionRegistry {
         if let Some(route) = inner.cid_routes.get(&prefix)
             && route.session_id != session_id
         {
+            warn!(
+                session_id = session_id,
+                conflicting_session_id = route.session_id,
+                prefix = ?prefix,
+                "CID prefix collision detected"
+            );
             return Err(CidInsertError::PrefixCollision(prefix));
         }
+        trace!(
+            session_id = session_id,
+            prefix = ?prefix,
+            "inserting CID route"
+        );
         inner.cid_routes.insert(prefix, CidRoute { session_id, tx });
         drop(inner);
         Ok(())
@@ -152,17 +216,34 @@ impl SessionRegistry {
     /// Remove all CID routes owned by `session_id`.
     pub fn remove_cids_for_session(&self, session_id: u64) {
         let mut inner = self.inner.write();
+        let before = inner.cid_routes.len();
         inner
             .cid_routes
             .retain(|_, route| route.session_id != session_id);
+        let removed_count = before - inner.cid_routes.len();
+        drop(inner);
+        trace!(
+            session_id = session_id,
+            removed_cid_routes = removed_count,
+            "removed all CID routes for session"
+        );
     }
 
     /// Remove all CID routes for `session_id` except `keep_prefix`.
     pub fn remove_cids_for_session_except(&self, session_id: u64, keep_prefix: CidPrefix) {
         let mut inner = self.inner.write();
+        let before = inner.cid_routes.len();
         inner
             .cid_routes
             .retain(|prefix, route| route.session_id != session_id || *prefix == keep_prefix);
+        let removed_count = before - inner.cid_routes.len();
+        drop(inner);
+        trace!(
+            session_id = session_id,
+            keep_prefix = ?keep_prefix,
+            removed_cid_routes = removed_count,
+            "removed CID routes for session (except keep_prefix)"
+        );
     }
 
     /// Lookup a session by CID prefix.

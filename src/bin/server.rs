@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let raw = fs::read_to_string(&args.config)?;
     let config: ServerConfig = toml::from_str(&raw)?;
+    info!(config_path = %args.config.display(), "config parsed successfully");
     let config = Arc::new(config);
 
     info!(
@@ -63,6 +64,8 @@ fn init_tracing() {
 }
 
 async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error::Error>> {
+    debug!("server runtime: initializing components");
+
     let metrics = Arc::new(Metrics::default());
     let registry = Arc::new(SessionRegistry::new());
     let frontdoor = TcpFrontDoor::bind(&config, metrics.clone()).await?;
@@ -98,54 +101,68 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
 
     spawn_ctrl_c(cancel.clone());
 
+    debug!("server runtime: spawning worker tasks");
+
     let mut tcp_task = spawn_tcp_task(frontdoor, auth_handler, cancel.clone());
     let mut udp_task = spawn_udp_task(quic, cancel.clone());
     let mut tun_task = spawn_tun_task(tun, registry, cancel.clone(), config.tun_mtu);
     let mut metrics_task = spawn_metrics_task(metrics, cancel.clone());
 
-    tokio::select! {
+    let shutdown_result = tokio::select! {
         res = &mut tcp_task => {
+            info!(reason = "tcp_task_failure", "graceful shutdown initiated");
             cancel.cancel();
-            res??;
+            let res = res;
             let _ = udp_task.await;
             let _ = tun_task.await;
             let _ = metrics_task.await;
+            classify_task_result("tcp", res)
         }
         res = &mut udp_task => {
+            info!(reason = "udp_task_failure", "graceful shutdown initiated");
             cancel.cancel();
-            res??;
+            let res = res;
             let _ = tcp_task.await;
             let _ = tun_task.await;
             let _ = metrics_task.await;
+            classify_task_result("udp", res)
         }
         res = &mut tun_task => {
+            info!(reason = "tun_task_failure", "graceful shutdown initiated");
             cancel.cancel();
-            res??;
+            let res = res;
             let _ = tcp_task.await;
             let _ = udp_task.await;
             let _ = metrics_task.await;
+            classify_task_result("tun", res)
         }
         res = &mut metrics_task => {
+            info!(reason = "metrics_task_failure", "graceful shutdown initiated");
             cancel.cancel();
-            res??;
+            let res = res;
             let _ = tcp_task.await;
             let _ = udp_task.await;
             let _ = tun_task.await;
+            classify_task_result("metrics", res)
         }
         () = cancel.cancelled() => {
+            info!(reason = "ctrl_c", "graceful shutdown initiated");
             let _ = tcp_task.await;
             let _ = udp_task.await;
             let _ = tun_task.await;
             let _ = metrics_task.await;
+            Ok(())
         }
-    }
+    };
 
-    Ok(())
+    info!("server shutdown complete");
+    shutdown_result
 }
 
 fn spawn_ctrl_c(cancel: CancellationToken) {
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
+            debug!("received ctrl_c signal");
             cancel.cancel();
         }
     });
@@ -169,6 +186,23 @@ fn spawn_tcp_task(
             })
             .await
     })
+}
+
+fn classify_task_result(
+    task: &'static str,
+    res: Result<io::Result<()>, tokio::task::JoinError>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match res {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => {
+            error!(task, error = %err, "worker task failed");
+            Err(Box::new(err))
+        }
+        Err(err) => {
+            error!(task, error = %err, "worker task failed");
+            Err(Box::new(err))
+        }
+    }
 }
 
 fn spawn_udp_task(
@@ -222,9 +256,19 @@ fn spawn_metrics_task(
 
 fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std::error::Error>> {
     let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
+
+    // Load TLS certificate
     match &config.tls_cert {
-        TlsMaterial::File { file } => builder.set_certificate_chain_file(file)?,
+        TlsMaterial::File { file } => {
+            debug!(source = "file", path = %file.display(), "loading tls certificate");
+            builder.set_certificate_chain_file(file)?;
+        }
         TlsMaterial::Pem(pem) => {
+            debug!(
+                source = "pem",
+                pem_length = pem.len(),
+                "loading tls certificate"
+            );
             let mut certs = X509::stack_from_pem(pem.as_bytes())?;
             let leaf = certs
                 .drain(..1)
@@ -236,14 +280,26 @@ fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std:
             }
         }
     }
+
+    // Load TLS private key
     match &config.tls_key {
-        TlsMaterial::File { file } => builder.set_private_key_file(file, SslFiletype::PEM)?,
+        TlsMaterial::File { file } => {
+            debug!(source = "file", path = %file.display(), "loading tls private key");
+            builder.set_private_key_file(file, SslFiletype::PEM)?;
+        }
         TlsMaterial::Pem(pem) => {
+            debug!(
+                source = "pem",
+                pem_length = pem.len(),
+                "loading tls private key"
+            );
             let key = PKey::private_key_from_pem(pem.as_bytes())?;
             builder.set_private_key(&key)?;
         }
     }
+
     builder.check_private_key()?;
+    trace!("tls acceptor built successfully");
     Ok(builder.build())
 }
 

@@ -12,6 +12,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_boring::accept as tls_accept;
+use tracing::{debug, error, info, trace, warn};
 use tun_rs::AsyncDevice;
 
 use crate::config::{ServerClient, ServerConfig};
@@ -123,13 +124,21 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     ///
     /// Returns an error if the TLS handshake, exporter, or socket IO fails.
     pub async fn handle(&self, stream: TcpStream) -> io::Result<()> {
+        let peer_addr = stream.peer_addr().ok();
+        debug!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "starting TLS handshake");
+
         let tls = match time::timeout(self.auth_timeout, tls_accept(&self.acceptor, stream)).await {
-            Ok(Ok(stream)) => stream,
+            Ok(Ok(stream)) => {
+                debug!(peer_addr = ?peer_addr, "TLS handshake completed");
+                stream
+            }
             Ok(Err(err)) => {
+                warn!(peer_addr = ?peer_addr, error = ?err, "TLS handshake failed");
                 self.metrics.inc_auth_failures();
                 return Err(io::Error::other(format!("{err:?}")));
             }
             Err(_) => {
+                warn!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "TLS handshake timed out");
                 self.metrics.inc_auth_failures();
                 return Ok(());
             }
@@ -155,15 +164,18 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 .ok_or_else(|| io::Error::other("tls stream missing"))?;
             tokio::select! {
                 () = timeout => {
+                    warn!(peer_addr = ?peer_addr, "auth phase timed out waiting for message");
                     self.metrics.inc_auth_failures();
                     return Ok(());
                 },
                 res = tls_ref.read_buf(&mut buf) => {
                     let n = res?;
                     if n == 0 {
+                        trace!(peer_addr = ?peer_addr, "connection closed during auth phase");
                         self.metrics.inc_auth_failures();
                         return Ok(());
                     }
+                    trace!(bytes_read = n, peer_addr = ?peer_addr, "received data during auth phase");
                 }
             }
 
@@ -203,9 +215,13 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         match message {
             Message::Auth { payload } => {
                 let auth = AuthPayload::decode(payload).map_err(map_payload_error)?;
+                trace!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, "processing auth message");
+
                 match self.verify_auth(&auth, challenge) {
                     Ok(assigned_ip) => {
                         self.metrics.inc_auth_successes();
+                        info!(client_id = %auth.client_id, assigned_ip = %assigned_ip, "authentication successful");
+
                         let mut ok_buf = Vec::new();
                         let ok = AuthOkPayload;
                         ok.encode(&mut ok_buf);
@@ -223,6 +239,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                             self.registry
                                 .register_session(auth.client_id, assigned_ip, tx.clone());
                         if let Some(old) = old {
+                            debug!(client_id = %auth.client_id, session_id = %handle.session_id, replaced_session_id = %old.session_id, "replacing existing session");
                             tokio::spawn(async move {
                                 let _ = old.tx.send(SessionEvent::Shutdown).await;
                             });
@@ -255,6 +272,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                     }
                     Err(code) => {
                         self.metrics.inc_auth_failures();
+                        warn!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, code = ?code, "authentication failed");
                         let tls_ref = tls
                             .as_mut()
                             .ok_or_else(|| io::Error::other("tls stream missing"))?;
@@ -265,6 +283,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             }
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
+                trace!(nonce = ping_in.nonce, "received ping during auth phase");
                 let pong_out = PongPayload {
                     nonce: ping_in.nonce,
                 };
@@ -277,9 +296,13 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                     .await?;
                 Ok(AuthStep::Continue)
             }
-            Message::Close { .. } => Ok(AuthStep::Done),
+            Message::Close { .. } => {
+                trace!("received close message during auth phase");
+                Ok(AuthStep::Done)
+            }
             _ => {
                 self.metrics.inc_auth_failures();
+                warn!(message = ?message, "received unexpected message during auth phase");
                 let tls_ref = tls
                     .as_mut()
                     .ok_or_else(|| io::Error::other("tls stream missing"))?;
@@ -291,6 +314,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
     fn ensure_session_queue_size(&self) -> io::Result<()> {
         if self.session_queue_size == 0 {
+            error!("session_queue_size must be non-zero");
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "session_queue_size must be non-zero",
@@ -356,13 +380,18 @@ fn verify_auth_payload(
     let client = authenticator
         .get(&payload.client_id)
         .ok_or(AuthFailCode::UnknownClient)?;
+    trace!(client_id = %payload.client_id, "looking up client in authenticator");
+
     if !client.enabled {
+        trace!(client_id = %payload.client_id, "client is disabled");
         return Err(AuthFailCode::Disabled);
     }
     if client.assigned_ipv4 != payload.assigned_ipv4 {
+        trace!(client_id = %payload.client_id, expected = %client.assigned_ipv4, provided = %payload.assigned_ipv4, "IP address mismatch");
         return Err(AuthFailCode::IpMismatch);
     }
     if &payload.challenge != challenge {
+        trace!(client_id = %payload.client_id, "challenge mismatch");
         return Err(AuthFailCode::ChallengeInvalid);
     }
 
@@ -372,12 +401,17 @@ fn verify_auth_payload(
     context.extend_from_slice(&payload.assigned_ipv4.octets());
     context.extend_from_slice(challenge);
 
-    let key = VerifyingKey::from_bytes(client.pubkey_ed25519.as_bytes())
-        .map_err(|_| AuthFailCode::BadSignature)?;
+    let key = VerifyingKey::from_bytes(client.pubkey_ed25519.as_bytes()).map_err(|_| {
+        trace!(client_id = %payload.client_id, "failed to parse verifying key");
+        AuthFailCode::BadSignature
+    })?;
     let signature = Signature::from_bytes(&payload.signature);
-    key.verify_strict(&context, &signature)
-        .map_err(|_| AuthFailCode::BadSignature)?;
+    key.verify_strict(&context, &signature).map_err(|_| {
+        trace!(client_id = %payload.client_id, "signature verification failed");
+        AuthFailCode::BadSignature
+    })?;
 
+    trace!(client_id = %payload.client_id, "signature verified successfully");
     Ok(AssignedIp(client.assigned_ipv4))
 }
 
