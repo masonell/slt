@@ -1,9 +1,25 @@
 use crate::{auth, tcp, tun};
 use slt_core::config::ClientConfig;
+use slt_core::proto::{
+    AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_PAYLOAD_LEN, CloseCode, ClosePayload, FrameError, HP_KEY_LEN,
+    MAX_DCID_LEN, Message, MessageError, MessageLimits, PayloadError, PingPayload, PongPayload,
+    decode_message, encode_message,
+};
+use std::io;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use tokio::time;
+use tokio_boring::SslStream;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info, trace, warn};
 use tun_rs::DeviceBuilder;
+
+const PING_MIN: Duration = Duration::from_secs(10);
+const PING_MAX: Duration = Duration::from_secs(20);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Run the client runtime until shutdown.
 pub async fn run_client(
@@ -15,7 +31,7 @@ pub async fn run_client(
     let auth_outcome = auth::authenticate(&mut tcp.stream, &config).await?;
     tcp.read_buf = auth_outcome.leftover;
     if !tcp.read_buf.is_empty() {
-        tracing::debug!(len = tcp.read_buf.len(), "preserved auth leftovers");
+        debug!(len = tcp.read_buf.len(), "preserved auth leftovers");
     }
 
     let tun = Arc::new(
@@ -25,12 +41,291 @@ pub async fn run_client(
             .build_async()?,
     );
 
-    let tun_handles = tun::spawn(tun, config.assigned_ipv4, cancel.clone(), config.tun_mtu);
-    let _ = (&tun_handles.to_session_rx, &tun_handles.to_tun_tx);
+    let mut tun_handles = tun::spawn(tun, config.assigned_ipv4, cancel.clone(), config.tun_mtu);
+    let limits = message_limits_from_mtu(config.tun_mtu);
 
-    info!("client runtime not implemented yet; waiting for shutdown");
-    cancel.cancelled().await;
+    let (to_session_rx, to_tun_tx) = tun_handles.take_channels();
+    let mut session = ClientSession::new(
+        tcp.stream,
+        tcp.read_buf,
+        to_session_rx,
+        to_tun_tx,
+        cancel.clone(),
+        limits,
+        PING_MIN,
+        PING_MAX,
+        IDLE_TIMEOUT,
+    );
+
+    let result = session.run().await;
+    cancel.cancel();
     tun_handles.shutdown().await;
+
+    if let Err(err) = result {
+        warn!(error = %err, "client session exited with error");
+        return Err(err.into());
+    }
+
     info!("client shutdown complete");
     Ok(())
+}
+
+struct ClientSession {
+    stream: SslStream<TcpStream>,
+    read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
+    to_session_rx: mpsc::Receiver<Vec<u8>>,
+    to_tun_tx: mpsc::Sender<Vec<u8>>,
+    cancel: CancellationToken,
+    limits: MessageLimits,
+    last_activity: Instant,
+    ping_min: Duration,
+    ping_max: Duration,
+    idle_timeout: Duration,
+}
+
+impl ClientSession {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        stream: SslStream<TcpStream>,
+        read_buf: Vec<u8>,
+        to_session_rx: mpsc::Receiver<Vec<u8>>,
+        to_tun_tx: mpsc::Sender<Vec<u8>>,
+        cancel: CancellationToken,
+        limits: MessageLimits,
+        ping_min: Duration,
+        ping_max: Duration,
+        idle_timeout: Duration,
+    ) -> Self {
+        Self {
+            stream,
+            read_buf,
+            write_buf: Vec::new(),
+            to_session_rx,
+            to_tun_tx,
+            cancel,
+            limits,
+            last_activity: Instant::now(),
+            ping_min,
+            ping_max,
+            idle_timeout,
+        }
+    }
+
+    async fn run(&mut self) -> io::Result<()> {
+        let mut next_ping_at = self.schedule_next_ping();
+
+        loop {
+            if !self.read_buf.is_empty() && self.handle_tcp_read().await? == SessionControl::Close {
+                return Ok(());
+            }
+
+            let idle_deadline = self.last_activity + self.idle_timeout;
+
+            tokio::select! {
+                () = self.cancel.cancelled() => {
+                    info!("shutdown requested");
+                    if let Err(err) = self.send_close(CloseCode::Normal).await {
+                        debug!(error = %err, "failed to send close on shutdown");
+                    }
+                    return Ok(());
+                }
+                res = self.stream.read_buf(&mut self.read_buf) => {
+                    let n = res?;
+                    if n == 0 {
+                        info!("tcp connection closed");
+                        return Ok(());
+                    }
+                    self.note_activity();
+                    if self.handle_tcp_read().await? == SessionControl::Close {
+                        return Ok(());
+                    }
+                }
+                maybe = self.to_session_rx.recv() => {
+                    let Some(packet) = maybe else {
+                        info!("tun channel closed");
+                        if let Err(err) = self.send_close(CloseCode::Normal).await {
+                            debug!(error = %err, "failed to send close after tun shutdown");
+                        }
+                        return Ok(());
+                    };
+                    if self.handle_tun_packet(packet).await? == SessionControl::Close {
+                        return Ok(());
+                    }
+                }
+                () = time::sleep_until(next_ping_at.into()) => {
+                    self.handle_ping_tick().await?;
+                    next_ping_at = self.schedule_next_ping();
+                }
+                () = time::sleep_until(idle_deadline.into()) => {
+                    info!("idle timeout reached");
+                    if let Err(err) = self.send_close(CloseCode::IdleTimeout).await {
+                        debug!(error = %err, "failed to send idle close");
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
+        loop {
+            let decoded = decode_message(&self.read_buf, self.limits).map_err(map_message_error)?;
+            let Some((_, consumed)) = decoded else {
+                return Ok(SessionControl::Continue);
+            };
+
+            let rest = self.read_buf.split_off(consumed);
+            let frame_buf = std::mem::replace(&mut self.read_buf, rest);
+            let decoded = decode_message(&frame_buf, self.limits).map_err(map_message_error)?;
+            let Some((message, _)) = decoded else {
+                return Ok(SessionControl::Continue);
+            };
+
+            if self.handle_tcp_message(message).await? == SessionControl::Close {
+                return Ok(SessionControl::Close);
+            }
+        }
+    }
+
+    async fn handle_tcp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
+        self.note_activity();
+        match message {
+            Message::Data { packet } => {
+                if self.to_tun_tx.send(packet.to_vec()).await.is_err() {
+                    return Ok(SessionControl::Close);
+                }
+                Ok(SessionControl::Continue)
+            }
+            Message::Ping { payload } => {
+                let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
+                let pong_out = PongPayload {
+                    nonce: ping_in.nonce,
+                };
+                let mut pong_buf = Vec::with_capacity(8);
+                pong_out.encode(&mut pong_buf);
+                self.send_tcp_message(Message::Pong { payload: &pong_buf })
+                    .await?;
+                Ok(SessionControl::Continue)
+            }
+            Message::Pong { payload } => {
+                let pong_in = PongPayload::decode(payload).map_err(map_payload_error)?;
+                trace!(nonce = pong_in.nonce, "received pong");
+                Ok(SessionControl::Continue)
+            }
+            Message::Close { payload } => {
+                let close = ClosePayload::decode(payload).map_err(map_payload_error)?;
+                info!(code = ?close.code, "received close");
+                Ok(SessionControl::Close)
+            }
+            Message::RegisterCid { .. }
+            | Message::RegisterOk { .. }
+            | Message::RegisterFail { .. }
+            | Message::Auth { .. }
+            | Message::AuthOk { .. }
+            | Message::AuthFail { .. } => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected control message on established session",
+            )),
+        }
+    }
+
+    async fn handle_tun_packet(&mut self, packet: Vec<u8>) -> io::Result<SessionControl> {
+        if packet.is_empty() {
+            return Ok(SessionControl::Continue);
+        }
+        if packet.len() > self.limits.max_data_len {
+            trace!(
+                packet_len = packet.len(),
+                max_len = self.limits.max_data_len,
+                "dropping tun packet: size limit exceeded"
+            );
+            return Ok(SessionControl::Continue);
+        }
+
+        self.send_tcp_message(Message::Data {
+            packet: packet.as_slice(),
+        })
+        .await?;
+        Ok(SessionControl::Continue)
+    }
+
+    async fn handle_ping_tick(&mut self) -> io::Result<()> {
+        let nonce = fastrand::u64(..);
+        let ping = PingPayload { nonce };
+        let mut buf = Vec::with_capacity(8);
+        ping.encode(&mut buf);
+        trace!(nonce, "sending ping");
+        self.send_tcp_message(Message::Ping { payload: &buf }).await
+    }
+
+    async fn send_close(&mut self, code: CloseCode) -> io::Result<()> {
+        let payload = ClosePayload { code };
+        let mut buf = Vec::with_capacity(1);
+        payload.encode(&mut buf);
+        self.send_tcp_message(Message::Close { payload: &buf })
+            .await
+    }
+
+    async fn send_tcp_message(&mut self, message: Message<'_>) -> io::Result<()> {
+        self.write_buf.clear();
+        encode_message(message, &mut self.write_buf).map_err(map_frame_error)?;
+        self.stream.write_all(&self.write_buf).await
+    }
+
+    fn schedule_next_ping(&self) -> Instant {
+        let min_ms = u64::try_from(self.ping_min.as_millis()).unwrap_or(u64::MAX);
+        let max_ms = u64::try_from(self.ping_max.as_millis()).unwrap_or(u64::MAX);
+        let jitter_ms = if max_ms > min_ms {
+            fastrand::u64(0..=(max_ms - min_ms))
+        } else {
+            0
+        };
+        Instant::now() + Duration::from_millis(min_ms + jitter_ms)
+    }
+
+    fn note_activity(&mut self) {
+        self.last_activity = Instant::now();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionControl {
+    Continue,
+    Close,
+}
+
+fn message_limits_from_mtu(mtu: u16) -> MessageLimits {
+    let max_data_len = mtu as usize;
+    let max_register_len = 1
+        + MAX_DCID_LEN
+        + 1
+        + MAX_DCID_LEN
+        + 1
+        + (HP_KEY_LEN * 2)
+        + (AEAD_KEY_LEN * 2)
+        + (AEAD_IV_LEN * 2)
+        + 8
+        + 8
+        + 1;
+    let max_frame_len = max_data_len.max(max_register_len).max(AUTH_PAYLOAD_LEN);
+    MessageLimits::new(max_frame_len, max_data_len)
+}
+
+fn map_frame_error(err: FrameError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
+}
+
+fn map_message_error(err: MessageError) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("message error: {err:?}"),
+    )
+}
+
+fn map_payload_error(err: PayloadError) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("payload error: {err:?}"),
+    )
 }

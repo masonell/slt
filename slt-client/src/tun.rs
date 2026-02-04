@@ -26,6 +26,14 @@ impl TunHandles {
         join_task("tun_reader", self.reader).await;
         join_task("tun_writer", self.writer).await;
     }
+
+    /// Take the session channels while keeping the task handles for shutdown.
+    pub fn take_channels(&mut self) -> (mpsc::Receiver<Vec<u8>>, mpsc::Sender<Vec<u8>>) {
+        let (dummy_tx, dummy_rx) = mpsc::channel(1);
+        let to_session_rx = std::mem::replace(&mut self.to_session_rx, dummy_rx);
+        let to_tun_tx = std::mem::replace(&mut self.to_tun_tx, dummy_tx);
+        (to_session_rx, to_tun_tx)
+    }
 }
 
 /// Spawn TUN reader/writer tasks and return channels plus handles.
