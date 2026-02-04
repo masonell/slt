@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 
-use crate::crypto::udp_qsp::SessionIo;
+use slt_core::crypto::udp_qsp::SessionIo;
 
 /// UDP socket interface used for session traffic.
 pub trait UdpSocketIo: Send + Sync + 'static {

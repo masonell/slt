@@ -1,6 +1,6 @@
 use clap::Parser;
 use quiche::ConnectionId;
-use slt::crypto::quic_client_chrome_config;
+use slt_core::crypto::quic_client_chrome_config;
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 

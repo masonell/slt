@@ -25,10 +25,10 @@ use super::metrics::Metrics;
 use super::quic::UdpClaim;
 use super::registry::{CidInsertError, SessionRegistry};
 use super::router::PacketRouter;
-use super::tun::TunDeviceIo;
 use super::{AssignedIp, ClientId};
-use crate::crypto::udp_qsp::{QspSessionError, QuicQspSession, UdpQspKeys};
-use crate::proto::{
+use crate::tun::TunDeviceIo;
+use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, UdpQspKeys};
+use slt_core::proto::{
     CloseCode, ClosePayload, FrameError, Message, MessageError, MessageLimits, PayloadError,
     PingPayload, PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload,
     RegisterOkPayload, decode_message, encode_message,
@@ -861,11 +861,11 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
 
-    use crate::proto::{
+    use slt_core::proto::{
         AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, CloseCode, ClosePayload, HP_KEY_LEN,
         RegisterFailCode, RegisterFailPayload,
     };
-    use crate::types::{Cid, QUIC_DCID_PREFIX_LEN};
+    use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
 
     #[derive(Clone)]
     struct TestTun {
@@ -906,8 +906,8 @@ mod tests {
     fn cert_paths() -> (PathBuf, PathBuf) {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         (
-            root.join("vendor/boring/test/cert.pem"),
-            root.join("vendor/boring/test/key.pem"),
+            root.join("../vendor/boring/test/cert.pem"),
+            root.join("../vendor/boring/test/key.pem"),
         )
     }
 

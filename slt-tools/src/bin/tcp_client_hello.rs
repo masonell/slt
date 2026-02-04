@@ -1,9 +1,9 @@
 use boring::rand::rand_bytes;
 use boring::ssl::{HandshakeError, Ssl, SslVerifyMode};
 use clap::Parser;
-use slt::crypto::client_hello::client_hello_session_id_callback;
-use slt::crypto::{configure_client_chrome_ssl, tcp_client_chrome_ctx_builder};
-use slt::types::SharedSecret;
+use slt_core::crypto::client_hello::client_hello_session_id_callback;
+use slt_core::crypto::{configure_client_chrome_ssl, tcp_client_chrome_ctx_builder};
+use slt_core::types::SharedSecret;
 use std::net::ToSocketAddrs;
 
 #[derive(Parser, Debug)]

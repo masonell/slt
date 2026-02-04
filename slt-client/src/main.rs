@@ -1,6 +1,5 @@
 use clap::Parser;
-use slt::config::ClientConfig;
-use slt::server::router::PacketRouter;
+use slt_core::config::ClientConfig;
 use std::fs;
 use std::io;
 use std::net::Ipv4Addr;
@@ -156,7 +155,7 @@ async fn run_tun_reader(
         }
 
         let packet = &buf[..n];
-        let Some(src_ip) = PacketRouter::extract_src_ipv4(packet) else {
+        let Some(src_ip) = slt_core::packet::extract_src_ipv4(packet) else {
             debug!(len = n, "tun packet missing IPv4 src");
             continue;
         };

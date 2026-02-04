@@ -15,18 +15,19 @@ use tokio_boring::accept as tls_accept;
 use tracing::{debug, error, info, trace, warn};
 use tun_rs::AsyncDevice;
 
-use crate::config::{ServerClient, ServerConfig};
-use crate::proto::{
-    AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, FrameError, Message, MessageError,
-    MessageLimits, PayloadError, PingPayload, PongPayload, decode_message, encode_message,
+use slt_core::config::{ServerClient, ServerConfig};
+use slt_core::proto::{
+    AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, FrameError,
+    Message, MessageError, MessageLimits, PayloadError, PingPayload, PongPayload, decode_message,
+    encode_message,
 };
-use crate::types::ClientId;
+use slt_core::types::ClientId;
 
 use super::AssignedIp;
 use super::metrics::Metrics;
 use super::registry::SessionRegistry;
-use super::sessions::{ClientSessionBase, SessionEvent, SessionTimeouts};
-use super::tun::TunDeviceIo;
+use crate::sessions::{ClientSessionBase, SessionEvent, SessionTimeouts};
+use crate::tun::TunDeviceIo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthStep {
@@ -145,7 +146,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         };
         let mut tls = Some(tls);
 
-        let mut challenge = [0u8; crate::proto::AUTH_CHALLENGE_LEN];
+        let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
         let tls_ref = tls
             .as_ref()
             .ok_or_else(|| io::Error::other("tls stream missing"))?;
@@ -210,7 +211,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         message: Message<'_>,
         tls: &mut Option<tokio_boring::SslStream<TcpStream>>,
         buf: &mut Vec<u8>,
-        challenge: &[u8; crate::proto::AUTH_CHALLENGE_LEN],
+        challenge: &[u8; AUTH_CHALLENGE_LEN],
     ) -> io::Result<AuthStep> {
         match message {
             Message::Auth { payload } => {
@@ -326,7 +327,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     fn verify_auth(
         &self,
         payload: &AuthPayload,
-        challenge: &[u8; crate::proto::AUTH_CHALLENGE_LEN],
+        challenge: &[u8; AUTH_CHALLENGE_LEN],
     ) -> Result<AssignedIp, AuthFailCode> {
         verify_auth_payload(&self.authenticator, payload, challenge)
     }
@@ -375,7 +376,7 @@ fn map_payload_error(err: PayloadError) -> io::Error {
 fn verify_auth_payload(
     authenticator: &Authenticator,
     payload: &AuthPayload,
-    challenge: &[u8; crate::proto::AUTH_CHALLENGE_LEN],
+    challenge: &[u8; AUTH_CHALLENGE_LEN],
 ) -> Result<AssignedIp, AuthFailCode> {
     let client = authenticator
         .get(&payload.client_id)
@@ -421,8 +422,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use crate::proto::AUTH_CHALLENGE_LEN;
-    use crate::types::{PubKeyEd25519, SharedSecret};
+    use slt_core::proto::AUTH_CHALLENGE_LEN;
+    use slt_core::types::{PubKeyEd25519, SharedSecret, TlsMaterial};
 
     fn make_client(
         client_id: ClientId,
@@ -479,10 +480,10 @@ mod tests {
             server_secret: SharedSecret([0xAA; 32]),
             listen_tcp: SocketAddr::from(([127, 0, 0, 1], 0)),
             listen_udp: SocketAddr::from(([127, 0, 0, 1], 0)),
-            tls_cert: crate::types::TlsMaterial::File {
+            tls_cert: TlsMaterial::File {
                 file: "vendor/boring/test/cert.pem".into(),
             },
-            tls_key: crate::types::TlsMaterial::File {
+            tls_key: TlsMaterial::File {
                 file: "vendor/boring/test/key.pem".into(),
             },
             nginx_tcp_upstream: SocketAddr::from(([127, 0, 0, 1], 0)),

@@ -5,9 +5,9 @@ pub mod crypto;
 pub use crypto::client_hello;
 /// Static configuration types.
 pub mod config;
+/// IPv4 packet parsing utilities.
+pub mod packet;
 /// VPN protocol framing and message definitions.
 pub mod proto;
-/// Server-side abstractions.
-pub mod server;
 /// Common types used across the codebase.
 pub mod types;

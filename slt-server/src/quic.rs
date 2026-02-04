@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 
 use super::metrics::Metrics;
 use super::registry::SessionRegistry;
-use super::sessions::SessionEvent;
-use crate::classifier::{QuicVerdict, classify_quic_datagram};
-use crate::config::ServerConfig;
-use crate::types::CidPrefix;
+use crate::sessions::SessionEvent;
 use lru::LruCache;
+use slt_core::classifier::{QuicVerdict, classify_quic_datagram};
+use slt_core::config::ServerConfig;
+use slt_core::types::CidPrefix;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

@@ -1,7 +1,7 @@
 //! Session message limit helpers.
 
-use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_PAYLOAD_LEN, HP_KEY_LEN, MessageLimits};
-use crate::types::MAX_DCID_LEN;
+use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_PAYLOAD_LEN, HP_KEY_LEN, MessageLimits};
+use slt_core::types::MAX_DCID_LEN;
 
 /// Compute message size limits based on TUN MTU.
 #[must_use]

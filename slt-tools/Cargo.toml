@@ -1,0 +1,22 @@
+[package]
+name = "slt-tools"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "quic_client_hello"
+path = "src/bin/quic_client_hello.rs"
+
+[[bin]]
+name = "tcp_client_hello"
+path = "src/bin/tcp_client_hello.rs"
+
+[dependencies]
+boring = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+quiche = { workspace = true }
+slt-core = { workspace = true }
+
+[lints]
+workspace = true

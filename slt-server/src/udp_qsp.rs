@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use tracing::{debug, error, trace, warn};
 
-use crate::crypto::udp_qsp::{OpenedPacket, QspCryptoError, UdpQspKeys};
-use crate::proto::RegisterCidPayload;
-use crate::types::{Cid, CidPrefix};
+use slt_core::crypto::udp_qsp::{OpenedPacket, QspCryptoError, UdpQspKeys};
+use slt_core::proto::RegisterCidPayload;
+use slt_core::types::{Cid, CidPrefix};
 
 /// CID map entry for a single UDP-QSP session.
 #[derive(Debug, Clone)]
@@ -234,8 +234,8 @@ impl CidMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
-    use crate::types::{Cid, QUIC_DCID_PREFIX_LEN};
+    use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
+    use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
 
     #[test]
     fn cid_map_insert_lookup_remove() {

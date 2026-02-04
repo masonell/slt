@@ -1,0 +1,25 @@
+[package]
+name = "slt-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+boring = { workspace = true }
+boring-sys = { workspace = true }
+brotli = { workspace = true }
+ed25519-dalek = { workspace = true }
+foreign-types = { workspace = true }
+fastrand = { workspace = true }
+hex = { workspace = true }
+humantime-serde = { workspace = true }
+parking_lot = { workspace = true }
+quiche = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

@@ -13,8 +13,8 @@ pub mod udp_qsp;
 use std::fmt;
 use std::net::Ipv4Addr;
 
-// Re-export common types
-pub use crate::types::ClientId;
+// Re-export common types from slt-core
+pub use slt_core::types::ClientId;
 
 /// Assigned VPN IPv4 address wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

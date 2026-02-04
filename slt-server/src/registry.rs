@@ -6,9 +6,9 @@ use std::net::Ipv4Addr;
 use parking_lot::RwLock;
 use tracing::{debug, info, trace, warn};
 
-use super::sessions::SessionTx;
 use super::{AssignedIp, ClientId};
-use crate::types::CidPrefix;
+use crate::sessions::SessionTx;
+use slt_core::types::CidPrefix;
 
 /// Error returned when inserting a CID prefix into the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,7 +285,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use tokio::sync::mpsc;
 
-    use crate::types::QUIC_DCID_PREFIX_LEN;
+    use slt_core::types::QUIC_DCID_PREFIX_LEN;
 
     fn make_tx() -> SessionTx {
         let (tx, _rx) = mpsc::channel(1);

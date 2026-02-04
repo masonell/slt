@@ -2,16 +2,16 @@ use boring::pkey::PKey;
 use boring::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use boring::x509::X509;
 use clap::Parser;
-use slt::config::ServerConfig;
-use slt::server::auth::{AuthHandler, Authenticator};
-use slt::server::metrics::Metrics;
-use slt::server::quic::QuicEndpoint;
-use slt::server::registry::SessionRegistry;
-use slt::server::router::PacketRouter;
-use slt::server::sessions::SessionEvent;
-use slt::server::sessions::{SessionTimeouts, message_limits_from_mtu};
-use slt::server::tcp::TcpFrontDoor;
-use slt::types::TlsMaterial;
+use slt_core::config::ServerConfig;
+use slt_core::packet::extract_dst_ipv4;
+use slt_core::types::TlsMaterial;
+use slt_server::auth::{AuthHandler, Authenticator};
+use slt_server::metrics::Metrics;
+use slt_server::quic::QuicEndpoint;
+use slt_server::registry::SessionRegistry;
+use slt_server::sessions::SessionEvent;
+use slt_server::sessions::{SessionTimeouts, message_limits_from_mtu};
+use slt_server::tcp::TcpFrontDoor;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -321,7 +321,7 @@ async fn run_tun_reader(
         }
 
         let packet = &buf[..n];
-        let Some(dst_ip) = PacketRouter::extract_dst_ipv4(packet) else {
+        let Some(dst_ip) = extract_dst_ipv4(packet) else {
             debug!(len = n, "tun packet missing IPv4 dst");
             continue;
         };
