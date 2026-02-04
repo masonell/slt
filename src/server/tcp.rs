@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
+use super::metrics::Metrics;
 use crate::classifier::{Verdict, classify_tcp_client_hello};
 use crate::config::ServerConfig;
 use crate::types::SharedSecret;
@@ -20,6 +21,7 @@ pub struct TcpFrontDoor {
     listener: TcpListener,
     classification_secret: SharedSecret,
     nginx_tcp_upstream: SocketAddr,
+    metrics: Arc<Metrics>,
 }
 
 impl TcpFrontDoor {
@@ -28,12 +30,13 @@ impl TcpFrontDoor {
     /// # Errors
     ///
     /// Returns an error if TCP listener binding fails.
-    pub async fn bind(config: &ServerConfig) -> io::Result<Self> {
+    pub async fn bind(config: &ServerConfig, metrics: Arc<Metrics>) -> io::Result<Self> {
         let listener = TcpListener::bind(config.listen_tcp).await?;
         Ok(Self {
             listener,
             classification_secret: config.server_secret,
             nginx_tcp_upstream: config.nginx_tcp_upstream,
+            metrics,
         })
     }
 
@@ -68,17 +71,24 @@ impl TcpFrontDoor {
                 () = cancel.cancelled() => return Ok(()),
                 res = self.listener.accept() => res?,
             };
+            self.metrics.inc_tcp_accepted();
             let server_secret = self.classification_secret;
             let upstream = self.nginx_tcp_upstream;
             let claim_handler = claim_handler.clone();
+            let metrics = self.metrics.clone();
 
             tokio::spawn(async move {
                 match Self::classify_stream(&stream, server_secret).await {
-                    Ok(Verdict::Claim) => (claim_handler)(stream, addr),
+                    Ok(Verdict::Claim) => {
+                        metrics.inc_claimed();
+                        (claim_handler)(stream, addr);
+                    }
                     Ok(Verdict::Pass | Verdict::Incomplete) => {
+                        metrics.inc_passed();
                         let _ = Self::proxy_to_upstream(stream, upstream).await;
                     }
                     Ok(Verdict::Drop) | Err(_) => {
+                        metrics.inc_dropped();
                         // Drop the connection.
                     }
                 }

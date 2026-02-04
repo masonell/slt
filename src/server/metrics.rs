@@ -10,7 +10,14 @@ pub struct Metrics {
     claimed: AtomicU64,
     passed: AtomicU64,
     dropped: AtomicU64,
+    auth_successes: AtomicU64,
     auth_failures: AtomicU64,
+    transport_tcp_to_udp: AtomicU64,
+    transport_udp_to_tcp: AtomicU64,
+    disconnect_idle_timeout: AtomicU64,
+    disconnect_close: AtomicU64,
+    disconnect_shutdown: AtomicU64,
+    disconnect_error: AtomicU64,
 }
 
 /// Snapshot of metric counters.
@@ -28,6 +35,20 @@ pub struct MetricsSnapshot {
     pub dropped: u64,
     /// Authentication failures.
     pub auth_failures: u64,
+    /// Authentication successes.
+    pub auth_successes: u64,
+    /// TCP -> UDP transport switches.
+    pub transport_tcp_to_udp: u64,
+    /// UDP -> TCP transport switches.
+    pub transport_udp_to_tcp: u64,
+    /// Disconnects due to idle timeout.
+    pub disconnect_idle_timeout: u64,
+    /// Disconnects due to close frames or EOF.
+    pub disconnect_close: u64,
+    /// Disconnects due to explicit shutdown events.
+    pub disconnect_shutdown: u64,
+    /// Disconnects due to errors.
+    pub disconnect_error: u64,
 }
 
 impl Metrics {
@@ -61,6 +82,41 @@ impl Metrics {
         self.auth_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Increment auth success counter.
+    pub fn inc_auth_successes(&self) {
+        self.auth_successes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment TCP -> UDP transport switch counter.
+    pub fn inc_transport_tcp_to_udp(&self) {
+        self.transport_tcp_to_udp.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment UDP -> TCP transport switch counter.
+    pub fn inc_transport_udp_to_tcp(&self) {
+        self.transport_udp_to_tcp.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment idle timeout disconnect counter.
+    pub fn inc_disconnect_idle_timeout(&self) {
+        self.disconnect_idle_timeout.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment disconnect close counter.
+    pub fn inc_disconnect_close(&self) {
+        self.disconnect_close.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment disconnect shutdown counter.
+    pub fn inc_disconnect_shutdown(&self) {
+        self.disconnect_shutdown.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment disconnect error counter.
+    pub fn inc_disconnect_error(&self) {
+        self.disconnect_error.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Return a point-in-time snapshot of metrics.
     #[must_use]
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -71,6 +127,13 @@ impl Metrics {
             passed: self.passed.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
+            auth_successes: self.auth_successes.load(Ordering::Relaxed),
+            transport_tcp_to_udp: self.transport_tcp_to_udp.load(Ordering::Relaxed),
+            transport_udp_to_tcp: self.transport_udp_to_tcp.load(Ordering::Relaxed),
+            disconnect_idle_timeout: self.disconnect_idle_timeout.load(Ordering::Relaxed),
+            disconnect_close: self.disconnect_close.load(Ordering::Relaxed),
+            disconnect_shutdown: self.disconnect_shutdown.load(Ordering::Relaxed),
+            disconnect_error: self.disconnect_error.load(Ordering::Relaxed),
         }
     }
 }

@@ -4,6 +4,7 @@ use boring::x509::X509;
 use clap::Parser;
 use slt::config::ServerConfig;
 use slt::server::auth::{AuthHandler, Authenticator};
+use slt::server::metrics::Metrics;
 use slt::server::quic::QuicEndpoint;
 use slt::server::registry::SessionRegistry;
 use slt::server::router::PacketRouter;
@@ -61,9 +62,10 @@ fn init_tracing() {
 }
 
 async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = Arc::new(Metrics::default());
     let registry = Arc::new(SessionRegistry::new());
-    let frontdoor = TcpFrontDoor::bind(&config).await?;
-    let quic = QuicEndpoint::bind(&config, registry.clone()).await?;
+    let frontdoor = TcpFrontDoor::bind(&config, metrics.clone()).await?;
+    let quic = QuicEndpoint::bind(&config, registry.clone(), metrics.clone()).await?;
     let acceptor = build_tls_acceptor(&config)?;
     let authenticator = Authenticator::from_config(&config);
     let tun = Arc::new(
@@ -83,6 +85,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         acceptor,
         authenticator,
         registry.clone(),
+        metrics.clone(),
         tun.clone(),
         quic.socket().clone(),
         limits,

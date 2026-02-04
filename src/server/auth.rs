@@ -22,6 +22,7 @@ use crate::proto::{
 use crate::types::ClientId;
 
 use super::AssignedIp;
+use super::metrics::Metrics;
 use super::registry::SessionRegistry;
 use super::sessions::{ClientSessionBase, SessionEvent, SessionTimeouts};
 use super::tun::TunDeviceIo;
@@ -74,6 +75,7 @@ pub struct AuthHandlerBase<T: TunDeviceIo> {
     acceptor: SslAcceptor,
     authenticator: Authenticator,
     registry: Arc<SessionRegistry>,
+    metrics: Arc<Metrics>,
     tun: Arc<T>,
     udp_socket: Arc<tokio::net::UdpSocket>,
     limits: MessageLimits,
@@ -93,6 +95,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         acceptor: SslAcceptor,
         authenticator: Authenticator,
         registry: Arc<SessionRegistry>,
+        metrics: Arc<Metrics>,
         tun: Arc<T>,
         udp_socket: Arc<tokio::net::UdpSocket>,
         limits: MessageLimits,
@@ -104,6 +107,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             acceptor,
             authenticator,
             registry,
+            metrics,
             tun,
             udp_socket,
             limits,
@@ -122,7 +126,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         let tls = match time::timeout(self.auth_timeout, tls_accept(&self.acceptor, stream)).await {
             Ok(Ok(stream)) => stream,
             Ok(Err(err)) => return Err(io::Error::other(format!("{err:?}"))),
-            Err(_) => return Ok(()),
+            Err(_) => {
+                self.metrics.inc_auth_failures();
+                return Ok(());
+            }
         };
         let mut tls = Some(tls);
 
@@ -144,7 +151,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 .as_mut()
                 .ok_or_else(|| io::Error::other("tls stream missing"))?;
             tokio::select! {
-                () = timeout => return Ok(()),
+                () = timeout => {
+                    self.metrics.inc_auth_failures();
+                    return Ok(());
+                },
                 res = tls_ref.read_buf(&mut buf) => {
                     let n = res?;
                     if n == 0 {
@@ -191,6 +201,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 let auth = AuthPayload::decode(payload).map_err(map_payload_error)?;
                 match self.verify_auth(&auth, challenge) {
                     Ok(assigned_ip) => {
+                        self.metrics.inc_auth_successes();
                         let mut ok_buf = Vec::new();
                         let ok = AuthOkPayload;
                         ok.encode(&mut ok_buf);
@@ -224,6 +235,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                             self.tun.clone(),
                             self.udp_socket.clone(),
                             self.registry.clone(),
+                            self.metrics.clone(),
                             tx,
                             rx,
                             self.limits,
@@ -238,6 +250,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                         Ok(AuthStep::Done)
                     }
                     Err(code) => {
+                        self.metrics.inc_auth_failures();
                         let tls_ref = tls
                             .as_mut()
                             .ok_or_else(|| io::Error::other("tls stream missing"))?;
@@ -262,6 +275,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             }
             Message::Close { .. } => Ok(AuthStep::Done),
             _ => {
+                self.metrics.inc_auth_failures();
                 let tls_ref = tls
                     .as_mut()
                     .ok_or_else(|| io::Error::other("tls stream missing"))?;

@@ -6,6 +6,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::metrics::Metrics;
 use super::registry::SessionRegistry;
 use super::sessions::SessionEvent;
 use crate::classifier::{QuicVerdict, classify_quic_datagram};
@@ -51,6 +52,7 @@ pub struct QuicEndpoint {
     max_lru_entries: NonZeroUsize,
     idle_timeout: Duration,
     registry: Arc<SessionRegistry>,
+    metrics: Arc<Metrics>,
 }
 
 impl QuicEndpoint {
@@ -62,7 +64,11 @@ impl QuicEndpoint {
     /// - `udp_nat_max_entries` is zero
     /// - `idle_timeout` is zero
     /// - UDP socket binding fails
-    pub async fn bind(config: &ServerConfig, registry: Arc<SessionRegistry>) -> io::Result<Self> {
+    pub async fn bind(
+        config: &ServerConfig,
+        registry: Arc<SessionRegistry>,
+        metrics: Arc<Metrics>,
+    ) -> io::Result<Self> {
         let max_lru_entries = NonZeroUsize::new(config.udp_nat_max_entries).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -83,6 +89,7 @@ impl QuicEndpoint {
             max_lru_entries,
             idle_timeout: config.idle_timeout,
             registry,
+            metrics,
         })
     }
 
@@ -118,6 +125,7 @@ impl QuicEndpoint {
                 }
                 res = self.socket.recv_from(&mut buf) => res?,
             };
+            self.metrics.inc_udp_accepted();
             self.handle_datagram(&mut state, cancel.clone(), peer, &buf[..len])
                 .await?;
         }
@@ -131,8 +139,12 @@ impl QuicEndpoint {
         payload: &[u8],
     ) -> io::Result<()> {
         match classify_quic_datagram(payload) {
-            QuicVerdict::Drop => return Ok(()),
+            QuicVerdict::Drop => {
+                self.metrics.inc_dropped();
+                return Ok(());
+            }
             QuicVerdict::Pass => {
+                self.metrics.inc_passed();
                 let upstream_socket = state
                     .get_or_create_upstream(self.socket.clone(), self.nginx_upstream, peer, cancel)
                     .await?;
@@ -140,12 +152,14 @@ impl QuicEndpoint {
             }
             QuicVerdict::Short { dcid_prefix } => {
                 if let Some(tx) = self.registry.lookup_cid(dcid_prefix) {
+                    self.metrics.inc_claimed();
                     let _ = tx.try_send(SessionEvent::Udp(UdpClaim {
                         peer,
                         dcid_prefix,
                         payload: payload.to_vec(),
                     }));
                 } else {
+                    self.metrics.inc_passed();
                     let upstream_socket = state
                         .get_or_create_upstream(
                             self.socket.clone(),

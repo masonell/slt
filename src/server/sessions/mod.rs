@@ -20,6 +20,7 @@ use tokio::time;
 use tokio_boring::SslStream;
 use tun_rs::AsyncDevice;
 
+use super::metrics::Metrics;
 use super::quic::UdpClaim;
 use super::registry::{CidInsertError, SessionRegistry};
 use super::router::PacketRouter;
@@ -102,6 +103,7 @@ pub struct ClientSessionBase<
     pub udp_verified: bool,
     session_id: u64,
     registry: Arc<SessionRegistry>,
+    metrics: Arc<Metrics>,
     tx: SessionTx,
     tcp: SslStream<S>,
     tun: Arc<T>,
@@ -133,6 +135,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         tun: Arc<T>,
         udp_socket: Arc<U>,
         registry: Arc<SessionRegistry>,
+        metrics: Arc<Metrics>,
         tx: SessionTx,
         rx: SessionRx,
         limits: MessageLimits,
@@ -149,6 +152,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             udp_verified: false,
             session_id,
             registry,
+            metrics,
             tx,
             tcp,
             tun,
@@ -171,6 +175,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     /// Returns an error if the TCP stream or TUN device fails.
     pub async fn run(mut self) -> io::Result<()> {
         let result = self.run_inner().await;
+        if result.is_err() {
+            self.metrics.inc_disconnect_error();
+        }
         self.cleanup();
         result
     }
@@ -192,9 +199,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 
             if let Some(verify_deadline) = verify_deadline {
                 tokio::select! {
-                    res = self.tcp.read_buf(&mut self.tcp_read_buf) => {
+                res = self.tcp.read_buf(&mut self.tcp_read_buf) => {
                     let n = res?;
                     if n == 0 {
+                        self.metrics.inc_disconnect_close();
                         return Ok(());
                     }
                     self.note_activity();
@@ -212,6 +220,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                         next_ping_at = self.schedule_next_ping();
                     }
                     () = time::sleep_until(idle_deadline.into()) => {
+                        self.metrics.inc_disconnect_idle_timeout();
                         let _ = self.send_close(CloseCode::IdleTimeout).await;
                         return Ok(());
                     }
@@ -221,9 +230,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 }
             } else {
                 tokio::select! {
-                    res = self.tcp.read_buf(&mut self.tcp_read_buf) => {
+                res = self.tcp.read_buf(&mut self.tcp_read_buf) => {
                     let n = res?;
                     if n == 0 {
+                        self.metrics.inc_disconnect_close();
                         return Ok(());
                     }
                     self.note_activity();
@@ -241,6 +251,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                         next_ping_at = self.schedule_next_ping();
                     }
                     () = time::sleep_until(idle_deadline.into()) => {
+                        self.metrics.inc_disconnect_idle_timeout();
                         let _ = self.send_close(CloseCode::IdleTimeout).await;
                         return Ok(());
                     }
@@ -300,7 +311,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 Ok(SessionControl::Continue)
             }
             Message::Pong { .. } => Ok(SessionControl::Continue),
-            Message::Close { .. } => Ok(SessionControl::Close),
+            Message::Close { .. } => {
+                self.metrics.inc_disconnect_close();
+                Ok(SessionControl::Close)
+            }
             Message::RegisterCid { payload } => {
                 self.handle_register_cid(payload, Transport::Tcp).await
             }
@@ -312,7 +326,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         match event {
             SessionEvent::TunPacket(packet) => self.handle_tun_packet(packet).await,
             SessionEvent::Udp(claim) => self.handle_udp_claim(claim).await,
-            SessionEvent::Shutdown => Ok(SessionControl::Close),
+            SessionEvent::Shutdown => {
+                self.metrics.inc_disconnect_shutdown();
+                Ok(SessionControl::Close)
+            }
         }
     }
 
@@ -410,7 +427,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     .is_some_and(|verify| verify.nonce == pong_in.nonce)
                 {
                     self.udp_verified = true;
-                    self.active_transport = ActiveTransport::UdpQsp;
+                    self.set_active_transport(ActiveTransport::UdpQsp);
                     self.udp_verify = None;
                 }
                 Ok(SessionControl::Continue)
@@ -490,7 +507,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 
         self.udp_session = Some(udp);
         self.udp_verified = false;
-        self.active_transport = ActiveTransport::Tcp;
+        self.set_active_transport(ActiveTransport::Tcp);
         self.udp_verify = Some(UdpVerify {
             nonce: fastrand::u64(..),
             deadline: Instant::now() + self.timeouts.udp_verify_timeout,
@@ -549,7 +566,23 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.udp_peer = None;
         self.udp_verify = None;
         self.udp_verified = false;
-        self.active_transport = ActiveTransport::Tcp;
+        self.set_active_transport(ActiveTransport::Tcp);
+    }
+
+    fn set_active_transport(&mut self, transport: ActiveTransport) {
+        if self.active_transport == transport {
+            return;
+        }
+        match (self.active_transport, transport) {
+            (ActiveTransport::Tcp, ActiveTransport::UdpQsp) => {
+                self.metrics.inc_transport_tcp_to_udp();
+            }
+            (ActiveTransport::UdpQsp, ActiveTransport::Tcp) => {
+                self.metrics.inc_transport_udp_to_tcp();
+            }
+            _ => {}
+        }
+        self.active_transport = transport;
     }
 
     async fn send_message(&mut self, message: Message<'_>, transport: Transport) -> io::Result<()> {
@@ -777,6 +810,7 @@ mod tests {
         let (udp_tx, udp_rx) = mpsc::channel(16);
         let tun = Arc::new(TestTun { tx: tun_tx });
         let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
         let (tx, rx) = mpsc::channel(8);
         let client_id = ClientId([0xA5; 16]);
         let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
@@ -790,6 +824,7 @@ mod tests {
             tun,
             Arc::new(TestUdpSocket { tx: udp_tx }),
             registry.clone(),
+            metrics,
             tx.clone(),
             rx,
             limits,
