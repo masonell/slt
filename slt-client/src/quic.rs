@@ -5,6 +5,7 @@ use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN, TlsMaterial};
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{UdpSocket, lookup_host};
 use tokio::time;
@@ -21,6 +22,10 @@ pub struct QuicIds {
     pub dcid: Cid,
     /// Destination connection ID for server->client packets.
     pub scid: Cid,
+    /// Peer address used for QUIC discovery.
+    pub peer: SocketAddr,
+    /// UDP socket used for QUIC discovery and UDP-QSP traffic.
+    pub socket: Arc<UdpSocket>,
 }
 
 /// Perform a QUIC handshake to discover the server DCID.
@@ -85,7 +90,7 @@ async fn discover_quic_ids_for_peer(
         SocketAddr::V4(_) => "0.0.0.0:0",
         SocketAddr::V6(_) => "[::]:0",
     };
-    let socket = UdpSocket::bind(bind_addr).await?;
+    let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
     let local = socket.local_addr()?;
 
     let mut quic_config = quic_client_chrome_config().map_err(map_quic_error)?;
@@ -117,7 +122,12 @@ async fn discover_quic_ids_for_peer(
 
         if saw_peer_packet {
             let dcid = Cid::new(conn.destination_id().as_ref()).map_err(map_cid_error)?;
-            return Ok(QuicIds { dcid, scid });
+            return Ok(QuicIds {
+                dcid,
+                scid,
+                peer,
+                socket,
+            });
         }
 
         if conn.is_closed() {
