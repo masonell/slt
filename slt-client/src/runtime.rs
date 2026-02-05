@@ -1,4 +1,4 @@
-use crate::{auth, tcp, tun};
+use crate::{auth, quic, tcp, tun};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_PAYLOAD_LEN, CloseCode, ClosePayload, FrameError, HP_KEY_LEN,
@@ -34,6 +34,26 @@ pub async fn run_client(
         debug!(len = tcp.read_buf.len(), "preserved auth leftovers");
     }
 
+    let quic_ids = if config.upgrade.is_some() {
+        match Box::pin(quic::discover_quic_ids(&config, &cancel, tcp.peer)).await {
+            Ok(ids) => {
+                info!(
+                    dcid_len = ids.dcid.len(),
+                    scid_len = ids.scid.len(),
+                    "quic dcid discovery succeeded"
+                );
+                Some(ids)
+            }
+            Err(err) => {
+                warn!(error = %err, "quic dcid discovery failed");
+                None
+            }
+        }
+    } else {
+        debug!("upgrade disabled; skipping quic dcid discovery");
+        None
+    };
+
     let tun = Arc::new(
         DeviceBuilder::new()
             .name(&config.tun_name)
@@ -55,6 +75,7 @@ pub async fn run_client(
         PING_MIN,
         PING_MAX,
         IDLE_TIMEOUT,
+        quic_ids,
     );
 
     let result = session.run().await;
@@ -82,6 +103,7 @@ struct ClientSession {
     ping_min: Duration,
     ping_max: Duration,
     idle_timeout: Duration,
+    quic_ids: Option<quic::QuicIds>,
 }
 
 impl ClientSession {
@@ -96,6 +118,7 @@ impl ClientSession {
         ping_min: Duration,
         ping_max: Duration,
         idle_timeout: Duration,
+        quic_ids: Option<quic::QuicIds>,
     ) -> Self {
         Self {
             stream,
@@ -109,10 +132,18 @@ impl ClientSession {
             ping_min,
             ping_max,
             idle_timeout,
+            quic_ids,
         }
     }
 
     async fn run(&mut self) -> io::Result<()> {
+        if let Some(ids) = &self.quic_ids {
+            debug!(
+                dcid_len = ids.dcid.len(),
+                scid_len = ids.scid.len(),
+                "quic ids ready for registration"
+            );
+        }
         let mut next_ping_at = self.schedule_next_ping();
 
         loop {

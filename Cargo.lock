@@ -1349,6 +1349,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "fastrand",
+ "quiche",
  "slt-core",
  "tokio",
  "tokio-boring",

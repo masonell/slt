@@ -11,6 +11,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod auth;
+mod quic;
 mod runtime;
 mod tcp;
 mod tun;
@@ -48,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "client starting"
     );
 
-    run_client(config, cancel).await
+    Box::pin(run_client(config, cancel)).await
 }
 
 fn init_tracing(filter: Option<&str>) {
@@ -98,5 +99,5 @@ async fn run_client(
     config: ClientConfig,
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    runtime::run_client(config, cancel).await
+    Box::pin(runtime::run_client(config, cancel)).await
 }
