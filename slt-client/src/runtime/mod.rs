@@ -1,7 +1,7 @@
 mod register;
 mod session;
 
-use crate::{auth, tcp, transport, tun};
+use crate::{auth, transport, tun};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{FrameError, MessageError, PayloadError};
 use std::io;
@@ -20,7 +20,7 @@ pub async fn run_client(
     config: ClientConfig,
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut tcp = tcp::connect(&config).await?;
+    let mut tcp = transport::tcp::connect(&config).await?;
     info!(peer = ?tcp.peer, sni = ?tcp.sni, "tcp handshake complete");
     let auth_outcome = auth::authenticate(&mut tcp.stream, &config).await?;
     tcp.read_buf = auth_outcome.leftover;

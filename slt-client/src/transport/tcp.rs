@@ -1,4 +1,4 @@
-use crate::transport;
+use super::tls;
 use boring::error::ErrorStack;
 use boring::ssl::{Ssl, SslVerifyMode};
 use boring::x509::verify::X509CheckFlags;
@@ -37,7 +37,7 @@ pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
     }
 
     let mut ctx = tcp_client_chrome_ctx_builder().map_err(map_error)?;
-    transport::tls::configure_boring_ca_store(&mut ctx, &config.tls_ca).map_err(map_error)?;
+    tls::configure_boring_ca_store(&mut ctx, &config.tls_ca).map_err(map_error)?;
     ctx.set_verify(SslVerifyMode::PEER);
     ctx.set_client_hello_session_id_callback(client_hello_session_id_callback(
         config.shared_secret,
