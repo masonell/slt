@@ -2,7 +2,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, Message, MessageError,
-    MessageLimits, PayloadError, PingPayload, PongPayload, decode_message, encode_message,
+    MessageLimits, PayloadError, PingPayload, PongPayload, encode_message,
 };
 use std::io;
 use std::time::{Duration, Instant};
@@ -50,17 +50,15 @@ pub async fn authenticate(
         }
 
         loop {
-            let decoded = decode_message(&buf, limits).map_err(map_message_error)?;
-            let Some((message, consumed)) = decoded else {
+            let Some(msg_buf) =
+                crate::wire::pop_message_buf(&mut buf, limits).map_err(map_message_error)?
+            else {
                 break;
             };
 
-            let result = handle_auth_message(stream, message).await;
-            let rest = buf.split_off(consumed);
-
-            match result? {
+            match handle_auth_message(stream, msg_buf.message()).await? {
                 AuthResult::Continue => {}
-                AuthResult::Accepted => return Ok(AuthOutcome { leftover: rest }),
+                AuthResult::Accepted => return Ok(AuthOutcome { leftover: buf }),
                 AuthResult::Rejected => {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
@@ -68,8 +66,6 @@ pub async fn authenticate(
                     ));
                 }
             }
-
-            buf = rest;
         }
     }
 }
