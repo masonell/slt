@@ -16,6 +16,7 @@ mod runtime;
 mod tcp;
 mod transport;
 mod tun;
+mod wire;
 
 #[derive(Parser, Debug)]
 #[command(about = "Run the SLT client.")]

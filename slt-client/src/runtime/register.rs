@@ -4,7 +4,7 @@ use slt_core::crypto::udp_qsp::{QuicQspSession, SessionIo, UdpQspKeys};
 use slt_core::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_PAYLOAD_LEN, CipherSuite, ClosePayload, HP_KEY_LEN,
     MAX_DCID_LEN, Message, MessageLimits, PingPayload, PongPayload, RegisterCidPayload,
-    RegisterFailPayload, RegisterOkPayload, decode_message, encode_message,
+    RegisterFailPayload, RegisterOkPayload, encode_message,
 };
 use std::io;
 use std::net::SocketAddr;
@@ -132,19 +132,13 @@ async fn handle_register_read(
     ctx: &RegisterContext<'_>,
 ) -> io::Result<Option<QuicQspSession<ClientUdpIo>>> {
     loop {
-        let decoded = decode_message(read_buf, limits).map_err(super::map_message_error)?;
-        let Some((_, consumed)) = decoded else {
+        let Some(msg_buf) =
+            crate::wire::pop_message_buf(read_buf, limits).map_err(super::map_message_error)?
+        else {
             return Ok(None);
         };
 
-        let rest = read_buf.split_off(consumed);
-        let frame_buf = std::mem::replace(read_buf, rest);
-        let decoded = decode_message(&frame_buf, limits).map_err(super::map_message_error)?;
-        let Some((message, _)) = decoded else {
-            return Ok(None);
-        };
-
-        let result = handle_register_message(stream, message, ctx).await?;
+        let result = handle_register_message(stream, msg_buf.message(), ctx).await?;
         if let Some(session) = result {
             return Ok(Some(session));
         }

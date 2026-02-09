@@ -2,8 +2,7 @@ use super::register::ClientUdpIo;
 use crate::quic;
 use slt_core::crypto::udp_qsp::QuicQspSession;
 use slt_core::proto::{
-    CloseCode, ClosePayload, Message, MessageLimits, PingPayload, PongPayload, decode_message,
-    encode_message,
+    CloseCode, ClosePayload, Message, MessageLimits, PingPayload, PongPayload, encode_message,
 };
 use std::io;
 use std::time::{Duration, Instant};
@@ -135,21 +134,13 @@ impl ClientSession {
 
     async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
         loop {
-            let decoded =
-                decode_message(&self.read_buf, self.limits).map_err(super::map_message_error)?;
-            let Some((_, consumed)) = decoded else {
+            let Some(msg_buf) = crate::wire::pop_message_buf(&mut self.read_buf, self.limits)
+                .map_err(super::map_message_error)?
+            else {
                 return Ok(SessionControl::Continue);
             };
 
-            let rest = self.read_buf.split_off(consumed);
-            let frame_buf = std::mem::replace(&mut self.read_buf, rest);
-            let decoded =
-                decode_message(&frame_buf, self.limits).map_err(super::map_message_error)?;
-            let Some((message, _)) = decoded else {
-                return Ok(SessionControl::Continue);
-            };
-
-            if self.handle_tcp_message(message).await? == SessionControl::Close {
+            if self.handle_tcp_message(msg_buf.message()).await? == SessionControl::Close {
                 return Ok(SessionControl::Close);
             }
         }
