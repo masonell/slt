@@ -14,6 +14,7 @@ mod auth;
 mod quic;
 mod runtime;
 mod tcp;
+mod transport;
 mod tun;
 
 #[derive(Parser, Debug)]

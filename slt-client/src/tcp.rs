@@ -1,11 +1,10 @@
+use crate::transport;
 use boring::error::ErrorStack;
-use boring::ssl::{Ssl, SslContextBuilder, SslVerifyMode};
-use boring::x509::X509;
+use boring::ssl::{Ssl, SslVerifyMode};
 use boring::x509::verify::X509CheckFlags;
 use slt_core::config::ClientConfig;
 use slt_core::crypto::client_hello::client_hello_session_id_callback;
 use slt_core::crypto::{configure_client_chrome_ssl, tcp_client_chrome_ctx_builder};
-use slt_core::types::TlsMaterial;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use tokio::net::{TcpStream, lookup_host};
@@ -38,7 +37,7 @@ pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
     }
 
     let mut ctx = tcp_client_chrome_ctx_builder().map_err(map_error)?;
-    configure_ca_store(&mut ctx, &config.tls_ca).map_err(map_error)?;
+    transport::tls::configure_boring_ca_store(&mut ctx, &config.tls_ca).map_err(map_error)?;
     ctx.set_verify(SslVerifyMode::PEER);
     ctx.set_client_hello_session_id_callback(client_hello_session_id_callback(
         config.shared_secret,
@@ -90,19 +89,6 @@ async fn connect_stream(config: &ClientConfig) -> io::Result<TcpStream> {
     }
 
     Err(last_err.unwrap_or_else(|| io::Error::other("tcp connect failed")))
-}
-
-fn configure_ca_store(ctx: &mut SslContextBuilder, tls_ca: &TlsMaterial) -> Result<(), ErrorStack> {
-    match tls_ca {
-        TlsMaterial::File { file } => ctx.set_ca_file(file),
-        TlsMaterial::Pem(pem) => {
-            let certs = X509::stack_from_pem(pem.as_bytes())?;
-            for cert in certs {
-                ctx.cert_store_mut().add_cert(cert)?;
-            }
-            Ok(())
-        }
-    }
 }
 
 fn configure_hostname_verification(ssl: &mut Ssl, host: &str) -> Result<(), ErrorStack> {

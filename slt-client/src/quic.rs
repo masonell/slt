@@ -1,10 +1,10 @@
+use crate::transport;
 use slt_core::config::ClientConfig;
 use slt_core::crypto::quic_client_chrome_config;
 use slt_core::types::cid::CidError;
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN, TlsMaterial};
+use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{UdpSocket, lookup_host};
@@ -94,7 +94,7 @@ async fn discover_quic_ids_for_peer(
     let local = socket.local_addr()?;
 
     let mut quic_config = quic_client_chrome_config().map_err(map_quic_error)?;
-    configure_ca_store(&mut quic_config, &config.tls_ca)?;
+    transport::tls::configure_quiche_ca_store(&mut quic_config, &config.tls_ca)?;
     quic_config.verify_peer(true);
 
     let scid_bytes = build_scid();
@@ -177,33 +177,6 @@ async fn discover_quic_ids_for_peer(
             }
         }
     }
-}
-
-fn configure_ca_store(config: &mut quiche::Config, tls_ca: &TlsMaterial) -> io::Result<()> {
-    match tls_ca {
-        TlsMaterial::File { file } => {
-            config
-                .load_verify_locations_from_file(file.to_string_lossy().as_ref())
-                .map_err(map_quic_error)?;
-            Ok(())
-        }
-        TlsMaterial::Pem(pem) => {
-            let path = write_temp_pem(pem)?;
-            let result = config
-                .load_verify_locations_from_file(path.to_string_lossy().as_ref())
-                .map_err(map_quic_error);
-            let _ = std::fs::remove_file(&path);
-            result
-        }
-    }
-}
-
-fn write_temp_pem(pem: &str) -> io::Result<PathBuf> {
-    let mut path = std::env::temp_dir();
-    let name = format!("slt-quic-ca-{id}.pem", id = fastrand::u64(..));
-    path.push(name);
-    std::fs::write(&path, pem)?;
-    Ok(path)
 }
 
 fn build_scid() -> [u8; QUIC_DCID_PREFIX_LEN] {
