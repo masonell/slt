@@ -1,3 +1,4 @@
+mod limits;
 mod register;
 mod session;
 
@@ -60,7 +61,7 @@ pub async fn run_client(
     );
 
     let mut tun_handles = tun::spawn(tun, config.assigned_ipv4, cancel.clone(), config.tun_mtu);
-    let limits = register::message_limits_from_mtu(config.tun_mtu);
+    let limits = limits::message_limits_from_mtu(config.tun_mtu);
 
     let (to_session_rx, to_tun_tx) = tun_handles.take_channels();
 
