@@ -1,5 +1,5 @@
-use super::register::ClientUdpIo;
 use crate::transport::quic_discovery as quic;
+use crate::transport::udp_qsp::ClientUdpIo;
 use slt_core::crypto::udp_qsp::QuicQspSession;
 use slt_core::proto::{
     CloseCode, ClosePayload, Message, MessageLimits, PingPayload, PongPayload, encode_message,

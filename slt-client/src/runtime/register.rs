@@ -1,17 +1,16 @@
 use crate::transport::quic_discovery as quic;
+use crate::transport::udp_qsp::ClientUdpIo;
 use boring::rand::rand_bytes;
-use slt_core::crypto::udp_qsp::{QuicQspSession, SessionIo, UdpQspKeys};
+use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
 use slt_core::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_PAYLOAD_LEN, CipherSuite, ClosePayload, HP_KEY_LEN,
     MAX_DCID_LEN, Message, MessageLimits, PingPayload, PongPayload, RegisterCidPayload,
     RegisterFailPayload, RegisterOkPayload, encode_message,
 };
 use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio_boring::SslStream;
@@ -25,27 +24,6 @@ struct RegisterContext<'a> {
     cipher: CipherSuite,
     pn_start_c2s: u64,
     pn_start_s2c: u64,
-}
-
-pub(super) struct ClientUdpIo {
-    socket: Arc<UdpSocket>,
-    peer: SocketAddr,
-}
-
-impl SessionIo for ClientUdpIo {
-    async fn send<'a>(&'a mut self, bytes: &'a [u8]) -> io::Result<()> {
-        let _ = self.socket.send_to(bytes, self.peer).await?;
-        Ok(())
-    }
-
-    async fn recv<'a>(&'a mut self, buf: &'a mut [u8]) -> io::Result<usize> {
-        loop {
-            let (len, from) = self.socket.recv_from(buf).await?;
-            if from == self.peer {
-                return Ok(len);
-            }
-        }
-    }
 }
 
 pub(super) async fn register_udp_qsp(
@@ -171,10 +149,7 @@ async fn handle_register_message(
                 ctx.payload.iv_tx,
             )
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "udp-qsp keys invalid"))?;
-            let io = ClientUdpIo {
-                socket: ctx.ids.socket.clone(),
-                peer: ctx.ids.peer,
-            };
+            let io = ClientUdpIo::new(ctx.ids.socket.clone(), ctx.ids.peer);
             let session = QuicQspSession::new(
                 io,
                 ctx.ids.scid,
