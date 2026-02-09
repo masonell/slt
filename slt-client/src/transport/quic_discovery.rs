@@ -1,4 +1,4 @@
-use crate::transport;
+use super::tls;
 use slt_core::config::ClientConfig;
 use slt_core::crypto::quic_client_chrome_config;
 use slt_core::types::cid::CidError;
@@ -94,7 +94,7 @@ async fn discover_quic_ids_for_peer(
     let local = socket.local_addr()?;
 
     let mut quic_config = quic_client_chrome_config().map_err(map_quic_error)?;
-    transport::tls::configure_quiche_ca_store(&mut quic_config, &config.tls_ca)?;
+    tls::configure_quiche_ca_store(&mut quic_config, &config.tls_ca)?;
     quic_config.verify_peer(true);
 
     let scid_bytes = build_scid();

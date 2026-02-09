@@ -11,7 +11,6 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod auth;
-mod quic;
 mod runtime;
 mod tcp;
 mod transport;

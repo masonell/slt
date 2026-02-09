@@ -1,7 +1,7 @@
 mod register;
 mod session;
 
-use crate::{auth, quic, tcp, tun};
+use crate::{auth, tcp, transport, tun};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{FrameError, MessageError, PayloadError};
 use std::io;
@@ -29,7 +29,11 @@ pub async fn run_client(
     }
 
     let quic_ids = if config.upgrade.is_some() {
-        match Box::pin(quic::discover_quic_ids(&config, &cancel, tcp.peer)).await {
+        match Box::pin(transport::quic_discovery::discover_quic_ids(
+            &config, &cancel, tcp.peer,
+        ))
+        .await
+        {
             Ok(ids) => {
                 info!(
                     dcid_len = ids.dcid.len(),

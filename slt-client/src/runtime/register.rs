@@ -1,4 +1,4 @@
-use crate::quic;
+use crate::transport::quic_discovery as quic;
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, SessionIo, UdpQspKeys};
 use slt_core::proto::{
