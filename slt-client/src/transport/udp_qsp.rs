@@ -1,5 +1,4 @@
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, SessionIo};
-use slt_core::proto::MessageType;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -86,32 +85,26 @@ impl UdpQspTransport {
             .recv(&mut self.packet_buf)
             .await
             .map_err(map_qsp_error)?;
-        let payload = opened.payload;
+        let bytes = opened.payload;
 
-        let Some((frame, consumed)) =
-            slt_core::proto::decode_frame(payload, limits.max_frame_len).map_err(map_frame_err)?
+        let Some((message, consumed)) = slt_core::proto::decode_message(bytes, limits)
+            .map_err(crate::wire::map_message_error)?
         else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "udp-qsp frame incomplete",
+                "udp-qsp message incomplete",
             ));
         };
-        if consumed != payload.len() {
+        if consumed != bytes.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "udp-qsp packet contains multiple frames",
             ));
         }
-        if frame.ty == MessageType::Data && frame.payload.len() > limits.max_data_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "udp-qsp data frame too large",
-            ));
-        }
 
         Ok(crate::wire::OwnedMessageBuf::new(
-            frame.ty,
-            payload.to_vec(),
+            message.ty(),
+            bytes.to_vec(),
         ))
     }
 }
@@ -124,8 +117,4 @@ fn map_qsp_error(err: QspSessionError) -> io::Error {
             format!("udp-qsp error: {other:?}"),
         ),
     }
-}
-
-fn map_frame_err(err: slt_core::proto::FrameError) -> io::Error {
-    crate::wire::map_frame_error(err)
 }
