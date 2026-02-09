@@ -21,10 +21,9 @@ pub async fn run_client(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tcp = transport::tcp::connect(&config).await?;
     info!(peer = ?tcp.peer, sni = ?tcp.sni, "tcp handshake complete");
-    let auth_outcome = auth::authenticate(&mut tcp.stream, &config).await?;
-    tcp.read_buf = auth_outcome.leftover;
-    if !tcp.read_buf.is_empty() {
-        debug!(len = tcp.read_buf.len(), "preserved auth leftovers");
+    auth::authenticate(&mut tcp.transport, &config).await?;
+    if tcp.transport.has_buffered_input() {
+        debug!("preserved auth leftovers");
     }
 
     let quic_ids = if config.upgrade.is_some() {
@@ -65,8 +64,7 @@ pub async fn run_client(
 
     let udp_session = if let Some(ids) = &quic_ids {
         match Box::pin(register::register_udp_qsp(
-            &mut tcp.stream,
-            &mut tcp.read_buf,
+            &mut tcp.transport,
             limits,
             &to_tun_tx,
             ids,
@@ -91,8 +89,7 @@ pub async fn run_client(
         None
     };
     let mut session = session::ClientSession::new(
-        tcp.stream,
-        tcp.read_buf,
+        tcp.transport,
         to_session_rx,
         to_tun_tx,
         cancel.clone(),

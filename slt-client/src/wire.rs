@@ -8,6 +8,14 @@ pub struct OwnedMessageBuf {
 }
 
 impl OwnedMessageBuf {
+    /// Create an owned message buffer from a frame type and full frame bytes.
+    ///
+    /// `buf` must contain the 5-byte header plus payload bytes.
+    #[must_use]
+    pub const fn new(ty: MessageType, buf: Vec<u8>) -> Self {
+        Self { ty, buf }
+    }
+
     /// Returns a decoded `Message` view into the owned frame buffer.
     #[must_use]
     pub fn message(&self) -> slt_core::proto::Message<'_> {

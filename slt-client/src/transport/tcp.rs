@@ -1,26 +1,77 @@
 use super::tls;
 use boring::error::ErrorStack;
-use boring::ssl::{Ssl, SslVerifyMode};
+use boring::ssl::{Ssl, SslRef, SslVerifyMode};
 use boring::x509::verify::X509CheckFlags;
 use slt_core::config::ClientConfig;
 use slt_core::crypto::client_hello::client_hello_session_id_callback;
 use slt_core::crypto::{configure_client_chrome_ssl, tcp_client_chrome_ctx_builder};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, lookup_host};
 use tokio_boring::{HandshakeError, SslStream};
 use tracing::debug;
 
+/// TCP transport wrapper for the VPN protocol.
+pub struct TcpTransport {
+    stream: SslStream<TcpStream>,
+    read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
+}
+
+impl TcpTransport {
+    /// Create a new TCP transport around an established TLS stream.
+    #[must_use]
+    pub const fn new(stream: SslStream<TcpStream>) -> Self {
+        Self {
+            stream,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+        }
+    }
+
+    /// Returns the TLS session handle.
+    #[must_use]
+    pub fn ssl(&self) -> &SslRef {
+        self.stream.ssl()
+    }
+
+    /// Returns true if there are buffered bytes ready for parsing.
+    #[must_use]
+    pub const fn has_buffered_input(&self) -> bool {
+        !self.read_buf.is_empty()
+    }
+
+    /// Read more bytes from the TLS stream into the internal buffer.
+    pub async fn read_more(&mut self) -> io::Result<usize> {
+        self.stream.read_buf(&mut self.read_buf).await
+    }
+
+    /// Attempt to pop the next message from the internal read buffer.
+    pub fn try_pop_message(
+        &mut self,
+        limits: slt_core::proto::MessageLimits,
+    ) -> Result<Option<crate::wire::OwnedMessageBuf>, slt_core::proto::MessageError> {
+        crate::wire::pop_message_buf(&mut self.read_buf, limits)
+    }
+
+    /// Encode and write a protocol message on the TLS stream.
+    pub async fn write_message(&mut self, message: slt_core::proto::Message<'_>) -> io::Result<()> {
+        self.write_buf.clear();
+        slt_core::proto::encode_message(message, &mut self.write_buf)
+            .map_err(crate::wire::map_frame_error)?;
+        self.stream.write_all(&self.write_buf).await
+    }
+}
+
 /// Connected TCP TLS session metadata.
 pub struct TcpSession {
-    /// TLS stream.
-    pub stream: SslStream<TcpStream>,
+    /// TLS-wrapped TCP transport for protocol I/O.
+    pub transport: TcpTransport,
     /// Connected peer address, if available.
     pub peer: Option<SocketAddr>,
     /// SNI hostname used for the handshake.
     pub sni: Option<String>,
-    /// Buffered bytes read before handing off to the session loop.
-    pub read_buf: Vec<u8>,
 }
 
 /// Connect to the server and perform a TLS handshake.
@@ -57,10 +108,9 @@ pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
 
     let sni = Some(config.hostname.clone());
     Ok(TcpSession {
-        stream,
+        transport: TcpTransport::new(stream),
         peer,
         sni,
-        read_buf: Vec::new(),
     })
 }
 

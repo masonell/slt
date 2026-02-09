@@ -1,19 +1,16 @@
 use crate::transport::quic_discovery as quic;
-use crate::transport::udp_qsp::ClientUdpIo;
+use crate::transport::tcp::TcpTransport;
+use crate::transport::udp_qsp::{ClientUdpIo, UdpQspTransport};
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
 use slt_core::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, ClosePayload, HP_KEY_LEN, Message, MessageLimits,
     PingPayload, PongPayload, RegisterCidPayload, RegisterFailPayload, RegisterOkPayload,
-    encode_message,
 };
 use std::io;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time;
-use tokio_boring::SslStream;
 
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -27,12 +24,11 @@ struct RegisterContext<'a> {
 }
 
 pub(super) async fn register_udp_qsp(
-    stream: &mut SslStream<TcpStream>,
-    read_buf: &mut Vec<u8>,
+    tcp: &mut TcpTransport,
     limits: MessageLimits,
     to_tun_tx: &mpsc::Sender<Vec<u8>>,
     ids: &quic::QuicIds,
-) -> io::Result<QuicQspSession<ClientUdpIo>> {
+) -> io::Result<UdpQspTransport> {
     let cipher = CipherSuite::Aes128Gcm;
     let hp_c2s = random_array::<HP_KEY_LEN>()?;
     let hp_s2c = random_array::<HP_KEY_LEN>()?;
@@ -63,12 +59,9 @@ pub(super) async fn register_udp_qsp(
     payload
         .encode(&mut payload_buf)
         .map_err(crate::wire::map_payload_error)?;
-    send_tcp_message(
-        stream,
-        Message::RegisterCid {
-            payload: &payload_buf,
-        },
-    )
+    tcp.write_message(Message::RegisterCid {
+        payload: &payload_buf,
+    })
     .await?;
 
     let ctx = RegisterContext {
@@ -82,9 +75,7 @@ pub(super) async fn register_udp_qsp(
 
     let deadline = Instant::now() + REGISTER_TIMEOUT;
     loop {
-        if !read_buf.is_empty()
-            && let Some(session) = handle_register_read(stream, read_buf, limits, &ctx).await?
-        {
+        if let Some(session) = handle_register_read(tcp, limits, &ctx).await? {
             return Ok(session);
         }
 
@@ -93,7 +84,7 @@ pub(super) async fn register_udp_qsp(
             () = timeout => {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "register_cid timed out"));
             }
-            res = stream.read_buf(read_buf) => {
+            res = tcp.read_more() => {
                 let n = res?;
                 if n == 0 {
                     return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "register_cid connection closed"));
@@ -104,30 +95,30 @@ pub(super) async fn register_udp_qsp(
 }
 
 async fn handle_register_read(
-    stream: &mut SslStream<TcpStream>,
-    read_buf: &mut Vec<u8>,
+    tcp: &mut TcpTransport,
     limits: MessageLimits,
     ctx: &RegisterContext<'_>,
-) -> io::Result<Option<QuicQspSession<ClientUdpIo>>> {
+) -> io::Result<Option<UdpQspTransport>> {
     loop {
-        let Some(msg_buf) = crate::wire::pop_message_buf(read_buf, limits)
+        let Some(msg_buf) = tcp
+            .try_pop_message(limits)
             .map_err(crate::wire::map_message_error)?
         else {
             return Ok(None);
         };
 
-        let result = handle_register_message(stream, msg_buf.message(), ctx).await?;
-        if let Some(session) = result {
-            return Ok(Some(session));
+        let result = handle_register_message(tcp, msg_buf.message(), ctx).await?;
+        if result.is_some() {
+            return Ok(result);
         }
     }
 }
 
 async fn handle_register_message(
-    stream: &mut SslStream<TcpStream>,
+    tcp: &mut TcpTransport,
     message: Message<'_>,
     ctx: &RegisterContext<'_>,
-) -> io::Result<Option<QuicQspSession<ClientUdpIo>>> {
+) -> io::Result<Option<UdpQspTransport>> {
     match message {
         Message::RegisterOk {
             payload: ok_payload,
@@ -160,7 +151,7 @@ async fn handle_register_message(
                 ctx.pn_start_s2c,
                 ctx.payload.key_phase,
             );
-            Ok(Some(session))
+            Ok(Some(UdpQspTransport::new(session)))
         }
         Message::RegisterFail {
             payload: fail_payload,
@@ -179,7 +170,8 @@ async fn handle_register_message(
             };
             let mut pong_buf = Vec::with_capacity(8);
             pong_out.encode(&mut pong_buf);
-            send_tcp_message(stream, Message::Pong { payload: &pong_buf }).await?;
+            tcp.write_message(Message::Pong { payload: &pong_buf })
+                .await?;
             Ok(None)
         }
         Message::Pong { .. } => Ok(None),
@@ -213,13 +205,4 @@ fn random_array<const N: usize>() -> io::Result<[u8; N]> {
     let mut bytes = [0u8; N];
     rand_bytes(&mut bytes).map_err(|err| io::Error::other(format!("{err:?}")))?;
     Ok(bytes)
-}
-
-async fn send_tcp_message(
-    stream: &mut SslStream<TcpStream>,
-    message: Message<'_>,
-) -> io::Result<()> {
-    let mut buf = Vec::new();
-    encode_message(message, &mut buf).map_err(crate::wire::map_frame_error)?;
-    stream.write_all(&buf).await
 }

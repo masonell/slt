@@ -1,23 +1,17 @@
 use crate::transport::quic_discovery as quic;
-use crate::transport::udp_qsp::ClientUdpIo;
-use slt_core::crypto::udp_qsp::QuicQspSession;
-use slt_core::proto::{
-    CloseCode, ClosePayload, Message, MessageLimits, PingPayload, PongPayload, encode_message,
-};
+use crate::transport::tcp::TcpTransport;
+use crate::transport::udp_qsp::UdpQspTransport;
+use slt_core::proto::{CloseCode, ClosePayload, Message, MessageLimits, PingPayload, PongPayload};
 use std::io;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time;
-use tokio_boring::SslStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 pub(super) struct ClientSession {
-    stream: SslStream<TcpStream>,
-    read_buf: Vec<u8>,
-    write_buf: Vec<u8>,
+    tcp: TcpTransport,
+    active_transport: ActiveTransport,
     to_session_rx: mpsc::Receiver<Vec<u8>>,
     to_tun_tx: mpsc::Sender<Vec<u8>>,
     cancel: CancellationToken,
@@ -27,14 +21,13 @@ pub(super) struct ClientSession {
     ping_max: Duration,
     idle_timeout: Duration,
     quic_ids: Option<quic::QuicIds>,
-    udp_session: Option<QuicQspSession<ClientUdpIo>>,
+    udp_session: Option<UdpQspTransport>,
 }
 
 impl ClientSession {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        stream: SslStream<TcpStream>,
-        read_buf: Vec<u8>,
+        tcp: TcpTransport,
         to_session_rx: mpsc::Receiver<Vec<u8>>,
         to_tun_tx: mpsc::Sender<Vec<u8>>,
         cancel: CancellationToken,
@@ -43,12 +36,11 @@ impl ClientSession {
         ping_max: Duration,
         idle_timeout: Duration,
         quic_ids: Option<quic::QuicIds>,
-        udp_session: Option<QuicQspSession<ClientUdpIo>>,
+        udp_session: Option<UdpQspTransport>,
     ) -> Self {
         Self {
-            stream,
-            read_buf,
-            write_buf: Vec::new(),
+            tcp,
+            active_transport: ActiveTransport::Tcp,
             to_session_rx,
             to_tun_tx,
             cancel,
@@ -63,6 +55,10 @@ impl ClientSession {
     }
 
     pub(super) async fn run(&mut self) -> io::Result<()> {
+        // Keep the UDP-QSP transport methods and enum variant compiled/used even before
+        // transport switching is implemented.
+        let _ = ActiveTransport::UdpQsp;
+
         if let Some(ids) = &self.quic_ids {
             debug!(
                 dcid_len = ids.dcid.len(),
@@ -80,7 +76,11 @@ impl ClientSession {
         let mut next_ping_at = self.schedule_next_ping();
 
         loop {
-            if !self.read_buf.is_empty() && self.handle_tcp_read().await? == SessionControl::Close {
+            self.maybe_read_udp_one().await?;
+
+            if self.tcp.has_buffered_input()
+                && self.handle_tcp_read().await? == SessionControl::Close
+            {
                 return Ok(());
             }
 
@@ -94,7 +94,7 @@ impl ClientSession {
                     }
                     return Ok(());
                 }
-                res = self.stream.read_buf(&mut self.read_buf) => {
+                res = self.tcp.read_more() => {
                     let n = res?;
                     if n == 0 {
                         info!("tcp connection closed");
@@ -134,7 +134,9 @@ impl ClientSession {
 
     async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
         loop {
-            let Some(msg_buf) = crate::wire::pop_message_buf(&mut self.read_buf, self.limits)
+            let Some(msg_buf) = self
+                .tcp
+                .try_pop_message(self.limits)
                 .map_err(crate::wire::map_message_error)?
             else {
                 return Ok(SessionControl::Continue);
@@ -163,7 +165,7 @@ impl ClientSession {
                 };
                 let mut pong_buf = Vec::with_capacity(8);
                 pong_out.encode(&mut pong_buf);
-                self.send_tcp_message(Message::Pong { payload: &pong_buf })
+                self.write_active_message(Message::Pong { payload: &pong_buf })
                     .await?;
                 Ok(SessionControl::Continue)
             }
@@ -204,7 +206,7 @@ impl ClientSession {
             return Ok(SessionControl::Continue);
         }
 
-        self.send_tcp_message(Message::Data {
+        self.write_active_message(Message::Data {
             packet: packet.as_slice(),
         })
         .await?;
@@ -217,21 +219,40 @@ impl ClientSession {
         let mut buf = Vec::with_capacity(8);
         ping.encode(&mut buf);
         trace!(nonce, "sending ping");
-        self.send_tcp_message(Message::Ping { payload: &buf }).await
+        self.write_active_message(Message::Ping { payload: &buf })
+            .await
     }
 
     async fn send_close(&mut self, code: CloseCode) -> io::Result<()> {
         let payload = ClosePayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
-        self.send_tcp_message(Message::Close { payload: &buf })
+        self.write_active_message(Message::Close { payload: &buf })
             .await
     }
 
-    async fn send_tcp_message(&mut self, message: Message<'_>) -> io::Result<()> {
-        self.write_buf.clear();
-        encode_message(message, &mut self.write_buf).map_err(crate::wire::map_frame_error)?;
-        self.stream.write_all(&self.write_buf).await
+    async fn write_active_message(&mut self, message: Message<'_>) -> io::Result<()> {
+        match self.active_transport {
+            ActiveTransport::Tcp => self.tcp.write_message(message).await,
+            ActiveTransport::UdpQsp => {
+                let udp = self.udp_session.as_mut().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+                })?;
+                udp.write_message(message).await
+            }
+        }
+    }
+
+    async fn maybe_read_udp_one(&mut self) -> io::Result<()> {
+        if self.active_transport != ActiveTransport::UdpQsp {
+            return Ok(());
+        }
+
+        let udp = self.udp_session.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+        })?;
+        let _ = udp.read_next_message(self.limits).await?;
+        Ok(())
     }
 
     fn schedule_next_ping(&self) -> Instant {
@@ -254,4 +275,10 @@ impl ClientSession {
 enum SessionControl {
     Continue,
     Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveTransport {
+    Tcp,
+    UdpQsp,
 }

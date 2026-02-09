@@ -2,35 +2,25 @@ use ed25519_dalek::{Signer, SigningKey};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, Message, MessageLimits,
-    PingPayload, PongPayload, encode_message,
+    PingPayload, PongPayload,
 };
 use std::io;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::time;
-use tokio_boring::SslStream;
 use tracing::{debug, info, trace, warn};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_MAX_FRAME: usize = 16 * 1024;
 
-/// Result of the auth phase.
-pub struct AuthOutcome {
-    /// Extra bytes read beyond `AUTH_OK` that should be preserved.
-    pub leftover: Vec<u8>,
-}
-
 /// Perform TLS exporter auth and wait for `AUTH_OK`.
 pub async fn authenticate(
-    stream: &mut SslStream<TcpStream>,
+    tcp: &mut crate::transport::tcp::TcpTransport,
     config: &ClientConfig,
-) -> io::Result<AuthOutcome> {
-    let challenge = export_challenge(stream)?;
+) -> io::Result<()> {
+    let challenge = export_challenge(tcp)?;
     let payload = build_auth_payload(config, challenge);
-    send_auth(stream, &payload).await?;
+    send_auth(tcp, &payload).await?;
 
-    let mut buf = Vec::with_capacity(16 * 1024);
     let limits = MessageLimits::new(AUTH_MAX_FRAME, AUTH_MAX_FRAME);
     let deadline = Instant::now() + AUTH_TIMEOUT;
 
@@ -40,7 +30,7 @@ pub async fn authenticate(
             () = timeout => {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "auth timed out"));
             }
-            res = stream.read_buf(&mut buf) => {
+            res = tcp.read_more() => {
                 let n = res?;
                 if n == 0 {
                     return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "auth connection closed"));
@@ -50,15 +40,16 @@ pub async fn authenticate(
         }
 
         loop {
-            let Some(msg_buf) = crate::wire::pop_message_buf(&mut buf, limits)
+            let Some(msg_buf) = tcp
+                .try_pop_message(limits)
                 .map_err(crate::wire::map_message_error)?
             else {
                 break;
             };
 
-            match handle_auth_message(stream, msg_buf.message()).await? {
+            match handle_auth_message(tcp, msg_buf.message()).await? {
                 AuthResult::Continue => {}
-                AuthResult::Accepted => return Ok(AuthOutcome { leftover: buf }),
+                AuthResult::Accepted => return Ok(()),
                 AuthResult::Rejected => {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
@@ -70,10 +61,11 @@ pub async fn authenticate(
     }
 }
 
-fn export_challenge(stream: &SslStream<TcpStream>) -> io::Result<[u8; AUTH_CHALLENGE_LEN]> {
+fn export_challenge(
+    tcp: &crate::transport::tcp::TcpTransport,
+) -> io::Result<[u8; AUTH_CHALLENGE_LEN]> {
     let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-    stream
-        .ssl()
+    tcp.ssl()
         .export_keying_material(&mut challenge, "slt-auth-challenge", None)
         .map_err(|err| io::Error::other(format!("{err:?}")))?;
     Ok(challenge)
@@ -97,20 +89,20 @@ fn build_auth_payload(config: &ClientConfig, challenge: [u8; AUTH_CHALLENGE_LEN]
     }
 }
 
-async fn send_auth(stream: &mut SslStream<TcpStream>, payload: &AuthPayload) -> io::Result<()> {
+async fn send_auth(
+    tcp: &mut crate::transport::tcp::TcpTransport,
+    payload: &AuthPayload,
+) -> io::Result<()> {
     let mut payload_buf = Vec::with_capacity(slt_core::proto::AUTH_PAYLOAD_LEN);
     payload.encode(&mut payload_buf);
-    send_message(
-        stream,
-        Message::Auth {
-            payload: &payload_buf,
-        },
-    )
+    tcp.write_message(Message::Auth {
+        payload: &payload_buf,
+    })
     .await
 }
 
 async fn handle_auth_message(
-    stream: &mut SslStream<TcpStream>,
+    tcp: &mut crate::transport::tcp::TcpTransport,
     message: Message<'_>,
 ) -> io::Result<AuthResult> {
     match message {
@@ -130,7 +122,8 @@ async fn handle_auth_message(
             let pong_payload = PongPayload { nonce: ping.nonce };
             let mut pong_buf = Vec::with_capacity(8);
             pong_payload.encode(&mut pong_buf);
-            send_message(stream, Message::Pong { payload: &pong_buf }).await?;
+            tcp.write_message(Message::Pong { payload: &pong_buf })
+                .await?;
             Ok(AuthResult::Continue)
         }
         Message::Close { .. } => {
@@ -142,12 +135,6 @@ async fn handle_auth_message(
             Ok(AuthResult::Rejected)
         }
     }
-}
-
-async fn send_message(stream: &mut SslStream<TcpStream>, message: Message<'_>) -> io::Result<()> {
-    let mut buf = Vec::new();
-    encode_message(message, &mut buf).map_err(crate::wire::map_frame_error)?;
-    stream.write_all(&buf).await
 }
 
 #[derive(Debug, Clone, Copy)]
