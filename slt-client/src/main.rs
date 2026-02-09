@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+mod app;
 mod auth;
 mod runtime;
 mod transport;
@@ -49,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "client starting"
     );
 
-    Box::pin(run_client(config, cancel)).await
+    Box::pin(app::run(config, cancel)).await
 }
 
 fn init_tracing(filter: Option<&str>) {
@@ -93,11 +94,4 @@ const fn tls_material_source(material: &TlsMaterial) -> &'static str {
         TlsMaterial::Pem(_) => "pem",
         TlsMaterial::File { .. } => "file",
     }
-}
-
-async fn run_client(
-    config: ClientConfig,
-    cancel: CancellationToken,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Box::pin(runtime::run_client(config, cancel)).await
 }
