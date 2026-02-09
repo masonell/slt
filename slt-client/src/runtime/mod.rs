@@ -4,8 +4,6 @@ mod session;
 
 use crate::{auth, transport, tun};
 use slt_core::config::ClientConfig;
-use slt_core::proto::{FrameError, MessageError, PayloadError};
-use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -117,22 +115,4 @@ pub async fn run_client(
 
     info!("client shutdown complete");
     Ok(())
-}
-
-fn map_frame_error(err: FrameError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
-}
-
-fn map_message_error(err: MessageError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("message error: {err:?}"),
-    )
-}
-
-fn map_payload_error(err: PayloadError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("payload error: {err:?}"),
-    )
 }

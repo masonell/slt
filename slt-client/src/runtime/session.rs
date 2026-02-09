@@ -135,7 +135,7 @@ impl ClientSession {
     async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
         loop {
             let Some(msg_buf) = crate::wire::pop_message_buf(&mut self.read_buf, self.limits)
-                .map_err(super::map_message_error)?
+                .map_err(crate::wire::map_message_error)?
             else {
                 return Ok(SessionControl::Continue);
             };
@@ -156,7 +156,8 @@ impl ClientSession {
                 Ok(SessionControl::Continue)
             }
             Message::Ping { payload } => {
-                let ping_in = PingPayload::decode(payload).map_err(super::map_payload_error)?;
+                let ping_in =
+                    PingPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
                 let pong_out = PongPayload {
                     nonce: ping_in.nonce,
                 };
@@ -167,12 +168,14 @@ impl ClientSession {
                 Ok(SessionControl::Continue)
             }
             Message::Pong { payload } => {
-                let pong_in = PongPayload::decode(payload).map_err(super::map_payload_error)?;
+                let pong_in =
+                    PongPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
                 trace!(nonce = pong_in.nonce, "received pong");
                 Ok(SessionControl::Continue)
             }
             Message::Close { payload } => {
-                let close = ClosePayload::decode(payload).map_err(super::map_payload_error)?;
+                let close =
+                    ClosePayload::decode(payload).map_err(crate::wire::map_payload_error)?;
                 info!(code = ?close.code, "received close");
                 Ok(SessionControl::Close)
             }
@@ -227,7 +230,7 @@ impl ClientSession {
 
     async fn send_tcp_message(&mut self, message: Message<'_>) -> io::Result<()> {
         self.write_buf.clear();
-        encode_message(message, &mut self.write_buf).map_err(super::map_frame_error)?;
+        encode_message(message, &mut self.write_buf).map_err(crate::wire::map_frame_error)?;
         self.stream.write_all(&self.write_buf).await
     }
 

@@ -1,8 +1,8 @@
 use ed25519_dalek::{Signer, SigningKey};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
-    AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, Message, MessageError,
-    MessageLimits, PayloadError, PingPayload, PongPayload, encode_message,
+    AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, Message, MessageLimits,
+    PingPayload, PongPayload, encode_message,
 };
 use std::io;
 use std::time::{Duration, Instant};
@@ -50,8 +50,8 @@ pub async fn authenticate(
         }
 
         loop {
-            let Some(msg_buf) =
-                crate::wire::pop_message_buf(&mut buf, limits).map_err(map_message_error)?
+            let Some(msg_buf) = crate::wire::pop_message_buf(&mut buf, limits)
+                .map_err(crate::wire::map_message_error)?
             else {
                 break;
             };
@@ -115,17 +115,17 @@ async fn handle_auth_message(
 ) -> io::Result<AuthResult> {
     match message {
         Message::AuthOk { payload } => {
-            AuthOkPayload::decode(payload).map_err(map_payload_error)?;
+            AuthOkPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
             info!("authentication accepted");
             Ok(AuthResult::Accepted)
         }
         Message::AuthFail { payload } => {
-            let fail = AuthFailPayload::decode(payload).map_err(map_payload_error)?;
+            let fail = AuthFailPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
             warn!(code = ?fail.code, "authentication rejected");
             Ok(AuthResult::Rejected)
         }
         Message::Ping { payload } => {
-            let ping = PingPayload::decode(payload).map_err(map_payload_error)?;
+            let ping = PingPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
             debug!(nonce = ping.nonce, "received ping during auth");
             let pong_payload = PongPayload { nonce: ping.nonce };
             let mut pong_buf = Vec::with_capacity(8);
@@ -146,26 +146,8 @@ async fn handle_auth_message(
 
 async fn send_message(stream: &mut SslStream<TcpStream>, message: Message<'_>) -> io::Result<()> {
     let mut buf = Vec::new();
-    encode_message(message, &mut buf).map_err(map_frame_error)?;
+    encode_message(message, &mut buf).map_err(crate::wire::map_frame_error)?;
     stream.write_all(&buf).await
-}
-
-fn map_frame_error(err: slt_core::proto::FrameError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
-}
-
-fn map_message_error(err: MessageError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("message error: {err:?}"),
-    )
-}
-
-fn map_payload_error(err: PayloadError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("payload error: {err:?}"),
-    )
 }
 
 #[derive(Debug, Clone, Copy)]

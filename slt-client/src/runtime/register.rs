@@ -62,7 +62,7 @@ pub(super) async fn register_udp_qsp(
     let mut payload_buf = Vec::new();
     payload
         .encode(&mut payload_buf)
-        .map_err(super::map_payload_error)?;
+        .map_err(crate::wire::map_payload_error)?;
     send_tcp_message(
         stream,
         Message::RegisterCid {
@@ -110,8 +110,8 @@ async fn handle_register_read(
     ctx: &RegisterContext<'_>,
 ) -> io::Result<Option<QuicQspSession<ClientUdpIo>>> {
     loop {
-        let Some(msg_buf) =
-            crate::wire::pop_message_buf(read_buf, limits).map_err(super::map_message_error)?
+        let Some(msg_buf) = crate::wire::pop_message_buf(read_buf, limits)
+            .map_err(crate::wire::map_message_error)?
         else {
             return Ok(None);
         };
@@ -132,7 +132,8 @@ async fn handle_register_message(
         Message::RegisterOk {
             payload: ok_payload,
         } => {
-            let ok = RegisterOkPayload::decode(ok_payload).map_err(super::map_payload_error)?;
+            let ok =
+                RegisterOkPayload::decode(ok_payload).map_err(crate::wire::map_payload_error)?;
             if ok.dcid != ctx.ids.dcid {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -164,15 +165,15 @@ async fn handle_register_message(
         Message::RegisterFail {
             payload: fail_payload,
         } => {
-            let fail =
-                RegisterFailPayload::decode(fail_payload).map_err(super::map_payload_error)?;
+            let fail = RegisterFailPayload::decode(fail_payload)
+                .map_err(crate::wire::map_payload_error)?;
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!("register_cid rejected: {:?}", fail.code),
             ))
         }
         Message::Ping { payload } => {
-            let ping_in = PingPayload::decode(payload).map_err(super::map_payload_error)?;
+            let ping_in = PingPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
             let pong_out = PongPayload {
                 nonce: ping_in.nonce,
             };
@@ -183,7 +184,7 @@ async fn handle_register_message(
         }
         Message::Pong { .. } => Ok(None),
         Message::Close { payload } => {
-            let close = ClosePayload::decode(payload).map_err(super::map_payload_error)?;
+            let close = ClosePayload::decode(payload).map_err(crate::wire::map_payload_error)?;
             Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 format!("register_cid closed: {:?}", close.code),
@@ -219,6 +220,6 @@ async fn send_tcp_message(
     message: Message<'_>,
 ) -> io::Result<()> {
     let mut buf = Vec::new();
-    encode_message(message, &mut buf).map_err(super::map_frame_error)?;
+    encode_message(message, &mut buf).map_err(crate::wire::map_frame_error)?;
     stream.write_all(&buf).await
 }
