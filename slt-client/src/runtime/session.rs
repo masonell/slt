@@ -12,12 +12,27 @@ use tracing::{debug, info, trace, warn};
 const UDP_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const UDP_VERIFY_PONG_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(100);
 const UDP_VERIFY_PONG_MAX_SENDS: u8 = 3;
+const REGISTER_REKEY_TIMEOUT: Duration = Duration::from_secs(10);
+const UDP_REKEY_MARGIN: u64 = slt_core::crypto::udp_qsp::PN_REPLAY_WINDOW as u64;
+const UDP_PN_MAX: u64 = u32::MAX as u64;
 
 #[derive(Debug, Clone, Copy)]
 struct UdpVerifySwitch {
     pong_payload: [u8; 8],
     next_send_at: Instant,
     sent: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegisterTransport {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingRegister {
+    transport: RegisterTransport,
+    deadline: Instant,
 }
 
 pub(super) struct ClientSession {
@@ -35,6 +50,7 @@ pub(super) struct ClientSession {
     udp_session: Option<UdpQspTransport>,
     udp_expect_ping_deadline: Option<Instant>,
     udp_verify: Option<UdpVerifySwitch>,
+    pending_register: Option<PendingRegister>,
 }
 
 impl ClientSession {
@@ -66,6 +82,7 @@ impl ClientSession {
             udp_session,
             udp_expect_ping_deadline: None,
             udp_verify: None,
+            pending_register: None,
         }
     }
 
@@ -121,6 +138,7 @@ impl ClientSession {
         } else {
             None
         };
+        let register_deadline = self.pending_register.map(|pending| pending.deadline);
         let retransmit_at = self.udp_verify.as_ref().map(|verify| verify.next_send_at);
         let retransmit_sleep = async move {
             if let Some(at) = retransmit_at {
@@ -131,6 +149,13 @@ impl ClientSession {
         };
         let verify_sleep = async move {
             if let Some(deadline) = verify_deadline {
+                time::sleep_until(deadline.into()).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let register_sleep = async move {
+            if let Some(deadline) = register_deadline {
                 time::sleep_until(deadline.into()).await;
             } else {
                 std::future::pending::<()>().await;
@@ -151,6 +176,7 @@ impl ClientSession {
             () = time::sleep_until(next_ping_at.into()) => Ok(SessionEvent::PingTick),
             () = time::sleep_until(idle_deadline.into()) => Ok(SessionEvent::IdleTimeout),
             () = verify_sleep => Ok(SessionEvent::UdpVerifyTimeout),
+            () = register_sleep => Ok(SessionEvent::RegisterTimeout),
         }
     }
 
@@ -226,7 +252,13 @@ impl ClientSession {
                 self.udp_session = None;
                 self.udp_expect_ping_deadline = None;
                 self.udp_verify = None;
+                self.pending_register = None;
                 self.active_transport = ActiveTransport::Tcp;
+                Ok(SessionControl::Continue)
+            }
+            SessionEvent::RegisterTimeout => {
+                warn!("register_cid timed out; continuing");
+                self.pending_register = None;
                 Ok(SessionControl::Continue)
             }
         }
@@ -246,7 +278,42 @@ impl ClientSession {
         self.udp_session = None;
         self.udp_expect_ping_deadline = None;
         self.udp_verify = None;
+        self.pending_register = None;
         self.active_transport = ActiveTransport::Tcp;
+    }
+
+    fn handle_register_ok(
+        &mut self,
+        transport: RegisterTransport,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let ok = slt_core::proto::RegisterOkPayload::decode(payload)
+            .map_err(crate::wire::map_payload_error)?;
+        if let Some(ids) = &self.quic_ids
+            && ok.dcid != ids.dcid
+        {
+            warn!(transport = ?transport, "register_ok dcid mismatch");
+        } else {
+            info!(transport = ?transport, "register_cid accepted");
+        }
+        self.pending_register = None;
+        Ok(())
+    }
+
+    fn handle_register_fail(
+        &mut self,
+        transport: RegisterTransport,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let fail = slt_core::proto::RegisterFailPayload::decode(payload)
+            .map_err(crate::wire::map_payload_error)?;
+        warn!(transport = ?transport, code = ?fail.code, "register_cid rejected");
+        self.pending_register = None;
+        self.udp_session = None;
+        self.udp_expect_ping_deadline = None;
+        self.udp_verify = None;
+        self.active_transport = ActiveTransport::Tcp;
+        Ok(())
     }
 
     async fn handle_udp_verify_retransmit(&mut self) -> io::Result<()> {
@@ -299,6 +366,28 @@ impl ClientSession {
 
     async fn handle_tcp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
         match message {
+            Message::RegisterOk { payload } => {
+                if self
+                    .pending_register
+                    .is_some_and(|pending| pending.transport == RegisterTransport::Tcp)
+                {
+                    self.handle_register_ok(RegisterTransport::Tcp, payload)?;
+                } else {
+                    debug!("unexpected register_ok on established session");
+                }
+                Ok(SessionControl::Continue)
+            }
+            Message::RegisterFail { payload } => {
+                if self
+                    .pending_register
+                    .is_some_and(|pending| pending.transport == RegisterTransport::Tcp)
+                {
+                    self.handle_register_fail(RegisterTransport::Tcp, payload)?;
+                } else {
+                    debug!("unexpected register_fail on established session");
+                }
+                Ok(SessionControl::Continue)
+            }
             Message::Data { packet } => {
                 if self.active_transport != ActiveTransport::Tcp {
                     debug!("tcp data received while udp-qsp is active; switching to tcp");
@@ -339,8 +428,6 @@ impl ClientSession {
                 Ok(SessionControl::Close)
             }
             Message::RegisterCid { .. }
-            | Message::RegisterOk { .. }
-            | Message::RegisterFail { .. }
             | Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. } => Err(io::Error::new(
@@ -352,6 +439,34 @@ impl ClientSession {
 
     async fn handle_udp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
         match message {
+            Message::RegisterOk { payload } => {
+                if self
+                    .pending_register
+                    .is_some_and(|pending| pending.transport == RegisterTransport::Udp)
+                {
+                    self.handle_register_ok(RegisterTransport::Udp, payload)?;
+                    Ok(SessionControl::Continue)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected register_ok on udp-qsp transport",
+                    ))
+                }
+            }
+            Message::RegisterFail { payload } => {
+                if self
+                    .pending_register
+                    .is_some_and(|pending| pending.transport == RegisterTransport::Udp)
+                {
+                    self.handle_register_fail(RegisterTransport::Udp, payload)?;
+                    Ok(SessionControl::Continue)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected register_fail on udp-qsp transport",
+                    ))
+                }
+            }
             Message::Ping { payload } => {
                 let ping_in =
                     PingPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
@@ -363,6 +478,7 @@ impl ClientSession {
 
                 if self.udp_expect_ping_deadline.is_some() {
                     self.udp_expect_ping_deadline = None;
+                    self.pending_register = None;
                     self.udp_verify = Some(UdpVerifySwitch {
                         pong_payload,
                         next_send_at: Instant::now() + UDP_VERIFY_PONG_RETRANSMIT_INTERVAL,
@@ -410,8 +526,6 @@ impl ClientSession {
                 Ok(SessionControl::Close)
             }
             Message::RegisterCid { .. }
-            | Message::RegisterOk { .. }
-            | Message::RegisterFail { .. }
             | Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. } => Err(io::Error::new(
@@ -497,6 +611,9 @@ impl ClientSession {
     }
 
     async fn write_active_message(&mut self, message: Message<'_>) -> io::Result<()> {
+        if self.active_transport == ActiveTransport::UdpQsp {
+            let _ = self.maybe_rekey_udp_qsp().await?;
+        }
         match self.active_transport {
             ActiveTransport::Tcp => self.tcp.write_message(message).await,
             ActiveTransport::UdpQsp => {
@@ -513,6 +630,71 @@ impl ClientSession {
             io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
         })?;
         udp.write_message(message).await
+    }
+
+    async fn maybe_rekey_udp_qsp(&mut self) -> io::Result<bool> {
+        if self.pending_register.is_some() || self.udp_expect_ping_deadline.is_some() {
+            return Ok(false);
+        }
+        let Some(udp) = self.udp_session.as_ref() else {
+            return Ok(false);
+        };
+
+        let threshold = UDP_PN_MAX.saturating_sub(UDP_REKEY_MARGIN);
+        let next_pn = udp.next_pn();
+        let expected_pn = udp.expected_pn();
+        if next_pn < threshold && expected_pn < threshold {
+            return Ok(false);
+        }
+
+        // Prefer rekey over TCP (control channel). Server will drive UDP verify after this.
+        if let Err(err) = self.start_rekey(RegisterTransport::Tcp).await {
+            warn!(error = %err, "tcp rekey failed; trying udp");
+            if let Err(err) = self.start_rekey(RegisterTransport::Udp).await {
+                warn!(error = %err, "udp rekey failed");
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn start_rekey(&mut self, transport: RegisterTransport) -> io::Result<()> {
+        let Some(ids) = &self.quic_ids else {
+            return Ok(());
+        };
+        let mut prepared = super::register::prepare_udp_qsp_registration(ids)?;
+
+        match transport {
+            RegisterTransport::Tcp => {
+                self.tcp
+                    .write_message(Message::RegisterCid {
+                        payload: &prepared.payload_buf,
+                    })
+                    .await?;
+            }
+            RegisterTransport::Udp => {
+                let udp = self.udp_session.as_mut().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+                })?;
+                udp.write_message(Message::RegisterCid {
+                    payload: &prepared.payload_buf,
+                })
+                .await?;
+            }
+        }
+
+        self.udp_session = prepared.udp.take();
+        self.udp_expect_ping_deadline = Some(Instant::now() + UDP_VERIFY_TIMEOUT);
+        self.udp_verify = None;
+        self.pending_register = Some(PendingRegister {
+            transport,
+            deadline: Instant::now() + REGISTER_REKEY_TIMEOUT,
+        });
+        self.active_transport = match transport {
+            RegisterTransport::Tcp => ActiveTransport::Tcp,
+            RegisterTransport::Udp => ActiveTransport::UdpQsp,
+        };
+        Ok(())
     }
 
     async fn send_udp_probe_ping(&mut self) -> io::Result<()> {
@@ -553,6 +735,7 @@ enum SessionEvent {
     PingTick,
     IdleTimeout,
     UdpVerifyTimeout,
+    RegisterTimeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

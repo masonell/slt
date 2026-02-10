@@ -11,6 +11,7 @@ pub const PN_REPLAY_WINDOW: usize = 1024;
 
 const WINDOW_WORD_BITS: usize = 64;
 const WINDOW_WORDS: usize = PN_REPLAY_WINDOW / WINDOW_WORD_BITS;
+const MAX_PACKET_NUMBER: u64 = u32::MAX as u64;
 
 /// UDP-QSP session errors.
 #[derive(Debug)]
@@ -220,16 +221,32 @@ impl<I: SessionIo> QuicQspSession<I> {
         &self.dcid
     }
 
+    /// Return the next packet number used for outbound packets.
+    #[must_use]
+    pub const fn next_pn(&self) -> u64 {
+        self.next_pn
+    }
+
+    /// Return the expected next packet number for inbound packets.
+    #[must_use]
+    pub fn expected_pn(&self) -> u64 {
+        self.replay_window.expected_pn()
+    }
+
     /// Send a payload over UDP-QSP.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - the packet number overflows
+    /// - the packet number exceeds the wire format bounds
     /// - packet protection fails
     /// - the IO layer fails
     pub async fn send(&mut self, payload: &[u8]) -> Result<(), QspSessionError> {
         let pn = self.next_pn;
+        if pn > MAX_PACKET_NUMBER {
+            return Err(QspSessionError::PacketNumberOverflow);
+        }
         self.next_pn = pn
             .checked_add(1)
             .ok_or(QspSessionError::PacketNumberOverflow)?;
@@ -270,16 +287,23 @@ impl<I: SessionIo> QuicQspSession<I> {
     ///
     /// Returns an error if:
     /// - header protection / AEAD fails
+    /// - the packet number exceeds the wire format bounds
     /// - the packet is too old or a replay
     pub fn open_packet<'a>(
         &'a mut self,
         packet: &[u8],
     ) -> Result<OpenedPacketRef<'a>, QspSessionError> {
         let expected_pn = self.replay_window.expected_pn();
+        if expected_pn > MAX_PACKET_NUMBER {
+            return Err(QspSessionError::PacketNumberOverflow);
+        }
         let opened =
             self.keys
                 .open_into(self.scid.len(), packet, expected_pn, &mut self.recv_buf)?;
         let pn = opened.pn;
+        if pn > MAX_PACKET_NUMBER {
+            return Err(QspSessionError::PacketNumberOverflow);
+        }
         let pn_len = opened.pn_len;
         let key_phase = opened.key_phase;
 
@@ -388,6 +412,47 @@ mod tests {
         assert!(matches!(
             session.recv(&mut buf).await,
             Err(QspSessionError::Replay)
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_send_rejects_packet_number_overflow() {
+        struct TestIo;
+
+        impl SessionIo for TestIo {
+            async fn send(&mut self, _bytes: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+
+            async fn recv(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "no recv"))
+            }
+        }
+
+        let keys = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],
+            [0x11; HP_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x55; AEAD_IV_LEN],
+            [0x55; AEAD_IV_LEN],
+        )
+        .unwrap();
+
+        let mut session = QuicQspSession::new(
+            TestIo,
+            Cid::from([0xCD; 8]),
+            Cid::from([0xAB; 8]),
+            keys,
+            u64::from(u32::MAX) + 1,
+            0,
+            false,
+        );
+
+        assert!(matches!(
+            session.send(b"hello").await,
+            Err(QspSessionError::PacketNumberOverflow)
         ));
     }
 }

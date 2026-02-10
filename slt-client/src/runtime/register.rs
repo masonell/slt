@@ -14,21 +14,27 @@ use tokio::time;
 
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 
-struct RegisterContext<'a> {
-    to_tun_tx: &'a mpsc::Sender<Vec<u8>>,
-    ids: &'a quic::QuicIds,
-    payload: &'a RegisterCidPayload,
-    cipher: CipherSuite,
-    pn_start_c2s: u64,
-    pn_start_s2c: u64,
+/// Prepared state for a UDP-QSP `REGISTER_CID` exchange.
+///
+/// This bundles the encoded `RegisterCidPayload` to send to the server together
+/// with a locally-constructed `UdpQspTransport` that matches the generated
+/// keys/packet-number starts. The transport is stored in an `Option` so it can
+/// be moved out exactly once (via `take()`) when the server replies
+/// `REGISTER_OK`.
+pub(super) struct PreparedUdpQspRegistration {
+    /// Encoded `RegisterCidPayload` bytes (used as the `Message::RegisterCid` payload).
+    pub(super) payload_buf: Vec<u8>,
+    /// Matching UDP-QSP transport to install once registration succeeds.
+    pub(super) udp: Option<UdpQspTransport>,
 }
 
-pub(super) async fn register_udp_qsp(
-    tcp: &mut TcpTransport,
-    limits: MessageLimits,
-    to_tun_tx: &mpsc::Sender<Vec<u8>>,
+/// Build a `REGISTER_CID` payload and a matching UDP-QSP transport.
+///
+/// The payload is expressed in the server's `(tx, rx)` terms; the returned
+/// transport uses the reversed directions for the client.
+pub(super) fn prepare_udp_qsp_registration(
     ids: &quic::QuicIds,
-) -> io::Result<UdpQspTransport> {
+) -> io::Result<PreparedUdpQspRegistration> {
     let cipher = CipherSuite::Aes128Gcm;
     let hp_c2s = random_array::<HP_KEY_LEN>()?;
     let hp_s2c = random_array::<HP_KEY_LEN>()?;
@@ -59,23 +65,53 @@ pub(super) async fn register_udp_qsp(
     payload
         .encode(&mut payload_buf)
         .map_err(crate::wire::map_payload_error)?;
+
+    // Reverse key directions: the payload is expressed in the server's (tx/rx) terms.
+    let keys = UdpQspKeys::new(
+        cipher,
+        payload.hp_rx,
+        payload.hp_tx,
+        payload.aead_rx,
+        payload.aead_tx,
+        payload.iv_rx,
+        payload.iv_tx,
+    )
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "udp-qsp keys invalid"))?;
+
+    let io = ClientUdpIo::new(ids.socket.clone(), ids.peer);
+    let session = QuicQspSession::new(
+        io,
+        ids.scid,
+        ids.dcid,
+        keys,
+        pn_start_c2s,
+        pn_start_s2c,
+        key_phase,
+    );
+
+    Ok(PreparedUdpQspRegistration {
+        payload_buf,
+        udp: Some(UdpQspTransport::new(session)),
+    })
+}
+
+pub(super) async fn register_udp_qsp(
+    tcp: &mut TcpTransport,
+    limits: MessageLimits,
+    to_tun_tx: &mpsc::Sender<Vec<u8>>,
+    ids: &quic::QuicIds,
+) -> io::Result<UdpQspTransport> {
+    let mut prepared = prepare_udp_qsp_registration(ids)?;
     tcp.write_message(Message::RegisterCid {
-        payload: &payload_buf,
+        payload: &prepared.payload_buf,
     })
     .await?;
 
-    let ctx = RegisterContext {
-        to_tun_tx,
-        ids,
-        payload: &payload,
-        cipher,
-        pn_start_c2s,
-        pn_start_s2c,
-    };
-
     let deadline = Instant::now() + REGISTER_TIMEOUT;
     loop {
-        if let Some(session) = handle_register_read(tcp, limits, &ctx).await? {
+        if let Some(session) =
+            handle_register_read(tcp, limits, to_tun_tx, ids, &mut prepared).await?
+        {
             return Ok(session);
         }
 
@@ -97,7 +133,9 @@ pub(super) async fn register_udp_qsp(
 async fn handle_register_read(
     tcp: &mut TcpTransport,
     limits: MessageLimits,
-    ctx: &RegisterContext<'_>,
+    to_tun_tx: &mpsc::Sender<Vec<u8>>,
+    ids: &quic::QuicIds,
+    prepared: &mut PreparedUdpQspRegistration,
 ) -> io::Result<Option<UdpQspTransport>> {
     loop {
         let Some(msg_buf) = tcp
@@ -107,7 +145,8 @@ async fn handle_register_read(
             return Ok(None);
         };
 
-        let result = handle_register_message(tcp, msg_buf.message(), ctx).await?;
+        let result =
+            handle_register_message(tcp, msg_buf.message(), to_tun_tx, ids, prepared).await?;
         if result.is_some() {
             return Ok(result);
         }
@@ -117,7 +156,9 @@ async fn handle_register_read(
 async fn handle_register_message(
     tcp: &mut TcpTransport,
     message: Message<'_>,
-    ctx: &RegisterContext<'_>,
+    to_tun_tx: &mpsc::Sender<Vec<u8>>,
+    ids: &quic::QuicIds,
+    prepared: &mut PreparedUdpQspRegistration,
 ) -> io::Result<Option<UdpQspTransport>> {
     match message {
         Message::RegisterOk {
@@ -125,33 +166,16 @@ async fn handle_register_message(
         } => {
             let ok =
                 RegisterOkPayload::decode(ok_payload).map_err(crate::wire::map_payload_error)?;
-            if ok.dcid != ctx.ids.dcid {
+            if ok.dcid != ids.dcid {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "register_ok dcid mismatch",
                 ));
             }
-            let keys = UdpQspKeys::new(
-                ctx.cipher,
-                ctx.payload.hp_rx,
-                ctx.payload.hp_tx,
-                ctx.payload.aead_rx,
-                ctx.payload.aead_tx,
-                ctx.payload.iv_rx,
-                ctx.payload.iv_tx,
-            )
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "udp-qsp keys invalid"))?;
-            let io = ClientUdpIo::new(ctx.ids.socket.clone(), ctx.ids.peer);
-            let session = QuicQspSession::new(
-                io,
-                ctx.ids.scid,
-                ctx.ids.dcid,
-                keys,
-                ctx.pn_start_c2s,
-                ctx.pn_start_s2c,
-                ctx.payload.key_phase,
-            );
-            Ok(Some(UdpQspTransport::new(session)))
+            let session = prepared.udp.take().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "udp-qsp session missing")
+            })?;
+            Ok(Some(session))
         }
         Message::RegisterFail {
             payload: fail_payload,
@@ -183,7 +207,7 @@ async fn handle_register_message(
             ))
         }
         Message::Data { packet } => {
-            if ctx.to_tun_tx.send(packet.to_vec()).await.is_err() {
+            if to_tun_tx.send(packet.to_vec()).await.is_err() {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "tun channel closed during register",

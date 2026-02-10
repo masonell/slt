@@ -64,6 +64,18 @@ impl UdpQspTransport {
         self.session.scid()
     }
 
+    /// Return the next packet number used for outbound packets.
+    #[must_use]
+    pub const fn next_pn(&self) -> u64 {
+        self.session.next_pn()
+    }
+
+    /// Return the expected next packet number for inbound packets.
+    #[must_use]
+    pub fn expected_pn(&self) -> u64 {
+        self.session.expected_pn()
+    }
+
     /// Encode and send a VPN protocol message over UDP-QSP.
     pub async fn write_message(&mut self, message: slt_core::proto::Message<'_>) -> io::Result<()> {
         self.write_buf.clear();
