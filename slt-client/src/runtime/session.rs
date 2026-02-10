@@ -42,7 +42,8 @@ pub(super) struct ClientSession {
     to_tun_tx: mpsc::Sender<Vec<u8>>,
     cancel: CancellationToken,
     limits: MessageLimits,
-    last_activity: Instant,
+    last_tcp_rx: Instant,
+    last_udp_rx: Instant,
     ping_min: Duration,
     ping_max: Duration,
     idle_timeout: Duration,
@@ -51,6 +52,7 @@ pub(super) struct ClientSession {
     udp_expect_ping_deadline: Option<Instant>,
     udp_verify: Option<UdpVerifySwitch>,
     pending_register: Option<PendingRegister>,
+    exit: Option<SessionExit>,
 }
 
 impl ClientSession {
@@ -67,6 +69,7 @@ impl ClientSession {
         quic_ids: Option<quic::QuicIds>,
         udp_session: Option<UdpQspTransport>,
     ) -> Self {
+        let now = Instant::now();
         Self {
             tcp,
             active_transport: ActiveTransport::Tcp,
@@ -74,7 +77,8 @@ impl ClientSession {
             to_tun_tx,
             cancel,
             limits,
-            last_activity: Instant::now(),
+            last_tcp_rx: now,
+            last_udp_rx: now,
             ping_min,
             ping_max,
             idle_timeout,
@@ -83,10 +87,11 @@ impl ClientSession {
             udp_expect_ping_deadline: None,
             udp_verify: None,
             pending_register: None,
+            exit: None,
         }
     }
 
-    pub(super) async fn run(&mut self) -> io::Result<()> {
+    pub(super) async fn run(&mut self) -> io::Result<SessionExit> {
         if let Some(ids) = &self.quic_ids {
             debug!(
                 dcid_len = ids.dcid.len(),
@@ -101,14 +106,19 @@ impl ClientSession {
             if self.tcp.has_buffered_input()
                 && self.handle_tcp_read().await? == SessionControl::Close
             {
-                return Ok(());
+                return Ok(self.exit.take().unwrap_or(SessionExit::TcpClosed));
             }
 
             let event = self.poll_event(next_ping_at).await?;
             if self.handle_event(event, &mut next_ping_at).await? == SessionControl::Close {
-                return Ok(());
+                return Ok(self.exit.take().unwrap_or(SessionExit::TcpClosed));
             }
         }
+    }
+
+    pub(super) fn take_to_session_rx(&mut self) -> mpsc::Receiver<Vec<u8>> {
+        let (_dummy_tx, dummy_rx) = mpsc::channel(1);
+        std::mem::replace(&mut self.to_session_rx, dummy_rx)
     }
 
     async fn maybe_start_udp_verify(&mut self) {
@@ -131,7 +141,10 @@ impl ClientSession {
     }
 
     async fn poll_event(&mut self, next_ping_at: Instant) -> io::Result<SessionEvent> {
-        let idle_deadline = self.last_activity + self.idle_timeout;
+        let idle_deadline = match self.active_transport {
+            ActiveTransport::Tcp => self.last_tcp_rx + self.idle_timeout,
+            ActiveTransport::UdpQsp => self.last_udp_rx + self.idle_timeout,
+        };
         let udp_enabled = self.udp_session.is_some();
         let verify_deadline = if udp_enabled {
             self.udp_expect_ping_deadline
@@ -188,6 +201,7 @@ impl ClientSession {
         match event {
             SessionEvent::Shutdown => {
                 info!("shutdown requested");
+                self.exit = Some(SessionExit::Shutdown);
                 if let Err(err) = self.send_close(CloseCode::Normal).await {
                     debug!(error = %err, "failed to send close on shutdown");
                 }
@@ -196,14 +210,16 @@ impl ClientSession {
             SessionEvent::TcpRead(n) => {
                 if n == 0 {
                     info!("tcp connection closed");
+                    self.exit = Some(SessionExit::TcpClosed);
                     return Ok(SessionControl::Close);
                 }
-                self.note_activity();
+                self.note_tcp_activity();
                 self.handle_tcp_read().await
             }
             SessionEvent::TunPacket(maybe) => {
                 let Some(packet) = maybe else {
                     info!("tun channel closed");
+                    self.exit = Some(SessionExit::TunClosed);
                     if let Err(err) = self.send_close(CloseCode::Normal).await {
                         debug!(error = %err, "failed to send close after tun shutdown");
                     }
@@ -221,7 +237,7 @@ impl ClientSession {
                             return Ok(SessionControl::Continue);
                         }
                     };
-                    self.note_activity();
+                    self.note_udp_activity();
                     Ok(control)
                 }
                 Err(err) => {
@@ -240,13 +256,22 @@ impl ClientSession {
                 *next_ping_at = self.schedule_next_ping();
                 Ok(SessionControl::Continue)
             }
-            SessionEvent::IdleTimeout => {
-                info!("idle timeout reached");
-                if let Err(err) = self.send_close(CloseCode::IdleTimeout).await {
-                    debug!(error = %err, "failed to send idle close");
+            SessionEvent::IdleTimeout => match self.active_transport {
+                ActiveTransport::Tcp => {
+                    info!("idle timeout reached");
+                    self.exit = Some(SessionExit::IdleTimeout);
+                    if let Err(err) = self.send_close(CloseCode::IdleTimeout).await {
+                        debug!(error = %err, "failed to send idle close");
+                    }
+                    Ok(SessionControl::Close)
                 }
-                Ok(SessionControl::Close)
-            }
+                ActiveTransport::UdpQsp => {
+                    warn!("udp-qsp idle timeout; switching to tcp");
+                    self.active_transport = ActiveTransport::Tcp;
+                    self.note_tcp_activity();
+                    Ok(SessionControl::Continue)
+                }
+            },
             SessionEvent::UdpVerifyTimeout => {
                 warn!("udp-qsp verification timed out; staying on tcp");
                 self.udp_session = None;
@@ -254,6 +279,7 @@ impl ClientSession {
                 self.udp_verify = None;
                 self.pending_register = None;
                 self.active_transport = ActiveTransport::Tcp;
+                self.note_tcp_activity();
                 Ok(SessionControl::Continue)
             }
             SessionEvent::RegisterTimeout => {
@@ -280,6 +306,7 @@ impl ClientSession {
         self.udp_verify = None;
         self.pending_register = None;
         self.active_transport = ActiveTransport::Tcp;
+        self.note_tcp_activity();
     }
 
     fn handle_register_ok(
@@ -313,6 +340,7 @@ impl ClientSession {
         self.udp_expect_ping_deadline = None;
         self.udp_verify = None;
         self.active_transport = ActiveTransport::Tcp;
+        self.note_tcp_activity();
         Ok(())
     }
 
@@ -394,6 +422,7 @@ impl ClientSession {
                     self.active_transport = ActiveTransport::Tcp;
                 }
                 if self.to_tun_tx.send(packet.to_vec()).await.is_err() {
+                    self.exit = Some(SessionExit::TunClosed);
                     return Ok(SessionControl::Close);
                 }
                 Ok(SessionControl::Continue)
@@ -425,6 +454,7 @@ impl ClientSession {
                 let close =
                     ClosePayload::decode(payload).map_err(crate::wire::map_payload_error)?;
                 info!(code = ?close.code, "received close");
+                self.exit = Some(SessionExit::RemoteClose(close.code));
                 Ok(SessionControl::Close)
             }
             Message::RegisterCid { .. }
@@ -515,6 +545,7 @@ impl ClientSession {
                     info!("udp-qsp data received; switching to udp");
                 }
                 if self.to_tun_tx.send(packet.to_vec()).await.is_err() {
+                    self.exit = Some(SessionExit::TunClosed);
                     return Ok(SessionControl::Close);
                 }
                 Ok(SessionControl::Continue)
@@ -523,6 +554,7 @@ impl ClientSession {
                 let close =
                     ClosePayload::decode(payload).map_err(crate::wire::map_payload_error)?;
                 info!(code = ?close.code, "received udp close");
+                self.exit = Some(SessionExit::RemoteClose(close.code));
                 Ok(SessionControl::Close)
             }
             Message::RegisterCid { .. }
@@ -694,6 +726,13 @@ impl ClientSession {
             RegisterTransport::Tcp => ActiveTransport::Tcp,
             RegisterTransport::Udp => ActiveTransport::UdpQsp,
         };
+        // `poll_event()` tracks idle per active transport. When we switch the active transport
+        // (e.g. UDP -> TCP for rekey), refresh the corresponding timer so we don't immediately
+        // trip an idle timeout based on stale receive timestamps.
+        match self.active_transport {
+            ActiveTransport::Tcp => self.note_tcp_activity(),
+            ActiveTransport::UdpQsp => self.note_udp_activity(),
+        }
         Ok(())
     }
 
@@ -721,9 +760,23 @@ impl ClientSession {
         Instant::now() + Duration::from_millis(min_ms + jitter_ms)
     }
 
-    fn note_activity(&mut self) {
-        self.last_activity = Instant::now();
+    fn note_tcp_activity(&mut self) {
+        self.last_tcp_rx = Instant::now();
     }
+
+    fn note_udp_activity(&mut self) {
+        self.last_udp_rx = Instant::now();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Session termination reason used by the runtime to decide reconnect behavior.
+pub(super) enum SessionExit {
+    Shutdown,
+    TcpClosed,
+    TunClosed,
+    IdleTimeout,
+    RemoteClose(CloseCode),
 }
 
 enum SessionEvent {
