@@ -329,7 +329,69 @@ impl<I: SessionIo> QuicQspSession<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN};
+    use crate::proto::{
+        AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, MessageLimits, PingPayload,
+        PongPayload, decode_message, encode_message,
+    };
+    use tokio::sync::mpsc;
+
+    struct ChanIo {
+        tx: mpsc::Sender<Vec<u8>>,
+        rx: mpsc::Receiver<Vec<u8>>,
+    }
+
+    impl SessionIo for ChanIo {
+        async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.tx
+                .send(bytes.to_vec())
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "channel closed"))
+        }
+
+        async fn recv<'a>(&'a mut self, buf: &'a mut [u8]) -> io::Result<usize> {
+            let packet =
+                self.rx.recv().await.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed")
+                })?;
+            if packet.len() > buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "packet too large",
+                ));
+            }
+            buf[..packet.len()].copy_from_slice(&packet);
+            Ok(packet.len())
+        }
+    }
+
+    fn encode_ping_frame(nonce: u64) -> Vec<u8> {
+        let payload = PingPayload { nonce };
+        let mut payload_buf = Vec::new();
+        payload.encode(&mut payload_buf);
+
+        let mut frame = Vec::new();
+        encode_message(
+            Message::Ping {
+                payload: &payload_buf,
+            },
+            &mut frame,
+        )
+        .unwrap();
+        frame
+    }
+
+    fn encode_pong_frame(nonce: u64) -> Vec<u8> {
+        let wire = nonce.to_be_bytes();
+        let mut frame = Vec::new();
+        encode_message(Message::Pong { payload: &wire }, &mut frame).unwrap();
+        frame
+    }
+
+    fn decode_one(frame: &[u8], limits: MessageLimits) -> Message<'_> {
+        let (message, consumed) = decode_message(frame, limits).unwrap().unwrap();
+        assert_eq!(consumed, frame.len());
+        message
+    }
 
     #[test]
     fn replay_window_rejects_replay() {
@@ -454,5 +516,89 @@ mod tests {
             session.send(b"hello").await,
             Err(QspSessionError::PacketNumberOverflow)
         ));
+    }
+
+    #[tokio::test]
+    async fn session_roundtrips_framed_messages_over_in_memory_io() {
+        let (c2s_tx, c2s_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (s2c_tx, s2c_rx) = mpsc::channel::<Vec<u8>>(8);
+
+        let hp_c2s = [0x11; HP_KEY_LEN];
+        let hp_s2c = [0x22; HP_KEY_LEN];
+        let aead_c2s = [0x33; AEAD_KEY_LEN];
+        let aead_s2c = [0x44; AEAD_KEY_LEN];
+        let iv_c2s = [0x55; AEAD_IV_LEN];
+        let iv_s2c = [0x66; AEAD_IV_LEN];
+
+        let keys_client = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            hp_c2s,
+            hp_s2c,
+            aead_c2s,
+            aead_s2c,
+            iv_c2s,
+            iv_s2c,
+        )
+        .unwrap();
+        let keys_server = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            hp_s2c,
+            hp_c2s,
+            aead_s2c,
+            aead_c2s,
+            iv_s2c,
+            iv_c2s,
+        )
+        .unwrap();
+
+        let client_scid = Cid::from([0xA1; 8]);
+        let server_scid = Cid::from([0xB2; 8]);
+
+        let mut client = QuicQspSession::new(
+            ChanIo {
+                tx: c2s_tx,
+                rx: s2c_rx,
+            },
+            client_scid,
+            server_scid,
+            keys_client,
+            0,
+            0,
+            false,
+        );
+        let mut server = QuicQspSession::new(
+            ChanIo {
+                tx: s2c_tx,
+                rx: c2s_rx,
+            },
+            server_scid,
+            client_scid,
+            keys_server,
+            0,
+            0,
+            false,
+        );
+
+        let limits = MessageLimits::new(2048, 2048);
+        let mut packet_buf = vec![0u8; 2048];
+
+        let nonce = 0x1122_3344_5566_7788_u64;
+        let frame = encode_ping_frame(nonce);
+        client.send(&frame).await.unwrap();
+        let opened = server.recv(&mut packet_buf).await.unwrap();
+        assert_eq!(opened.pn, 0);
+        let Message::Ping { payload } = decode_one(opened.payload, limits) else {
+            panic!("expected ping");
+        };
+        assert_eq!(PingPayload::decode(payload).unwrap().nonce, nonce);
+
+        let frame = encode_pong_frame(nonce);
+        server.send(&frame).await.unwrap();
+        let opened = client.recv(&mut packet_buf).await.unwrap();
+        assert_eq!(opened.pn, 0);
+        let Message::Pong { payload } = decode_one(opened.payload, limits) else {
+            panic!("expected pong");
+        };
+        assert_eq!(PongPayload::decode(payload).unwrap().nonce, nonce);
     }
 }

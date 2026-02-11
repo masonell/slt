@@ -754,6 +754,45 @@ mod tests {
     }
 
     #[test]
+    fn register_cid_roundtrip_max_len() {
+        let dcid = Cid::new(&[0x55u8; MAX_DCID_LEN]).unwrap();
+        let scid = Cid::new(&[0x44u8; MAX_DCID_LEN]).unwrap();
+        let payload = RegisterCidPayload {
+            dcid,
+            scid,
+            cipher: CipherSuite::Aes128Gcm,
+            hp_tx: [0x01; HP_KEY_LEN],
+            hp_rx: [0x02; HP_KEY_LEN],
+            aead_tx: [0x03; AEAD_KEY_LEN],
+            aead_rx: [0x04; AEAD_KEY_LEN],
+            iv_tx: [0x05; AEAD_IV_LEN],
+            iv_rx: [0x06; AEAD_IV_LEN],
+            pn_start: 42,
+            pn_start_rx: 9001,
+            key_phase: true,
+        };
+
+        let expected_len = 1
+            + payload.dcid.len()
+            + 1
+            + payload.scid.len()
+            + 1
+            + (HP_KEY_LEN * 2)
+            + (AEAD_KEY_LEN * 2)
+            + (AEAD_IV_LEN * 2)
+            + 8
+            + 8
+            + 1;
+
+        let mut buf = Vec::new();
+        payload.encode(&mut buf).unwrap();
+        assert_eq!(buf.len(), expected_len);
+
+        let decoded = RegisterCidPayload::decode(&buf).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
     fn register_ok_roundtrip() {
         let dcid = Cid::from([0xAAu8; QUIC_DCID_PREFIX_LEN]);
         let payload = RegisterOkPayload { dcid };

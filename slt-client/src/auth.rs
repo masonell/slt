@@ -143,3 +143,48 @@ enum AuthResult {
     Accepted,
     Rejected,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signature, Verifier};
+    use slt_core::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn auth_payload_roundtrip_and_signature_verifies() {
+        let config = ClientConfig {
+            hostname: "example.com".to_string(),
+            port: 443,
+            ip: None,
+            tls_ca: TlsMaterial::Pem(String::new()),
+            client_id: ClientId([0x11; 16]),
+            shared_secret: SharedSecret([0x22; 32]),
+            assigned_ipv4: Ipv4Addr::new(10, 10, 0, 2),
+            privkey_ed25519: PrivKeyEd25519([0x33; 32]),
+            tun_name: "tun0".to_string(),
+            tun_mtu: 1280,
+            upgrade: None,
+        };
+
+        let challenge = [0x44; AUTH_CHALLENGE_LEN];
+        let payload = build_auth_payload(&config, challenge);
+
+        let mut buf = Vec::new();
+        payload.encode(&mut buf);
+
+        let decoded = AuthPayload::decode(&buf).unwrap();
+        assert_eq!(decoded, payload);
+
+        let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
+        context.extend_from_slice(b"slt-auth-v1");
+        context.extend_from_slice(config.client_id.as_bytes());
+        context.extend_from_slice(&config.assigned_ipv4.octets());
+        context.extend_from_slice(&challenge);
+
+        let signing_key = SigningKey::from_bytes(config.privkey_ed25519.as_bytes());
+        let verifying_key = signing_key.verifying_key();
+        let signature = Signature::from_bytes(&payload.signature);
+        verifying_key.verify(&context, &signature).unwrap();
+    }
+}
