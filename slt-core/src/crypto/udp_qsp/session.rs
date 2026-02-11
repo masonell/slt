@@ -11,7 +11,6 @@ pub const PN_REPLAY_WINDOW: usize = 1024;
 
 const WINDOW_WORD_BITS: usize = 64;
 const WINDOW_WORDS: usize = PN_REPLAY_WINDOW / WINDOW_WORD_BITS;
-const MAX_PACKET_NUMBER: u64 = u32::MAX as u64;
 
 /// UDP-QSP session errors.
 #[derive(Debug)]
@@ -239,14 +238,10 @@ impl<I: SessionIo> QuicQspSession<I> {
     ///
     /// Returns an error if:
     /// - the packet number overflows
-    /// - the packet number exceeds the wire format bounds
     /// - packet protection fails
     /// - the IO layer fails
     pub async fn send(&mut self, payload: &[u8]) -> Result<(), QspSessionError> {
         let pn = self.next_pn;
-        if pn > MAX_PACKET_NUMBER {
-            return Err(QspSessionError::PacketNumberOverflow);
-        }
         self.next_pn = pn
             .checked_add(1)
             .ok_or(QspSessionError::PacketNumberOverflow)?;
@@ -287,23 +282,16 @@ impl<I: SessionIo> QuicQspSession<I> {
     ///
     /// Returns an error if:
     /// - header protection / AEAD fails
-    /// - the packet number exceeds the wire format bounds
     /// - the packet is too old or a replay
     pub fn open_packet<'a>(
         &'a mut self,
         packet: &[u8],
     ) -> Result<OpenedPacketRef<'a>, QspSessionError> {
         let expected_pn = self.replay_window.expected_pn();
-        if expected_pn > MAX_PACKET_NUMBER {
-            return Err(QspSessionError::PacketNumberOverflow);
-        }
         let opened =
             self.keys
                 .open_into(self.scid.len(), packet, expected_pn, &mut self.recv_buf)?;
         let pn = opened.pn;
-        if pn > MAX_PACKET_NUMBER {
-            return Err(QspSessionError::PacketNumberOverflow);
-        }
         let pn_len = opened.pn_len;
         let key_phase = opened.key_phase;
 
@@ -507,7 +495,7 @@ mod tests {
             Cid::from([0xCD; 8]),
             Cid::from([0xAB; 8]),
             keys,
-            u64::from(u32::MAX) + 1,
+            u64::MAX,
             0,
             false,
         );
@@ -516,6 +504,133 @@ mod tests {
             session.send(b"hello").await,
             Err(QspSessionError::PacketNumberOverflow)
         ));
+    }
+
+    #[tokio::test]
+    async fn session_recv_accepts_packet_number_above_u32_max() {
+        struct TestIo {
+            packet: Vec<u8>,
+        }
+
+        impl SessionIo for TestIo {
+            async fn send(&mut self, _bytes: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+
+            async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let len = self.packet.len();
+                buf[..len].copy_from_slice(&self.packet);
+                Ok(len)
+            }
+        }
+
+        let keys = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],
+            [0x11; HP_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x55; AEAD_IV_LEN],
+            [0x55; AEAD_IV_LEN],
+        )
+        .unwrap();
+
+        let pn = u64::from(u32::MAX) + 7;
+        let dcid = Cid::from([0xAB; 8]);
+        let packet = keys.protect(dcid.as_slice(), pn, false, b"hello").unwrap();
+
+        let io = TestIo { packet };
+        let mut session = QuicQspSession::new(io, Cid::from([0xCD; 8]), dcid, keys, 0, pn, false);
+        let mut buf = vec![0u8; 1500];
+
+        let opened = session.recv(&mut buf).await.unwrap();
+        assert_eq!(opened.pn, pn);
+        assert_eq!(opened.payload, b"hello");
+    }
+
+    #[tokio::test]
+    async fn session_roundtrip_with_large_packet_number() {
+        let (c2s_tx, c2s_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (s2c_tx, s2c_rx) = mpsc::channel::<Vec<u8>>(8);
+
+        let hp_c2s = [0x11; HP_KEY_LEN];
+        let hp_s2c = [0x22; HP_KEY_LEN];
+        let aead_c2s = [0x33; AEAD_KEY_LEN];
+        let aead_s2c = [0x44; AEAD_KEY_LEN];
+        let iv_c2s = [0x55; AEAD_IV_LEN];
+        let iv_s2c = [0x66; AEAD_IV_LEN];
+
+        let keys_client = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            hp_c2s,
+            hp_s2c,
+            aead_c2s,
+            aead_s2c,
+            iv_c2s,
+            iv_s2c,
+        )
+        .unwrap();
+        let keys_server = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            hp_s2c,
+            hp_c2s,
+            aead_s2c,
+            aead_c2s,
+            iv_s2c,
+            iv_c2s,
+        )
+        .unwrap();
+
+        let client_scid = Cid::from([0xA1; 8]);
+        let server_scid = Cid::from([0xB2; 8]);
+        let pn = u64::from(u32::MAX) + 17;
+
+        let mut client = QuicQspSession::new(
+            ChanIo {
+                tx: c2s_tx,
+                rx: s2c_rx,
+            },
+            client_scid,
+            server_scid,
+            keys_client,
+            pn,
+            pn,
+            false,
+        );
+        let mut server = QuicQspSession::new(
+            ChanIo {
+                tx: s2c_tx,
+                rx: c2s_rx,
+            },
+            server_scid,
+            client_scid,
+            keys_server,
+            pn,
+            pn,
+            false,
+        );
+
+        let limits = MessageLimits::new(2048, 2048);
+        let mut packet_buf = vec![0u8; 2048];
+
+        let nonce = 0xCAFE_BABE_DEAD_BEEFu64;
+        let frame = encode_ping_frame(nonce);
+        client.send(&frame).await.unwrap();
+        let opened = server.recv(&mut packet_buf).await.unwrap();
+        assert_eq!(opened.pn, pn);
+        let Message::Ping { payload } = decode_one(opened.payload, limits) else {
+            panic!("expected ping");
+        };
+        assert_eq!(PingPayload::decode(payload).unwrap().nonce, nonce);
+
+        let frame = encode_pong_frame(nonce);
+        server.send(&frame).await.unwrap();
+        let opened = client.recv(&mut packet_buf).await.unwrap();
+        assert_eq!(opened.pn, pn);
+        let Message::Pong { payload } = decode_one(opened.payload, limits) else {
+            panic!("expected pong");
+        };
+        assert_eq!(PongPayload::decode(payload).unwrap().nonce, nonce);
     }
 
     #[tokio::test]
