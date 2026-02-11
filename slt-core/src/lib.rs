@@ -9,5 +9,7 @@ pub mod config;
 pub mod packet;
 /// VPN protocol framing and message definitions.
 pub mod proto;
+/// Shared transport building blocks.
+pub mod transport;
 /// Common types used across the codebase.
 pub mod types;

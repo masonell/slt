@@ -7,7 +7,6 @@ use std::time::Instant;
 
 use boring::ssl::SslAcceptor;
 use ed25519_dalek::{Signature, VerifyingKey};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time;
@@ -17,10 +16,10 @@ use tun_rs::AsyncDevice;
 
 use slt_core::config::{ServerClient, ServerConfig};
 use slt_core::proto::{
-    AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, FrameError,
-    Message, MessageError, MessageLimits, PayloadError, PingPayload, PongPayload, decode_message,
-    encode_message,
+    AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, Message,
+    MessageError, MessageLimits, PayloadError, PingPayload, PongPayload,
 };
+use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::ClientId;
 
 use super::AssignedIp;
@@ -144,32 +143,33 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 return Ok(());
             }
         };
-        let mut tls = Some(tls);
+        let mut tcp = Some(TcpChannel::new(tls));
 
         let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-        let tls_ref = tls
+        let tcp_ref = tcp
             .as_ref()
-            .ok_or_else(|| io::Error::other("tls stream missing"))?;
-        tls_ref
+            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+        tcp_ref
             .ssl()
             .export_keying_material(&mut challenge, "slt-auth-challenge", None)
             .map_err(|err| io::Error::other(format!("{err:?}")))?;
 
         let deadline = Instant::now() + self.auth_timeout;
-        let mut buf = Vec::with_capacity(16 * 1024);
 
         loop {
             let timeout = time::sleep_until(deadline.into());
-            let tls_ref = tls
-                .as_mut()
-                .ok_or_else(|| io::Error::other("tls stream missing"))?;
             tokio::select! {
                 () = timeout => {
                     warn!(peer_addr = ?peer_addr, "auth phase timed out waiting for message");
                     self.metrics.inc_auth_failures();
                     return Ok(());
                 },
-                res = tls_ref.read_buf(&mut buf) => {
+                res = async {
+                    let tcp_ref = tcp
+                        .as_mut()
+                        .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                    tcp_ref.read_more().await
+                } => {
                     let n = res?;
                     if n == 0 {
                         trace!(peer_addr = ?peer_addr, "connection closed during auth phase");
@@ -181,27 +181,22 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             }
 
             loop {
-                let decoded = decode_message(&buf, self.limits).map_err(map_message_error)?;
-                let Some((_, consumed)) = decoded else {
-                    break;
-                };
-
-                let rest = buf.split_off(consumed);
-                let frame_buf = std::mem::replace(&mut buf, rest);
-                let decoded = decode_message(&frame_buf, self.limits).map_err(map_message_error)?;
-                let Some((message, _)) = decoded else {
+                let Some(msg_buf) = tcp
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("tcp channel missing"))?
+                    .try_pop_message(self.limits)
+                    .map_err(map_message_error)?
+                else {
                     break;
                 };
 
                 match self
-                    .handle_auth_message(message, &mut tls, &mut buf, &challenge)
+                    .handle_auth_message(msg_buf.message(), &mut tcp, &challenge)
                     .await?
                 {
                     AuthStep::Continue => {}
                     AuthStep::Done => return Ok(()),
                 }
-
-                drop(frame_buf);
             }
         }
     }
@@ -209,8 +204,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     async fn handle_auth_message(
         &self,
         message: Message<'_>,
-        tls: &mut Option<tokio_boring::SslStream<TcpStream>>,
-        buf: &mut Vec<u8>,
+        tcp: &mut Option<TcpChannel<TcpStream>>,
         challenge: &[u8; AUTH_CHALLENGE_LEN],
     ) -> io::Result<AuthStep> {
         match message {
@@ -227,10 +221,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                         let ok = AuthOkPayload;
                         ok.encode(&mut ok_buf);
                         {
-                            let tls_ref = tls
+                            let tcp_ref = tcp
                                 .as_mut()
-                                .ok_or_else(|| io::Error::other("tls stream missing"))?;
-                            self.send_message(tls_ref, Message::AuthOk { payload: &ok_buf })
+                                .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                            self.send_message(tcp_ref, Message::AuthOk { payload: &ok_buf })
                                 .await?;
                         }
 
@@ -246,14 +240,14 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                             });
                         }
 
-                        let tls_stream = tls
+                        let tcp_channel = tcp
                             .take()
-                            .ok_or_else(|| io::Error::other("tls stream missing"))?;
+                            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
                         let session = ClientSessionBase::new(
                             handle.session_id,
                             auth.client_id,
                             assigned_ip,
-                            tls_stream,
+                            tcp_channel,
                             self.tun.clone(),
                             self.udp_socket.clone(),
                             self.registry.clone(),
@@ -262,7 +256,6 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                             rx,
                             self.limits,
                             self.session_timeouts,
-                            std::mem::take(buf),
                         );
 
                         tokio::spawn(async move {
@@ -274,10 +267,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                     Err(code) => {
                         self.metrics.inc_auth_failures();
                         warn!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, code = ?code, "authentication failed");
-                        let tls_ref = tls
+                        let tcp_ref = tcp
                             .as_mut()
-                            .ok_or_else(|| io::Error::other("tls stream missing"))?;
-                        self.send_auth_fail(tls_ref, code).await?;
+                            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                        self.send_auth_fail(tcp_ref, code).await?;
                         Ok(AuthStep::Done)
                     }
                 }
@@ -290,10 +283,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 };
                 let mut pong_buf = Vec::new();
                 pong_out.encode(&mut pong_buf);
-                let tls_ref = tls
+                let tcp_ref = tcp
                     .as_mut()
-                    .ok_or_else(|| io::Error::other("tls stream missing"))?;
-                self.send_message(tls_ref, Message::Pong { payload: &pong_buf })
+                    .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                self.send_message(tcp_ref, Message::Pong { payload: &pong_buf })
                     .await?;
                 Ok(AuthStep::Continue)
             }
@@ -304,10 +297,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             _ => {
                 self.metrics.inc_auth_failures();
                 warn!(message = ?message, "received unexpected message during auth phase");
-                let tls_ref = tls
+                let tcp_ref = tcp
                     .as_mut()
-                    .ok_or_else(|| io::Error::other("tls stream missing"))?;
-                self.send_auth_fail(tls_ref, AuthFailCode::Unknown).await?;
+                    .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                self.send_auth_fail(tcp_ref, AuthFailCode::Unknown).await?;
                 Ok(AuthStep::Done)
             }
         }
@@ -334,23 +327,21 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
     async fn send_message(
         &self,
-        tls: &mut tokio_boring::SslStream<TcpStream>,
+        tcp: &mut TcpChannel<TcpStream>,
         message: Message<'_>,
     ) -> io::Result<()> {
-        let mut buf = Vec::new();
-        encode_message(message, &mut buf).map_err(map_frame_error)?;
-        tls.write_all(&buf).await
+        tcp.write_message(message).await
     }
 
     async fn send_auth_fail(
         &self,
-        tls: &mut tokio_boring::SslStream<TcpStream>,
+        tcp: &mut TcpChannel<TcpStream>,
         code: AuthFailCode,
     ) -> io::Result<()> {
         let payload = AuthFailPayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
-        self.send_message(tls, Message::AuthFail { payload: &buf })
+        self.send_message(tcp, Message::AuthFail { payload: &buf })
             .await
     }
 }
@@ -360,10 +351,6 @@ fn map_message_error(err: MessageError) -> io::Error {
         io::ErrorKind::InvalidData,
         format!("message error: {err:?}"),
     )
-}
-
-fn map_frame_error(err: FrameError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
 }
 
 fn map_payload_error(err: PayloadError) -> io::Error {

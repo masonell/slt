@@ -13,11 +13,10 @@ use std::time::{Duration, Instant};
 
 use self::udp_io::UdpIo;
 use fastrand;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::time;
-use tokio_boring::SslStream;
 use tracing::{debug, error, info, trace, warn};
 use tun_rs::AsyncDevice;
 
@@ -33,6 +32,7 @@ use slt_core::proto::{
     PingPayload, PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload,
     RegisterOkPayload, decode_message, encode_message,
 };
+use slt_core::transport::tcp::TcpChannel;
 
 /// Active transport for a client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +106,7 @@ pub struct ClientSessionBase<
     registry: Arc<SessionRegistry>,
     metrics: Arc<Metrics>,
     tx: SessionTx,
-    tcp: SslStream<S>,
+    tcp: TcpChannel<S>,
     tun: Arc<T>,
     udp_socket: Arc<U>,
     udp_peer: Option<SocketAddr>,
@@ -115,8 +115,7 @@ pub struct ClientSessionBase<
     rx: SessionRx,
     limits: MessageLimits,
     timeouts: SessionTimeouts,
-    tcp_read_buf: Vec<u8>,
-    tcp_write_buf: Vec<u8>,
+    udp_write_buf: Vec<u8>,
 }
 
 /// Default client session using a real TUN device.
@@ -132,7 +131,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         session_id: u64,
         client_id: ClientId,
         assigned_ipv4: AssignedIp,
-        tcp: SslStream<S>,
+        tcp: TcpChannel<S>,
         tun: Arc<T>,
         udp_socket: Arc<U>,
         registry: Arc<SessionRegistry>,
@@ -141,7 +140,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         rx: SessionRx,
         limits: MessageLimits,
         timeouts: SessionTimeouts,
-        initial_tcp_buf: Vec<u8>,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -164,8 +162,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             rx,
             limits,
             timeouts,
-            tcp_read_buf: initial_tcp_buf,
-            tcp_write_buf: Vec::new(),
+            udp_write_buf: Vec::new(),
         }
     }
 
@@ -205,12 +202,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         let mut next_ping_at = self.schedule_next_ping();
 
         loop {
-            if !self.tcp_read_buf.is_empty() {
-                let decoded =
-                    decode_message(&self.tcp_read_buf, self.limits).map_err(map_message_error)?;
-                if decoded.is_some() && self.handle_tcp_read().await? == SessionControl::Close {
-                    return Ok(());
-                }
+            if self.tcp.has_buffered_input()
+                && self.handle_tcp_read().await? == SessionControl::Close
+            {
+                return Ok(());
             }
 
             let idle_deadline = self.last_activity + self.timeouts.idle_timeout;
@@ -218,7 +213,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 
             if let Some(verify_deadline) = verify_deadline {
                 tokio::select! {
-                res = self.tcp.read_buf(&mut self.tcp_read_buf) => {
+                res = self.tcp.read_more() => {
                     let n = res?;
                     if n == 0 {
                         self.metrics.inc_disconnect_close();
@@ -261,7 +256,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 }
             } else {
                 tokio::select! {
-                res = self.tcp.read_buf(&mut self.tcp_read_buf) => {
+                res = self.tcp.read_more() => {
                     let n = res?;
                     if n == 0 {
                         self.metrics.inc_disconnect_close();
@@ -305,20 +300,15 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 
     async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
         loop {
-            let decoded =
-                decode_message(&self.tcp_read_buf, self.limits).map_err(map_message_error)?;
-            let Some((_, consumed)) = decoded else {
+            let Some(msg_buf) = self
+                .tcp
+                .try_pop_message(self.limits)
+                .map_err(map_message_error)?
+            else {
                 return Ok(SessionControl::Continue);
             };
 
-            let rest = self.tcp_read_buf.split_off(consumed);
-            let frame_buf = std::mem::replace(&mut self.tcp_read_buf, rest);
-            let decoded = decode_message(&frame_buf, self.limits).map_err(map_message_error)?;
-            let Some((message, _)) = decoded else {
-                return Ok(SessionControl::Continue);
-            };
-
-            if self.handle_tcp_message(message).await? == SessionControl::Close {
+            if self.handle_tcp_message(msg_buf.message()).await? == SessionControl::Close {
                 return Ok(SessionControl::Close);
             }
         }
@@ -761,9 +751,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     }
 
     async fn send_tcp_message(&mut self, message: Message<'_>) -> io::Result<()> {
-        self.tcp_write_buf.clear();
-        encode_message(message, &mut self.tcp_write_buf).map_err(map_frame_error)?;
-        self.tcp.write_all(&self.tcp_write_buf).await
+        self.tcp.write_message(message).await
     }
 
     async fn send_udp_message(&mut self, message: Message<'_>) -> io::Result<()> {
@@ -774,10 +762,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             return Ok(());
         }
 
-        self.tcp_write_buf.clear();
-        encode_message(message, &mut self.tcp_write_buf).map_err(map_frame_error)?;
+        self.udp_write_buf.clear();
+        encode_message(message, &mut self.udp_write_buf).map_err(map_frame_error)?;
         session
-            .send(&self.tcp_write_buf)
+            .send(&self.udp_write_buf)
             .await
             .map_err(|err| match err {
                 QspSessionError::Io(err) => err,
@@ -988,7 +976,7 @@ mod tests {
             handle.session_id,
             client_id,
             assigned,
-            server_tls,
+            TcpChannel::new(server_tls),
             tun,
             Arc::new(TestUdpSocket { tx: udp_tx }),
             registry.clone(),
@@ -997,7 +985,6 @@ mod tests {
             rx,
             limits,
             timeouts,
-            Vec::new(),
         );
         let join = tokio::spawn(async move { session.run().await });
         (

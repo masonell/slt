@@ -1,4 +1,4 @@
-use slt_core::proto::{FrameError, MessageError, MessageLimits, MessageType, PayloadError};
+use slt_core::proto::{FrameError, MessageError, MessageType, PayloadError};
 use std::io;
 
 /// An owned protocol frame buffer that can be reborrowed as a decoded `Message`.
@@ -26,32 +26,6 @@ impl OwnedMessageBuf {
             payload,
         })
     }
-}
-
-/// Pops the next full frame from `read_buf`, if present, and returns it as an owned buffer.
-///
-/// The returned buffer contains the full frame bytes (header plus payload), and enforces the
-/// configured `DATA` size limit before removing bytes from `read_buf`.
-pub fn pop_message_buf(
-    read_buf: &mut Vec<u8>,
-    limits: MessageLimits,
-) -> Result<Option<OwnedMessageBuf>, MessageError> {
-    let Some((frame, consumed)) = slt_core::proto::decode_frame(read_buf, limits.max_frame_len)?
-    else {
-        return Ok(None);
-    };
-
-    if frame.ty == MessageType::Data && frame.payload.len() > limits.max_data_len {
-        return Err(MessageError::DataTooLarge {
-            len: frame.payload.len(),
-            max: limits.max_data_len,
-        });
-    }
-
-    let ty = frame.ty;
-    let rest = read_buf.split_off(consumed);
-    let buf = std::mem::replace(read_buf, rest);
-    Ok(Some(OwnedMessageBuf { ty, buf }))
 }
 
 /// Map a protocol framing error into an `io::Error`.
