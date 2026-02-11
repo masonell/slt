@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     let args = Args::parse();
     let raw = fs::read_to_string(&args.config)?;
-    let config: ServerConfig = toml::from_str(&raw)?;
+    let config = ServerConfig::from_toml_str(&raw)?;
     info!(config_path = %args.config.display(), "config parsed successfully");
     let config = Arc::new(config);
 

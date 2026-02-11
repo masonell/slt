@@ -220,6 +220,14 @@ nonce: u64 (big-endian)
 Raw IP packet (currently IPv4 only). The server MUST enforce
 `src_ip == assigned_ipv4` and drop any packet that violates this.
 `DATA` payload length MUST be <= `max_data_len` (config).
+`tun_mtu` MUST be in `1..=1406`.
+
+MTU rationale for `1406`:
+- Target outer transport envelope: Ethernet IP MTU `1500`.
+- Outer overhead budget (worst case): IPv6 header `40` + UDP header `8`.
+- UDP-QSP + VPN framing overhead (worst case): short-header fields `1 + 20 + 4`,
+  AEAD tag `16`, VPN frame header `5` => `46`.
+- Budget: `1500 - 48 - 46 = 1406`.
 
 ## 4. UDP-QSP (QUIC-shaped data plane)
 

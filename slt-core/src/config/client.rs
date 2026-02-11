@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
+use super::{ConfigError, ConfigLoadError, validate_tun_mtu};
 use crate::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
 
 /// Preferences for connection upgrade/fallback timing.
@@ -40,4 +41,27 @@ pub struct ClientConfig {
     pub tun_mtu: u16,
     /// Optional upgrade/fallback preferences.
     pub upgrade: Option<UpgradePreferences>,
+}
+
+impl ClientConfig {
+    /// Validate semantic constraints for a parsed client config.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidTunMtu` if `tun_mtu` is out of range.
+    pub const fn validate(&self) -> Result<(), ConfigError> {
+        validate_tun_mtu(self.tun_mtu)
+    }
+
+    /// Parse and validate a client config from TOML text.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigLoadError::ParseToml` if TOML deserialization fails, or
+    /// `ConfigLoadError::Validate` if semantic validation fails.
+    pub fn from_toml_str(raw: &str) -> Result<Self, ConfigLoadError> {
+        let config: Self = toml::from_str(raw)?;
+        config.validate()?;
+        Ok(config)
+    }
 }

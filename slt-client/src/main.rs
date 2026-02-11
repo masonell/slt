@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing(args.log.as_deref());
 
     let raw = fs::read_to_string(&args.config)?;
-    let config: ClientConfig = toml::from_str(&raw)?;
+    let config = ClientConfig::from_toml_str(&raw)?;
     info!(config_path = %args.config.display(), "config parsed successfully");
     log_config(&config);
 

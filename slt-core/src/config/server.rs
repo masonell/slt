@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use super::{ConfigError, ConfigLoadError, validate_tun_mtu};
 use crate::types::{ClientId, PubKeyEd25519, SharedSecret, TlsMaterial};
 
 /// Per-client entry in the server allowlist.
@@ -64,4 +65,27 @@ pub struct ServerConfig {
 
 const fn default_session_queue_size() -> usize {
     256
+}
+
+impl ServerConfig {
+    /// Validate semantic constraints for a parsed server config.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError::InvalidTunMtu` if `tun_mtu` is out of range.
+    pub const fn validate(&self) -> Result<(), ConfigError> {
+        validate_tun_mtu(self.tun_mtu)
+    }
+
+    /// Parse and validate a server config from TOML text.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigLoadError::ParseToml` if TOML deserialization fails, or
+    /// `ConfigLoadError::Validate` if semantic validation fails.
+    pub fn from_toml_str(raw: &str) -> Result<Self, ConfigLoadError> {
+        let config: Self = toml::from_str(raw)?;
+        config.validate()?;
+        Ok(config)
+    }
 }

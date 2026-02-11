@@ -287,7 +287,8 @@ Constraints:
 * `LEN` must be bounded by config.
 * Before auth, only `AUTH`, `PING`, `CLOSE` allowed.
 * `REGISTER_CID` is only allowed after `AUTH_OK`.
-* `DATA` payload must not exceed `tun_mtu + headroom` (recommend: `tun_mtu + 64`).
+* `DATA` payload must not exceed `tun_mtu`.
+* `tun_mtu` must be validated into `1..=1406`.
 
 ### 6.4 UDP-QSP mapping
 
@@ -377,7 +378,9 @@ Session limits:
 ### 8.3 MTU
 
 * Default `tun_mtu = 1280` (safe baseline).
-* Configurable on both client and server.
+* Configurable on both client and server, but MUST be in `1..=1406`.
+* The `1406` cap ensures UDP-QSP-wrapped VPN frames fit inside a 1500-byte Ethernet IP MTU
+  even with worst-case outer IPv6+UDP overhead.
 * Scripts must apply MTU:
 
   * `ip link set dev <tun> mtu <tun_mtu>`
