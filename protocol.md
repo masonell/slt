@@ -156,8 +156,8 @@ offset size field
 ...    16   aead_rx
 ...    12   iv_tx
 ...    12   iv_rx
-...    8    pn_start (u64, big-endian; MUST be <= 2^32-1)
-...    8    pn_start_rx (u64, big-endian; MUST be <= 2^32-1)
+...    8    pn_start (u64, big-endian)
+...    8    pn_start_rx (u64, big-endian)
 ...    1    key_phase (0 or 1)
 ```
 
@@ -167,8 +167,8 @@ Server requirements:
 - `dcid_len` MUST be within `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
 - `scid_len` MUST be within `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
 - The server MUST reject `REGISTER_CID` if another active connection already
-  uses the same `QUIC_DCID_PREFIX_LEN`-byte prefix. Retransmits or rekeys for
-  the same connection MAY replace the existing entry.
+  uses the same `QUIC_DCID_PREFIX_LEN`-byte prefix. Retransmits or
+  re-registrations for the same connection MAY replace the existing entry.
 
 Key direction:
 - For a client->server `REGISTER_CID`, `*_tx` are the keys the server uses to send
@@ -250,7 +250,9 @@ Short header first byte bits:
 
 Packet number length selection:
 - Sender MUST use the minimal length (1..4 bytes) to encode the packet number.
-- Maximum allowed packet number value is `2^32-1`.
+- Full packet number space is `u64`.
+- Senders MUST NOT wrap packet numbers; once `next_pn` would overflow `u64`,
+  the session MUST be replaced.
 - For UDP-QSP, the first `QUIC_DCID_PREFIX_LEN` bytes of the DCID are used as
   the classifier prefix.
 
@@ -290,10 +292,11 @@ Each UDP datagram carries exactly one framed message using the same
 
 Allowed message types on UDP-QSP depend on session state:
 - **Before UDP-QSP is verified**: only `PING` and `PONG` are allowed.
-- **After UDP-QSP is verified**: `DATA`, `PING`, `PONG`, `CLOSE`,
-  `REGISTER_CID`, `REGISTER_OK`, and `REGISTER_FAIL` are allowed.
+- **After UDP-QSP is verified**: `DATA`, `PING`, `PONG`, and `CLOSE` are allowed.
 
 `AUTH`, `AUTH_OK`, and `AUTH_FAIL` are TCP-only.
+`REGISTER_CID`, `REGISTER_OK`, and `REGISTER_FAIL` are control-plane messages
+on TCP.
 
 ### 4.6 Packet number reconstruction
 
@@ -341,6 +344,40 @@ Rules:
 Implementation note:
 - Use a ring-buffer bitmap to avoid shifting `PN_REPLAY_WINDOW` bits per packet.
 
+### 4.8 Key update and key phase
+
+UDP-QSP key update is in-band and does not use `REGISTER_CID` retransmits.
+Both sides derive new keys locally with HKDF from prior key state.
+
+Requirements:
+- Rekey interval MUST be much larger than `PN_REPLAY_WINDOW` (1024). A
+  recommended baseline is `2^21` packets per direction.
+- At most one key update may be in flight per direction.
+- Key update rotates HP key, AEAD key, and IV together for that direction.
+
+Sender behavior:
+- When local TX packet number crosses the rekey interval threshold, derive next
+  directional keys with HKDF, switch to them, and flip `key_phase` on outgoing
+  packets.
+- Continue sending with the new key phase; no explicit rekey ACK message is
+  sent.
+
+Receiver behavior:
+- Maintain RX key states: `current` and `previous`.
+- On packet open attempt:
+  - try `current` first,
+  - try `previous` only while inside a bounded grace window,
+  - derive ephemeral `candidate = KDF(current)` and try it only inside a bounded
+    rekey window around expected rekey packet number.
+- If `candidate` succeeds, promote:
+  - `previous = current`
+  - `current = candidate`
+- Rekey window uses asymmetric margins:
+  - `early_margin`: small, before threshold,
+  - `late_margin`: larger, after threshold.
+- If receive state is beyond `late_margin` and packets still fail to open, the
+  channel is treated as dead and the endpoint reconnects.
+
 ## 5. Connection flow and state machines
 
 ### 5.1 TCP VPN session establishment
@@ -368,15 +405,14 @@ On `AUTH_OK`, the session is authenticated and TCP data is permitted.
 The server MUST NOT accept UDP-QSP packets for a CID until it has replied
 `REGISTER_OK` for that CID.
 
-After UDP-QSP is verified, `REGISTER_CID` MAY be sent over UDP-QSP (for rekey or
-CID rotation). The sender MUST retransmit on timeout; the server replies with
-`REGISTER_OK` or `REGISTER_FAIL` over UDP-QSP.
+After UDP-QSP is verified, periodic key updates use the key-phase algorithm in
+Section 4.8. `REGISTER_CID` remains a TCP control-plane message. CID rotation is
+deferred.
 
 ### 5.3 Active transport and fallback
 
 - Only one active data path per `client_id` at a time.
-- Control uses TCP until UDP-QSP is verified. After verification, control MAY
-  be sent over UDP-QSP and TCP MAY close.
+- Registration and key-management control remain on TCP.
 - `CLOSE` on UDP-QSP is best-effort; if dropped, idle timeout closes the session.
 - If UDP-QSP fails (idle timeout), the server MAY fall back to TCP if still connected.
 - A new authenticated session for the same `client_id` takes over and replaces any

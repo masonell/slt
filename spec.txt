@@ -242,9 +242,11 @@ TLS library: **BoringSSL** via `boring-sys` (patched client hook to set `legacy_
   * QUIC-style AEAD payload protection with nonce = `IV XOR PN` and associated data = unmasked header.
 * Payload length sufficient for the 16-byte HP sample (pad if needed).
 * Interop: UDP-QSP is **not** compatible with standard QUIC stacks.
-* Packet number (PN) is encoded as 1-4 bytes per QUIC short header rules. Current implementations
-  treat PN as a u32; `pn_start` in `REGISTER_CID` must fit in 32 bits and sessions must re-register
-  or reconnect before wrapping. PN reconstruction (QUIC-style) is a future enhancement.
+* Packet number (PN) is encoded as 1-4 bytes per QUIC short header rules and
+  reconstructed to a full `u64` using expected-PN logic.
+* Implementations must never wrap PN; when local TX PN would overflow `u64`,
+  the session must be replaced.
+* Replay protection window is fixed at `PN_REPLAY_WINDOW = 1024`.
 
 Client-side QUIC library (wire-shape handshake only): **quiche** (vendored + patched as needed).
 
@@ -252,6 +254,19 @@ Constraints / patch notes for `quiche`:
 * Must allow controlling Initial DCID length to match Chrome.
 * Must allow including unknown transport parameters (or an escape hatch to append raw TP bytes).
 * Must not require owning a socket (quiche is acceptable; quinn is not due to `SocketAddr` requirements and `ring` dependency).
+
+### 5.3 UDP-QSP key update model
+
+* Key updates are in-band and signaled by key-phase transitions on protected packets.
+* `REGISTER_CID` is not used for periodic UDP rekey.
+* Next-generation keys are derived locally via HKDF from prior key state.
+* HP key, AEAD key, and IV rotate together per direction.
+* Receiver state is `current + previous`; candidate next keys are derived
+  ephemerally and only tried within bounded rekey windows.
+* Rekey interval must be much larger than replay window (for example, around
+  `2^21` packets per direction).
+* One key update in flight per direction; if receiver state is far past late
+  margin and opens keep failing, treat the channel as dead and reconnect.
 
 ## 6. VPN Protocol (Application Layer)
 
@@ -292,7 +307,7 @@ Constraints:
 
 ### 6.4 UDP-QSP mapping
 
-* Control remains on the TCP channel.
+* Registration and key-management control remains on TCP.
 * Data and keepalive over UDP-QSP use a single framed message per UDP datagram:
 
   * `TYPE: u8`
@@ -300,6 +315,7 @@ Constraints:
   * `PAYLOAD: LEN bytes`
 * `DATA` payload is exactly one IP packet.
 * `PING`/`PONG` may be sent over UDP-QSP for liveness.
+* `REGISTER_CID` is used for initial UDP-QSP registration only (CID rotation is deferred).
 
 ## 7. Keepalive, Timeouts, Switching
 
@@ -328,6 +344,8 @@ Configurable timeouts:
   * DCID to reuse on UDP-QSP,
   * UDP-QSP keys (hp + payload, both directions),
   * initial PN and key phase.
+* Rekey: after verify, UDP-QSP uses in-band key-phase updates with HKDF-derived
+  next keys; no periodic `REGISTER_CID` retransmit flow.
 * Verify-before-switch:
 
   1. server sends `PING` over UDP-QSP
