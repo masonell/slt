@@ -112,14 +112,13 @@ async fn discover_quic_ids_for_peer(
     let mut recv_buf = vec![0u8; 65535];
     let mut out_buf = vec![0u8; QUIC_MAX_DATAGRAM];
     let deadline = Instant::now() + QUIC_HANDSHAKE_TIMEOUT;
-    let mut saw_peer_packet = false;
 
     loop {
         while let Ok((write, send_info)) = conn.send(&mut out_buf) {
             socket.send_to(&out_buf[..write], send_info.to).await?;
         }
 
-        if saw_peer_packet {
+        if conn.is_established() {
             let dcid = Cid::new(conn.destination_id().as_ref()).map_err(map_cid_error)?;
             return Ok(QuicIds {
                 dcid,
@@ -162,10 +161,7 @@ async fn discover_quic_ids_for_peer(
                 }
                 let recv_info = quiche::RecvInfo { to: local, from };
                 match conn.recv(&mut recv_buf[..len], recv_info) {
-                    Ok(_) => {
-                        saw_peer_packet = true;
-                    }
-                    Err(quiche::Error::Done) => {}
+                    Ok(_) | Err(quiche::Error::Done) => {}
                     Err(err) => {
                         debug!(error = ?err, "quic recv failed");
                     }
