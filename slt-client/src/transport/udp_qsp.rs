@@ -128,7 +128,7 @@ impl UdpQspTransport {
             );
         }
 
-        let Some((message, consumed)) = slt_core::proto::decode_message(&payload, limits)
+        let Some((message, _consumed)) = slt_core::proto::decode_message(&payload, limits)
             .map_err(crate::wire::map_message_error)?
         else {
             return Err(io::Error::new(
@@ -136,12 +136,8 @@ impl UdpQspTransport {
                 "udp-qsp message incomplete",
             ));
         };
-        if consumed != payload.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "udp-qsp packet contains multiple frames",
-            ));
-        }
+        // Per protocol.md Section 4.4: receivers MUST ignore any trailing bytes
+        // after decoding the first framed message (may be padding for HP sample).
 
         Ok(crate::wire::OwnedMessageBuf::new(message.ty(), payload))
     }
