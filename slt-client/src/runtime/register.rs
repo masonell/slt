@@ -11,6 +11,7 @@ use std::io;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -100,6 +101,7 @@ pub(super) async fn register_udp_qsp(
     limits: MessageLimits,
     to_tun_tx: &mpsc::Sender<Vec<u8>>,
     ids: &quic::QuicIds,
+    cancel: &CancellationToken,
 ) -> io::Result<UdpQspTransport> {
     let mut prepared = prepare_udp_qsp_registration(ids)?;
     tcp.write_message(Message::RegisterCid {
@@ -125,6 +127,9 @@ pub(super) async fn register_udp_qsp(
                 if n == 0 {
                     return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "register_cid connection closed"));
                 }
+            }
+            () = cancel.cancelled() => {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "register_cid cancelled"));
             }
         }
     }

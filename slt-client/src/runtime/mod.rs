@@ -79,8 +79,14 @@ pub async fn run_client(
         let tun_state_ref = tun_state.as_mut().expect("tun state initialized");
 
         let quic_ids = discover_quic_ids(&config, &cancel, tcp.peer).await;
-        let udp_session =
-            register_udp_qsp(&mut tcp.transport, limits, tun_state_ref, quic_ids.as_ref()).await;
+        let udp_session = register_udp_qsp(
+            &mut tcp.transport,
+            limits,
+            tun_state_ref,
+            quic_ids.as_ref(),
+            &cancel,
+        )
+        .await;
 
         let exit = run_session(
             tcp.transport,
@@ -234,10 +240,11 @@ async fn register_udp_qsp(
     limits: MessageLimits,
     tun_state: &TunState,
     quic_ids: Option<&transport::quic_discovery::QuicIds>,
+    cancel: &CancellationToken,
 ) -> Option<transport::udp_qsp::UdpQspTransport> {
     let ids = quic_ids?;
 
-    match register::register_udp_qsp(tcp, limits, tun_state.to_tun_tx_ref(), ids).await {
+    match register::register_udp_qsp(tcp, limits, tun_state.to_tun_tx_ref(), ids, cancel).await {
         Ok(session) => {
             info!(
                 dcid_len = ids.dcid.len(),
