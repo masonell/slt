@@ -12,6 +12,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 mod app;
 mod auth;
+mod metrics;
 mod runtime;
 mod transport;
 mod tun;

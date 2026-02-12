@@ -1,6 +1,6 @@
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::TcpTransport;
-use crate::transport::udp_qsp::{ClientUdpIo, UdpQspTransport};
+use crate::transport::udp_qsp::ClientUdpIo;
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
 use slt_core::proto::{
@@ -18,15 +18,15 @@ const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Prepared state for a UDP-QSP `REGISTER_CID` exchange.
 ///
 /// This bundles the encoded `RegisterCidPayload` to send to the server together
-/// with a locally-constructed `UdpQspTransport` that matches the generated
-/// keys/packet-number starts. The transport is stored in an `Option` so it can
+/// with a locally-constructed `QuicQspSession` that matches the generated
+/// keys/packet-number starts. The session is stored in an `Option` so it can
 /// be moved out exactly once (via `take()`) when the server replies
 /// `REGISTER_OK`.
 pub(super) struct PreparedUdpQspRegistration {
     /// Encoded `RegisterCidPayload` bytes (used as the `Message::RegisterCid` payload).
     pub(super) payload_buf: Vec<u8>,
-    /// Matching UDP-QSP transport to install once registration succeeds.
-    pub(super) udp: Option<UdpQspTransport>,
+    /// Matching UDP-QSP session to install once registration succeeds.
+    pub(super) session: Option<QuicQspSession<ClientUdpIo>>,
 }
 
 /// Build a `REGISTER_CID` payload and a matching UDP-QSP transport.
@@ -92,7 +92,7 @@ pub(super) fn prepare_udp_qsp_registration(
 
     Ok(PreparedUdpQspRegistration {
         payload_buf,
-        udp: Some(UdpQspTransport::new(session)),
+        session: Some(session),
     })
 }
 
@@ -102,7 +102,7 @@ pub(super) async fn register_udp_qsp(
     to_tun_tx: &mpsc::Sender<Vec<u8>>,
     ids: &quic::QuicIds,
     cancel: &CancellationToken,
-) -> io::Result<UdpQspTransport> {
+) -> io::Result<QuicQspSession<ClientUdpIo>> {
     let mut prepared = prepare_udp_qsp_registration(ids)?;
     tcp.write_message(Message::RegisterCid {
         payload: &prepared.payload_buf,
@@ -141,7 +141,7 @@ async fn handle_register_read(
     to_tun_tx: &mpsc::Sender<Vec<u8>>,
     ids: &quic::QuicIds,
     prepared: &mut PreparedUdpQspRegistration,
-) -> io::Result<Option<UdpQspTransport>> {
+) -> io::Result<Option<QuicQspSession<ClientUdpIo>>> {
     loop {
         let Some(msg_buf) = tcp
             .try_pop_message(limits)
@@ -164,7 +164,7 @@ async fn handle_register_message(
     to_tun_tx: &mpsc::Sender<Vec<u8>>,
     ids: &quic::QuicIds,
     prepared: &mut PreparedUdpQspRegistration,
-) -> io::Result<Option<UdpQspTransport>> {
+) -> io::Result<Option<QuicQspSession<ClientUdpIo>>> {
     match message {
         Message::RegisterOk {
             payload: ok_payload,
@@ -177,7 +177,7 @@ async fn handle_register_message(
                     "register_ok dcid mismatch",
                 ));
             }
-            let session = prepared.udp.take().ok_or_else(|| {
+            let session = prepared.session.take().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "udp-qsp session missing")
             })?;
             Ok(Some(session))

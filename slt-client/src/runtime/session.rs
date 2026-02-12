@@ -1,8 +1,10 @@
+use crate::metrics::Metrics;
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::udp_qsp::UdpQspTransport;
 use slt_core::proto::{CloseCode, ClosePayload, Message, MessageLimits, PingPayload, PongPayload};
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time;
@@ -45,6 +47,7 @@ pub(super) struct ClientSession {
     udp_verify: Option<UdpVerifySwitch>,
     udp_probe_ping: Option<UdpProbePing>,
     exit: Option<SessionExit>,
+    metrics: Arc<Metrics>,
 }
 
 impl ClientSession {
@@ -60,6 +63,7 @@ impl ClientSession {
         idle_timeout: Duration,
         quic_ids: Option<quic::QuicIds>,
         udp_session: Option<UdpQspTransport>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -80,6 +84,7 @@ impl ClientSession {
             udp_verify: None,
             udp_probe_ping: None,
             exit: None,
+            metrics,
         }
     }
 
@@ -192,6 +197,7 @@ impl ClientSession {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_event(
         &mut self,
         event: SessionEvent,
@@ -200,6 +206,7 @@ impl ClientSession {
         match event {
             SessionEvent::Shutdown => {
                 info!("shutdown requested");
+                self.metrics.inc_disconnect_shutdown();
                 self.exit = Some(SessionExit::Shutdown);
                 if let Err(err) = self.send_close(CloseCode::Normal).await {
                     debug!(error = %err, "failed to send close on shutdown");
@@ -209,6 +216,7 @@ impl ClientSession {
             SessionEvent::TcpRead(n) => {
                 if n == 0 {
                     info!("tcp connection closed");
+                    self.metrics.inc_disconnect_close();
                     self.exit = Some(SessionExit::TcpClosed);
                     return Ok(SessionControl::Close);
                 }
@@ -270,6 +278,7 @@ impl ClientSession {
             SessionEvent::IdleTimeout => match self.active_transport {
                 ActiveTransport::Tcp => {
                     info!("idle timeout reached");
+                    self.metrics.inc_disconnect_idle_timeout();
                     self.exit = Some(SessionExit::IdleTimeout);
                     if let Err(err) = self.send_close(CloseCode::IdleTimeout).await {
                         debug!(error = %err, "failed to send idle close");
@@ -278,6 +287,7 @@ impl ClientSession {
                 }
                 ActiveTransport::UdpQsp => {
                     warn!("udp-qsp idle timeout; switching to tcp");
+                    self.metrics.inc_transport_udp_to_tcp();
                     self.active_transport = ActiveTransport::Tcp;
                     self.note_tcp_activity();
                     Ok(SessionControl::Continue)
@@ -285,6 +295,10 @@ impl ClientSession {
             },
             SessionEvent::UdpVerifyTimeout => {
                 warn!("udp-qsp verification timed out; staying on tcp");
+                // Only count as a switch if we were actually on UDP
+                if self.active_transport == ActiveTransport::UdpQsp {
+                    self.metrics.inc_transport_udp_to_tcp();
+                }
                 self.udp_session = None;
                 self.udp_expect_ping_deadline = None;
                 self.udp_verify = None;
@@ -302,11 +316,15 @@ impl ClientSession {
             return;
         }
 
+        let was_udp_active = self.active_transport == ActiveTransport::UdpQsp;
         warn!(
             kind = ?err.kind(),
             error = %err,
             "udp-qsp io error; falling back to tcp"
         );
+        if was_udp_active {
+            self.metrics.inc_transport_udp_to_tcp();
+        }
         self.udp_session = None;
         self.udp_expect_ping_deadline = None;
         self.udp_verify = None;
@@ -392,6 +410,7 @@ impl ClientSession {
             Message::Data { packet } => {
                 if self.active_transport != ActiveTransport::Tcp {
                     debug!("tcp data received while udp-qsp is active; switching to tcp");
+                    self.metrics.inc_transport_udp_to_tcp();
                     self.active_transport = ActiveTransport::Tcp;
                 }
                 if self.to_tun_tx.send(packet.to_vec()).await.is_err() {
@@ -405,6 +424,7 @@ impl ClientSession {
                     PingPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
                 if self.active_transport != ActiveTransport::Tcp {
                     debug!("tcp ping received while udp-qsp is active; switching to tcp");
+                    self.metrics.inc_transport_udp_to_tcp();
                     self.active_transport = ActiveTransport::Tcp;
                 }
                 let pong_out = PongPayload {
@@ -470,6 +490,7 @@ impl ClientSession {
                     if self.active_transport == ActiveTransport::UdpQsp {
                         info!(nonce = ping_in.nonce, "udp-qsp verify ping received");
                     } else {
+                        self.metrics.inc_transport_tcp_to_udp();
                         self.active_transport = ActiveTransport::UdpQsp;
                         info!(
                             nonce = ping_in.nonce,
@@ -477,6 +498,7 @@ impl ClientSession {
                         );
                     }
                 } else if self.active_transport == ActiveTransport::Tcp {
+                    self.metrics.inc_transport_tcp_to_udp();
                     self.active_transport = ActiveTransport::UdpQsp;
                     info!(
                         nonce = ping_in.nonce,
@@ -494,6 +516,7 @@ impl ClientSession {
             }
             Message::Data { packet } => {
                 if self.active_transport != ActiveTransport::UdpQsp {
+                    self.metrics.inc_transport_tcp_to_udp();
                     self.active_transport = ActiveTransport::UdpQsp;
                     info!("udp-qsp data received; switching to udp");
                 }

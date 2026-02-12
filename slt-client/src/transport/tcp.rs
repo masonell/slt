@@ -1,25 +1,67 @@
 use boring::error::ErrorStack;
-use boring::ssl::{Ssl, SslVerifyMode};
+use boring::ssl::{Ssl, SslRef, SslVerifyMode};
 use boring::x509::verify::X509CheckFlags;
 use slt_core::config::ClientConfig;
 use slt_core::crypto::client_hello::client_hello_session_id_callback;
 use slt_core::crypto::{
     configure_ca_store, configure_client_chrome_ssl, tcp_client_chrome_ctx_builder,
 };
-use slt_core::transport::tcp::{IntervalKeyUpdater, TcpChannel, default_interval_key_updater};
+use slt_core::transport::tcp::{
+    IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
+};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpStream, lookup_host};
 use tokio::time::timeout;
 use tokio_boring::HandshakeError;
-use tracing::debug;
+use tracing::{debug, trace};
+
+use crate::metrics::Metrics;
 
 /// Maximum time allowed for TCP connect + TLS handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Metrics-aware TLS key updater used by client session channels.
+#[derive(Debug, Clone)]
+pub struct ClientKeyUpdater {
+    inner: IntervalKeyUpdater,
+    metrics: Arc<Metrics>,
+}
+
+impl ClientKeyUpdater {
+    /// Create a metrics-aware key updater with default interval policy.
+    #[must_use]
+    pub const fn new(metrics: Arc<Metrics>) -> Self {
+        Self {
+            inner: default_interval_key_updater(),
+            metrics,
+        }
+    }
+}
+
+impl KeyUpdater for ClientKeyUpdater {
+    fn maybe_request_key_update(&mut self, ssl: &mut SslRef) -> io::Result<()> {
+        let will_update = self.inner.messages_until_update() == 1;
+        let request_peer_update = self.inner.requests_peer_update();
+        if will_update {
+            self.metrics.inc_tls_key_update_requested();
+        }
+        self.inner.maybe_request_key_update(ssl)?;
+        if will_update {
+            self.metrics.inc_tls_key_update_applied();
+            trace!(
+                request_peer_update,
+                "client TCP TLS key update applied before outbound message"
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Client TCP transport for framed VPN protocol I/O.
-pub type TcpTransport = TcpChannel<TcpStream, IntervalKeyUpdater>;
+pub type TcpTransport = TcpChannel<TcpStream, ClientKeyUpdater>;
 
 /// Connected TCP TLS session metadata.
 pub struct TcpSession {
@@ -32,7 +74,9 @@ pub struct TcpSession {
 }
 
 /// Connect to the server and perform a TLS handshake.
-pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
+pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result<TcpSession> {
+    metrics.inc_tcp_connections();
+
     let stream = timeout(CONNECT_TIMEOUT, connect_stream(config))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tcp connect timeout"))??;
@@ -40,37 +84,64 @@ pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
     debug!(peer = ?peer, "tcp connected");
 
     if config.hostname.is_empty() {
+        metrics.inc_tcp_handshake_failures();
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "hostname is empty",
         ));
     }
 
-    let mut ctx = tcp_client_chrome_ctx_builder().map_err(map_error)?;
-    configure_ca_store(&mut ctx, &config.tls_ca).map_err(map_error)?;
+    let mut ctx = tcp_client_chrome_ctx_builder().map_err(|err| {
+        metrics.inc_tcp_handshake_failures();
+        map_error(err)
+    })?;
+    configure_ca_store(&mut ctx, &config.tls_ca).map_err(|err| {
+        metrics.inc_tcp_handshake_failures();
+        map_error(err)
+    })?;
     ctx.set_verify(SslVerifyMode::PEER);
     ctx.set_client_hello_session_id_callback(client_hello_session_id_callback(
         config.shared_secret,
     ));
     let ctx = ctx.build();
 
-    let mut ssl = Ssl::new(&ctx).map_err(map_error)?;
-    configure_client_chrome_ssl(&mut ssl).map_err(map_error)?;
+    let mut ssl = Ssl::new(&ctx).map_err(|err| {
+        metrics.inc_tcp_handshake_failures();
+        map_error(err)
+    })?;
+    configure_client_chrome_ssl(&mut ssl).map_err(|err| {
+        metrics.inc_tcp_handshake_failures();
+        map_error(err)
+    })?;
 
-    ssl.set_hostname(&config.hostname).map_err(map_error)?;
-    configure_hostname_verification(&mut ssl, &config.hostname).map_err(map_error)?;
+    ssl.set_hostname(&config.hostname).map_err(|err| {
+        metrics.inc_tcp_handshake_failures();
+        map_error(err)
+    })?;
+    configure_hostname_verification(&mut ssl, &config.hostname).map_err(|err| {
+        metrics.inc_tcp_handshake_failures();
+        map_error(err)
+    })?;
 
     let stream = timeout(
         CONNECT_TIMEOUT,
         tokio_boring::SslStreamBuilder::new(ssl, stream).connect(),
     )
     .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timeout"))?
-    .map_err(|err| map_handshake_error(&err))?;
+    .map_err(|_| {
+        metrics.inc_tcp_handshake_failures();
+        io::Error::new(io::ErrorKind::TimedOut, "tls handshake timeout")
+    })?
+    .map_err(|err| {
+        metrics.inc_tcp_handshake_failures();
+        map_handshake_error(&err)
+    })?;
+
+    metrics.inc_tcp_handshake_successes();
 
     let sni = Some(config.hostname.clone());
     Ok(TcpSession {
-        transport: TcpChannel::with_key_updater(stream, default_interval_key_updater()),
+        transport: TcpChannel::with_key_updater(stream, ClientKeyUpdater::new(metrics)),
         peer,
         sni,
     })

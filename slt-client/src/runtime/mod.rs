@@ -2,7 +2,7 @@ mod limits;
 mod register;
 mod session;
 
-use crate::{auth, transport, tun};
+use crate::{auth, metrics::Metrics, transport, tun};
 use slt_core::config::ClientConfig;
 use slt_core::proto::MessageLimits;
 use std::io;
@@ -23,10 +23,14 @@ const RECONNECT_MIN: Duration = Duration::from_millis(200);
 const RECONNECT_MAX: Duration = Duration::from_secs(5);
 
 /// Run the client runtime until shutdown.
+#[allow(clippy::too_many_lines)]
 pub async fn run_client(
     config: ClientConfig,
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = Arc::new(Metrics::default());
+    let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
+
     let limits = limits::message_limits_from_mtu(config.tun_mtu);
     let mut backoff = ReconnectBackoff::new(RECONNECT_MIN, RECONNECT_MAX);
     let mut attempt: u64 = 0;
@@ -40,7 +44,7 @@ pub async fn run_client(
         attempt = attempt.saturating_add(1);
         info!(attempt, hostname = %config.hostname, port = config.port, "connecting");
 
-        let mut tcp = match connect_authenticated(&config, &cancel).await {
+        let mut tcp = match connect_authenticated(&config, &cancel, &metrics).await {
             Ok(tcp) => tcp,
             Err(err) => {
                 if cancel.is_cancelled() {
@@ -85,6 +89,7 @@ pub async fn run_client(
             tun_state_ref,
             quic_ids.as_ref(),
             &cancel,
+            &metrics,
         )
         .await;
 
@@ -95,6 +100,7 @@ pub async fn run_client(
             &cancel,
             quic_ids,
             udp_session,
+            metrics.clone(),
         )
         .await;
 
@@ -127,6 +133,9 @@ pub async fn run_client(
         tun_state.shutdown().await;
     }
 
+    // Wait for metrics reporter to finish
+    let _ = metrics_reporter.await;
+
     if let Err(err) = result {
         warn!(error = %err, "client runtime exited with error");
         return Err(err.into());
@@ -134,6 +143,46 @@ pub async fn run_client(
 
     info!("client shutdown complete");
     Ok(())
+}
+
+fn spawn_metrics_task(
+    metrics: Arc<Metrics>,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                _ = interval.tick() => {
+                    let snap = metrics.snapshot();
+                    info!(
+                        tcp_connections = snap.tcp_connections,
+                        tcp_handshake_successes = snap.tcp_handshake_successes,
+                        tcp_handshake_failures = snap.tcp_handshake_failures,
+                        auth_successes = snap.auth_successes,
+                        auth_failures = snap.auth_failures,
+                        tcp_to_udp = snap.transport_tcp_to_udp,
+                        udp_to_tcp = snap.transport_udp_to_tcp,
+                        disconnect_idle = snap.disconnect_idle_timeout,
+                        disconnect_close = snap.disconnect_close,
+                        disconnect_shutdown = snap.disconnect_shutdown,
+                        disconnect_error = snap.disconnect_error,
+                        tls_key_update_requested = snap.tls_key_update_requested,
+                        tls_key_update_applied = snap.tls_key_update_applied,
+                        udp_qsp_tx_phase = snap.udp_qsp_tx_key_phase_transitions,
+                        udp_qsp_rx_phase = snap.udp_qsp_rx_key_phase_transitions,
+                        udp_qsp_decrypt_replay = snap.udp_qsp_decrypt_fail_replay,
+                        udp_qsp_decrypt_too_old = snap.udp_qsp_decrypt_fail_too_old,
+                        udp_qsp_decrypt_crypto = snap.udp_qsp_decrypt_fail_crypto,
+                        udp_qsp_decrypt_other = snap.udp_qsp_decrypt_fail_other,
+                        udp_qsp_dead_channel = snap.udp_qsp_dead_channel,
+                        "metrics snapshot"
+                    );
+                }
+            }
+        }
+    })
 }
 
 fn should_reconnect(err: &io::Error) -> bool {
@@ -185,12 +234,13 @@ impl ReconnectBackoff {
 async fn connect_authenticated(
     config: &ClientConfig,
     cancel: &CancellationToken,
+    metrics: &Arc<Metrics>,
 ) -> io::Result<transport::tcp::TcpSession> {
     let mut tcp = tokio::select! {
         () = cancel.cancelled() => {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "connect cancelled"));
         }
-        res = transport::tcp::connect(config) => res,
+        res = transport::tcp::connect(config, metrics.clone()) => res,
     }?;
 
     info!(peer = ?tcp.peer, sni = ?tcp.sni, "tcp handshake complete");
@@ -199,7 +249,7 @@ async fn connect_authenticated(
         () = cancel.cancelled() => {
             Err(io::Error::new(io::ErrorKind::Interrupted, "auth cancelled"))
         }
-        res = auth::authenticate(&mut tcp.transport, config) => res,
+        res = auth::authenticate(&mut tcp.transport, config, metrics) => res,
     }?;
 
     if tcp.transport.has_buffered_input() {
@@ -241,6 +291,7 @@ async fn register_udp_qsp(
     tun_state: &TunState,
     quic_ids: Option<&transport::quic_discovery::QuicIds>,
     cancel: &CancellationToken,
+    metrics: &Arc<Metrics>,
 ) -> Option<transport::udp_qsp::UdpQspTransport> {
     let ids = quic_ids?;
 
@@ -252,7 +303,10 @@ async fn register_udp_qsp(
                 peer = %ids.peer,
                 "register_cid accepted"
             );
-            Some(session)
+            Some(transport::udp_qsp::UdpQspTransport::new(
+                session,
+                (*metrics).clone(),
+            ))
         }
         Err(err) => {
             warn!(error = %err, "register_cid failed");
@@ -268,6 +322,7 @@ async fn run_session(
     cancel: &CancellationToken,
     quic_ids: Option<transport::quic_discovery::QuicIds>,
     udp_session: Option<transport::udp_qsp::UdpQspTransport>,
+    metrics: Arc<Metrics>,
 ) -> io::Result<session::SessionExit> {
     let rx = tun_state.take_session_rx();
     let to_tun_tx = tun_state.to_tun_tx();
@@ -283,6 +338,7 @@ async fn run_session(
         IDLE_TIMEOUT,
         quic_ids,
         udp_session,
+        metrics,
     );
 
     let exit = session.run().await;

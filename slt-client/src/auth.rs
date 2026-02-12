@@ -1,3 +1,4 @@
+use crate::metrics::Metrics;
 use ed25519_dalek::{Signer, SigningKey};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
@@ -16,6 +17,7 @@ const AUTH_MAX_FRAME: usize = 16 * 1024;
 pub async fn authenticate(
     tcp: &mut crate::transport::tcp::TcpTransport,
     config: &ClientConfig,
+    metrics: &Metrics,
 ) -> io::Result<()> {
     let challenge = export_challenge(tcp)?;
     let payload = build_auth_payload(config, challenge);
@@ -49,8 +51,12 @@ pub async fn authenticate(
 
             match handle_auth_message(tcp, msg_buf.message()).await? {
                 AuthResult::Continue => {}
-                AuthResult::Accepted => return Ok(()),
+                AuthResult::Accepted => {
+                    metrics.inc_auth_successes();
+                    return Ok(());
+                }
                 AuthResult::Rejected => {
+                    metrics.inc_auth_failures();
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "auth failed",
