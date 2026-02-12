@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use self::udp_io::UdpIo;
+use boring::ssl::SslRef;
 use fastrand;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UdpSocket};
@@ -32,7 +33,9 @@ use slt_core::proto::{
     PingPayload, PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload,
     RegisterOkPayload, decode_message, encode_message,
 };
-use slt_core::transport::tcp::TcpChannel;
+use slt_core::transport::tcp::{
+    IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
+};
 
 /// Active transport for a client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +61,45 @@ pub enum SessionEvent {
 pub type SessionTx = mpsc::Sender<SessionEvent>;
 /// Receiver for session events.
 pub type SessionRx = mpsc::Receiver<SessionEvent>;
+/// Metrics-aware TLS key updater used by server session channels.
+#[derive(Debug, Clone)]
+pub struct SessionKeyUpdater {
+    inner: IntervalKeyUpdater,
+    metrics: Arc<Metrics>,
+}
+
+impl SessionKeyUpdater {
+    /// Create a metrics-aware key updater with default interval policy.
+    #[must_use]
+    pub const fn new(metrics: Arc<Metrics>) -> Self {
+        Self {
+            inner: default_interval_key_updater(),
+            metrics,
+        }
+    }
+}
+
+impl KeyUpdater for SessionKeyUpdater {
+    fn maybe_request_key_update(&mut self, ssl: &mut SslRef) -> io::Result<()> {
+        let will_update = self.inner.messages_until_update() == 1;
+        let request_peer_update = self.inner.requests_peer_update();
+        if will_update {
+            self.metrics.inc_tls_key_update_requested();
+        }
+        self.inner.maybe_request_key_update(ssl)?;
+        if will_update {
+            self.metrics.inc_tls_key_update_applied();
+            trace!(
+                request_peer_update,
+                "server TCP TLS key update applied before outbound message"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Session TCP channel with interval-based TLS key updates.
+pub type SessionTcpChannel<S = TcpStream> = TcpChannel<S, SessionKeyUpdater>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionControl {
@@ -106,7 +148,7 @@ pub struct ClientSessionBase<
     registry: Arc<SessionRegistry>,
     metrics: Arc<Metrics>,
     tx: SessionTx,
-    tcp: TcpChannel<S>,
+    tcp: SessionTcpChannel<S>,
     tun: Arc<T>,
     udp_socket: Arc<U>,
     udp_peer: Option<SocketAddr>,
@@ -131,7 +173,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         session_id: u64,
         client_id: ClientId,
         assigned_ipv4: AssignedIp,
-        tcp: TcpChannel<S>,
+        tcp: SessionTcpChannel<S>,
         tun: Arc<T>,
         udp_socket: Arc<U>,
         registry: Arc<SessionRegistry>,
@@ -430,17 +472,43 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 return Ok(SessionControl::Continue);
             };
 
-            let opened = match session.open_packet(&claim.payload) {
-                Ok(opened) => opened,
-                Err(QspSessionError::Replay | QspSessionError::TooOld) => {
+            let rx_phase_before = session.rx_key_phase();
+            match session.open_packet(&claim.payload) {
+                Ok(opened) => {
+                    let payload = opened.payload.to_vec();
+                    if session.rx_key_phase() != rx_phase_before {
+                        self.metrics.inc_udp_qsp_rx_key_phase_transition();
+                        info!(
+                            session_id = self.session_id,
+                            client_id = %self.client_id,
+                            key_phase = session.rx_key_phase(),
+                            "UDP-QSP RX key phase transitioned"
+                        );
+                    }
+                    payload
+                }
+                Err(QspSessionError::Replay) => {
+                    self.metrics.inc_udp_qsp_decrypt_fail_replay();
                     trace!(
                         session_id = self.session_id,
                         client_id = %self.client_id,
-                        "UDP packet dropped: replay/too old"
+                        reason = "replay",
+                        "UDP packet dropped: decrypt failure"
+                    );
+                    return Ok(SessionControl::Continue);
+                }
+                Err(QspSessionError::TooOld) => {
+                    self.metrics.inc_udp_qsp_decrypt_fail_too_old();
+                    trace!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        reason = "too_old",
+                        "UDP packet dropped: decrypt failure"
                     );
                     return Ok(SessionControl::Continue);
                 }
                 Err(QspSessionError::DeadChannel) => {
+                    self.metrics.inc_udp_qsp_dead_channel();
                     warn!(
                         session_id = self.session_id,
                         client_id = %self.client_id,
@@ -454,18 +522,29 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     self.set_active_transport(ActiveTransport::Tcp);
                     return Ok(SessionControl::Continue);
                 }
-                Err(err) => {
+                Err(QspSessionError::Crypto(err)) => {
+                    self.metrics.inc_udp_qsp_decrypt_fail_crypto();
                     trace!(
                         session_id = self.session_id,
                         client_id = %self.client_id,
+                        reason = "crypto",
                         error = ?err,
-                        "UDP packet dropped: QSP error"
+                        "UDP packet dropped: decrypt failure"
                     );
                     return Ok(SessionControl::Continue);
                 }
-            };
-
-            opened.payload.to_vec()
+                Err(err) => {
+                    self.metrics.inc_udp_qsp_decrypt_fail_other();
+                    trace!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        reason = "other",
+                        error = ?err,
+                        "UDP packet dropped: decrypt failure"
+                    );
+                    return Ok(SessionControl::Continue);
+                }
+            }
         };
 
         if self.udp_peer != Some(peer) {
@@ -763,13 +842,33 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 
         self.udp_write_buf.clear();
         encode_message(message, &mut self.udp_write_buf).map_err(map_frame_error)?;
-        session
-            .send(&self.udp_write_buf)
-            .await
-            .map_err(|err| match err {
-                QspSessionError::Io(err) => err,
-                _ => io::Error::new(io::ErrorKind::InvalidData, "udp-qsp send failed"),
-            })
+        let tx_phase_before = session.tx_key_phase();
+        match session.send(&self.udp_write_buf).await {
+            Ok(()) => {
+                if session.tx_key_phase() != tx_phase_before {
+                    self.metrics.inc_udp_qsp_tx_key_phase_transition();
+                    info!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        key_phase = session.tx_key_phase(),
+                        "UDP-QSP TX key phase transitioned"
+                    );
+                }
+                Ok(())
+            }
+            Err(QspSessionError::Io(err)) => Err(err),
+            Err(QspSessionError::DeadChannel) => {
+                self.metrics.inc_udp_qsp_dead_channel();
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "udp-qsp channel dead",
+                ))
+            }
+            Err(err) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("udp-qsp send failed: {err:?}"),
+            )),
+        }
     }
 
     async fn send_register_fail(
@@ -975,7 +1074,7 @@ mod tests {
             handle.session_id,
             client_id,
             assigned,
-            TcpChannel::new(server_tls),
+            TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
             tun,
             Arc::new(TestUdpSocket { tx: udp_tx }),
             registry.clone(),

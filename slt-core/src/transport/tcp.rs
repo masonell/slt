@@ -92,6 +92,18 @@ impl IntervalKeyUpdater {
         self.request_peer_update = request_peer_update;
         self
     }
+
+    /// Return how many outbound messages remain before the next key update.
+    #[must_use]
+    pub const fn messages_until_update(&self) -> u64 {
+        self.until_update
+    }
+
+    /// Return whether peer key update is requested on key-update frames.
+    #[must_use]
+    pub const fn requests_peer_update(&self) -> bool {
+        self.request_peer_update
+    }
 }
 
 impl KeyUpdater for IntervalKeyUpdater {
@@ -105,6 +117,22 @@ impl KeyUpdater for IntervalKeyUpdater {
         self.until_update = self.interval.get();
         Ok(())
     }
+}
+
+/// Default number of outbound TCP messages per TLS key update.
+///
+/// Uses the same cadence scale as UDP-QSP key updates.
+pub const TCP_TLS_KEY_UPDATE_INTERVAL_MESSAGES: u64 = 1 << 21;
+/// Whether TCP TLS key updates should request peer key updates immediately.
+pub const TCP_TLS_KEY_UPDATE_REQUEST_PEER_RESPONSE: bool = false;
+const TCP_TLS_KEY_UPDATE_INTERVAL_NONZERO: NonZeroU64 =
+    NonZeroU64::new(TCP_TLS_KEY_UPDATE_INTERVAL_MESSAGES).unwrap();
+
+/// Build the default TCP TLS interval key updater used by client and server.
+#[must_use]
+pub const fn default_interval_key_updater() -> IntervalKeyUpdater {
+    IntervalKeyUpdater::new(TCP_TLS_KEY_UPDATE_INTERVAL_NONZERO)
+        .with_peer_response_requested(TCP_TLS_KEY_UPDATE_REQUEST_PEER_RESPONSE)
 }
 
 /// TCP framed channel over an established `SslStream`.

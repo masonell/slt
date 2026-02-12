@@ -19,6 +19,15 @@ pub struct Metrics {
     disconnect_close: AtomicU64,
     disconnect_shutdown: AtomicU64,
     disconnect_error: AtomicU64,
+    tls_key_update_requested: AtomicU64,
+    tls_key_update_applied: AtomicU64,
+    udp_qsp_tx_key_phase_transitions: AtomicU64,
+    udp_qsp_rx_key_phase_transitions: AtomicU64,
+    udp_qsp_decrypt_fail_replay: AtomicU64,
+    udp_qsp_decrypt_fail_too_old: AtomicU64,
+    udp_qsp_decrypt_fail_crypto: AtomicU64,
+    udp_qsp_decrypt_fail_other: AtomicU64,
+    udp_qsp_dead_channel: AtomicU64,
 }
 
 /// Snapshot of metric counters.
@@ -50,6 +59,24 @@ pub struct MetricsSnapshot {
     pub disconnect_shutdown: u64,
     /// Disconnects due to errors.
     pub disconnect_error: u64,
+    /// TLS key updates requested.
+    pub tls_key_update_requested: u64,
+    /// TLS key updates successfully applied.
+    pub tls_key_update_applied: u64,
+    /// UDP-QSP transmit key phase transitions.
+    pub udp_qsp_tx_key_phase_transitions: u64,
+    /// UDP-QSP receive key phase transitions.
+    pub udp_qsp_rx_key_phase_transitions: u64,
+    /// UDP-QSP decrypt failures due to replay packets.
+    pub udp_qsp_decrypt_fail_replay: u64,
+    /// UDP-QSP decrypt failures due to too-old packets.
+    pub udp_qsp_decrypt_fail_too_old: u64,
+    /// UDP-QSP decrypt failures due to crypto failure.
+    pub udp_qsp_decrypt_fail_crypto: u64,
+    /// UDP-QSP decrypt failures for other reasons.
+    pub udp_qsp_decrypt_fail_other: u64,
+    /// UDP-QSP channels marked dead.
+    pub udp_qsp_dead_channel: u64,
 }
 
 impl Metrics {
@@ -146,6 +173,98 @@ impl Metrics {
         trace!(disconnect_error = prev + 1, "Disconnect due to error");
     }
 
+    /// Increment TLS key update requested counter.
+    pub fn inc_tls_key_update_requested(&self) {
+        let prev = self
+            .tls_key_update_requested
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            tls_key_update_requested = prev + 1,
+            "TLS key update requested"
+        );
+    }
+
+    /// Increment TLS key update applied counter.
+    pub fn inc_tls_key_update_applied(&self) {
+        let prev = self.tls_key_update_applied.fetch_add(1, Ordering::Relaxed);
+        trace!(tls_key_update_applied = prev + 1, "TLS key update applied");
+    }
+
+    /// Increment UDP-QSP TX key-phase transition counter.
+    pub fn inc_udp_qsp_tx_key_phase_transition(&self) {
+        let prev = self
+            .udp_qsp_tx_key_phase_transitions
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            udp_qsp_tx_key_phase_transitions = prev + 1,
+            "UDP-QSP TX key phase transitioned"
+        );
+    }
+
+    /// Increment UDP-QSP RX key-phase transition counter.
+    pub fn inc_udp_qsp_rx_key_phase_transition(&self) {
+        let prev = self
+            .udp_qsp_rx_key_phase_transitions
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            udp_qsp_rx_key_phase_transitions = prev + 1,
+            "UDP-QSP RX key phase transitioned"
+        );
+    }
+
+    /// Increment UDP-QSP replay decrypt failure counter.
+    pub fn inc_udp_qsp_decrypt_fail_replay(&self) {
+        let prev = self
+            .udp_qsp_decrypt_fail_replay
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            udp_qsp_decrypt_fail_replay = prev + 1,
+            "UDP-QSP decrypt failure: replay"
+        );
+    }
+
+    /// Increment UDP-QSP too-old decrypt failure counter.
+    pub fn inc_udp_qsp_decrypt_fail_too_old(&self) {
+        let prev = self
+            .udp_qsp_decrypt_fail_too_old
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            udp_qsp_decrypt_fail_too_old = prev + 1,
+            "UDP-QSP decrypt failure: too old"
+        );
+    }
+
+    /// Increment UDP-QSP crypto decrypt failure counter.
+    pub fn inc_udp_qsp_decrypt_fail_crypto(&self) {
+        let prev = self
+            .udp_qsp_decrypt_fail_crypto
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            udp_qsp_decrypt_fail_crypto = prev + 1,
+            "UDP-QSP decrypt failure: crypto"
+        );
+    }
+
+    /// Increment UDP-QSP generic decrypt failure counter.
+    pub fn inc_udp_qsp_decrypt_fail_other(&self) {
+        let prev = self
+            .udp_qsp_decrypt_fail_other
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            udp_qsp_decrypt_fail_other = prev + 1,
+            "UDP-QSP decrypt failure: other"
+        );
+    }
+
+    /// Increment UDP-QSP dead-channel counter.
+    pub fn inc_udp_qsp_dead_channel(&self) {
+        let prev = self.udp_qsp_dead_channel.fetch_add(1, Ordering::Relaxed);
+        trace!(
+            udp_qsp_dead_channel = prev + 1,
+            "UDP-QSP channel marked dead"
+        );
+    }
+
     /// Return a point-in-time snapshot of metrics.
     #[must_use]
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -163,6 +282,19 @@ impl Metrics {
             disconnect_close: self.disconnect_close.load(Ordering::Relaxed),
             disconnect_shutdown: self.disconnect_shutdown.load(Ordering::Relaxed),
             disconnect_error: self.disconnect_error.load(Ordering::Relaxed),
+            tls_key_update_requested: self.tls_key_update_requested.load(Ordering::Relaxed),
+            tls_key_update_applied: self.tls_key_update_applied.load(Ordering::Relaxed),
+            udp_qsp_tx_key_phase_transitions: self
+                .udp_qsp_tx_key_phase_transitions
+                .load(Ordering::Relaxed),
+            udp_qsp_rx_key_phase_transitions: self
+                .udp_qsp_rx_key_phase_transitions
+                .load(Ordering::Relaxed),
+            udp_qsp_decrypt_fail_replay: self.udp_qsp_decrypt_fail_replay.load(Ordering::Relaxed),
+            udp_qsp_decrypt_fail_too_old: self.udp_qsp_decrypt_fail_too_old.load(Ordering::Relaxed),
+            udp_qsp_decrypt_fail_crypto: self.udp_qsp_decrypt_fail_crypto.load(Ordering::Relaxed),
+            udp_qsp_decrypt_fail_other: self.udp_qsp_decrypt_fail_other.load(Ordering::Relaxed),
+            udp_qsp_dead_channel: self.udp_qsp_dead_channel.load(Ordering::Relaxed),
         }
     }
 }

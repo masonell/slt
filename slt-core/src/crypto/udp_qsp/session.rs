@@ -274,6 +274,18 @@ impl<I: SessionIo> QuicQspSession<I> {
         self.replay_window.expected_pn()
     }
 
+    /// Return the current transmit key phase bit.
+    #[must_use]
+    pub const fn tx_key_phase(&self) -> bool {
+        self.tx_key_phase
+    }
+
+    /// Return the current receive key phase bit.
+    #[must_use]
+    pub const fn rx_key_phase(&self) -> bool {
+        self.rx_key_phase
+    }
+
     /// Send a payload over UDP-QSP.
     ///
     /// # Errors

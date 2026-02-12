@@ -246,6 +246,15 @@ fn spawn_metrics_task(
                         disconnect_close = snap.disconnect_close,
                         disconnect_shutdown = snap.disconnect_shutdown,
                         disconnect_error = snap.disconnect_error,
+                        tls_key_update_requested = snap.tls_key_update_requested,
+                        tls_key_update_applied = snap.tls_key_update_applied,
+                        udp_qsp_tx_phase = snap.udp_qsp_tx_key_phase_transitions,
+                        udp_qsp_rx_phase = snap.udp_qsp_rx_key_phase_transitions,
+                        udp_qsp_decrypt_replay = snap.udp_qsp_decrypt_fail_replay,
+                        udp_qsp_decrypt_too_old = snap.udp_qsp_decrypt_fail_too_old,
+                        udp_qsp_decrypt_crypto = snap.udp_qsp_decrypt_fail_crypto,
+                        udp_qsp_decrypt_other = snap.udp_qsp_decrypt_fail_other,
+                        udp_qsp_dead_channel = snap.udp_qsp_dead_channel,
                         "metrics snapshot"
                     );
                 }

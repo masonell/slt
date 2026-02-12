@@ -25,7 +25,9 @@ use slt_core::types::ClientId;
 use super::AssignedIp;
 use super::metrics::Metrics;
 use super::registry::SessionRegistry;
-use crate::sessions::{ClientSessionBase, SessionEvent, SessionTimeouts};
+use crate::sessions::{
+    ClientSessionBase, SessionEvent, SessionKeyUpdater, SessionTcpChannel, SessionTimeouts,
+};
 use crate::tun::TunDeviceIo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,7 +145,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 return Ok(());
             }
         };
-        let mut tcp = Some(TcpChannel::new(tls));
+        let mut tcp = Some(TcpChannel::with_key_updater(
+            tls,
+            SessionKeyUpdater::new(self.metrics.clone()),
+        ));
 
         let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
         let tcp_ref = tcp
@@ -204,7 +209,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     async fn handle_auth_message(
         &self,
         message: Message<'_>,
-        tcp: &mut Option<TcpChannel<TcpStream>>,
+        tcp: &mut Option<SessionTcpChannel<TcpStream>>,
         challenge: &[u8; AUTH_CHALLENGE_LEN],
     ) -> io::Result<AuthStep> {
         match message {
@@ -327,7 +332,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
     async fn send_message(
         &self,
-        tcp: &mut TcpChannel<TcpStream>,
+        tcp: &mut SessionTcpChannel<TcpStream>,
         message: Message<'_>,
     ) -> io::Result<()> {
         tcp.write_message(message).await
@@ -335,7 +340,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
     async fn send_auth_fail(
         &self,
-        tcp: &mut TcpChannel<TcpStream>,
+        tcp: &mut SessionTcpChannel<TcpStream>,
         code: AuthFailCode,
     ) -> io::Result<()> {
         let payload = AuthFailPayload { code };

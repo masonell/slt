@@ -5,7 +5,7 @@ use boring::x509::verify::X509CheckFlags;
 use slt_core::config::ClientConfig;
 use slt_core::crypto::client_hello::client_hello_session_id_callback;
 use slt_core::crypto::{configure_client_chrome_ssl, tcp_client_chrome_ctx_builder};
-use slt_core::transport::tcp::TcpChannel;
+use slt_core::transport::tcp::{IntervalKeyUpdater, TcpChannel, default_interval_key_updater};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use tokio::net::{TcpStream, lookup_host};
@@ -13,7 +13,7 @@ use tokio_boring::HandshakeError;
 use tracing::debug;
 
 /// Client TCP transport for framed VPN protocol I/O.
-pub type TcpTransport = TcpChannel<TcpStream>;
+pub type TcpTransport = TcpChannel<TcpStream, IntervalKeyUpdater>;
 
 /// Connected TCP TLS session metadata.
 pub struct TcpSession {
@@ -59,7 +59,7 @@ pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
 
     let sni = Some(config.hostname.clone());
     Ok(TcpSession {
-        transport: TcpChannel::new(stream),
+        transport: TcpChannel::with_key_updater(stream, default_interval_key_updater()),
         peer,
         sni,
     })
