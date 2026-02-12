@@ -12,12 +12,19 @@ use tracing::{debug, info, trace, warn};
 const UDP_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const UDP_VERIFY_PONG_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(100);
 const UDP_VERIFY_PONG_MAX_SENDS: u8 = 3;
+const UDP_PROBE_PING_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy)]
 struct UdpVerifySwitch {
     pong_payload: [u8; 8],
     next_send_at: Instant,
     sent: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UdpProbePing {
+    nonce: u64,
+    next_send_at: Instant,
 }
 
 pub(super) struct ClientSession {
@@ -36,6 +43,7 @@ pub(super) struct ClientSession {
     udp_session: Option<UdpQspTransport>,
     udp_expect_ping_deadline: Option<Instant>,
     udp_verify: Option<UdpVerifySwitch>,
+    udp_probe_ping: Option<UdpProbePing>,
     exit: Option<SessionExit>,
 }
 
@@ -70,6 +78,7 @@ impl ClientSession {
             udp_session,
             udp_expect_ping_deadline: None,
             udp_verify: None,
+            udp_probe_ping: None,
             exit: None,
         }
     }
@@ -115,11 +124,18 @@ impl ClientSession {
         );
         self.udp_expect_ping_deadline = Some(Instant::now() + UDP_VERIFY_TIMEOUT);
         self.udp_verify = None;
-        if let Err(err) = self.send_udp_probe_ping().await {
+        let nonce = fastrand::u64(..);
+        if let Err(err) = self.send_udp_probe_ping_with_nonce(nonce).await {
             warn!(error = %err, "failed to send udp-qsp probe ping; staying on tcp");
             self.udp_session = None;
             self.udp_expect_ping_deadline = None;
             self.udp_verify = None;
+            self.udp_probe_ping = None;
+        } else {
+            self.udp_probe_ping = Some(UdpProbePing {
+                nonce,
+                next_send_at: Instant::now() + UDP_PROBE_PING_RETRANSMIT_INTERVAL,
+            });
         }
     }
 
@@ -137,6 +153,14 @@ impl ClientSession {
         let retransmit_at = self.udp_verify.as_ref().map(|verify| verify.next_send_at);
         let retransmit_sleep = async move {
             if let Some(at) = retransmit_at {
+                time::sleep_until(at.into()).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let probe_ping_at = self.udp_probe_ping.as_ref().map(|probe| probe.next_send_at);
+        let probe_ping_sleep = async move {
+            if let Some(at) = probe_ping_at {
                 time::sleep_until(at.into()).await;
             } else {
                 std::future::pending::<()>().await;
@@ -161,6 +185,7 @@ impl ClientSession {
                 udp.read_next_message(self.limits).await
             }, if udp_enabled => Ok(SessionEvent::UdpResult(udp_res)),
             () = retransmit_sleep => Ok(SessionEvent::UdpVerifyRetransmit),
+            () = probe_ping_sleep => Ok(SessionEvent::UdpProbePingRetransmit),
             () = time::sleep_until(next_ping_at.into()) => Ok(SessionEvent::PingTick),
             () = time::sleep_until(idle_deadline.into()) => Ok(SessionEvent::IdleTimeout),
             () = verify_sleep => Ok(SessionEvent::UdpVerifyTimeout),
@@ -231,6 +256,12 @@ impl ClientSession {
                 }
                 Ok(SessionControl::Continue)
             }
+            SessionEvent::UdpProbePingRetransmit => {
+                if let Err(err) = self.handle_udp_probe_ping_retransmit().await {
+                    self.handle_udp_error(&err);
+                }
+                Ok(SessionControl::Continue)
+            }
             SessionEvent::PingTick => {
                 self.handle_ping_tick().await?;
                 *next_ping_at = self.schedule_next_ping();
@@ -257,6 +288,7 @@ impl ClientSession {
                 self.udp_session = None;
                 self.udp_expect_ping_deadline = None;
                 self.udp_verify = None;
+                self.udp_probe_ping = None;
                 self.active_transport = ActiveTransport::Tcp;
                 self.note_tcp_activity();
                 Ok(SessionControl::Continue)
@@ -278,6 +310,7 @@ impl ClientSession {
         self.udp_session = None;
         self.udp_expect_ping_deadline = None;
         self.udp_verify = None;
+        self.udp_probe_ping = None;
         self.active_transport = ActiveTransport::Tcp;
         self.note_tcp_activity();
     }
@@ -312,6 +345,22 @@ impl ClientSession {
         }
 
         res
+    }
+
+    async fn handle_udp_probe_ping_retransmit(&mut self) -> io::Result<()> {
+        let Some(mut probe) = self.udp_probe_ping else {
+            return Ok(());
+        };
+
+        let now = Instant::now();
+        if now < probe.next_send_at {
+            return Ok(());
+        }
+
+        self.send_udp_probe_ping_with_nonce(probe.nonce).await?;
+        probe.next_send_at = now + UDP_PROBE_PING_RETRANSMIT_INTERVAL;
+        self.udp_probe_ping = Some(probe);
+        Ok(())
     }
 
     async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
@@ -412,6 +461,7 @@ impl ClientSession {
 
                 if self.udp_expect_ping_deadline.is_some() {
                     self.udp_expect_ping_deadline = None;
+                    self.udp_probe_ping = None;
                     self.udp_verify = Some(UdpVerifySwitch {
                         pong_payload,
                         next_send_at: Instant::now() + UDP_VERIFY_PONG_RETRANSMIT_INTERVAL,
@@ -564,11 +614,10 @@ impl ClientSession {
         udp.write_message(message).await
     }
 
-    async fn send_udp_probe_ping(&mut self) -> io::Result<()> {
+    async fn send_udp_probe_ping_with_nonce(&mut self, nonce: u64) -> io::Result<()> {
         if self.udp_session.is_none() {
             return Ok(());
         }
-        let nonce = fastrand::u64(..);
         let ping = PingPayload { nonce };
         let mut buf = Vec::with_capacity(8);
         ping.encode(&mut buf);
@@ -613,6 +662,7 @@ enum SessionEvent {
     TunPacket(Option<Vec<u8>>),
     UdpResult(io::Result<crate::wire::OwnedMessageBuf>),
     UdpVerifyRetransmit,
+    UdpProbePingRetransmit,
     PingTick,
     IdleTimeout,
     UdpVerifyTimeout,
