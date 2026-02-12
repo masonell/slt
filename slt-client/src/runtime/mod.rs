@@ -227,7 +227,9 @@ impl ReconnectBackoff {
         let cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX);
         let half = cap_ms / 2;
         let jitter = if half > 0 { fastrand::u64(0..=half) } else { 0 };
-        Duration::from_millis(half.saturating_add(jitter))
+        // Equal-jitter: base = cap - half, add random jitter up to half
+        // Result: [half, cap] centered at ~0.75*cap
+        Duration::from_millis(cap_ms.saturating_sub(half).saturating_add(jitter))
     }
 }
 
