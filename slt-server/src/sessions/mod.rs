@@ -440,6 +440,20 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     );
                     return Ok(SessionControl::Continue);
                 }
+                Err(QspSessionError::DeadChannel) => {
+                    warn!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        "UDP-QSP channel marked dead; falling back to tcp"
+                    );
+                    self.registry.remove_cids_for_session(self.session_id);
+                    self.udp_session = None;
+                    self.udp_peer = None;
+                    self.udp_verify = None;
+                    self.udp_verified = false;
+                    self.set_active_transport(ActiveTransport::Tcp);
+                    return Ok(SessionControl::Continue);
+                }
                 Err(err) => {
                     trace!(
                         session_id = self.session_id,
@@ -563,21 +577,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 .await?;
             return Ok(SessionControl::Continue);
         };
-
-        if register.pn_start > u64::from(u32::MAX) || register.pn_start_rx > u64::from(u32::MAX) {
-            warn!(
-                session_id = self.session_id,
-                client_id = %self.client_id,
-                transport = ?transport,
-                pn_start = register.pn_start,
-                pn_start_rx = register.pn_start_rx,
-                reason = "invalid_packet_number",
-                "register_cid rejected"
-            );
-            self.send_register_fail(RegisterFailCode::InvalidCid, transport)
-                .await?;
-            return Ok(SessionControl::Continue);
-        }
 
         let Ok(keys) = UdpQspKeys::from_register(&register) else {
             warn!(

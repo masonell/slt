@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use boring::hash::hmac_sha256;
 use boring::symm::{Cipher, Crypter, Mode};
 
 use super::packet::{
@@ -176,6 +177,11 @@ struct DirectionKeys {
     aead: PacketKey,
 }
 
+const KEY_UPDATE_CONTEXT: &[u8] = b"slt-udp-qsp/key-update-v1";
+const KEY_UPDATE_HP_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/hp";
+const KEY_UPDATE_AEAD_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/aead";
+const KEY_UPDATE_IV_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/iv";
+
 /// UDP-QSP key material for header and payload protection.
 #[derive(Clone)]
 pub struct UdpQspKeys {
@@ -241,6 +247,24 @@ impl UdpQspKeys {
             payload.iv_tx,
             payload.iv_rx,
         )
+    }
+
+    pub(crate) fn with_next_tx_keys(&self) -> Result<Self, QspCryptoError> {
+        let config = CipherConfig::for_suite(self.cipher)?;
+        Ok(Self {
+            cipher: self.cipher,
+            tx: derive_direction_keys(&self.tx, config)?,
+            rx: self.rx.clone(),
+        })
+    }
+
+    pub(crate) fn with_next_rx_keys(&self) -> Result<Self, QspCryptoError> {
+        let config = CipherConfig::for_suite(self.cipher)?;
+        Ok(Self {
+            cipher: self.cipher,
+            tx: self.tx.clone(),
+            rx: derive_direction_keys(&self.rx, config)?,
+        })
     }
 
     /// Protect a UDP-QSP payload into a QUIC short-header packet.
@@ -331,7 +355,7 @@ impl UdpQspKeys {
         expected_pn: u64,
     ) -> Result<OpenedPacket, QspCryptoError> {
         let mut payload = Vec::new();
-        let meta = self.open_into_inner(dcid_len, packet, expected_pn, &mut payload)?;
+        let meta = Self::open_into_inner(&self.rx, dcid_len, packet, expected_pn, &mut payload)?;
         Ok(OpenedPacket {
             pn: meta.pn,
             pn_len: meta.pn_len,
@@ -360,7 +384,7 @@ impl UdpQspKeys {
         expected_pn: u64,
         out: &'a mut Vec<u8>,
     ) -> Result<OpenedPacketRef<'a>, QspCryptoError> {
-        let meta = self.open_into_inner(dcid_len, packet, expected_pn, out)?;
+        let meta = Self::open_into_inner(&self.rx, dcid_len, packet, expected_pn, out)?;
         Ok(OpenedPacketRef {
             pn: meta.pn,
             pn_len: meta.pn_len,
@@ -370,7 +394,7 @@ impl UdpQspKeys {
     }
 
     fn open_into_inner(
-        &self,
+        rx: &DirectionKeys,
         dcid_len: usize,
         packet: &[u8],
         expected_pn: u64,
@@ -378,18 +402,17 @@ impl UdpQspKeys {
     ) -> Result<OpenedPacketMeta, QspCryptoError> {
         require_hp_sample(packet, dcid_len)?;
         let sample = hp_sample_range(dcid_len);
-        let mask = self.rx.hp.mask(&packet[sample])?;
+        let mask = rx.hp.mask(&packet[sample])?;
         let parsed = parse_header(dcid_len, packet, mask)?;
 
         let pn = reconstruct_packet_number(parsed.pn, expected_pn, parsed.pn_len);
         let plaintext_len = packet.len() - parsed.header.len() - AEAD_TAG_LEN;
-        let needed_capacity = plaintext_len + self.rx.aead.block_size();
+        let needed_capacity = plaintext_len + rx.aead.block_size();
         if out.capacity() < needed_capacity {
             out.reserve_exact(needed_capacity - out.capacity());
         }
 
-        self.rx
-            .aead
+        rx.aead
             .open_into(pn, &parsed.header, &packet[parsed.header.len()..], out)?;
 
         Ok(OpenedPacketMeta {
@@ -413,4 +436,71 @@ fn make_nonce(iv: &[u8; AEAD_IV_LEN], counter: u64) -> [u8; AEAD_IV_LEN] {
         *a ^= b;
     }
     nonce
+}
+
+fn derive_direction_keys(
+    current: &DirectionKeys,
+    config: CipherConfig,
+) -> Result<DirectionKeys, QspCryptoError> {
+    let mut ikm = [0u8; HP_KEY_LEN + AEAD_KEY_LEN + AEAD_IV_LEN];
+    ikm[..HP_KEY_LEN].copy_from_slice(&current.hp.key);
+    ikm[HP_KEY_LEN..HP_KEY_LEN + AEAD_KEY_LEN].copy_from_slice(&current.aead.key);
+    ikm[HP_KEY_LEN + AEAD_KEY_LEN..].copy_from_slice(&current.aead.iv);
+
+    let mut extract_input = Vec::with_capacity(KEY_UPDATE_CONTEXT.len() + ikm.len());
+    extract_input.extend_from_slice(KEY_UPDATE_CONTEXT);
+    extract_input.extend_from_slice(&ikm);
+    let prk = hkdf_extract_sha256(&current.aead.iv, &extract_input)?;
+
+    Ok(DirectionKeys {
+        hp: HeaderProtectionKey::new(
+            hkdf_expand_sha256::<HP_KEY_LEN>(&prk, KEY_UPDATE_HP_INFO)?,
+            config.hp,
+        ),
+        aead: PacketKey::new(
+            hkdf_expand_sha256::<AEAD_KEY_LEN>(&prk, KEY_UPDATE_AEAD_INFO)?,
+            hkdf_expand_sha256::<AEAD_IV_LEN>(&prk, KEY_UPDATE_IV_INFO)?,
+            config.aead,
+        ),
+    })
+}
+
+fn hkdf_extract_sha256(salt: &[u8], ikm: &[u8]) -> Result<[u8; 32], QspCryptoError> {
+    hmac_sha256(salt, ikm).map_err(|_| QspCryptoError::CryptoFail)
+}
+
+fn hkdf_expand_sha256<const N: usize>(
+    prk: &[u8; 32],
+    info: &[u8],
+) -> Result<[u8; N], QspCryptoError> {
+    let mut out = [0u8; N];
+    if N == 0 {
+        return Ok(out);
+    }
+
+    let mut generated = 0usize;
+    let mut prev = [0u8; 32];
+    let mut prev_len = 0usize;
+    let mut counter = 1u8;
+
+    while generated < N {
+        let mut input = Vec::with_capacity(prev_len + info.len() + 1);
+        if prev_len != 0 {
+            input.extend_from_slice(&prev[..prev_len]);
+        }
+        input.extend_from_slice(info);
+        input.push(counter);
+
+        prev = hmac_sha256(prk, &input).map_err(|_| QspCryptoError::CryptoFail)?;
+        prev_len = prev.len();
+
+        let remaining = N - generated;
+        let take = remaining.min(prev_len);
+        out[generated..generated + take].copy_from_slice(&prev[..take]);
+        generated += take;
+
+        counter = counter.checked_add(1).ok_or(QspCryptoError::CryptoFail)?;
+    }
+
+    Ok(out)
 }

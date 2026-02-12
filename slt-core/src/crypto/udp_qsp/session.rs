@@ -8,9 +8,14 @@ use crate::types::Cid;
 
 /// Number of packets tracked for replay protection.
 pub const PN_REPLAY_WINDOW: usize = 1024;
+/// Default packets per key phase before rotating UDP-QSP keys.
+pub const KEY_UPDATE_INTERVAL: u64 = 1 << 21;
+/// Late packet-number margin where receiver still accepts old keys.
+pub const KEY_UPDATE_LATE_MARGIN: u64 = (PN_REPLAY_WINDOW as u64) * 8;
 
 const WINDOW_WORD_BITS: usize = 64;
 const WINDOW_WORDS: usize = PN_REPLAY_WINDOW / WINDOW_WORD_BITS;
+const DEAD_CHANNEL_FAILURE_THRESHOLD: u32 = 64;
 
 /// UDP-QSP session errors.
 #[derive(Debug)]
@@ -25,6 +30,8 @@ pub enum QspSessionError {
     TooOld,
     /// Packet number would overflow.
     PacketNumberOverflow,
+    /// Too many consecutive decrypt failures; channel is considered dead.
+    DeadChannel,
 }
 
 impl From<io::Error> for QspSessionError {
@@ -165,6 +172,29 @@ const fn bit_position(pn: u64) -> (usize, u64) {
     (word, 1u64 << bit)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RekeyPolicy {
+    interval: u64,
+    late_margin: u64,
+    dead_failures: u32,
+}
+
+impl RekeyPolicy {
+    const fn defaults() -> Self {
+        Self {
+            interval: KEY_UPDATE_INTERVAL,
+            late_margin: KEY_UPDATE_LATE_MARGIN,
+            dead_failures: DEAD_CHANNEL_FAILURE_THRESHOLD,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreviousRxKeys {
+    keys: UdpQspKeys,
+    valid_until_pn: u64,
+}
+
 /// UDP-QSP session state with replay protection and packet I/O.
 #[derive(Debug)]
 pub struct QuicQspSession<I> {
@@ -172,8 +202,14 @@ pub struct QuicQspSession<I> {
     scid: Cid,
     dcid: Cid,
     keys: UdpQspKeys,
-    key_phase: bool,
+    tx_key_phase: bool,
+    rx_key_phase: bool,
     next_pn: u64,
+    tx_next_rekey_pn: Option<u64>,
+    rx_next_rekey_pn: Option<u64>,
+    previous_rx: Option<PreviousRxKeys>,
+    consecutive_decrypt_failures: u32,
+    rekey_policy: RekeyPolicy,
     replay_window: ReplayWindow,
     send_buf: Vec<u8>,
     recv_buf: Vec<u8>,
@@ -200,8 +236,14 @@ impl<I: SessionIo> QuicQspSession<I> {
             scid,
             dcid,
             keys,
-            key_phase,
+            tx_key_phase: key_phase,
+            rx_key_phase: key_phase,
             next_pn: send_pn,
+            tx_next_rekey_pn: next_rekey_after(send_pn, RekeyPolicy::defaults().interval),
+            rx_next_rekey_pn: next_rekey_after(recv_expected_pn, RekeyPolicy::defaults().interval),
+            previous_rx: None,
+            consecutive_decrypt_failures: 0,
+            rekey_policy: RekeyPolicy::defaults(),
             replay_window: ReplayWindow::new(recv_expected_pn),
             send_buf: Vec::new(),
             recv_buf: Vec::new(),
@@ -242,13 +284,14 @@ impl<I: SessionIo> QuicQspSession<I> {
     /// - the IO layer fails
     pub async fn send(&mut self, payload: &[u8]) -> Result<(), QspSessionError> {
         let pn = self.next_pn;
+        self.maybe_rotate_tx_keys(pn)?;
         self.next_pn = pn
             .checked_add(1)
             .ok_or(QspSessionError::PacketNumberOverflow)?;
         self.keys.protect_into(
             self.dcid.as_slice(),
             pn,
-            self.key_phase,
+            self.tx_key_phase,
             payload,
             &mut self.send_buf,
         )?;
@@ -288,23 +331,48 @@ impl<I: SessionIo> QuicQspSession<I> {
         packet: &[u8],
     ) -> Result<OpenedPacketRef<'a>, QspSessionError> {
         let expected_pn = self.replay_window.expected_pn();
-        let opened =
-            self.keys
-                .open_into(self.scid.len(), packet, expected_pn, &mut self.recv_buf)?;
-        let pn = opened.pn;
-        let pn_len = opened.pn_len;
-        let key_phase = opened.key_phase;
-
-        match self.replay_window.check_and_update(pn) {
-            Ok(()) => Ok(OpenedPacketRef {
-                pn,
-                pn_len,
-                key_phase,
-                payload: self.recv_buf.as_slice(),
-            }),
-            Err(ReplayError::Replay) => Err(QspSessionError::Replay),
-            Err(ReplayError::TooOld) => Err(QspSessionError::TooOld),
+        self.maybe_confirm_previous_rx_keys(expected_pn);
+        let current_opened = self
+            .keys
+            .open_into(self.scid.len(), packet, expected_pn, &mut self.recv_buf)
+            .ok()
+            .map(|opened| (opened.pn, opened.pn_len, opened.key_phase));
+        if let Some((pn, pn_len, key_phase)) = current_opened
+            && key_phase == self.rx_key_phase
+        {
+            return self.accept_opened(pn, pn_len, key_phase);
         }
+
+        if self.can_try_previous(expected_pn)
+            && let Some(previous) = &self.previous_rx
+            && let Some((pn, pn_len, key_phase)) = previous
+                .keys
+                .open_into(self.scid.len(), packet, expected_pn, &mut self.recv_buf)
+                .ok()
+                .map(|opened| (opened.pn, opened.pn_len, opened.key_phase))
+            && key_phase != self.rx_key_phase
+        {
+            return self.accept_opened(pn, pn_len, key_phase);
+        }
+
+        if self.should_try_candidate(expected_pn)
+            && let Some(candidate_keys) = self.derive_candidate_rx_keys()?
+            && let Some((pn, pn_len, key_phase)) = candidate_keys
+                .open_into(self.scid.len(), packet, expected_pn, &mut self.recv_buf)
+                .ok()
+                .map(|opened| (opened.pn, opened.pn_len, opened.key_phase))
+            && key_phase != self.rx_key_phase
+        {
+            self.promote_candidate_rx_keys(candidate_keys);
+            return self.accept_opened(pn, pn_len, key_phase);
+        }
+
+        self.consecutive_decrypt_failures = self.consecutive_decrypt_failures.saturating_add(1);
+        if self.consecutive_decrypt_failures >= self.rekey_policy.dead_failures {
+            return Err(QspSessionError::DeadChannel);
+        }
+
+        Err(QspSessionError::Crypto(QspCryptoError::CryptoFail))
     }
 
     /// Returns a mutable reference to the underlying IO transport.
@@ -312,6 +380,101 @@ impl<I: SessionIo> QuicQspSession<I> {
     pub const fn io_mut(&mut self) -> &mut I {
         &mut self.io
     }
+
+    fn maybe_rotate_tx_keys(&mut self, pn: u64) -> Result<(), QspSessionError> {
+        while let Some(threshold) = self.tx_next_rekey_pn {
+            if pn < threshold {
+                break;
+            }
+
+            self.keys = self.keys.with_next_tx_keys()?;
+            self.tx_key_phase = !self.tx_key_phase;
+            self.tx_next_rekey_pn = next_rekey_after(threshold, self.rekey_policy.interval);
+        }
+        Ok(())
+    }
+
+    fn accept_opened(
+        &mut self,
+        pn: u64,
+        pn_len: usize,
+        key_phase: bool,
+    ) -> Result<OpenedPacketRef<'_>, QspSessionError> {
+        match self.replay_window.check_and_update(pn) {
+            Ok(()) => {
+                self.consecutive_decrypt_failures = 0;
+                Ok(OpenedPacketRef {
+                    pn,
+                    pn_len,
+                    key_phase,
+                    payload: self.recv_buf.as_slice(),
+                })
+            }
+            Err(ReplayError::Replay) => Err(QspSessionError::Replay),
+            Err(ReplayError::TooOld) => Err(QspSessionError::TooOld),
+        }
+    }
+
+    fn can_try_previous(&self, expected_pn: u64) -> bool {
+        self.previous_rx
+            .as_ref()
+            .is_some_and(|prev| expected_pn <= prev.valid_until_pn)
+    }
+
+    const fn should_try_candidate(&self, expected_pn: u64) -> bool {
+        if self.previous_rx.is_some() {
+            return false;
+        }
+        let Some(threshold) = self.rx_next_rekey_pn else {
+            return false;
+        };
+        pn_distance(expected_pn, threshold) <= self.rekey_policy.late_margin
+    }
+
+    fn derive_candidate_rx_keys(&self) -> Result<Option<UdpQspKeys>, QspSessionError> {
+        if self.rx_next_rekey_pn.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(self.keys.with_next_rx_keys()?))
+    }
+
+    fn promote_candidate_rx_keys(&mut self, candidate: UdpQspKeys) {
+        let threshold = self
+            .rx_next_rekey_pn
+            .unwrap_or_else(|| self.replay_window.expected_pn());
+        let valid_until = threshold.saturating_add(PN_REPLAY_WINDOW as u64);
+        self.previous_rx = Some(PreviousRxKeys {
+            keys: self.keys.clone(),
+            valid_until_pn: valid_until,
+        });
+        self.keys = candidate;
+        self.rx_key_phase = !self.rx_key_phase;
+        self.rx_next_rekey_pn = next_rekey_after(threshold, self.rekey_policy.interval);
+    }
+
+    fn maybe_confirm_previous_rx_keys(&mut self, expected_pn: u64) {
+        if self
+            .previous_rx
+            .as_ref()
+            .is_some_and(|prev| expected_pn > prev.valid_until_pn)
+        {
+            self.previous_rx = None;
+        }
+    }
+}
+
+const fn pn_distance(a: u64, b: u64) -> u64 {
+    a.abs_diff(b)
+}
+
+const fn next_rekey_after(pn: u64, interval: u64) -> Option<u64> {
+    if interval == 0 {
+        return None;
+    }
+
+    let rem = pn % interval;
+    let step = if rem == 0 { interval } else { interval - rem };
+    pn.checked_add(step)
 }
 
 #[cfg(test)]
@@ -379,6 +542,23 @@ mod tests {
         let (message, consumed) = decode_message(frame, limits).unwrap().unwrap();
         assert_eq!(consumed, frame.len());
         message
+    }
+
+    fn set_rekey_policy<I: SessionIo>(
+        session: &mut QuicQspSession<I>,
+        interval: u64,
+        late_margin: u64,
+        dead_failures: u32,
+    ) {
+        session.rekey_policy = RekeyPolicy {
+            interval,
+            late_margin,
+            dead_failures,
+        };
+        session.tx_next_rekey_pn = next_rekey_after(session.next_pn, interval);
+        session.rx_next_rekey_pn = next_rekey_after(session.expected_pn(), interval);
+        session.previous_rx = None;
+        session.consecutive_decrypt_failures = 0;
     }
 
     #[test]
@@ -715,5 +895,221 @@ mod tests {
             panic!("expected pong");
         };
         assert_eq!(PongPayload::decode(payload).unwrap().nonce, nonce);
+    }
+
+    #[tokio::test]
+    async fn session_rekeys_at_interval_and_accepts_new_phase() {
+        struct CaptureIo {
+            sent: Vec<Vec<u8>>,
+        }
+
+        impl SessionIo for CaptureIo {
+            async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+                self.sent.push(bytes.to_vec());
+                Ok(())
+            }
+
+            async fn recv(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "no recv"))
+            }
+        }
+
+        let keys = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],
+            [0x11; HP_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x55; AEAD_IV_LEN],
+            [0x55; AEAD_IV_LEN],
+        )
+        .unwrap();
+        let dcid = Cid::from([0xAB; 8]);
+        let scid = Cid::from([0xCD; 8]);
+        let limits = MessageLimits::new(2048, 2048);
+
+        let mut sender = QuicQspSession::new(
+            CaptureIo { sent: Vec::new() },
+            scid,
+            dcid,
+            keys.clone(),
+            0,
+            0,
+            false,
+        );
+        let mut receiver = QuicQspSession::new(
+            CaptureIo { sent: Vec::new() },
+            scid,
+            dcid,
+            keys,
+            0,
+            0,
+            false,
+        );
+        set_rekey_policy(&mut sender, 8, 16, 4);
+        set_rekey_policy(&mut receiver, 8, 16, 4);
+
+        for nonce in 0..=8u64 {
+            let frame = encode_ping_frame(nonce);
+            sender.send(&frame).await.unwrap();
+        }
+
+        for nonce in 0usize..=7usize {
+            let opened = receiver.open_packet(&sender.io_mut().sent[nonce]).unwrap();
+            assert!(!opened.key_phase);
+            let Message::Ping { payload } = decode_one(opened.payload, limits) else {
+                panic!("expected ping");
+            };
+            assert_eq!(PingPayload::decode(payload).unwrap().nonce, nonce as u64);
+        }
+
+        let opened = receiver.open_packet(&sender.io_mut().sent[8]).unwrap();
+        assert!(opened.key_phase);
+        let Message::Ping { payload } = decode_one(opened.payload, limits) else {
+            panic!("expected ping");
+        };
+        assert_eq!(PingPayload::decode(payload).unwrap().nonce, 8);
+    }
+
+    #[tokio::test]
+    async fn session_accepts_reordered_old_phase_packet_within_grace() {
+        struct CaptureIo {
+            sent: Vec<Vec<u8>>,
+        }
+
+        impl SessionIo for CaptureIo {
+            async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+                self.sent.push(bytes.to_vec());
+                Ok(())
+            }
+
+            async fn recv(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "no recv"))
+            }
+        }
+
+        let keys = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],
+            [0x11; HP_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x55; AEAD_IV_LEN],
+            [0x55; AEAD_IV_LEN],
+        )
+        .unwrap();
+        let dcid = Cid::from([0xAB; 8]);
+        let scid = Cid::from([0xCD; 8]);
+        let limits = MessageLimits::new(2048, 2048);
+
+        let mut sender = QuicQspSession::new(
+            CaptureIo { sent: Vec::new() },
+            scid,
+            dcid,
+            keys.clone(),
+            0,
+            0,
+            false,
+        );
+        let mut receiver = QuicQspSession::new(
+            CaptureIo { sent: Vec::new() },
+            scid,
+            dcid,
+            keys,
+            0,
+            0,
+            false,
+        );
+        set_rekey_policy(&mut sender, 8, 16, 4);
+        set_rekey_policy(&mut receiver, 8, 16, 4);
+
+        for nonce in 0..=8u64 {
+            let frame = encode_ping_frame(nonce);
+            sender.send(&frame).await.unwrap();
+        }
+
+        for nonce in 0usize..=6usize {
+            let opened = receiver.open_packet(&sender.io_mut().sent[nonce]).unwrap();
+            assert!(!opened.key_phase);
+        }
+
+        let opened = receiver.open_packet(&sender.io_mut().sent[8]).unwrap();
+        assert!(opened.key_phase);
+        let Message::Ping { payload } = decode_one(opened.payload, limits) else {
+            panic!("expected ping");
+        };
+        assert_eq!(PingPayload::decode(payload).unwrap().nonce, 8);
+
+        let opened = receiver.open_packet(&sender.io_mut().sent[7]).unwrap();
+        assert!(!opened.key_phase);
+        let Message::Ping { payload } = decode_one(opened.payload, limits) else {
+            panic!("expected ping");
+        };
+        assert_eq!(PingPayload::decode(payload).unwrap().nonce, 7);
+    }
+
+    #[test]
+    fn session_marks_dead_channel_after_late_crypto_failures() {
+        struct TestIo;
+
+        impl SessionIo for TestIo {
+            async fn send(&mut self, _bytes: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+
+            async fn recv(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "no recv"))
+            }
+        }
+
+        let keys_a = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],
+            [0x11; HP_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x55; AEAD_IV_LEN],
+            [0x55; AEAD_IV_LEN],
+        )
+        .unwrap();
+        let keys_b = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x21; HP_KEY_LEN],
+            [0x21; HP_KEY_LEN],
+            [0x43; AEAD_KEY_LEN],
+            [0x43; AEAD_KEY_LEN],
+            [0x65; AEAD_IV_LEN],
+            [0x65; AEAD_IV_LEN],
+        )
+        .unwrap();
+
+        let mut receiver = QuicQspSession::new(
+            TestIo,
+            Cid::from([0xCD; 8]),
+            Cid::from([0xAB; 8]),
+            keys_a,
+            0,
+            100,
+            false,
+        );
+        set_rekey_policy(&mut receiver, 8, 1, 3);
+        receiver.rx_next_rekey_pn = Some(90);
+
+        let packet = keys_b
+            .protect(receiver.scid().as_slice(), 100, false, b"late-fail")
+            .unwrap();
+
+        assert!(matches!(
+            receiver.open_packet(&packet),
+            Err(QspSessionError::Crypto(QspCryptoError::CryptoFail))
+        ));
+        assert!(matches!(
+            receiver.open_packet(&packet),
+            Err(QspSessionError::Crypto(QspCryptoError::CryptoFail))
+        ));
+        assert!(matches!(
+            receiver.open_packet(&packet),
+            Err(QspSessionError::DeadChannel)
+        ));
     }
 }
