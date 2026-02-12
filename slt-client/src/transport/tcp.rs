@@ -9,9 +9,14 @@ use slt_core::crypto::{
 use slt_core::transport::tcp::{IntervalKeyUpdater, TcpChannel, default_interval_key_updater};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 use tokio::net::{TcpStream, lookup_host};
+use tokio::time::timeout;
 use tokio_boring::HandshakeError;
 use tracing::debug;
+
+/// Maximum time allowed for TCP connect + TLS handshake.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Client TCP transport for framed VPN protocol I/O.
 pub type TcpTransport = TcpChannel<TcpStream, IntervalKeyUpdater>;
@@ -28,7 +33,9 @@ pub struct TcpSession {
 
 /// Connect to the server and perform a TLS handshake.
 pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
-    let stream = connect_stream(config).await?;
+    let stream = timeout(CONNECT_TIMEOUT, connect_stream(config))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tcp connect timeout"))??;
     let peer = stream.peer_addr().ok();
     debug!(peer = ?peer, "tcp connected");
 
@@ -53,10 +60,13 @@ pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
     ssl.set_hostname(&config.hostname).map_err(map_error)?;
     configure_hostname_verification(&mut ssl, &config.hostname).map_err(map_error)?;
 
-    let stream = tokio_boring::SslStreamBuilder::new(ssl, stream)
-        .connect()
-        .await
-        .map_err(|err| map_handshake_error(&err))?;
+    let stream = timeout(
+        CONNECT_TIMEOUT,
+        tokio_boring::SslStreamBuilder::new(ssl, stream).connect(),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timeout"))?
+    .map_err(|err| map_handshake_error(&err))?;
 
     let sni = Some(config.hostname.clone());
     Ok(TcpSession {
