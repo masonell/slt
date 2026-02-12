@@ -108,13 +108,6 @@ enum SessionControl {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct UdpVerify {
-    nonce: u64,
-    deadline: Instant,
-    sent: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct SessionTimeouts {
     /// Minimum interval between keepalive pings.
     pub ping_min: Duration,
@@ -122,8 +115,6 @@ pub struct SessionTimeouts {
     pub ping_max: Duration,
     /// Idle timeout for the session.
     pub idle_timeout: Duration,
-    /// Timeout for UDP-QSP verification.
-    pub udp_verify_timeout: Duration,
 }
 
 /// A single authenticated client session.
@@ -142,8 +133,6 @@ pub struct ClientSessionBase<
     pub last_activity: Instant,
     /// Active data transport.
     pub active_transport: ActiveTransport,
-    /// Whether UDP-QSP is verified for this session.
-    pub udp_verified: bool,
     session_id: u64,
     registry: Arc<SessionRegistry>,
     metrics: Arc<Metrics>,
@@ -153,7 +142,6 @@ pub struct ClientSessionBase<
     udp_socket: Arc<U>,
     udp_peer: Option<SocketAddr>,
     udp_session: Option<QuicQspSession<UdpIo<U>>>,
-    udp_verify: Option<UdpVerify>,
     rx: SessionRx,
     limits: MessageLimits,
     timeouts: SessionTimeouts,
@@ -190,7 +178,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             created_at: now,
             last_activity: now,
             active_transport: ActiveTransport::Tcp,
-            udp_verified: false,
             session_id,
             registry,
             metrics,
@@ -200,7 +187,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             udp_socket,
             udp_peer: None,
             udp_session: None,
-            udp_verify: None,
             rx,
             limits,
             timeouts,
@@ -251,10 +237,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             }
 
             let idle_deadline = self.last_activity + self.timeouts.idle_timeout;
-            let verify_deadline = self.udp_verify.map(|v| v.deadline);
 
-            if let Some(verify_deadline) = verify_deadline {
-                tokio::select! {
+            tokio::select! {
                 res = self.tcp.read_more() => {
                     let n = res?;
                     if n == 0 {
@@ -277,64 +261,20 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                         return Ok(());
                     }
                 }
-                    () = time::sleep_until(next_ping_at.into()) => {
-                        self.handle_ping_tick().await?;
-                        next_ping_at = self.schedule_next_ping();
-                    }
-                    () = time::sleep_until(idle_deadline.into()) => {
-                        self.metrics.inc_disconnect_idle_timeout();
-                        info!(
-                            session_id = self.session_id,
-                            client_id = %self.client_id,
-                            reason = "idle_timeout",
-                            "session disconnect"
-                        );
-                        let _ = self.send_close(CloseCode::IdleTimeout).await;
-                        return Ok(());
-                    }
-                    () = time::sleep_until(verify_deadline.into()) => {
-                        self.handle_udp_verify_timeout();
-                    }
+                () = time::sleep_until(next_ping_at.into()) => {
+                    self.handle_ping_tick().await?;
+                    next_ping_at = self.schedule_next_ping();
                 }
-            } else {
-                tokio::select! {
-                res = self.tcp.read_more() => {
-                    let n = res?;
-                    if n == 0 {
-                        self.metrics.inc_disconnect_close();
-                        info!(
-                            session_id = self.session_id,
-                            client_id = %self.client_id,
-                            reason = "tcp_close",
-                            "session disconnect"
-                        );
-                        return Ok(());
-                    }
-                    self.note_activity();
-                    if self.handle_tcp_read().await? == SessionControl::Close {
-                        return Ok(());
-                    }
-                }
-                Some(event) = self.rx.recv() => {
-                    if self.handle_event(event).await? == SessionControl::Close {
-                        return Ok(());
-                    }
-                }
-                    () = time::sleep_until(next_ping_at.into()) => {
-                        self.handle_ping_tick().await?;
-                        next_ping_at = self.schedule_next_ping();
-                    }
-                    () = time::sleep_until(idle_deadline.into()) => {
-                        self.metrics.inc_disconnect_idle_timeout();
-                        info!(
-                            session_id = self.session_id,
-                            client_id = %self.client_id,
-                            reason = "idle_timeout",
-                            "session disconnect"
-                        );
-                        let _ = self.send_close(CloseCode::IdleTimeout).await;
-                        return Ok(());
-                    }
+                () = time::sleep_until(idle_deadline.into()) => {
+                    self.metrics.inc_disconnect_idle_timeout();
+                    info!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        reason = "idle_timeout",
+                        "session disconnect"
+                    );
+                    let _ = self.send_close(CloseCode::IdleTimeout).await;
+                    return Ok(());
                 }
             }
         }
@@ -451,13 +391,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     #[allow(clippy::too_many_lines)]
     async fn handle_udp_claim(&mut self, claim: UdpClaim) -> io::Result<SessionControl> {
         let peer = claim.peer;
-        let send_verify_nonce = if let Some(verify) = self.udp_verify
-            && !verify.sent
-        {
-            Some(verify.nonce)
-        } else {
-            None
-        };
 
         trace!(
             session_id = self.session_id,
@@ -517,8 +450,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     self.registry.remove_cids_for_session(self.session_id);
                     self.udp_session = None;
                     self.udp_peer = None;
-                    self.udp_verify = None;
-                    self.udp_verified = false;
                     self.set_active_transport(ActiveTransport::Tcp);
                     return Ok(SessionControl::Continue);
                 }
@@ -554,25 +485,24 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             }
         }
 
-        if let Some(nonce) = send_verify_nonce {
-            self.send_udp_verify_ping(nonce).await?;
-            if let Some(verify) = self.udp_verify
-                && verify.nonce == nonce
-                && !verify.sent
-            {
-                self.udp_verify = Some(UdpVerify {
-                    sent: true,
-                    ..verify
-                });
-            }
-        }
-
         let decoded = decode_message(&opened_payload, self.limits).map_err(map_message_error)?;
         let Some((message, consumed)) = decoded else {
             return Ok(SessionControl::Continue);
         };
         if consumed != opened_payload.len() {
             return Ok(SessionControl::Continue);
+        }
+
+        let should_activate_udp = matches!(
+            &message,
+            Message::Ping { .. }
+                | Message::Pong { .. }
+                | Message::Data { .. }
+                | Message::Close { .. }
+                | Message::RegisterCid { .. }
+        );
+        if should_activate_udp {
+            self.set_active_transport(ActiveTransport::UdpQsp);
         }
 
         match message {
@@ -588,31 +518,15 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             }
             Message::Pong { payload } => {
                 let pong_in = PongPayload::decode(payload).map_err(map_payload_error)?;
-                if self
-                    .udp_verify
-                    .is_some_and(|verify| verify.nonce == pong_in.nonce)
-                {
-                    self.udp_verified = true;
-                    self.set_active_transport(ActiveTransport::UdpQsp);
-                    self.udp_verify = None;
-                    info!(
-                        session_id = self.session_id,
-                        client_id = %self.client_id,
-                        nonce = pong_in.nonce,
-                        "UDP verification succeeded"
-                    );
-                }
+                trace!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    nonce = pong_in.nonce,
+                    "received udp pong"
+                );
                 Ok(SessionControl::Continue)
             }
             Message::Data { packet } => {
-                if !self.udp_verified {
-                    trace!(
-                        session_id = self.session_id,
-                        client_id = %self.client_id,
-                        "UDP data dropped: not verified"
-                    );
-                    return Ok(SessionControl::Continue);
-                }
                 if PacketRouter::validate_packet_src(self, packet) {
                     self.tun.send(packet).await?;
                 }
@@ -620,14 +534,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             }
             Message::Close { .. } => Ok(SessionControl::Close),
             Message::RegisterCid { payload } => {
-                if !self.udp_verified {
-                    trace!(
-                        session_id = self.session_id,
-                        client_id = %self.client_id,
-                        "register_cid dropped: not verified"
-                    );
-                    return Ok(SessionControl::Continue);
-                }
                 self.handle_register_cid(payload, Transport::Udp).await
             }
             Message::Auth { .. }
@@ -705,14 +611,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         );
 
         self.udp_session = Some(udp);
-        self.udp_verified = false;
-        self.set_active_transport(ActiveTransport::Tcp);
-        let verify_nonce = fastrand::u64(..);
-        self.udp_verify = Some(UdpVerify {
-            nonce: verify_nonce,
-            deadline: Instant::now() + self.timeouts.udp_verify_timeout,
-            sent: false,
-        });
+        // Do not switch transport until the first valid UDP claim arrives.
+        // This avoids dropping downlink data before we learn `udp_peer`.
 
         debug!(
             session_id = self.session_id,
@@ -720,7 +620,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             transport = ?transport,
             dcid_prefix = ?register.dcid.prefix(),
             scid = ?register.scid,
-            verify_nonce,
             "register_cid accepted"
         );
 
@@ -732,31 +631,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.send_message(Message::RegisterOk { payload: &ok_buf }, transport)
             .await?;
 
-        if self.udp_peer.is_some()
-            && let Some(verify) = self.udp_verify
-            && !verify.sent
-        {
-            self.send_udp_verify_ping(verify.nonce).await?;
-            self.udp_verify = Some(UdpVerify {
-                sent: true,
-                ..verify
-            });
-        }
-
         Ok(SessionControl::Continue)
-    }
-
-    async fn send_udp_verify_ping(&mut self, nonce: u64) -> io::Result<()> {
-        debug!(
-            session_id = self.session_id,
-            client_id = %self.client_id,
-            nonce,
-            "sending UDP verify ping"
-        );
-        let ping = PingPayload { nonce };
-        let mut buf = Vec::new();
-        ping.encode(&mut buf);
-        self.send_udp_message(Message::Ping { payload: &buf }).await
     }
 
     async fn handle_ping_tick(&mut self) -> io::Result<()> {
@@ -768,27 +643,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             ActiveTransport::Tcp => self.send_tcp_message(Message::Ping { payload: &buf }).await,
             ActiveTransport::UdpQsp => self.send_udp_message(Message::Ping { payload: &buf }).await,
         }
-    }
-
-    fn handle_udp_verify_timeout(&mut self) {
-        let Some(verify) = self.udp_verify else {
-            return;
-        };
-        if Instant::now() < verify.deadline {
-            return;
-        }
-        warn!(
-            session_id = self.session_id,
-            client_id = %self.client_id,
-            nonce = verify.nonce,
-            "UDP verification timed out"
-        );
-        self.registry.remove_cids_for_session(self.session_id);
-        self.udp_session = None;
-        self.udp_peer = None;
-        self.udp_verify = None;
-        self.udp_verified = false;
-        self.set_active_transport(ActiveTransport::Tcp);
     }
 
     fn set_active_transport(&mut self, transport: ActiveTransport) {
@@ -1030,7 +884,6 @@ mod tests {
             ping_min: Duration::from_secs(3600),
             ping_max: Duration::from_secs(3600),
             idle_timeout: Duration::from_secs(3600),
-            udp_verify_timeout: Duration::from_secs(3600),
         }
     }
 
@@ -1252,9 +1105,36 @@ mod tests {
         let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
         assert!(matches!(message, Message::RegisterOk { .. }));
 
+        // Before first UDP claim, downlink traffic must stay on TCP.
+        let tcp_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 2), 12);
+        tx.send(SessionEvent::TunPacket(tcp_packet.clone()))
+            .await
+            .unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::Data { packet } => assert_eq!(packet, tcp_packet.as_slice()),
+            _ => panic!("expected tcp data before first udp claim"),
+        }
+        assert!(
+            timeout(Duration::from_millis(200), udp_rx.recv())
+                .await
+                .is_err(),
+            "unexpected udp datagram before first udp claim"
+        );
+
         let keys = UdpQspKeys::from_register(&register).unwrap();
         let peer = SocketAddr::from(([127, 0, 0, 1], 55555));
 
+        // Send a UDP PING to establish the peer address.
+        // Server switches to UDP after this first valid claim.
         let probe_nonce = 0xA1B2_C3D4_E5F6_0708;
         let probe = PingPayload { nonce: probe_nonce };
         let mut probe_payload = Vec::new();
@@ -1282,81 +1162,120 @@ mod tests {
         };
         tx.send(SessionEvent::Udp(claim)).await.unwrap();
 
+        // Wait for PONG response (establishes peer and verifies UDP works)
         let mut server_expected_pn = register.pn_start;
-        let mut verify_nonce = None;
-        for _ in 0..4 {
-            let packet = timeout(Duration::from_secs(1), udp_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            let opened = keys
-                .open(register.dcid.len(), &packet, server_expected_pn)
-                .unwrap();
-            server_expected_pn = opened.pn + 1;
-            let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
-            assert_eq!(consumed, opened.payload.len());
-            if let Message::Ping { payload } = message {
-                let decoded_ping = PingPayload::decode(payload).unwrap();
-                verify_nonce = Some(decoded_ping.nonce);
-                break;
-            }
-        }
-        let verify_nonce = verify_nonce.expect("expected UDP verify ping");
-
-        let response = PongPayload {
-            nonce: verify_nonce,
-        };
-        let mut response_payload = Vec::new();
-        response.encode(&mut response_payload);
-        let mut response_frame = Vec::new();
-        encode_message(
-            Message::Pong {
-                payload: &response_payload,
-            },
-            &mut response_frame,
-        )
-        .unwrap();
-        let packet = keys
-            .protect(
-                register.dcid.as_slice(),
-                1,
-                register.key_phase,
-                &response_frame,
-            )
+        let packet = timeout(Duration::from_secs(1), udp_rx.recv())
+            .await
+            .unwrap()
             .unwrap();
-        let claim = UdpClaim {
-            peer,
-            dcid_prefix: register.dcid.prefix(),
-            payload: packet,
-        };
-        tx.send(SessionEvent::Udp(claim)).await.unwrap();
+        let opened = keys
+            .open(register.dcid.len(), &packet, server_expected_pn)
+            .unwrap();
+        server_expected_pn = opened.pn + 1;
+        let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+        assert_eq!(consumed, opened.payload.len());
+        assert!(
+            matches!(message, Message::Pong { .. }),
+            "expected pong response"
+        );
 
-        let data_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 2), 12);
+        // Now send a TUN packet and verify it's forwarded via UDP.
+        let data_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 3), 12);
         tx.send(SessionEvent::TunPacket(data_packet.clone()))
             .await
             .unwrap();
 
-        let mut found = false;
-        for _ in 0..4 {
-            let packet = match timeout(Duration::from_millis(200), udp_rx.recv()).await {
-                Ok(Some(packet)) => packet,
-                Ok(None) => break,
-                Err(_) => continue,
-            };
-            let opened = keys
-                .open(register.dcid.len(), &packet, server_expected_pn)
-                .unwrap();
-            server_expected_pn = opened.pn + 1;
-            let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
-            assert_eq!(consumed, opened.payload.len());
-            if let Message::Data { packet } = message {
-                assert_eq!(packet, data_packet.as_slice());
-                found = true;
-                break;
-            }
+        let packet = timeout(Duration::from_millis(200), udp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let opened = keys
+            .open(register.dcid.len(), &packet, server_expected_pn)
+            .unwrap();
+        let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+        assert_eq!(consumed, opened.payload.len());
+        if let Message::Data { packet } = message {
+            assert_eq!(packet, data_packet.as_slice());
+        } else {
+            panic!("expected data message");
         }
 
-        assert!(found, "expected UDP data after verification");
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_switches_to_udp_after_first_valid_data_claim() {
+        let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
+            spawn_session().await;
+
+        let dcid = Cid::from([0xCC; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xDD; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        assert!(matches!(message, Message::RegisterOk { .. }));
+
+        let keys = UdpQspKeys::from_register(&register).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 44444));
+
+        // First valid UDP claim is DATA; this should switch active transport to UDP.
+        let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 44), 12);
+        let mut data_frame = Vec::new();
+        encode_message(
+            Message::Data {
+                packet: &uplink_packet,
+            },
+            &mut data_frame,
+        )
+        .unwrap();
+        let udp_packet = keys
+            .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+            .unwrap();
+        let claim = UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: udp_packet,
+        };
+        tx.send(SessionEvent::Udp(claim)).await.unwrap();
+
+        let received = timeout(Duration::from_secs(1), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, uplink_packet);
+
+        let downlink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 45), 12);
+        tx.send(SessionEvent::TunPacket(downlink_packet.clone()))
+            .await
+            .unwrap();
+
+        let packet = timeout(Duration::from_secs(1), udp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let opened = keys
+            .open(register.dcid.len(), &packet, register.pn_start)
+            .unwrap();
+        let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+        assert_eq!(consumed, opened.payload.len());
+        match message {
+            Message::Data { packet } => assert_eq!(packet, downlink_packet.as_slice()),
+            _ => panic!("expected udp data after first valid udp claim"),
+        }
 
         let _ = tx.send(SessionEvent::Shutdown).await;
         let _ = join.await.unwrap();
@@ -1464,55 +1383,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_udp_data_ignored_before_verification() {
-        let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
-            spawn_session().await;
-
-        let dcid = Cid::from([0x11; QUIC_DCID_PREFIX_LEN]);
-        let scid = Cid::from([0x22; QUIC_DCID_PREFIX_LEN]);
-        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
-        let mut reg_buf = Vec::new();
-        register.encode(&mut reg_buf).unwrap();
-        let mut frame = Vec::new();
-        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
-        client.write_all(&frame).await.unwrap();
-
-        let buf = timeout(
-            Duration::from_secs(1),
-            read_message_bytes(&mut client, limits),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
-        assert!(matches!(message, Message::RegisterOk { .. }));
-
-        let keys = UdpQspKeys::from_register(&register).unwrap();
-        let peer = SocketAddr::from(([127, 0, 0, 1], 44444));
-        let packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 3), 12);
-        let mut data_frame = Vec::new();
-        encode_message(Message::Data { packet: &packet }, &mut data_frame).unwrap();
-        let udp_packet = keys
-            .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
-            .unwrap();
-        let claim = UdpClaim {
-            peer,
-            dcid_prefix: register.dcid.prefix(),
-            payload: udp_packet,
-        };
-        tx.send(SessionEvent::Udp(claim)).await.unwrap();
-
-        match timeout(Duration::from_millis(200), tun_rx.recv()).await {
-            Ok(Some(_)) => panic!("unexpected tunneled packet"),
-            Ok(None) => panic!("tun channel closed unexpectedly"),
-            Err(_) => {}
-        }
-
-        let _ = tx.send(SessionEvent::Shutdown).await;
-        let _ = join.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn session_idle_timeout_sends_close() {
         let mut timeouts = default_timeouts();
         timeouts.idle_timeout = Duration::from_millis(50);
@@ -1545,45 +1415,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn session_udp_verify_timeout_clears_cid() {
-        let mut timeouts = default_timeouts();
-        timeouts.udp_verify_timeout = Duration::from_millis(50);
-        timeouts.ping_min = Duration::from_secs(5);
-        timeouts.ping_max = Duration::from_secs(5);
-
-        let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, registry) =
-            spawn_session_with_timeouts(timeouts).await;
-
-        let dcid = Cid::from([0x31; QUIC_DCID_PREFIX_LEN]);
-        let scid = Cid::from([0x32; QUIC_DCID_PREFIX_LEN]);
-        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
-        let mut reg_buf = Vec::new();
-        register.encode(&mut reg_buf).unwrap();
-        let mut frame = Vec::new();
-        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
-        client.write_all(&frame).await.unwrap();
-
-        let buf = timeout(
-            Duration::from_secs(1),
-            read_message_bytes(&mut client, limits),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
-        assert!(matches!(message, Message::RegisterOk { .. }));
-        assert!(registry.has_cid(register.dcid.prefix()));
-
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        tokio::task::yield_now().await;
-
-        assert!(!registry.has_cid(register.dcid.prefix()));
-
-        let _ = tx.send(SessionEvent::Shutdown).await;
-        let _ = join.await.unwrap();
     }
 
     #[tokio::test]

@@ -486,7 +486,6 @@ mod tests {
             ping_max: std::time::Duration::from_secs(2),
             auth_timeout: std::time::Duration::from_secs(3),
             idle_timeout: std::time::Duration::from_secs(4),
-            udp_verify_timeout: std::time::Duration::from_secs(5),
             udp_nat_max_entries: 32,
             session_queue_size: 8,
             clients: vec![client_enabled, client_disabled],

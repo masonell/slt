@@ -51,9 +51,6 @@ pub struct ServerConfig {
     /// Idle connection timeout.
     #[serde(with = "humantime_serde")]
     pub idle_timeout: Duration,
-    /// UDP verification timeout.
-    #[serde(with = "humantime_serde")]
-    pub udp_verify_timeout: Duration,
     /// Max number of UDP NAT peers to keep for nginx forwarding.
     pub udp_nat_max_entries: usize,
     /// Bounded queue size for per-session event channels.

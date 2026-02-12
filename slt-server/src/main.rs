@@ -82,7 +82,6 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         ping_min: config.ping_min,
         ping_max: config.ping_max,
         idle_timeout: config.idle_timeout,
-        udp_verify_timeout: config.udp_verify_timeout,
     };
     let limits = message_limits_from_mtu(config.tun_mtu);
     let auth_handler = Arc::new(AuthHandler::new(

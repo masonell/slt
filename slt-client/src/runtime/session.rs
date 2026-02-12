@@ -11,24 +11,6 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
-const UDP_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
-const UDP_VERIFY_PONG_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(100);
-const UDP_VERIFY_PONG_MAX_SENDS: u8 = 3;
-const UDP_PROBE_PING_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(200);
-
-#[derive(Debug, Clone, Copy)]
-struct UdpVerifySwitch {
-    pong_payload: [u8; 8],
-    next_send_at: Instant,
-    sent: u8,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct UdpProbePing {
-    nonce: u64,
-    next_send_at: Instant,
-}
-
 pub(super) struct ClientSession {
     tcp: TcpTransport,
     active_transport: ActiveTransport,
@@ -43,9 +25,6 @@ pub(super) struct ClientSession {
     idle_timeout: Duration,
     quic_ids: Option<quic::QuicIds>,
     udp_session: Option<UdpQspTransport>,
-    udp_expect_ping_deadline: Option<Instant>,
-    udp_verify: Option<UdpVerifySwitch>,
-    udp_probe_ping: Option<UdpProbePing>,
     exit: Option<SessionExit>,
     metrics: Arc<Metrics>,
 }
@@ -80,9 +59,6 @@ impl ClientSession {
             idle_timeout,
             quic_ids,
             udp_session,
-            udp_expect_ping_deadline: None,
-            udp_verify: None,
-            udp_probe_ping: None,
             exit: None,
             metrics,
         }
@@ -96,7 +72,19 @@ impl ClientSession {
                 "quic ids ready for registration"
             );
         }
-        self.maybe_start_udp_verify().await;
+
+        // If UDP session is available, switch to it immediately.
+        // UDP connectivity was already verified during QUIC handshake.
+        if let Some(session) = &self.udp_session {
+            debug!(
+                dcid_len = session.dcid().len(),
+                scid_len = session.scid().len(),
+                "udp-qsp session available; switching to udp"
+            );
+            self.active_transport = ActiveTransport::UdpQsp;
+            self.metrics.inc_transport_tcp_to_udp();
+        }
+
         let mut next_ping_at = self.schedule_next_ping();
 
         loop {
@@ -118,66 +106,12 @@ impl ClientSession {
         std::mem::replace(&mut self.to_session_rx, dummy_rx)
     }
 
-    async fn maybe_start_udp_verify(&mut self) {
-        let Some(session) = &self.udp_session else {
-            return;
-        };
-        debug!(
-            dcid_len = session.dcid().len(),
-            scid_len = session.scid().len(),
-            "udp-qsp session initialized"
-        );
-        self.udp_expect_ping_deadline = Some(Instant::now() + UDP_VERIFY_TIMEOUT);
-        self.udp_verify = None;
-        let nonce = fastrand::u64(..);
-        if let Err(err) = self.send_udp_probe_ping_with_nonce(nonce).await {
-            warn!(error = %err, "failed to send udp-qsp probe ping; staying on tcp");
-            self.udp_session = None;
-            self.udp_expect_ping_deadline = None;
-            self.udp_verify = None;
-            self.udp_probe_ping = None;
-        } else {
-            self.udp_probe_ping = Some(UdpProbePing {
-                nonce,
-                next_send_at: Instant::now() + UDP_PROBE_PING_RETRANSMIT_INTERVAL,
-            });
-        }
-    }
-
     async fn poll_event(&mut self, next_ping_at: Instant) -> io::Result<SessionEvent> {
         let idle_deadline = match self.active_transport {
             ActiveTransport::Tcp => self.last_tcp_rx + self.idle_timeout,
             ActiveTransport::UdpQsp => self.last_udp_rx + self.idle_timeout,
         };
         let udp_enabled = self.udp_session.is_some();
-        let verify_deadline = if udp_enabled {
-            self.udp_expect_ping_deadline
-        } else {
-            None
-        };
-        let retransmit_at = self.udp_verify.as_ref().map(|verify| verify.next_send_at);
-        let retransmit_sleep = async move {
-            if let Some(at) = retransmit_at {
-                time::sleep_until(at.into()).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
-        let probe_ping_at = self.udp_probe_ping.as_ref().map(|probe| probe.next_send_at);
-        let probe_ping_sleep = async move {
-            if let Some(at) = probe_ping_at {
-                time::sleep_until(at.into()).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
-        let verify_sleep = async move {
-            if let Some(deadline) = verify_deadline {
-                time::sleep_until(deadline.into()).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        };
 
         tokio::select! {
             () = self.cancel.cancelled() => Ok(SessionEvent::Shutdown),
@@ -189,15 +123,11 @@ impl ClientSession {
                 })?;
                 udp.read_next_message(self.limits).await
             }, if udp_enabled => Ok(SessionEvent::UdpResult(udp_res)),
-            () = retransmit_sleep => Ok(SessionEvent::UdpVerifyRetransmit),
-            () = probe_ping_sleep => Ok(SessionEvent::UdpProbePingRetransmit),
             () = time::sleep_until(next_ping_at.into()) => Ok(SessionEvent::PingTick),
             () = time::sleep_until(idle_deadline.into()) => Ok(SessionEvent::IdleTimeout),
-            () = verify_sleep => Ok(SessionEvent::UdpVerifyTimeout),
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_event(
         &mut self,
         event: SessionEvent,
@@ -258,18 +188,6 @@ impl ClientSession {
                     Ok(SessionControl::Continue)
                 }
             },
-            SessionEvent::UdpVerifyRetransmit => {
-                if let Err(err) = self.handle_udp_verify_retransmit().await {
-                    self.handle_udp_error(&err);
-                }
-                Ok(SessionControl::Continue)
-            }
-            SessionEvent::UdpProbePingRetransmit => {
-                if let Err(err) = self.handle_udp_probe_ping_retransmit().await {
-                    self.handle_udp_error(&err);
-                }
-                Ok(SessionControl::Continue)
-            }
             SessionEvent::PingTick => {
                 self.handle_ping_tick().await?;
                 *next_ping_at = self.schedule_next_ping();
@@ -293,20 +211,6 @@ impl ClientSession {
                     Ok(SessionControl::Continue)
                 }
             },
-            SessionEvent::UdpVerifyTimeout => {
-                warn!("udp-qsp verification timed out; staying on tcp");
-                // Only count as a switch if we were actually on UDP
-                if self.active_transport == ActiveTransport::UdpQsp {
-                    self.metrics.inc_transport_udp_to_tcp();
-                }
-                self.udp_session = None;
-                self.udp_expect_ping_deadline = None;
-                self.udp_verify = None;
-                self.udp_probe_ping = None;
-                self.active_transport = ActiveTransport::Tcp;
-                self.note_tcp_activity();
-                Ok(SessionControl::Continue)
-            }
         }
     }
 
@@ -326,59 +230,8 @@ impl ClientSession {
             self.metrics.inc_transport_udp_to_tcp();
         }
         self.udp_session = None;
-        self.udp_expect_ping_deadline = None;
-        self.udp_verify = None;
-        self.udp_probe_ping = None;
         self.active_transport = ActiveTransport::Tcp;
         self.note_tcp_activity();
-    }
-
-    async fn handle_udp_verify_retransmit(&mut self) -> io::Result<()> {
-        let Some(mut verify) = self.udp_verify else {
-            return Ok(());
-        };
-
-        if verify.sent >= UDP_VERIFY_PONG_MAX_SENDS {
-            self.udp_verify = None;
-            return Ok(());
-        }
-
-        let now = Instant::now();
-        if now < verify.next_send_at {
-            return Ok(());
-        }
-
-        let res = self
-            .write_udp_message(Message::Pong {
-                payload: &verify.pong_payload,
-            })
-            .await;
-        verify.sent = verify.sent.saturating_add(1);
-        verify.next_send_at = now + UDP_VERIFY_PONG_RETRANSMIT_INTERVAL;
-
-        if verify.sent >= UDP_VERIFY_PONG_MAX_SENDS {
-            self.udp_verify = None;
-        } else {
-            self.udp_verify = Some(verify);
-        }
-
-        res
-    }
-
-    async fn handle_udp_probe_ping_retransmit(&mut self) -> io::Result<()> {
-        let Some(mut probe) = self.udp_probe_ping else {
-            return Ok(());
-        };
-
-        let now = Instant::now();
-        if now < probe.next_send_at {
-            return Ok(());
-        }
-
-        self.send_udp_probe_ping_with_nonce(probe.nonce).await?;
-        probe.next_send_at = now + UDP_PROBE_PING_RETRANSMIT_INTERVAL;
-        self.udp_probe_ping = Some(probe);
-        Ok(())
     }
 
     async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
@@ -478,34 +331,7 @@ impl ClientSession {
                     payload: &pong_payload,
                 })
                 .await?;
-
-                if self.udp_expect_ping_deadline.is_some() {
-                    self.udp_expect_ping_deadline = None;
-                    self.udp_probe_ping = None;
-                    self.udp_verify = Some(UdpVerifySwitch {
-                        pong_payload,
-                        next_send_at: Instant::now() + UDP_VERIFY_PONG_RETRANSMIT_INTERVAL,
-                        sent: 1,
-                    });
-                    if self.active_transport == ActiveTransport::UdpQsp {
-                        info!(nonce = ping_in.nonce, "udp-qsp verify ping received");
-                    } else {
-                        self.metrics.inc_transport_tcp_to_udp();
-                        self.active_transport = ActiveTransport::UdpQsp;
-                        info!(
-                            nonce = ping_in.nonce,
-                            "udp-qsp verify ping received; switching to udp"
-                        );
-                    }
-                } else if self.active_transport == ActiveTransport::Tcp {
-                    self.metrics.inc_transport_tcp_to_udp();
-                    self.active_transport = ActiveTransport::UdpQsp;
-                    info!(
-                        nonce = ping_in.nonce,
-                        "udp-qsp ping received; switching to udp"
-                    );
-                }
-
+                trace!(nonce = ping_in.nonce, "responded to udp ping");
                 Ok(SessionControl::Continue)
             }
             Message::Pong { payload } => {
@@ -637,18 +463,6 @@ impl ClientSession {
         udp.write_message(message).await
     }
 
-    async fn send_udp_probe_ping_with_nonce(&mut self, nonce: u64) -> io::Result<()> {
-        if self.udp_session.is_none() {
-            return Ok(());
-        }
-        let ping = PingPayload { nonce };
-        let mut buf = Vec::with_capacity(8);
-        ping.encode(&mut buf);
-        trace!(nonce, "sending udp-qsp probe ping");
-        self.write_udp_message(Message::Ping { payload: &buf })
-            .await
-    }
-
     fn schedule_next_ping(&self) -> Instant {
         let min_ms = u64::try_from(self.ping_min.as_millis()).unwrap_or(u64::MAX);
         let max_ms = u64::try_from(self.ping_max.as_millis()).unwrap_or(u64::MAX);
@@ -684,11 +498,8 @@ enum SessionEvent {
     TcpRead(usize),
     TunPacket(Option<Vec<u8>>),
     UdpResult(io::Result<crate::wire::OwnedMessageBuf>),
-    UdpVerifyRetransmit,
-    UdpProbePingRetransmit,
     PingTick,
     IdleTimeout,
-    UdpVerifyTimeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

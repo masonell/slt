@@ -290,9 +290,7 @@ Receivers MUST ignore any trailing bytes after decoding the first framed message
 Each UDP datagram carries exactly one framed message using the same
 `TYPE + LEN + PAYLOAD` format as TCP.
 
-Allowed message types on UDP-QSP depend on session state:
-- **Before UDP-QSP is verified**: only `PING` and `PONG` are allowed.
-- **After UDP-QSP is verified**: `DATA`, `PING`, `PONG`, and `CLOSE` are allowed.
+Allowed message types on UDP-QSP: `DATA`, `PING`, `PONG`, and `CLOSE`.
 
 `AUTH`, `AUTH_OK`, and `AUTH_FAIL` are TCP-only.
 `REGISTER_CID`, `REGISTER_OK`, and `REGISTER_FAIL` are control-plane messages
@@ -398,14 +396,13 @@ On `AUTH_OK`, the session is authenticated and TCP data is permitted.
    - UDP-QSP keys
    - `pn_start` and `key_phase`
 3) Server validates, inserts CID into `cid_map`, and replies `REGISTER_OK`.
-4) Server sends UDP-QSP `PING` using the new CID.
-5) Client replies with UDP-QSP `PONG` within `udp_verify_timeout`.
-6) Server marks UDP-QSP as the active data path.
+4) Both sides switch to UDP-QSP as the active data path immediately.
 
 The server MUST NOT accept UDP-QSP packets for a CID until it has replied
 `REGISTER_OK` for that CID.
 
-After UDP-QSP is verified, periodic key updates use the key-phase algorithm in
+UDP connectivity was already proven during the QUIC handshake, so no additional
+verification is needed. Periodic key updates use the key-phase algorithm in
 Section 4.8. `REGISTER_CID` remains a TCP control-plane message. CID rotation is
 deferred.
 
@@ -423,7 +420,6 @@ deferred.
 Configurable timeouts:
 - `auth_timeout`: time allowed from accept to `AUTH_OK`.
 - `idle_timeout`: no inbound traffic on the active transport triggers disconnect.
-- `udp_verify_timeout`: time allowed for UDP-QSP PONG after server PING.
 
 Keepalive:
 - PINGs are sent only on the active transport.
