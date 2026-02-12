@@ -7,10 +7,13 @@ use boring::error::ErrorStack;
 use boring::ssl::{
     CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef,
 };
+use boring::x509::X509;
 use boring_sys as ffi;
 use brotli::enc::BrotliEncoderParams;
 use foreign_types::ForeignTypeRef;
 use std::io::{Cursor, Write};
+
+use crate::types::TlsMaterial;
 
 const ALPN_H2_HTTP1: &[u8] = b"\x02h2\x08http/1.1";
 const CHROME_SIGALGS: &str = "ecdsa_secp256r1_sha256:\
@@ -51,7 +54,50 @@ const CHROME_QUIC_CURVE_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
 /// protocols fails.
 pub fn quic_client_chrome_config() -> quiche::Result<quiche::Config> {
     let tls_ctx = quic_client_chrome_ctx_builder().map_err(|_| quiche::Error::TlsFail)?;
+    quic_config_from_ctx(tls_ctx)
+}
 
+/// Build a QUIC client config with CA trust anchors loaded.
+///
+/// Like `quic_client_chrome_config()` but also configures CA verification
+/// from the provided TLS material. For inline PEM, certs are parsed and
+/// added directly to the cert store without writing to disk.
+///
+/// # Errors
+///
+/// Returns an error if TLS context creation fails, CA loading fails,
+/// or if setting application protocols fails.
+pub fn quic_client_chrome_config_with_ca(tls_ca: &TlsMaterial) -> quiche::Result<quiche::Config> {
+    let mut tls_ctx = quic_client_chrome_ctx_builder().map_err(|_| quiche::Error::TlsFail)?;
+    configure_ca_store(&mut tls_ctx, tls_ca).map_err(|_| quiche::Error::TlsFail)?;
+    quic_config_from_ctx(tls_ctx)
+}
+
+/// Configure a `BoringSSL` context builder to trust the provided CA material.
+///
+/// For file paths, uses `BoringSSL`'s built-in loading. For inline PEM, parses
+/// certificates and adds them directly to the cert store without writing to disk.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or PEM cannot be parsed.
+pub fn configure_ca_store(
+    ctx: &mut SslContextBuilder,
+    tls_ca: &TlsMaterial,
+) -> Result<(), ErrorStack> {
+    match tls_ca {
+        TlsMaterial::File { file } => ctx.set_ca_file(file),
+        TlsMaterial::Pem(pem) => {
+            let certs = X509::stack_from_pem(pem.as_bytes())?;
+            for cert in certs {
+                ctx.cert_store_mut().add_cert(cert)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn quic_config_from_ctx(tls_ctx: SslContextBuilder) -> quiche::Result<quiche::Config> {
     let mut config =
         quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, tls_ctx)?;
     config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL)?;

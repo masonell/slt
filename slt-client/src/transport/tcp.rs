@@ -1,10 +1,11 @@
-use super::tls;
 use boring::error::ErrorStack;
 use boring::ssl::{Ssl, SslVerifyMode};
 use boring::x509::verify::X509CheckFlags;
 use slt_core::config::ClientConfig;
 use slt_core::crypto::client_hello::client_hello_session_id_callback;
-use slt_core::crypto::{configure_client_chrome_ssl, tcp_client_chrome_ctx_builder};
+use slt_core::crypto::{
+    configure_ca_store, configure_client_chrome_ssl, tcp_client_chrome_ctx_builder,
+};
 use slt_core::transport::tcp::{IntervalKeyUpdater, TcpChannel, default_interval_key_updater};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -39,7 +40,7 @@ pub async fn connect(config: &ClientConfig) -> io::Result<TcpSession> {
     }
 
     let mut ctx = tcp_client_chrome_ctx_builder().map_err(map_error)?;
-    tls::configure_boring_ca_store(&mut ctx, &config.tls_ca).map_err(map_error)?;
+    configure_ca_store(&mut ctx, &config.tls_ca).map_err(map_error)?;
     ctx.set_verify(SslVerifyMode::PEER);
     ctx.set_client_hello_session_id_callback(client_hello_session_id_callback(
         config.shared_secret,
