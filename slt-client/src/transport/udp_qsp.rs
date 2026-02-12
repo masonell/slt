@@ -115,6 +115,10 @@ fn map_qsp_error(err: QspSessionError) -> io::Error {
         QspSessionError::DeadChannel => {
             io::Error::new(io::ErrorKind::ConnectionAborted, "udp-qsp channel dead")
         }
+        QspSessionError::PacketNumberOverflow => io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            "udp-qsp packet number overflow",
+        ),
         other => io::Error::new(
             io::ErrorKind::InvalidData,
             format!("udp-qsp error: {other:?}"),
