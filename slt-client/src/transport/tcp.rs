@@ -45,11 +45,9 @@ impl KeyUpdater for ClientKeyUpdater {
     fn maybe_request_key_update(&mut self, ssl: &mut SslRef) -> io::Result<()> {
         let will_update = self.inner.messages_until_update() == 1;
         let request_peer_update = self.inner.requests_peer_update();
-        if will_update {
-            self.metrics.inc_tls_key_update_requested();
-        }
         self.inner.maybe_request_key_update(ssl)?;
         if will_update {
+            self.metrics.inc_tls_key_update_requested();
             self.metrics.inc_tls_key_update_applied();
             trace!(
                 request_peer_update,
