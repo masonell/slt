@@ -15,8 +15,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tun_rs::DeviceBuilder;
 
-const PING_MIN: Duration = Duration::from_secs(10);
-const PING_MAX: Duration = Duration::from_secs(20);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 const RECONNECT_MIN: Duration = Duration::from_millis(200);
@@ -98,6 +96,8 @@ pub async fn run_client(
             limits,
             tun_state_ref,
             &cancel,
+            config.ping_min,
+            config.ping_max,
             quic_ids,
             udp_session,
             metrics.clone(),
@@ -317,11 +317,14 @@ async fn register_udp_qsp(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     tcp: transport::tcp::TcpTransport,
     limits: MessageLimits,
     tun_state: &mut TunState,
     cancel: &CancellationToken,
+    ping_min: Duration,
+    ping_max: Duration,
     quic_ids: Option<transport::quic_discovery::QuicIds>,
     udp_session: Option<transport::udp_qsp::UdpQspTransport>,
     metrics: Arc<Metrics>,
@@ -335,8 +338,8 @@ async fn run_session(
         to_tun_tx,
         cancel.clone(),
         limits,
-        PING_MIN,
-        PING_MAX,
+        ping_min,
+        ping_max,
         IDLE_TIMEOUT,
         quic_ids,
         udp_session,

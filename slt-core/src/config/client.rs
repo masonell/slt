@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
 use super::{ConfigError, ConfigLoadError, validate_tun_mtu};
 use crate::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
@@ -30,6 +31,12 @@ pub struct ClientConfig {
     /// Enable QUIC DCID discovery and UDP-QSP upgrade.
     #[serde(default)]
     pub enable_upgrade: bool,
+    /// Minimum ping interval.
+    #[serde(with = "humantime_serde")]
+    pub ping_min: Duration,
+    /// Maximum ping interval.
+    #[serde(with = "humantime_serde")]
+    pub ping_max: Duration,
 }
 
 impl ClientConfig {

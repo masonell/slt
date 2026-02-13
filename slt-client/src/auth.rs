@@ -171,6 +171,8 @@ mod tests {
             tun_name: "tun0".to_string(),
             tun_mtu: 1280,
             enable_upgrade: false,
+            ping_min: std::time::Duration::from_secs(10),
+            ping_max: std::time::Duration::from_secs(20),
         };
 
         let challenge = [0x44; AUTH_CHALLENGE_LEN];
