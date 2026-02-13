@@ -1,20 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
 
 use super::{ConfigError, ConfigLoadError, validate_tun_mtu};
 use crate::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
-
-/// Preferences for connection upgrade/fallback timing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpgradePreferences {
-    /// Minimum delay before attempting an upgrade.
-    #[serde(with = "humantime_serde")]
-    pub min_delay: Duration,
-    /// Maximum delay before attempting an upgrade.
-    #[serde(with = "humantime_serde")]
-    pub max_delay: Duration,
-}
 
 /// Static client configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,8 +27,9 @@ pub struct ClientConfig {
     pub tun_name: String,
     /// TUN interface MTU.
     pub tun_mtu: u16,
-    /// Optional upgrade/fallback preferences.
-    pub upgrade: Option<UpgradePreferences>,
+    /// Enable QUIC DCID discovery and UDP-QSP upgrade.
+    #[serde(default)]
+    pub enable_upgrade: bool,
 }
 
 impl ClientConfig {

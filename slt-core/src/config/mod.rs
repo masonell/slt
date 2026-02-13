@@ -5,7 +5,7 @@ pub mod server;
 
 use std::fmt;
 
-pub use client::{ClientConfig, UpgradePreferences};
+pub use client::ClientConfig;
 pub use server::{ServerClient, ServerConfig};
 
 /// Ethernet IP MTU used as the transport envelope target.

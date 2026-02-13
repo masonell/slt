@@ -85,7 +85,7 @@ fn log_config(config: &ClientConfig) {
         assigned_ipv4 = %config.assigned_ipv4,
         tun_name = %config.tun_name,
         tun_mtu = config.tun_mtu,
-        has_upgrade = config.upgrade.is_some(),
+        enable_upgrade = config.enable_upgrade,
         "client config loaded (secrets redacted)"
     );
 }

@@ -266,7 +266,7 @@ async fn discover_quic_ids(
     cancel: &CancellationToken,
     peer: Option<SocketAddr>,
 ) -> Option<transport::quic_discovery::QuicIds> {
-    if config.upgrade.is_none() {
+    if !config.enable_upgrade {
         debug!("upgrade disabled; skipping quic dcid discovery");
         return None;
     }

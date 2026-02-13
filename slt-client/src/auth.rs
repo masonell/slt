@@ -170,7 +170,7 @@ mod tests {
             privkey_ed25519: PrivKeyEd25519([0x33; 32]),
             tun_name: "tun0".to_string(),
             tun_mtu: 1280,
-            upgrade: None,
+            enable_upgrade: false,
         };
 
         let challenge = [0x44; AUTH_CHALLENGE_LEN];
