@@ -29,7 +29,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_tracing(args.log.as_deref());
 
@@ -42,11 +42,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_ctrl_c(cancel.clone());
 
     info!(
-        hostname = %config.hostname,
-        port = config.port,
-        ip = ?config.ip,
-        tun_name = %config.tun_name,
-        tun_mtu = config.tun_mtu,
+        hostname = %config.network.hostname,
+        port = config.network.port,
+        ip = ?config.network.ip,
+        tun_name = %config.tun.tun_name,
+        tun_mtu = config.tun.tun_mtu,
         "client starting"
     );
 
@@ -76,14 +76,14 @@ fn spawn_ctrl_c(cancel: CancellationToken) {
 
 fn log_config(config: &ClientConfig) {
     info!(
-        hostname = %config.hostname,
-        port = config.port,
-        ip = ?config.ip,
-        tls_ca = tls_material_source(&config.tls_ca),
-        client_id = %config.client_id,
-        assigned_ipv4 = %config.assigned_ipv4,
-        tun_name = %config.tun_name,
-        tun_mtu = config.tun_mtu,
+        hostname = %config.network.hostname,
+        port = config.network.port,
+        ip = ?config.network.ip,
+        tls_ca = tls_material_source(&config.tls.tls_ca),
+        client_id = %config.identity.client_id,
+        assigned_ipv4 = %config.identity.assigned_ipv4,
+        tun_name = %config.tun.tun_name,
+        tun_mtu = config.tun.tun_mtu,
         enable_upgrade = config.enable_upgrade,
         "client config loaded (secrets redacted)"
     );

@@ -1,5 +1,5 @@
 [workspace]
-members = ["slt-core", "slt-tools"] # TODO: fix server and client: "slt-server", "slt-client",
+members = ["slt-core", "slt-client", "slt-tools"] # TODO: fix server and client: "slt-server", ,
 resolver = "2"
 
 [workspace.package]

@@ -23,7 +23,7 @@ pub async fn authenticate(
     send_auth(tcp, &payload).await?;
 
     let limits = MessageLimits::new(AUTH_MAX_FRAME, AUTH_MAX_FRAME);
-    let deadline = Instant::now() + config.auth_timeout;
+    let deadline = Instant::now() + config.timing.auth_timeout;
 
     loop {
         let timeout = time::sleep_until(deadline.into());
@@ -79,16 +79,16 @@ fn export_challenge(
 fn build_auth_payload(config: &ClientConfig, challenge: [u8; AUTH_CHALLENGE_LEN]) -> AuthPayload {
     let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
     context.extend_from_slice(b"slt-auth-v1");
-    context.extend_from_slice(config.client_id.as_bytes());
-    context.extend_from_slice(&config.assigned_ipv4.octets());
+    context.extend_from_slice(config.identity.client_id.as_bytes());
+    context.extend_from_slice(&config.identity.assigned_ipv4.octets());
     context.extend_from_slice(&challenge);
 
-    let signing_key = SigningKey::from_bytes(config.privkey_ed25519.as_bytes());
+    let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
     let signature = signing_key.sign(&context).to_bytes();
 
     AuthPayload {
-        client_id: config.client_id,
-        assigned_ipv4: config.assigned_ipv4,
+        client_id: config.identity.client_id,
+        assigned_ipv4: config.identity.assigned_ipv4,
         challenge,
         signature,
     }
@@ -153,30 +153,43 @@ enum AuthResult {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signature, Verifier};
-    use slt_core::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
+    use slt_core::types::{
+        ClientId, ClientIdentity, ClientNetworkConfig, ClientTimingConfig, ClientTlsConfig,
+        PrivKeyEd25519, SharedSecret, TlsMaterial, TunConfig,
+    };
     use std::net::Ipv4Addr;
 
     #[test]
     fn auth_payload_roundtrip_and_signature_verifies() {
         let config = ClientConfig {
-            hostname: "example.com".to_string(),
-            port: 443,
-            ip: None,
-            tls_ca: TlsMaterial::Pem(String::new()),
-            client_id: ClientId([0x11; 16]),
-            shared_secret: SharedSecret([0x22; 32]),
-            assigned_ipv4: Ipv4Addr::new(10, 10, 0, 2),
-            privkey_ed25519: PrivKeyEd25519([0x33; 32]),
-            tun_name: "tun0".to_string(),
-            tun_mtu: 1280,
+            network: ClientNetworkConfig {
+                hostname: "example.com".to_string(),
+                port: 443,
+                ip: None,
+            },
+            tls: ClientTlsConfig {
+                tls_ca: TlsMaterial::Pem(String::new()),
+            },
+            identity: ClientIdentity {
+                client_id: ClientId([0x11; 16]),
+                shared_secret: SharedSecret([0x22; 32]),
+                assigned_ipv4: Ipv4Addr::new(10, 10, 0, 2),
+                privkey_ed25519: PrivKeyEd25519([0x33; 32]),
+            },
+            tun: TunConfig {
+                tun_name: "tun0".to_string(),
+                tun_mtu: 1280,
+            },
             enable_upgrade: false,
-            ping_min: std::time::Duration::from_secs(10),
-            ping_max: std::time::Duration::from_secs(20),
-            auth_timeout: std::time::Duration::from_secs(10),
-            register_timeout: std::time::Duration::from_secs(10),
-            idle_timeout: std::time::Duration::from_secs(60),
-            reconnect_min: std::time::Duration::from_millis(200),
-            reconnect_max: std::time::Duration::from_secs(5),
+            timing: ClientTimingConfig {
+                ping_min: std::time::Duration::from_secs(10),
+                ping_max: std::time::Duration::from_secs(20),
+                auth_timeout: std::time::Duration::from_secs(10),
+                register_timeout: std::time::Duration::from_secs(10),
+                idle_timeout: std::time::Duration::from_secs(60),
+                reconnect_min: std::time::Duration::from_millis(200),
+                reconnect_max: std::time::Duration::from_secs(5),
+            },
         };
 
         let challenge = [0x44; AUTH_CHALLENGE_LEN];
@@ -190,11 +203,11 @@ mod tests {
 
         let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
         context.extend_from_slice(b"slt-auth-v1");
-        context.extend_from_slice(config.client_id.as_bytes());
-        context.extend_from_slice(&config.assigned_ipv4.octets());
+        context.extend_from_slice(config.identity.client_id.as_bytes());
+        context.extend_from_slice(&config.identity.assigned_ipv4.octets());
         context.extend_from_slice(&challenge);
 
-        let signing_key = SigningKey::from_bytes(config.privkey_ed25519.as_bytes());
+        let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
         let verifying_key = signing_key.verifying_key();
         let signature = Signature::from_bytes(&payload.signature);
         verifying_key.verify(&context, &signature).unwrap();

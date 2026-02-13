@@ -81,7 +81,7 @@ pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result
     let peer = stream.peer_addr().ok();
     debug!(peer = ?peer, "tcp connected");
 
-    if config.hostname.is_empty() {
+    if config.network.hostname.is_empty() {
         metrics.inc_tcp_handshake_failures();
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -93,13 +93,13 @@ pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result
         metrics.inc_tcp_handshake_failures();
         map_error(err)
     })?;
-    configure_ca_store(&mut ctx, &config.tls_ca).map_err(|err| {
+    configure_ca_store(&mut ctx, &config.tls.tls_ca).map_err(|err| {
         metrics.inc_tcp_handshake_failures();
         map_error(err)
     })?;
     ctx.set_verify(SslVerifyMode::PEER);
     ctx.set_client_hello_session_id_callback(client_hello_session_id_callback(
-        config.shared_secret,
+        config.identity.shared_secret,
     ));
     let ctx = ctx.build();
 
@@ -112,11 +112,11 @@ pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result
         map_error(err)
     })?;
 
-    ssl.set_hostname(&config.hostname).map_err(|err| {
+    ssl.set_hostname(&config.network.hostname).map_err(|err| {
         metrics.inc_tcp_handshake_failures();
         map_error(err)
     })?;
-    configure_hostname_verification(&mut ssl, &config.hostname).map_err(|err| {
+    configure_hostname_verification(&mut ssl, &config.network.hostname).map_err(|err| {
         metrics.inc_tcp_handshake_failures();
         map_error(err)
     })?;
@@ -137,7 +137,7 @@ pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result
 
     metrics.inc_tcp_handshake_successes();
 
-    let sni = Some(config.hostname.clone());
+    let sni = Some(config.network.hostname.clone());
     Ok(TcpSession {
         transport: TcpChannel::with_key_updater(stream, ClientKeyUpdater::new(metrics)),
         peer,
@@ -146,13 +146,14 @@ pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result
 }
 
 async fn connect_stream(config: &ClientConfig) -> io::Result<TcpStream> {
-    if let Some(ip) = config.ip {
-        return TcpStream::connect(SocketAddr::new(ip, config.port)).await;
+    if let Some(ip) = config.network.ip {
+        return TcpStream::connect(SocketAddr::new(ip, config.network.port)).await;
     }
 
-    let addrs: Vec<SocketAddr> = lookup_host((config.hostname.as_str(), config.port))
-        .await?
-        .collect();
+    let addrs: Vec<SocketAddr> =
+        lookup_host((config.network.hostname.as_str(), config.network.port))
+            .await?
+            .collect();
 
     if addrs.is_empty() {
         return Err(io::Error::new(

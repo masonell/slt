@@ -33,7 +33,7 @@ pub async fn discover_quic_ids(
     cancel: &CancellationToken,
     peer_override: Option<SocketAddr>,
 ) -> io::Result<QuicIds> {
-    if config.hostname.is_empty() {
+    if config.network.hostname.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "hostname is empty",
@@ -64,13 +64,14 @@ async fn resolve_peers(
         return Ok(vec![peer]);
     }
 
-    if let Some(ip) = config.ip {
-        return Ok(vec![SocketAddr::new(ip, config.port)]);
+    if let Some(ip) = config.network.ip {
+        return Ok(vec![SocketAddr::new(ip, config.network.port)]);
     }
 
-    let addrs: Vec<SocketAddr> = lookup_host((config.hostname.as_str(), config.port))
-        .await?
-        .collect();
+    let addrs: Vec<SocketAddr> =
+        lookup_host((config.network.hostname.as_str(), config.network.port))
+            .await?
+            .collect();
     if addrs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -93,7 +94,7 @@ async fn discover_quic_ids_for_peer(
     let local = socket.local_addr()?;
 
     let mut quic_config =
-        quic_client_chrome_config_with_ca(&config.tls_ca).map_err(map_quic_error)?;
+        quic_client_chrome_config_with_ca(&config.tls.tls_ca).map_err(map_quic_error)?;
     quic_config.verify_peer(true);
 
     let scid_bytes = build_scid();
@@ -101,7 +102,7 @@ async fn discover_quic_ids_for_peer(
     let scid_conn = quiche::ConnectionId::from_ref(&scid_bytes);
 
     let mut conn = quiche::connect(
-        Some(config.hostname.as_str()),
+        Some(config.network.hostname.as_str()),
         &scid_conn,
         local,
         peer,

@@ -17,15 +17,13 @@ use tun_rs::DeviceBuilder;
 
 /// Run the client runtime until shutdown.
 #[allow(clippy::too_many_lines)]
-pub async fn run_client(
-    config: ClientConfig,
-    cancel: CancellationToken,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
     let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
 
-    let limits = limits::message_limits_from_mtu(config.tun_mtu);
-    let mut backoff = ReconnectBackoff::new(config.reconnect_min, config.reconnect_max);
+    let limits = limits::message_limits_from_mtu(config.tun.tun_mtu);
+    let mut backoff =
+        ReconnectBackoff::new(config.timing.reconnect_min, config.timing.reconnect_max);
     let mut attempt: u64 = 0;
     let mut tun_state: Option<TunState> = None;
 
@@ -35,7 +33,7 @@ pub async fn run_client(
         }
 
         attempt = attempt.saturating_add(1);
-        info!(attempt, hostname = %config.hostname, port = config.port, "connecting");
+        info!(attempt, hostname = %config.network.hostname, port = config.network.port, "connecting");
 
         let mut tcp = match connect_authenticated(&config, &cancel, &metrics).await {
             Ok(tcp) => tcp,
@@ -82,7 +80,7 @@ pub async fn run_client(
             tun_state_ref,
             quic_ids.as_ref(),
             &cancel,
-            config.register_timeout,
+            config.timing.register_timeout,
             &metrics,
         )
         .await;
@@ -92,9 +90,9 @@ pub async fn run_client(
             limits,
             tun_state_ref,
             &cancel,
-            config.ping_min,
-            config.ping_max,
-            config.idle_timeout,
+            config.timing.ping_min,
+            config.timing.ping_max,
+            config.timing.idle_timeout,
             quic_ids,
             udp_session,
             metrics.clone(),
@@ -369,11 +367,16 @@ impl TunState {
     fn spawn(config: &ClientConfig, cancel: CancellationToken) -> io::Result<Self> {
         let tun = Arc::new(
             DeviceBuilder::new()
-                .name(&config.tun_name)
-                .mtu(config.tun_mtu)
+                .name(&config.tun.tun_name)
+                .mtu(config.tun.tun_mtu)
                 .build_async()?,
         );
-        let mut handles = tun::spawn(tun, config.assigned_ipv4, cancel, config.tun_mtu);
+        let mut handles = tun::spawn(
+            tun,
+            config.identity.assigned_ipv4,
+            cancel,
+            config.tun.tun_mtu,
+        );
         let (to_session_rx, to_tun_tx) = handles.take_channels();
         Ok(Self {
             handles,
