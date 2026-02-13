@@ -77,25 +77,25 @@ impl QuicEndpoint {
             )
         })?;
 
-        if config.idle_timeout.is_zero() {
+        if config.timing.idle_timeout.is_zero() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "idle_timeout must be non-zero",
             ));
         }
-        let socket = UdpSocket::bind(config.listen_udp).await?;
+        let socket = UdpSocket::bind(config.network.listen_udp).await?;
         debug!(
-            listen_addr = %config.listen_udp,
-            upstream_addr = %config.nginx_udp_upstream,
+            listen_addr = %config.network.listen_udp,
+            upstream_addr = %config.network.nginx_udp_upstream,
             max_lru_entries = max_lru_entries.get(),
-            idle_timeout_ms = config.idle_timeout.as_millis(),
+            idle_timeout_ms = config.timing.idle_timeout.as_millis(),
             "QUIC endpoint bound"
         );
         Ok(Self {
             socket: Arc::new(socket),
-            nginx_upstream: config.nginx_udp_upstream,
+            nginx_upstream: config.network.nginx_udp_upstream,
             max_lru_entries,
-            idle_timeout: config.idle_timeout,
+            idle_timeout: config.timing.idle_timeout,
             registry,
             metrics,
         })

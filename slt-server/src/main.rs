@@ -44,10 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(config);
 
     info!(
-        listen_tcp = %config.listen_tcp,
-        listen_udp = %config.listen_udp,
-        tun_name = %config.tun_name,
-        tun_mtu = config.tun_mtu,
+        listen_tcp = %config.network.listen_tcp,
+        listen_udp = %config.network.listen_udp,
+        tun_name = %config.tun.tun_name,
+        tun_mtu = config.tun.tun_mtu,
         "server starting"
     );
 
@@ -74,16 +74,16 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     let authenticator = Authenticator::from_config(&config);
     let tun = Arc::new(
         DeviceBuilder::new()
-            .name(&config.tun_name)
-            .mtu(config.tun_mtu)
+            .name(&config.tun.tun_name)
+            .mtu(config.tun.tun_mtu)
             .build_async()?,
     );
     let session_timeouts = SessionTimeouts {
-        ping_min: config.ping_min,
-        ping_max: config.ping_max,
-        idle_timeout: config.idle_timeout,
+        ping_min: config.timing.ping_min,
+        ping_max: config.timing.ping_max,
+        idle_timeout: config.timing.idle_timeout,
     };
-    let limits = message_limits_from_mtu(config.tun_mtu);
+    let limits = message_limits_from_mtu(config.tun.tun_mtu);
     let auth_handler = Arc::new(AuthHandler::new(
         acceptor,
         authenticator,
@@ -93,7 +93,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         quic.socket().clone(),
         limits,
         session_timeouts,
-        config.auth_timeout,
+        config.timing.auth_timeout,
         config.session_queue_size,
     ));
     let cancel = CancellationToken::new();
@@ -104,7 +104,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
 
     let mut tcp_task = spawn_tcp_task(frontdoor, auth_handler, cancel.clone());
     let mut udp_task = spawn_udp_task(quic, cancel.clone());
-    let mut tun_task = spawn_tun_task(tun, registry, cancel.clone(), config.tun_mtu);
+    let mut tun_task = spawn_tun_task(tun, registry, cancel.clone(), config.tun.tun_mtu);
     let mut metrics_task = spawn_metrics_task(metrics, cancel.clone());
 
     let shutdown_result = tokio::select! {
@@ -266,7 +266,7 @@ fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std:
     let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
 
     // Load TLS certificate
-    match &config.tls_cert {
+    match &config.tls.tls_cert {
         TlsMaterial::File { file } => {
             debug!(source = "file", path = %file.display(), "loading tls certificate");
             builder.set_certificate_chain_file(file)?;
@@ -290,7 +290,7 @@ fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std:
     }
 
     // Load TLS private key
-    match &config.tls_key {
+    match &config.tls.tls_key {
         TlsMaterial::File { file } => {
             debug!(source = "file", path = %file.display(), "loading tls private key");
             builder.set_private_key_file(file, SslFiletype::PEM)?;

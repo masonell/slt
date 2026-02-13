@@ -14,13 +14,14 @@ use tokio_boring::accept as tls_accept;
 use tracing::{debug, error, info, trace, warn};
 use tun_rs::AsyncDevice;
 
-use slt_core::config::{ServerClient, ServerConfig};
+use slt_core::config::ServerConfig;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, Message,
     MessageError, MessageLimits, PayloadError, PingPayload, PongPayload,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::ClientId;
+use slt_core::types::ServerClient;
 
 use super::AssignedIp;
 use super::metrics::Metrics;
@@ -415,7 +416,10 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use slt_core::proto::AUTH_CHALLENGE_LEN;
-    use slt_core::types::{PubKeyEd25519, SharedSecret, TlsMaterial};
+    use slt_core::types::{
+        PubKeyEd25519, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, SharedSecret,
+        TlsMaterial, TunConfig,
+    };
 
     fn make_client(
         client_id: ClientId,
@@ -470,22 +474,30 @@ mod tests {
 
         let config = ServerConfig {
             server_secret: SharedSecret([0xAA; 32]),
-            listen_tcp: SocketAddr::from(([127, 0, 0, 1], 0)),
-            listen_udp: SocketAddr::from(([127, 0, 0, 1], 0)),
-            tls_cert: TlsMaterial::File {
-                file: "vendor/boring/test/cert.pem".into(),
+            network: ServerNetworkConfig {
+                listen_tcp: SocketAddr::from(([127, 0, 0, 1], 0)),
+                listen_udp: SocketAddr::from(([127, 0, 0, 1], 0)),
+                nginx_tcp_upstream: SocketAddr::from(([127, 0, 0, 1], 0)),
+                nginx_udp_upstream: SocketAddr::from(([127, 0, 0, 1], 0)),
             },
-            tls_key: TlsMaterial::File {
-                file: "vendor/boring/test/key.pem".into(),
+            tls: ServerTlsConfig {
+                tls_cert: TlsMaterial::File {
+                    file: "vendor/boring/test/cert.pem".into(),
+                },
+                tls_key: TlsMaterial::File {
+                    file: "vendor/boring/test/key.pem".into(),
+                },
             },
-            nginx_tcp_upstream: SocketAddr::from(([127, 0, 0, 1], 0)),
-            nginx_udp_upstream: SocketAddr::from(([127, 0, 0, 1], 0)),
-            tun_name: "test0".to_string(),
-            tun_mtu: 1500,
-            ping_min: std::time::Duration::from_secs(1),
-            ping_max: std::time::Duration::from_secs(2),
-            auth_timeout: std::time::Duration::from_secs(3),
-            idle_timeout: std::time::Duration::from_secs(4),
+            tun: TunConfig {
+                tun_name: "test0".to_string(),
+                tun_mtu: 1500,
+            },
+            timing: ServerTimingConfig {
+                ping_min: std::time::Duration::from_secs(1),
+                ping_max: std::time::Duration::from_secs(2),
+                auth_timeout: std::time::Duration::from_secs(3),
+                idle_timeout: std::time::Duration::from_secs(4),
+            },
             udp_nat_max_entries: 32,
             session_queue_size: 8,
             clients: vec![client_enabled, client_disabled],

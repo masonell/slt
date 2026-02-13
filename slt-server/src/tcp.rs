@@ -32,13 +32,13 @@ impl TcpFrontDoor {
     ///
     /// Returns an error if TCP listener binding fails.
     pub async fn bind(config: &ServerConfig, metrics: Arc<Metrics>) -> io::Result<Self> {
-        debug!(listen_addr = %config.listen_tcp, upstream_addr = %config.nginx_tcp_upstream, "binding TCP front door");
-        let listener = TcpListener::bind(config.listen_tcp).await?;
-        info!(listen_addr = %config.listen_tcp, "TCP front door bound successfully");
+        debug!(listen_addr = %config.network.listen_tcp, upstream_addr = %config.network.nginx_tcp_upstream, "binding TCP front door");
+        let listener = TcpListener::bind(config.network.listen_tcp).await?;
+        info!(listen_addr = %config.network.listen_tcp, "TCP front door bound successfully");
         Ok(Self {
             listener,
             classification_secret: config.server_secret,
-            nginx_tcp_upstream: config.nginx_tcp_upstream,
+            nginx_tcp_upstream: config.network.nginx_tcp_upstream,
             metrics,
         })
     }
