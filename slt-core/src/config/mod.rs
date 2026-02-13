@@ -4,6 +4,7 @@ pub mod client;
 pub mod server;
 
 use std::fmt;
+use std::time::Duration;
 
 pub use client::ClientConfig;
 pub use server::{ServerClient, ServerConfig};
@@ -27,6 +28,16 @@ pub enum ConfigError {
         /// Maximum supported TUN MTU.
         max_tun_mtu: u16,
     },
+    /// Ping interval minimum exceeds maximum.
+    InvalidPingInterval {
+        ping_min: Duration,
+        ping_max: Duration,
+    },
+    /// Reconnect interval minimum exceeds maximum.
+    InvalidReconnectInterval {
+        reconnect_min: Duration,
+        reconnect_max: Duration,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -39,6 +50,21 @@ impl fmt::Display for ConfigError {
                 f,
                 "invalid tun_mtu {tun_mtu}; expected 1..={max_tun_mtu} so UDP-QSP fits within {ETHERNET_IP_MTU}-byte Ethernet MTU",
             ),
+            Self::InvalidPingInterval { ping_min, ping_max } => {
+                write!(
+                    f,
+                    "ping_min ({ping_min:?}) must not exceed ping_max ({ping_max:?})"
+                )
+            }
+            Self::InvalidReconnectInterval {
+                reconnect_min,
+                reconnect_max,
+            } => {
+                write!(
+                    f,
+                    "reconnect_min ({reconnect_min:?}) must not exceed reconnect_max ({reconnect_max:?})"
+                )
+            }
         }
     }
 }

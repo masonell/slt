@@ -15,11 +15,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use tun_rs::DeviceBuilder;
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-
-const RECONNECT_MIN: Duration = Duration::from_millis(200);
-const RECONNECT_MAX: Duration = Duration::from_secs(5);
-
 /// Run the client runtime until shutdown.
 #[allow(clippy::too_many_lines)]
 pub async fn run_client(
@@ -30,7 +25,7 @@ pub async fn run_client(
     let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
 
     let limits = limits::message_limits_from_mtu(config.tun_mtu);
-    let mut backoff = ReconnectBackoff::new(RECONNECT_MIN, RECONNECT_MAX);
+    let mut backoff = ReconnectBackoff::new(config.reconnect_min, config.reconnect_max);
     let mut attempt: u64 = 0;
     let mut tun_state: Option<TunState> = None;
 
@@ -87,6 +82,7 @@ pub async fn run_client(
             tun_state_ref,
             quic_ids.as_ref(),
             &cancel,
+            config.register_timeout,
             &metrics,
         )
         .await;
@@ -98,6 +94,7 @@ pub async fn run_client(
             &cancel,
             config.ping_min,
             config.ping_max,
+            config.idle_timeout,
             quic_ids,
             udp_session,
             metrics.clone(),
@@ -293,11 +290,21 @@ async fn register_udp_qsp(
     tun_state: &TunState,
     quic_ids: Option<&transport::quic_discovery::QuicIds>,
     cancel: &CancellationToken,
+    register_timeout: Duration,
     metrics: &Arc<Metrics>,
 ) -> Option<transport::udp_qsp::UdpQspTransport> {
     let ids = quic_ids?;
 
-    match register::register_udp_qsp(tcp, limits, tun_state.to_tun_tx_ref(), ids, cancel).await {
+    match register::register_udp_qsp(
+        tcp,
+        limits,
+        tun_state.to_tun_tx_ref(),
+        ids,
+        cancel,
+        register_timeout,
+    )
+    .await
+    {
         Ok(session) => {
             info!(
                 dcid_len = ids.dcid.len(),
@@ -325,6 +332,7 @@ async fn run_session(
     cancel: &CancellationToken,
     ping_min: Duration,
     ping_max: Duration,
+    idle_timeout: Duration,
     quic_ids: Option<transport::quic_discovery::QuicIds>,
     udp_session: Option<transport::udp_qsp::UdpQspTransport>,
     metrics: Arc<Metrics>,
@@ -340,7 +348,7 @@ async fn run_session(
         limits,
         ping_min,
         ping_max,
-        IDLE_TIMEOUT,
+        idle_timeout,
         quic_ids,
         udp_session,
         metrics,

@@ -13,8 +13,6 @@ use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Prepared state for a UDP-QSP `REGISTER_CID` exchange.
 ///
 /// This bundles the encoded `RegisterCidPayload` to send to the server together
@@ -102,6 +100,7 @@ pub(super) async fn register_udp_qsp(
     to_tun_tx: &mpsc::Sender<Vec<u8>>,
     ids: &quic::QuicIds,
     cancel: &CancellationToken,
+    timeout: Duration,
 ) -> io::Result<QuicQspSession<ClientUdpIo>> {
     let mut prepared = prepare_udp_qsp_registration(ids)?;
     tcp.write_message(Message::RegisterCid {
@@ -109,7 +108,7 @@ pub(super) async fn register_udp_qsp(
     })
     .await?;
 
-    let deadline = Instant::now() + REGISTER_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(session) =
             handle_register_read(tcp, limits, to_tun_tx, ids, &mut prepared).await?

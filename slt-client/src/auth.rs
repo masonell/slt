@@ -6,11 +6,10 @@ use slt_core::proto::{
     PingPayload, PongPayload,
 };
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::time;
 use tracing::{debug, info, trace, warn};
 
-const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_MAX_FRAME: usize = 16 * 1024;
 
 /// Perform TLS exporter auth and wait for `AUTH_OK`.
@@ -24,7 +23,7 @@ pub async fn authenticate(
     send_auth(tcp, &payload).await?;
 
     let limits = MessageLimits::new(AUTH_MAX_FRAME, AUTH_MAX_FRAME);
-    let deadline = Instant::now() + AUTH_TIMEOUT;
+    let deadline = Instant::now() + config.auth_timeout;
 
     loop {
         let timeout = time::sleep_until(deadline.into());
@@ -173,6 +172,11 @@ mod tests {
             enable_upgrade: false,
             ping_min: std::time::Duration::from_secs(10),
             ping_max: std::time::Duration::from_secs(20),
+            auth_timeout: std::time::Duration::from_secs(10),
+            register_timeout: std::time::Duration::from_secs(10),
+            idle_timeout: std::time::Duration::from_secs(60),
+            reconnect_min: std::time::Duration::from_millis(200),
+            reconnect_max: std::time::Duration::from_secs(5),
         };
 
         let challenge = [0x44; AUTH_CHALLENGE_LEN];
