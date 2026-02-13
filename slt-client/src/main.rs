@@ -10,7 +10,6 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-mod app;
 mod auth;
 mod metrics;
 mod runtime;
@@ -51,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "client starting"
     );
 
-    Box::pin(app::run(config, cancel)).await
+    Box::pin(runtime::run_client(config, cancel)).await
 }
 
 fn init_tracing(filter: Option<&str>) {
