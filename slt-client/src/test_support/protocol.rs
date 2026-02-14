@@ -2,7 +2,7 @@
 //!
 //! Provides convenient functions for encoding common message types.
 
-use slt_core::proto::{Message, PingPayload, encode_message};
+use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload, encode_message};
 
 /// Create a framed PING message with the given nonce.
 ///
@@ -32,9 +32,21 @@ pub fn encode_pong(nonce: u64) -> Vec<u8> {
 ///
 /// Returns the complete framed message (TYPE + LEN + PAYLOAD).
 #[must_use]
-#[allow(dead_code)]
 pub fn encode_data(packet: &[u8]) -> Vec<u8> {
     let mut frame = Vec::new();
     encode_message(Message::Data { packet }, &mut frame).expect("data encoding succeeds");
+    frame
+}
+
+/// Create a framed CLOSE message with the given code.
+///
+/// Returns the complete framed message (TYPE + LEN + PAYLOAD).
+#[must_use]
+pub fn encode_close(code: CloseCode) -> Vec<u8> {
+    let payload = ClosePayload { code };
+    let mut buf = Vec::new();
+    payload.encode(&mut buf);
+    let mut frame = Vec::new();
+    encode_message(Message::Close { payload: &buf }, &mut frame).expect("close encoding succeeds");
     frame
 }
