@@ -58,20 +58,6 @@ impl UdpQspTransport {
         }
     }
 
-    /// Return the destination connection ID used for outbound packets.
-    #[must_use]
-    #[allow(dead_code)]
-    pub const fn dcid(&self) -> &slt_core::types::Cid {
-        self.session.dcid()
-    }
-
-    /// Return the source connection ID used for inbound packets.
-    #[must_use]
-    #[allow(dead_code)]
-    pub const fn scid(&self) -> &slt_core::types::Cid {
-        self.session.scid()
-    }
-
     /// Encode and send a VPN protocol message over UDP-QSP.
     pub async fn write_message(&mut self, message: slt_core::proto::Message<'_>) -> io::Result<()> {
         self.write_buf.clear();
