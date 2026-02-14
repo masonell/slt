@@ -145,6 +145,9 @@ pub struct ClientSessionBase<
     limits: MessageLimits,
     timeouts: SessionTimeouts,
     udp_write_buf: Vec<u8>,
+    /// Whether the TCP connection is still usable. Set to false when TCP closes
+    /// while UDP-QSP is active, allowing the session to continue on UDP alone.
+    tcp_alive: bool,
 }
 
 /// Default client session using a real TUN device.
@@ -190,6 +193,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             limits,
             timeouts,
             udp_write_buf: Vec::new(),
+            tcp_alive: true,
         }
     }
 
@@ -229,7 +233,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         let mut next_ping_at = self.schedule_next_ping();
 
         loop {
-            if self.tcp.has_buffered_input()
+            if self.tcp_alive
+                && self.tcp.has_buffered_input()
                 && self.handle_tcp_read().await? == SessionControl::Close
             {
                 return Ok(());
@@ -238,9 +243,18 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             let idle_deadline = self.last_activity + self.timeouts.idle_timeout;
 
             tokio::select! {
-                res = self.tcp.read_more() => {
+                res = self.tcp.read_more(), if self.tcp_alive => {
                     let n = res?;
                     if n == 0 {
+                        if self.active_transport == ActiveTransport::UdpQsp {
+                            info!(
+                                session_id = self.session_id,
+                                client_id = %self.client_id,
+                                "tcp connection closed; continuing on udp"
+                            );
+                            self.tcp_alive = false;
+                            continue;
+                        }
                         self.metrics.inc_disconnect_close();
                         info!(
                             session_id = self.session_id,

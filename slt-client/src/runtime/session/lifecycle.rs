@@ -25,7 +25,12 @@ impl ClientSession<'_> {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            self.handle_udp_error(&err);
+            if !self.handle_udp_error(&err) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "both transports dead",
+                ));
+            }
             self.tcp
                 .write_message(Message::Ping { payload: &buf })
                 .await?;
@@ -46,7 +51,12 @@ impl ClientSession<'_> {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            self.handle_udp_error(&err);
+            if !self.handle_udp_error(&err) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "both transports dead",
+                ));
+            }
             self.tcp
                 .write_message(Message::Close { payload: &buf })
                 .await?;

@@ -50,6 +50,9 @@ pub(super) struct ClientSession<'a> {
     udp_state: UdpState,
     discovery_task: Option<JoinHandle<Option<quic::QuicIds>>>,
     metrics: Arc<Metrics>,
+    /// Whether the TCP connection is still usable. Set to false when TCP closes
+    /// while UDP-QSP is active, allowing the session to continue on UDP alone.
+    tcp_alive: bool,
 }
 
 impl<'a> ClientSession<'a> {
@@ -89,6 +92,7 @@ impl<'a> ClientSession<'a> {
             udp_state,
             discovery_task: None,
             metrics,
+            tcp_alive: true,
         }
     }
 
@@ -96,7 +100,7 @@ impl<'a> ClientSession<'a> {
     pub(super) async fn run(&mut self) -> SessionExit {
         let mut next_ping_at = self.schedule_next_ping();
         let result = loop {
-            if self.tcp.has_buffered_input() {
+            if self.tcp_alive && self.tcp.has_buffered_input() {
                 match self.handle_tcp_read().await {
                     Ok(SessionControl::Continue) => {}
                     Ok(SessionControl::Close(exit)) => break exit,
@@ -142,7 +146,7 @@ impl<'a> ClientSession<'a> {
 
         tokio::select! {
             () = self.cancel.cancelled() => Ok(SessionEvent::Shutdown),
-            res = self.tcp.read_more() => Ok(SessionEvent::TcpRead(res?)),
+            res = self.tcp.read_more(), if self.tcp_alive => Ok(SessionEvent::TcpRead(res?)),
             maybe = self.tun_channels.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
             udp_res = async {
                 let udp = self.udp_state.as_active_mut().ok_or_else(|| {
@@ -195,6 +199,11 @@ impl<'a> ClientSession<'a> {
             }
             SessionEvent::TcpRead(n) => {
                 if n == 0 {
+                    if self.active_transport == ActiveTransport::UdpQsp {
+                        info!(peer = ?self.peer, "tcp connection closed; continuing on udp");
+                        self.tcp_alive = false;
+                        return Ok(SessionControl::Continue);
+                    }
                     info!("tcp connection closed");
                     self.metrics.inc_disconnect_close();
                     return Ok(SessionControl::Close(SessionExit::TcpClosed));
@@ -221,7 +230,9 @@ impl<'a> ClientSession<'a> {
                             if err.kind() == io::ErrorKind::ConnectionAborted {
                                 return Err(err);
                             }
-                            self.handle_udp_error(&err);
+                            if !self.handle_udp_error(&err) {
+                                return Ok(SessionControl::Close(SessionExit::ConnectionError));
+                            }
                             return Ok(SessionControl::Continue);
                         }
                     };
@@ -232,7 +243,9 @@ impl<'a> ClientSession<'a> {
                     if err.kind() == io::ErrorKind::ConnectionAborted {
                         return Err(err);
                     }
-                    self.handle_udp_error(&err);
+                    if !self.handle_udp_error(&err) {
+                        return Ok(SessionControl::Close(SessionExit::ConnectionError));
+                    }
                     Ok(SessionControl::Continue)
                 }
             },
@@ -332,7 +345,12 @@ impl<'a> ClientSession<'a> {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            self.handle_udp_error(&err);
+            if !self.handle_udp_error(&err) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "both transports dead",
+                ));
+            }
             self.tcp
                 .write_message(Message::Data {
                     packet: packet.as_slice(),

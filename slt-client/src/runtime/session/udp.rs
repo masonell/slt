@@ -72,12 +72,24 @@ impl ClientSession<'_> {
     }
 
     /// Handle UDP-QSP transport errors.
-    pub(super) fn handle_udp_error(&mut self, err: &io::Error) {
+    ///
+    /// Returns `true` if the session can continue (TCP fallback available),
+    /// or `false` if both transports are dead and the session should close.
+    pub(super) fn handle_udp_error(&mut self, err: &io::Error) -> bool {
         // Transient errors (replay, too_old, crypto) can be retried
         // InvalidData is typically packet-level issues that should be dropped, not fatal
         if err.kind() == io::ErrorKind::InvalidData {
             trace!(error = %err, "dropping udp-qsp packets");
-            return;
+            return true;
+        }
+
+        if !self.tcp_alive {
+            warn!(
+                kind = ?err.kind(),
+                error = %err,
+                "udp-qsp io error and tcp dead; closing session"
+            );
+            return false;
         }
 
         let was_udp_active = self.active_transport == ActiveTransport::UdpQsp;
@@ -94,5 +106,6 @@ impl ClientSession<'_> {
 
         // Transition to NeedDiscovery state to re-discover quic_ids
         self.schedule_discovery_retry();
+        true
     }
 }
