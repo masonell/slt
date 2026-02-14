@@ -1,3 +1,4 @@
+use slt_core::config::ClientConfig;
 use slt_core::packet::extract_src_ipv4;
 use std::io;
 use std::net::Ipv4Addr;
@@ -6,18 +7,22 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
-use tun_rs::AsyncDevice;
+use tun_rs::{AsyncDevice, DeviceBuilder};
 
 const TUN_QUEUE_SIZE: usize = 256;
 
-/// TUN channel endpoints plus task handles.
+/// TUN task handles for shutdown coordination.
 pub struct TunHandles {
-    /// Packets read from TUN and destined for the session.
-    pub to_session_rx: mpsc::Receiver<Vec<u8>>,
-    /// Packets written to TUN from the session.
-    pub to_tun_tx: mpsc::Sender<Vec<u8>>,
     reader: JoinHandle<io::Result<()>>,
     writer: JoinHandle<io::Result<()>>,
+}
+
+/// TUN channel endpoints for packet I/O with the session.
+pub struct TunChannels {
+    /// Receives packets from TUN destined for the session.
+    pub to_session_rx: mpsc::Receiver<Vec<u8>>,
+    /// Sends packets from the session to TUN.
+    pub to_tun_tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl TunHandles {
@@ -26,23 +31,41 @@ impl TunHandles {
         join_task("tun_reader", self.reader).await;
         join_task("tun_writer", self.writer).await;
     }
-
-    /// Take the session channels while keeping the task handles for shutdown.
-    pub fn take_channels(&mut self) -> (mpsc::Receiver<Vec<u8>>, mpsc::Sender<Vec<u8>>) {
-        let (dummy_tx, dummy_rx) = mpsc::channel(1);
-        let to_session_rx = std::mem::replace(&mut self.to_session_rx, dummy_rx);
-        let to_tun_tx = std::mem::replace(&mut self.to_tun_tx, dummy_tx);
-        (to_session_rx, to_tun_tx)
-    }
 }
 
-/// Spawn TUN reader/writer tasks and return channels plus handles.
-pub fn spawn(
+/// Create TUN device and spawn reader/writer tasks.
+///
+/// Returns handles for shutdown coordination and channels for packet I/O.
+pub fn create(
+    config: &ClientConfig,
+    cancel: CancellationToken,
+) -> io::Result<(TunHandles, TunChannels)> {
+    let tun = Arc::new(
+        DeviceBuilder::new()
+            .name(&config.tun.tun_name)
+            .mtu(config.tun.tun_mtu)
+            .build_async()?,
+    );
+
+    let (handles, channels) = spawn(
+        tun,
+        config.identity.assigned_ipv4,
+        cancel,
+        config.tun.tun_mtu,
+    );
+
+    Ok((handles, channels))
+}
+
+/// Spawn TUN reader/writer tasks.
+///
+/// Returns handles for shutdown coordination and channels for packet I/O.
+fn spawn(
     tun: Arc<AsyncDevice>,
     assigned_ipv4: Ipv4Addr,
     cancel: CancellationToken,
     mtu: u16,
-) -> TunHandles {
+) -> (TunHandles, TunChannels) {
     let (to_session_tx, to_session_rx) = mpsc::channel(TUN_QUEUE_SIZE);
     let (to_tun_tx, to_tun_rx) = mpsc::channel(TUN_QUEUE_SIZE);
 
@@ -55,12 +78,13 @@ pub fn spawn(
     );
     let writer = spawn_tun_writer(tun, to_tun_rx, cancel);
 
-    TunHandles {
-        to_session_rx,
-        to_tun_tx,
-        reader,
-        writer,
-    }
+    (
+        TunHandles { reader, writer },
+        TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        },
+    )
 }
 
 fn spawn_tun_reader(

@@ -2,20 +2,19 @@ use crate::metrics::Metrics;
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::udp_qsp::UdpQspTransport;
+use crate::tun::TunChannels;
 use slt_core::proto::{CloseCode, ClosePayload, Message, MessageLimits, PingPayload, PongPayload};
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
-pub(super) struct ClientSession {
+pub(super) struct ClientSession<'a> {
     tcp: TcpTransport,
+    tun_channels: &'a mut TunChannels,
     active_transport: ActiveTransport,
-    to_session_rx: mpsc::Receiver<Vec<u8>>,
-    to_tun_tx: mpsc::Sender<Vec<u8>>,
     cancel: CancellationToken,
     limits: MessageLimits,
     last_tcp_rx: Instant,
@@ -29,12 +28,11 @@ pub(super) struct ClientSession {
     metrics: Arc<Metrics>,
 }
 
-impl ClientSession {
+impl<'a> ClientSession<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         tcp: TcpTransport,
-        to_session_rx: mpsc::Receiver<Vec<u8>>,
-        to_tun_tx: mpsc::Sender<Vec<u8>>,
+        tun_channels: &'a mut TunChannels,
         cancel: CancellationToken,
         limits: MessageLimits,
         ping_min: Duration,
@@ -47,9 +45,8 @@ impl ClientSession {
         let now = Instant::now();
         Self {
             tcp,
+            tun_channels,
             active_transport: ActiveTransport::Tcp,
-            to_session_rx,
-            to_tun_tx,
             cancel,
             limits,
             last_tcp_rx: now,
@@ -101,11 +98,6 @@ impl ClientSession {
         }
     }
 
-    pub(super) fn take_to_session_rx(&mut self) -> mpsc::Receiver<Vec<u8>> {
-        let (_dummy_tx, dummy_rx) = mpsc::channel(1);
-        std::mem::replace(&mut self.to_session_rx, dummy_rx)
-    }
-
     async fn poll_event(&mut self, next_ping_at: Instant) -> io::Result<SessionEvent> {
         let idle_deadline = match self.active_transport {
             ActiveTransport::Tcp => self.last_tcp_rx + self.idle_timeout,
@@ -116,7 +108,7 @@ impl ClientSession {
         tokio::select! {
             () = self.cancel.cancelled() => Ok(SessionEvent::Shutdown),
             res = self.tcp.read_more() => Ok(SessionEvent::TcpRead(res?)),
-            maybe = self.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
+            maybe = self.tun_channels.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
             udp_res = async {
                 let udp = self.udp_session.as_mut().ok_or_else(|| {
                     io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
@@ -266,7 +258,13 @@ impl ClientSession {
                     self.metrics.inc_transport_udp_to_tcp();
                     self.active_transport = ActiveTransport::Tcp;
                 }
-                if self.to_tun_tx.send(packet.to_vec()).await.is_err() {
+                if self
+                    .tun_channels
+                    .to_tun_tx
+                    .send(packet.to_vec())
+                    .await
+                    .is_err()
+                {
                     self.exit = Some(SessionExit::TunClosed);
                     return Ok(SessionControl::Close);
                 }
@@ -346,7 +344,13 @@ impl ClientSession {
                     self.active_transport = ActiveTransport::UdpQsp;
                     info!("udp-qsp data received; switching to udp");
                 }
-                if self.to_tun_tx.send(packet.to_vec()).await.is_err() {
+                if self
+                    .tun_channels
+                    .to_tun_tx
+                    .send(packet.to_vec())
+                    .await
+                    .is_err()
+                {
                     self.exit = Some(SessionExit::TunClosed);
                     return Ok(SessionControl::Close);
                 }

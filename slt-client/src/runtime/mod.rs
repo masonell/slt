@@ -9,11 +9,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use tun_rs::DeviceBuilder;
 
 /// Run the client runtime until shutdown.
 #[allow(clippy::too_many_lines)]
@@ -25,7 +23,8 @@ pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyh
     let mut backoff =
         ReconnectBackoff::new(config.timing.reconnect_min, config.timing.reconnect_max);
     let mut attempt: u64 = 0;
-    let mut tun_state: Option<TunState> = None;
+
+    let (tun_handles, mut tun_channels) = tun::create(&config, cancel.clone())?;
 
     let result: io::Result<()> = loop {
         if cancel.is_cancelled() {
@@ -68,16 +67,11 @@ pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyh
         };
         backoff.reset();
 
-        if tun_state.is_none() {
-            tun_state = Some(TunState::spawn(&config, cancel.clone())?);
-        }
-        let tun_state_ref = tun_state.as_mut().expect("tun state initialized");
-
         let quic_ids = discover_quic_ids(&config, &cancel, tcp.peer).await;
         let udp_session = register_udp_qsp(
             &mut tcp.transport,
             limits,
-            tun_state_ref,
+            &tun_channels,
             quic_ids.as_ref(),
             &cancel,
             config.timing.register_timeout,
@@ -88,7 +82,7 @@ pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyh
         let exit = run_session(
             tcp.transport,
             limits,
-            tun_state_ref,
+            &mut tun_channels,
             &cancel,
             config.timing.ping_min,
             config.timing.ping_max,
@@ -124,9 +118,7 @@ pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyh
     };
 
     cancel.cancel();
-    if let Some(tun_state) = tun_state {
-        tun_state.shutdown().await;
-    }
+    tun_handles.shutdown().await;
 
     // Wait for metrics reporter to finish
     let _ = metrics_reporter.await;
@@ -285,7 +277,7 @@ async fn discover_quic_ids(
 async fn register_udp_qsp(
     tcp: &mut transport::tcp::TcpTransport,
     limits: MessageLimits,
-    tun_state: &TunState,
+    tun_channels: &tun::TunChannels,
     quic_ids: Option<&transport::quic_discovery::QuicIds>,
     cancel: &CancellationToken,
     register_timeout: Duration,
@@ -296,7 +288,7 @@ async fn register_udp_qsp(
     match register::register_udp_qsp(
         tcp,
         limits,
-        tun_state.to_tun_tx_ref(),
+        &tun_channels.to_tun_tx,
         ids,
         cancel,
         register_timeout,
@@ -326,7 +318,7 @@ async fn register_udp_qsp(
 async fn run_session(
     tcp: transport::tcp::TcpTransport,
     limits: MessageLimits,
-    tun_state: &mut TunState,
+    tun_channels: &mut tun::TunChannels,
     cancel: &CancellationToken,
     ping_min: Duration,
     ping_max: Duration,
@@ -335,13 +327,9 @@ async fn run_session(
     udp_session: Option<transport::udp_qsp::UdpQspTransport>,
     metrics: Arc<Metrics>,
 ) -> io::Result<session::SessionExit> {
-    let rx = tun_state.take_session_rx();
-    let to_tun_tx = tun_state.to_tun_tx();
-
     let mut session = session::ClientSession::new(
         tcp,
-        rx,
-        to_tun_tx,
+        tun_channels,
         cancel.clone(),
         limits,
         ping_min,
@@ -352,57 +340,5 @@ async fn run_session(
         metrics,
     );
 
-    let exit = session.run().await;
-    tun_state.restore_session_rx(session.take_to_session_rx());
-    exit
-}
-
-struct TunState {
-    handles: tun::TunHandles,
-    to_session_rx: mpsc::Receiver<Vec<u8>>,
-    to_tun_tx: mpsc::Sender<Vec<u8>>,
-}
-
-impl TunState {
-    fn spawn(config: &ClientConfig, cancel: CancellationToken) -> io::Result<Self> {
-        let tun = Arc::new(
-            DeviceBuilder::new()
-                .name(&config.tun.tun_name)
-                .mtu(config.tun.tun_mtu)
-                .build_async()?,
-        );
-        let mut handles = tun::spawn(
-            tun,
-            config.identity.assigned_ipv4,
-            cancel,
-            config.tun.tun_mtu,
-        );
-        let (to_session_rx, to_tun_tx) = handles.take_channels();
-        Ok(Self {
-            handles,
-            to_session_rx,
-            to_tun_tx,
-        })
-    }
-
-    fn take_session_rx(&mut self) -> mpsc::Receiver<Vec<u8>> {
-        let (_dummy_tx, dummy_rx) = mpsc::channel(1);
-        std::mem::replace(&mut self.to_session_rx, dummy_rx)
-    }
-
-    fn restore_session_rx(&mut self, rx: mpsc::Receiver<Vec<u8>>) {
-        self.to_session_rx = rx;
-    }
-
-    fn to_tun_tx(&self) -> mpsc::Sender<Vec<u8>> {
-        self.to_tun_tx.clone()
-    }
-
-    const fn to_tun_tx_ref(&self) -> &mpsc::Sender<Vec<u8>> {
-        &self.to_tun_tx
-    }
-
-    async fn shutdown(self) {
-        self.handles.shutdown().await;
-    }
+    session.run().await
 }
