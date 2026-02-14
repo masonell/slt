@@ -180,6 +180,7 @@ impl ClientSession<'_> {
 
         let fail = RegisterFailPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
         warn!(code = ?fail.code, "register_cid rejected; scheduling retry");
+        self.metrics.inc_udp_register_failure();
         self.schedule_registration_retry();
         Ok(SessionControl::Continue)
     }

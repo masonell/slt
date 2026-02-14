@@ -104,18 +104,27 @@ impl<'a> ClientSession<'a> {
                 match self.handle_tcp_read().await {
                     Ok(SessionControl::Continue) => {}
                     Ok(SessionControl::Close(exit)) => break exit,
-                    Err(err) => break Self::classify_error(&err),
+                    Err(err) => {
+                        self.metrics.inc_disconnect_error();
+                        break Self::classify_error(&err);
+                    }
                 }
             }
 
             let event = match self.poll_event(next_ping_at).await {
                 Ok(event) => event,
-                Err(err) => break Self::classify_error(&err),
+                Err(err) => {
+                    self.metrics.inc_disconnect_error();
+                    break Self::classify_error(&err);
+                }
             };
             match self.handle_event(event, &mut next_ping_at).await {
                 Ok(SessionControl::Continue) => {}
                 Ok(SessionControl::Close(exit)) => break exit,
-                Err(err) => break Self::classify_error(&err),
+                Err(err) => {
+                    self.metrics.inc_disconnect_error();
+                    break Self::classify_error(&err);
+                }
             }
         };
 
@@ -214,6 +223,7 @@ impl<'a> ClientSession<'a> {
             SessionEvent::TunPacket(maybe) => {
                 let Some(packet) = maybe else {
                     info!("tun channel closed");
+                    self.metrics.inc_disconnect_close();
                     if let Err(err) = self.send_close(CloseCode::Normal).await {
                         debug!(error = %err, "failed to send close after tun shutdown");
                     }
@@ -231,6 +241,7 @@ impl<'a> ClientSession<'a> {
                                 return Err(err);
                             }
                             if !self.handle_udp_error(&err) {
+                                self.metrics.inc_disconnect_error();
                                 return Ok(SessionControl::Close(SessionExit::ConnectionError));
                             }
                             return Ok(SessionControl::Continue);
@@ -244,6 +255,7 @@ impl<'a> ClientSession<'a> {
                         return Err(err);
                     }
                     if !self.handle_udp_error(&err) {
+                        self.metrics.inc_disconnect_error();
                         return Ok(SessionControl::Close(SessionExit::ConnectionError));
                     }
                     Ok(SessionControl::Continue)
@@ -300,21 +312,19 @@ impl<'a> ClientSession<'a> {
             }
             SessionEvent::DiscoveryResult(maybe_ids) => {
                 self.discovery_task = None; // Clear the completed task
-                match maybe_ids {
-                    Some(ids) => {
-                        self.udp_state = UdpState::Pending {
-                            quic_ids: ids,
-                            backoff: ReconnectBackoff::new(
-                                self.config.timing.reconnect_min,
-                                self.config.timing.reconnect_max,
-                            ),
-                            reconnect_at: Instant::now(),
-                            registration: None,
-                        };
-                    }
-                    None => {
-                        self.schedule_discovery_retry();
-                    }
+                if let Some(ids) = maybe_ids {
+                    self.udp_state = UdpState::Pending {
+                        quic_ids: ids,
+                        backoff: ReconnectBackoff::new(
+                            self.config.timing.reconnect_min,
+                            self.config.timing.reconnect_max,
+                        ),
+                        reconnect_at: Instant::now(),
+                        registration: None,
+                    };
+                } else {
+                    self.metrics.inc_udp_discovery_failure();
+                    self.schedule_discovery_retry();
                 }
                 Ok(SessionControl::Continue)
             }
@@ -327,6 +337,7 @@ impl<'a> ClientSession<'a> {
             return Ok(SessionControl::Continue);
         }
         if packet.len() > self.limits.max_data_len {
+            self.metrics.inc_tun_packets_dropped_oversized();
             tracing::trace!(
                 packet_len = packet.len(),
                 max_len = self.limits.max_data_len,

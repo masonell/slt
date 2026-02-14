@@ -48,8 +48,7 @@ impl KeyUpdater for ClientKeyUpdater {
         let request_peer_update = self.inner.requests_peer_update();
         self.inner.maybe_request_key_update(ssl)?;
         if will_update {
-            self.metrics.inc_tls_key_update_requested();
-            self.metrics.inc_tls_key_update_applied();
+            self.metrics.inc_tls_key_update();
             trace!(
                 request_peer_update,
                 "client TCP TLS key update applied before outbound message"

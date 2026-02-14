@@ -45,6 +45,7 @@ impl ClientSession<'_> {
                     .await
                     .is_err()
                 {
+                    self.metrics.inc_disconnect_close();
                     return Ok(SessionControl::Close(SessionExit::TunClosed));
                 }
                 Ok(SessionControl::Continue)
@@ -74,6 +75,7 @@ impl ClientSession<'_> {
             Message::Close { payload } => {
                 let close = ClosePayload::decode(payload).map_err(wire::map_payload_error)?;
                 info!(code = ?close.code, "received close");
+                self.metrics.inc_disconnect_close();
                 Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
             }
             Message::RegisterCid { .. }

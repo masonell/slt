@@ -18,8 +18,10 @@ pub struct Metrics {
     disconnect_close: AtomicU64,
     disconnect_shutdown: AtomicU64,
     disconnect_error: AtomicU64,
-    tls_key_update_requested: AtomicU64,
-    tls_key_update_applied: AtomicU64,
+    tls_key_updates: AtomicU64,
+    udp_discovery_failures: AtomicU64,
+    udp_register_failures: AtomicU64,
+    tun_packets_dropped_oversized: AtomicU64,
     udp_qsp_tx_key_phase_transitions: AtomicU64,
     udp_qsp_rx_key_phase_transitions: AtomicU64,
     udp_qsp_decrypt_fail_replay: AtomicU64,
@@ -54,10 +56,14 @@ pub struct MetricsSnapshot {
     pub disconnect_shutdown: u64,
     /// Disconnects due to errors.
     pub disconnect_error: u64,
-    /// TLS key updates requested.
-    pub tls_key_update_requested: u64,
-    /// TLS key updates successfully applied.
-    pub tls_key_update_applied: u64,
+    /// TLS key updates applied.
+    pub tls_key_updates: u64,
+    /// UDP-QSP discovery failures.
+    pub udp_discovery_failures: u64,
+    /// UDP-QSP registration rejections (`REGISTER_FAIL` received).
+    pub udp_register_failures: u64,
+    /// TUN packets dropped due to size limits.
+    pub tun_packets_dropped_oversized: u64,
     /// UDP-QSP transmit key phase transitions.
     pub udp_qsp_tx_key_phase_transitions: u64,
     /// UDP-QSP receive key phase transitions.
@@ -154,27 +160,44 @@ impl Metrics {
     }
 
     /// Increment disconnect error counter.
-    #[allow(dead_code)]
     pub fn inc_disconnect_error(&self) {
         let prev = self.disconnect_error.fetch_add(1, Ordering::Relaxed);
         trace!(disconnect_error = prev + 1, "Disconnect due to error");
     }
 
-    /// Increment TLS key update requested counter.
-    pub fn inc_tls_key_update_requested(&self) {
-        let prev = self
-            .tls_key_update_requested
-            .fetch_add(1, Ordering::Relaxed);
+    /// Increment TLS key update counter.
+    pub fn inc_tls_key_update(&self) {
+        let prev = self.tls_key_updates.fetch_add(1, Ordering::Relaxed);
+        trace!(tls_key_updates = prev + 1, "TLS key update applied");
+    }
+
+    /// Increment UDP discovery failure counter.
+    pub fn inc_udp_discovery_failure(&self) {
+        let prev = self.udp_discovery_failures.fetch_add(1, Ordering::Relaxed);
         trace!(
-            tls_key_update_requested = prev + 1,
-            "TLS key update requested"
+            udp_discovery_failures = prev + 1,
+            "UDP-QSP discovery failed"
         );
     }
 
-    /// Increment TLS key update applied counter.
-    pub fn inc_tls_key_update_applied(&self) {
-        let prev = self.tls_key_update_applied.fetch_add(1, Ordering::Relaxed);
-        trace!(tls_key_update_applied = prev + 1, "TLS key update applied");
+    /// Increment UDP registration failure counter.
+    pub fn inc_udp_register_failure(&self) {
+        let prev = self.udp_register_failures.fetch_add(1, Ordering::Relaxed);
+        trace!(
+            udp_register_failures = prev + 1,
+            "UDP-QSP registration rejected"
+        );
+    }
+
+    /// Increment dropped oversized TUN packet counter.
+    pub fn inc_tun_packets_dropped_oversized(&self) {
+        let prev = self
+            .tun_packets_dropped_oversized
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            tun_packets_dropped_oversized = prev + 1,
+            "TUN packet dropped: size limit exceeded"
+        );
     }
 
     /// Increment UDP-QSP TX key-phase transition counter.
@@ -267,8 +290,12 @@ impl Metrics {
             disconnect_close: self.disconnect_close.load(Ordering::Relaxed),
             disconnect_shutdown: self.disconnect_shutdown.load(Ordering::Relaxed),
             disconnect_error: self.disconnect_error.load(Ordering::Relaxed),
-            tls_key_update_requested: self.tls_key_update_requested.load(Ordering::Relaxed),
-            tls_key_update_applied: self.tls_key_update_applied.load(Ordering::Relaxed),
+            tls_key_updates: self.tls_key_updates.load(Ordering::Relaxed),
+            udp_discovery_failures: self.udp_discovery_failures.load(Ordering::Relaxed),
+            udp_register_failures: self.udp_register_failures.load(Ordering::Relaxed),
+            tun_packets_dropped_oversized: self
+                .tun_packets_dropped_oversized
+                .load(Ordering::Relaxed),
             udp_qsp_tx_key_phase_transitions: self
                 .udp_qsp_tx_key_phase_transitions
                 .load(Ordering::Relaxed),
@@ -339,14 +366,30 @@ mod tests {
     }
 
     #[test]
-    fn test_tls_key_update_counters() {
+    fn test_tls_key_update_counter() {
         let metrics = Metrics::default();
 
-        metrics.inc_tls_key_update_requested();
-        assert_eq!(metrics.tls_key_update_requested.load(Ordering::Relaxed), 1);
+        metrics.inc_tls_key_update();
+        assert_eq!(metrics.tls_key_updates.load(Ordering::Relaxed), 1);
+    }
 
-        metrics.inc_tls_key_update_applied();
-        assert_eq!(metrics.tls_key_update_applied.load(Ordering::Relaxed), 1);
+    #[test]
+    fn test_new_counters() {
+        let metrics = Metrics::default();
+
+        metrics.inc_udp_discovery_failure();
+        assert_eq!(metrics.udp_discovery_failures.load(Ordering::Relaxed), 1);
+
+        metrics.inc_udp_register_failure();
+        assert_eq!(metrics.udp_register_failures.load(Ordering::Relaxed), 1);
+
+        metrics.inc_tun_packets_dropped_oversized();
+        assert_eq!(
+            metrics
+                .tun_packets_dropped_oversized
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -437,8 +480,10 @@ mod tests {
         metrics.inc_disconnect_close();
         metrics.inc_disconnect_shutdown();
         metrics.inc_disconnect_error();
-        metrics.inc_tls_key_update_requested();
-        metrics.inc_tls_key_update_applied();
+        metrics.inc_tls_key_update();
+        metrics.inc_udp_discovery_failure();
+        metrics.inc_udp_register_failure();
+        metrics.inc_tun_packets_dropped_oversized();
         metrics.inc_udp_qsp_tx_key_phase_transition();
         metrics.inc_udp_qsp_rx_key_phase_transition();
         metrics.inc_udp_qsp_decrypt_fail_replay();
@@ -461,8 +506,10 @@ mod tests {
         assert_eq!(snapshot.disconnect_close, 1);
         assert_eq!(snapshot.disconnect_shutdown, 1);
         assert_eq!(snapshot.disconnect_error, 1);
-        assert_eq!(snapshot.tls_key_update_requested, 1);
-        assert_eq!(snapshot.tls_key_update_applied, 1);
+        assert_eq!(snapshot.tls_key_updates, 1);
+        assert_eq!(snapshot.udp_discovery_failures, 1);
+        assert_eq!(snapshot.udp_register_failures, 1);
+        assert_eq!(snapshot.tun_packets_dropped_oversized, 1);
         assert_eq!(snapshot.udp_qsp_tx_key_phase_transitions, 1);
         assert_eq!(snapshot.udp_qsp_rx_key_phase_transitions, 1);
         assert_eq!(snapshot.udp_qsp_decrypt_fail_replay, 1);
