@@ -14,6 +14,7 @@ pub struct Metrics {
     auth_failures: AtomicU64,
     transport_tcp_to_udp: AtomicU64,
     transport_udp_to_tcp: AtomicU64,
+    transport_udp_to_tcp_server: AtomicU64,
     disconnect_idle_timeout: AtomicU64,
     disconnect_close: AtomicU64,
     disconnect_shutdown: AtomicU64,
@@ -46,8 +47,10 @@ pub struct MetricsSnapshot {
     pub auth_successes: u64,
     /// TCP -> UDP transport switches.
     pub transport_tcp_to_udp: u64,
-    /// UDP -> TCP transport switches.
+    /// UDP -> TCP transport switches (client-initiated: timeout/error).
     pub transport_udp_to_tcp: u64,
+    /// UDP -> TCP transport switches (server-initiated).
+    pub transport_udp_to_tcp_server: u64,
     /// Disconnects due to idle timeout.
     pub disconnect_idle_timeout: u64,
     /// Disconnects due to close frames or EOF.
@@ -123,12 +126,29 @@ impl Metrics {
         );
     }
 
-    /// Increment UDP -> TCP transport switch counter.
+    /// Increment UDP -> TCP transport switch counter (client-initiated).
+    ///
+    /// Called when the client falls back to TCP due to UDP idle timeout or
+    /// error, as opposed to server-initiated switches.
     pub fn inc_transport_udp_to_tcp(&self) {
         let prev = self.transport_udp_to_tcp.fetch_add(1, Ordering::Relaxed);
         trace!(
             transport_udp_to_tcp = prev + 1,
-            "Transport switch: UDP -> TCP"
+            "Transport switch: UDP -> TCP (client-initiated)"
+        );
+    }
+
+    /// Increment UDP -> TCP transport switch counter (server-initiated).
+    ///
+    /// Called when the server sends DATA or PING on TCP while UDP is active,
+    /// indicating the server prefers TCP for this traffic.
+    pub fn inc_transport_udp_to_tcp_server(&self) {
+        let prev = self
+            .transport_udp_to_tcp_server
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            transport_udp_to_tcp_server = prev + 1,
+            "Transport switch: UDP -> TCP (server-initiated)"
         );
     }
 
@@ -286,6 +306,7 @@ impl Metrics {
             auth_successes: self.auth_successes.load(Ordering::Relaxed),
             transport_tcp_to_udp: self.transport_tcp_to_udp.load(Ordering::Relaxed),
             transport_udp_to_tcp: self.transport_udp_to_tcp.load(Ordering::Relaxed),
+            transport_udp_to_tcp_server: self.transport_udp_to_tcp_server.load(Ordering::Relaxed),
             disconnect_idle_timeout: self.disconnect_idle_timeout.load(Ordering::Relaxed),
             disconnect_close: self.disconnect_close.load(Ordering::Relaxed),
             disconnect_shutdown: self.disconnect_shutdown.load(Ordering::Relaxed),
@@ -346,6 +367,13 @@ mod tests {
 
         metrics.inc_transport_udp_to_tcp();
         assert_eq!(metrics.transport_udp_to_tcp.load(Ordering::Relaxed), 1);
+
+        metrics.inc_transport_udp_to_tcp_server();
+        metrics.inc_transport_udp_to_tcp_server();
+        assert_eq!(
+            metrics.transport_udp_to_tcp_server.load(Ordering::Relaxed),
+            2
+        );
     }
 
     #[test]
@@ -476,6 +504,7 @@ mod tests {
         metrics.inc_auth_failures();
         metrics.inc_transport_tcp_to_udp();
         metrics.inc_transport_udp_to_tcp();
+        metrics.inc_transport_udp_to_tcp_server();
         metrics.inc_disconnect_idle_timeout();
         metrics.inc_disconnect_close();
         metrics.inc_disconnect_shutdown();
@@ -502,6 +531,7 @@ mod tests {
         assert_eq!(snapshot.auth_failures, 1);
         assert_eq!(snapshot.transport_tcp_to_udp, 1);
         assert_eq!(snapshot.transport_udp_to_tcp, 1);
+        assert_eq!(snapshot.transport_udp_to_tcp_server, 1);
         assert_eq!(snapshot.disconnect_idle_timeout, 1);
         assert_eq!(snapshot.disconnect_close, 1);
         assert_eq!(snapshot.disconnect_shutdown, 1);

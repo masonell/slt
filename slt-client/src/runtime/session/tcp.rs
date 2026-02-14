@@ -35,7 +35,7 @@ impl ClientSession<'_> {
             Message::Data { packet } => {
                 if self.active_transport != ActiveTransport::Tcp {
                     debug!("tcp data received while udp-qsp is active; switching to tcp");
-                    self.metrics.inc_transport_udp_to_tcp();
+                    self.metrics.inc_transport_udp_to_tcp_server();
                     self.active_transport = ActiveTransport::Tcp;
                 }
                 if self
@@ -54,7 +54,7 @@ impl ClientSession<'_> {
                 let ping_in = PingPayload::decode(payload).map_err(wire::map_payload_error)?;
                 if self.active_transport != ActiveTransport::Tcp {
                     debug!("tcp ping received while udp-qsp is active; switching to tcp");
-                    self.metrics.inc_transport_udp_to_tcp();
+                    self.metrics.inc_transport_udp_to_tcp_server();
                     self.active_transport = ActiveTransport::Tcp;
                 }
                 let pong_out = PongPayload {
