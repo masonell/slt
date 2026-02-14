@@ -8,12 +8,13 @@ use boring::x509::X509;
 use clap::Parser;
 use slt_core::config::ServerConfig;
 use slt_core::packet::extract_dst_ipv4;
+use slt_core::proto::MessageLimits;
 use slt_core::types::TlsMaterial;
 use slt_server::auth::{AuthHandler, Authenticator};
 use slt_server::metrics::Metrics;
 use slt_server::quic::QuicEndpoint;
 use slt_server::registry::SessionRegistry;
-use slt_server::sessions::{SessionEvent, SessionTimeouts, message_limits_from_mtu};
+use slt_server::sessions::{SessionEvent, SessionTimeouts};
 use slt_server::tcp::TcpFrontDoor;
 use tokio::net::TcpStream;
 use tokio::time::{self, Duration};
@@ -82,7 +83,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         ping_max: config.timing.ping_max,
         idle_timeout: config.timing.idle_timeout,
     };
-    let limits = message_limits_from_mtu(config.tun.tun_mtu);
+    let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
     let auth_handler = Arc::new(AuthHandler::new(
         acceptor,
         authenticator,

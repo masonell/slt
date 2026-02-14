@@ -1,4 +1,3 @@
-mod limits;
 mod register;
 mod session;
 

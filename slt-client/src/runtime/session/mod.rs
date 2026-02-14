@@ -30,7 +30,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::{ReconnectBackoff, limits};
+use super::ReconnectBackoff;
 use crate::metrics::Metrics;
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::{TcpSession, TcpTransport};
@@ -65,7 +65,7 @@ impl<'a> ClientSession<'a> {
         metrics: Arc<Metrics>,
     ) -> Self {
         let now = Instant::now();
-        let limits = limits::message_limits_from_mtu(config.tun.tun_mtu);
+        let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
 
         let udp_state = if config.enable_upgrade {
             UdpState::NeedDiscovery {

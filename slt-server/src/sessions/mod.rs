@@ -1,6 +1,5 @@
 //! Client session tracking and lifecycle helpers.
 
-mod limits;
 mod udp_io;
 
 use std::io;
@@ -26,7 +25,6 @@ use tokio::time;
 use tracing::{debug, error, info, trace, warn};
 use tun_rs::AsyncDevice;
 
-pub use self::limits::message_limits_from_mtu;
 use self::udp_io::UdpIo;
 pub use self::udp_io::UdpSocketIo;
 use super::metrics::Metrics;
@@ -936,7 +934,7 @@ mod tests {
         let client_id = ClientId([0xA5; 16]);
         let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
         let (handle, _old) = registry.register_session(client_id, assigned, tx.clone());
-        let limits = message_limits_from_mtu(1500);
+        let limits = MessageLimits::from_mtu(1500);
         let session = ClientSessionBase::<TestTun, DuplexStream, TestUdpSocket>::new(
             handle.session_id,
             client_id,
