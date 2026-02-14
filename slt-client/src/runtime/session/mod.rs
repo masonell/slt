@@ -276,10 +276,16 @@ impl<'a> ClientSession<'a> {
                     Ok(SessionControl::Close(SessionExit::IdleTimeout))
                 }
                 ActiveTransport::UdpQsp => {
+                    if !self.tcp_alive {
+                        warn!("udp-qsp idle timeout and tcp dead; closing session");
+                        self.metrics.inc_disconnect_idle_timeout();
+                        return Ok(SessionControl::Close(SessionExit::IdleTimeout));
+                    }
                     warn!("udp-qsp idle timeout; switching to tcp");
                     self.metrics.inc_transport_udp_to_tcp();
                     self.active_transport = ActiveTransport::Tcp;
                     self.note_tcp_activity();
+                    self.schedule_discovery_retry();
                     Ok(SessionControl::Continue)
                 }
             },
