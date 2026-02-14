@@ -4,9 +4,7 @@ mod session;
 
 use crate::{auth, metrics::Metrics, transport, tun};
 use slt_core::config::ClientConfig;
-use slt_core::proto::MessageLimits;
 use std::io;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
@@ -19,7 +17,6 @@ pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyh
     let metrics = Arc::new(Metrics::default());
     let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
 
-    let limits = limits::message_limits_from_mtu(config.tun.tun_mtu);
     let mut backoff =
         ReconnectBackoff::new(config.timing.reconnect_min, config.timing.reconnect_max);
     let mut attempt: u64 = 0;
@@ -34,7 +31,7 @@ pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyh
         attempt = attempt.saturating_add(1);
         info!(attempt, hostname = %config.network.hostname, port = config.network.port, "connecting");
 
-        let mut tcp = match connect_authenticated(&config, &cancel, &metrics).await {
+        let tcp = match connect_authenticated(&config, &cancel, &metrics).await {
             Ok(tcp) => tcp,
             Err(err) => {
                 if cancel.is_cancelled() {
@@ -67,31 +64,15 @@ pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyh
         };
         backoff.reset();
 
-        let quic_ids = discover_quic_ids(&config, &cancel, tcp.peer).await;
-        let udp_session = register_udp_qsp(
-            &mut tcp.transport,
-            limits,
-            &tun_channels,
-            quic_ids.as_ref(),
-            &cancel,
-            config.timing.register_timeout,
-            &metrics,
-        )
-        .await;
-
-        let exit = run_session(
-            tcp.transport,
-            limits,
+        let mut session = session::ClientSession::new(
+            &config,
+            tcp,
             &mut tun_channels,
-            &cancel,
-            config.timing.ping_min,
-            config.timing.ping_max,
-            config.timing.idle_timeout,
-            quic_ids,
-            udp_session,
+            cancel.clone(),
             metrics.clone(),
-        )
-        .await;
+        );
+
+        let exit = session.run().await;
 
         match exit {
             Ok(session::SessionExit::Shutdown) => break Ok(()),
@@ -246,99 +227,4 @@ async fn connect_authenticated(
     }
 
     Ok(tcp)
-}
-
-async fn discover_quic_ids(
-    config: &ClientConfig,
-    cancel: &CancellationToken,
-    peer: Option<SocketAddr>,
-) -> Option<transport::quic_discovery::QuicIds> {
-    if !config.enable_upgrade {
-        debug!("upgrade disabled; skipping quic dcid discovery");
-        return None;
-    }
-
-    match transport::quic_discovery::discover_quic_ids(config, cancel, peer).await {
-        Ok(ids) => {
-            info!(
-                dcid_len = ids.dcid.len(),
-                scid_len = ids.scid.len(),
-                "quic dcid discovery succeeded"
-            );
-            Some(ids)
-        }
-        Err(err) => {
-            warn!(error = %err, "quic dcid discovery failed");
-            None
-        }
-    }
-}
-
-async fn register_udp_qsp(
-    tcp: &mut transport::tcp::TcpTransport,
-    limits: MessageLimits,
-    tun_channels: &tun::TunChannels,
-    quic_ids: Option<&transport::quic_discovery::QuicIds>,
-    cancel: &CancellationToken,
-    register_timeout: Duration,
-    metrics: &Arc<Metrics>,
-) -> Option<transport::udp_qsp::UdpQspTransport> {
-    let ids = quic_ids?;
-
-    match register::register_udp_qsp(
-        tcp,
-        limits,
-        &tun_channels.to_tun_tx,
-        ids,
-        cancel,
-        register_timeout,
-    )
-    .await
-    {
-        Ok(session) => {
-            info!(
-                dcid_len = ids.dcid.len(),
-                scid_len = ids.scid.len(),
-                peer = %ids.peer,
-                "register_cid accepted"
-            );
-            Some(transport::udp_qsp::UdpQspTransport::new(
-                session,
-                (*metrics).clone(),
-            ))
-        }
-        Err(err) => {
-            warn!(error = %err, "register_cid failed");
-            None
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_session(
-    tcp: transport::tcp::TcpTransport,
-    limits: MessageLimits,
-    tun_channels: &mut tun::TunChannels,
-    cancel: &CancellationToken,
-    ping_min: Duration,
-    ping_max: Duration,
-    idle_timeout: Duration,
-    quic_ids: Option<transport::quic_discovery::QuicIds>,
-    udp_session: Option<transport::udp_qsp::UdpQspTransport>,
-    metrics: Arc<Metrics>,
-) -> io::Result<session::SessionExit> {
-    let mut session = session::ClientSession::new(
-        tcp,
-        tun_channels,
-        cancel.clone(),
-        limits,
-        ping_min,
-        ping_max,
-        idle_timeout,
-        quic_ids,
-        udp_session,
-        metrics,
-    );
-
-    session.run().await
 }

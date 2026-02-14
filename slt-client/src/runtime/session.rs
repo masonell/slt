@@ -1,10 +1,14 @@
 use crate::metrics::Metrics;
 use crate::transport::quic_discovery as quic;
+use crate::transport::tcp::TcpSession;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::udp_qsp::UdpQspTransport;
 use crate::tun::TunChannels;
-use slt_core::proto::{CloseCode, ClosePayload, Message, MessageLimits, PingPayload, PongPayload};
+use slt_core::config::ClientConfig;
+use slt_core::proto::MessageLimits;
+use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload, PongPayload};
 use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
@@ -12,16 +16,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 pub(super) struct ClientSession<'a> {
+    config: &'a ClientConfig,
     tcp: TcpTransport,
+    peer: Option<SocketAddr>,
     tun_channels: &'a mut TunChannels,
     active_transport: ActiveTransport,
     cancel: CancellationToken,
     limits: MessageLimits,
     last_tcp_rx: Instant,
     last_udp_rx: Instant,
-    ping_min: Duration,
-    ping_max: Duration,
-    idle_timeout: Duration,
     quic_ids: Option<quic::QuicIds>,
     udp_session: Option<UdpQspTransport>,
     exit: Option<SessionExit>,
@@ -29,57 +32,45 @@ pub(super) struct ClientSession<'a> {
 }
 
 impl<'a> ClientSession<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        tcp: TcpTransport,
+        config: &'a ClientConfig,
+        tcp: TcpSession,
         tun_channels: &'a mut TunChannels,
         cancel: CancellationToken,
-        limits: MessageLimits,
-        ping_min: Duration,
-        ping_max: Duration,
-        idle_timeout: Duration,
-        quic_ids: Option<quic::QuicIds>,
-        udp_session: Option<UdpQspTransport>,
         metrics: Arc<Metrics>,
     ) -> Self {
         let now = Instant::now();
+        let limits = super::limits::message_limits_from_mtu(config.tun.tun_mtu);
         Self {
-            tcp,
+            config,
+            tcp: tcp.transport,
+            peer: tcp.peer,
             tun_channels,
             active_transport: ActiveTransport::Tcp,
             cancel,
             limits,
             last_tcp_rx: now,
             last_udp_rx: now,
-            ping_min,
-            ping_max,
-            idle_timeout,
-            quic_ids,
-            udp_session,
+            quic_ids: None,
+            udp_session: None,
             exit: None,
             metrics,
         }
     }
 
     pub(super) async fn run(&mut self) -> io::Result<SessionExit> {
+        // Discover QUIC IDs for potential UDP-QSP upgrade
+        self.quic_ids = self.discover_quic_ids().await;
+
         if let Some(ids) = &self.quic_ids {
             debug!(
                 dcid_len = ids.dcid.len(),
                 scid_len = ids.scid.len(),
                 "quic ids ready for registration"
             );
-        }
 
-        // If UDP session is available, switch to it immediately.
-        // UDP connectivity was already verified during QUIC handshake.
-        if let Some(session) = &self.udp_session {
-            debug!(
-                dcid_len = session.dcid().len(),
-                scid_len = session.scid().len(),
-                "udp-qsp session available; switching to udp"
-            );
-            self.active_transport = ActiveTransport::UdpQsp;
-            self.metrics.inc_transport_tcp_to_udp();
+            // Attempt UDP registration
+            self.try_register_udp_qsp().await;
         }
 
         let mut next_ping_at = self.schedule_next_ping();
@@ -98,10 +89,69 @@ impl<'a> ClientSession<'a> {
         }
     }
 
+    /// Discover QUIC connection IDs for UDP-QSP upgrade.
+    async fn discover_quic_ids(&self) -> Option<quic::QuicIds> {
+        if !self.config.enable_upgrade {
+            debug!("upgrade disabled; skipping quic dcid discovery");
+            return None;
+        }
+
+        tokio::select! {
+            () = self.cancel.cancelled() => None,
+            result = quic::discover_quic_ids(self.config, &self.cancel, self.peer) => match result {
+                Ok(ids) => {
+                    info!(
+                        dcid_len = ids.dcid.len(),
+                        scid_len = ids.scid.len(),
+                        "quic dcid discovery succeeded"
+                    );
+                    Some(ids)
+                }
+                Err(err) => {
+                    warn!(error = %err, "quic dcid discovery failed");
+                    None
+                }
+            }
+        }
+    }
+
+    /// Attempt UDP-QSP registration (one-time attempt, fallback to TCP on failure).
+    async fn try_register_udp_qsp(&mut self) {
+        let Some(ids) = &self.quic_ids else {
+            return;
+        };
+
+        match super::register::register_udp_qsp(
+            &mut self.tcp,
+            self.limits,
+            &self.tun_channels.to_tun_tx,
+            ids,
+            &self.cancel,
+            self.config.timing.register_timeout,
+        )
+        .await
+        {
+            Ok(session) => {
+                info!(
+                    dcid_len = ids.dcid.len(),
+                    scid_len = ids.scid.len(),
+                    peer = %ids.peer,
+                    "register_cid accepted"
+                );
+                self.udp_session = Some(UdpQspTransport::new(session, self.metrics.clone()));
+                self.active_transport = ActiveTransport::UdpQsp;
+                self.metrics.inc_transport_tcp_to_udp();
+            }
+            Err(err) => {
+                warn!(error = %err, "register_cid failed; continuing with tcp");
+            }
+        }
+    }
+
     async fn poll_event(&mut self, next_ping_at: Instant) -> io::Result<SessionEvent> {
         let idle_deadline = match self.active_transport {
-            ActiveTransport::Tcp => self.last_tcp_rx + self.idle_timeout,
-            ActiveTransport::UdpQsp => self.last_udp_rx + self.idle_timeout,
+            ActiveTransport::Tcp => self.last_tcp_rx + self.config.timing.idle_timeout,
+            ActiveTransport::UdpQsp => self.last_udp_rx + self.config.timing.idle_timeout,
         };
         let udp_enabled = self.udp_session.is_some();
 
@@ -208,7 +258,7 @@ impl<'a> ClientSession<'a> {
 
     fn handle_udp_error(&mut self, err: &io::Error) {
         if err.kind() == io::ErrorKind::InvalidData {
-            trace!(error = %err, "dropping udp-qsp packet");
+            trace!(error = %err, "dropping udp-qsp packets");
             return;
         }
 
@@ -468,8 +518,8 @@ impl<'a> ClientSession<'a> {
     }
 
     fn schedule_next_ping(&self) -> Instant {
-        let min_ms = u64::try_from(self.ping_min.as_millis()).unwrap_or(u64::MAX);
-        let max_ms = u64::try_from(self.ping_max.as_millis()).unwrap_or(u64::MAX);
+        let min_ms = u64::try_from(self.config.timing.ping_min.as_millis()).unwrap_or(u64::MAX);
+        let max_ms = u64::try_from(self.config.timing.ping_max.as_millis()).unwrap_or(u64::MAX);
         let jitter_ms = if max_ms > min_ms {
             fastrand::u64(0..=(max_ms - min_ms))
         } else {
