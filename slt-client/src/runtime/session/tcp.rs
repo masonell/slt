@@ -21,8 +21,8 @@ impl ClientSession<'_> {
                 return Ok(SessionControl::Continue);
             };
 
-            if self.handle_tcp_message(msg_buf.message()).await? == SessionControl::Close {
-                return Ok(SessionControl::Close);
+            if let SessionControl::Close(exit) = self.handle_tcp_message(msg_buf.message()).await? {
+                return Ok(SessionControl::Close(exit));
             }
         }
     }
@@ -45,8 +45,7 @@ impl ClientSession<'_> {
                     .await
                     .is_err()
                 {
-                    self.exit = Some(SessionExit::TunClosed);
-                    return Ok(SessionControl::Close);
+                    return Ok(SessionControl::Close(SessionExit::TunClosed));
                 }
                 Ok(SessionControl::Continue)
             }
@@ -75,8 +74,7 @@ impl ClientSession<'_> {
             Message::Close { payload } => {
                 let close = ClosePayload::decode(payload).map_err(wire::map_payload_error)?;
                 info!(code = ?close.code, "received close");
-                self.exit = Some(SessionExit::RemoteClose(close.code));
-                Ok(SessionControl::Close)
+                Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
             }
             Message::RegisterCid { .. }
             | Message::Auth { .. }

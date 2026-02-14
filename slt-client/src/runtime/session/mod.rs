@@ -49,7 +49,6 @@ pub(super) struct ClientSession<'a> {
     last_udp_rx: Instant,
     udp_state: UdpState,
     discovery_task: Option<JoinHandle<Option<quic::QuicIds>>>,
-    exit: Option<SessionExit>,
     metrics: Arc<Metrics>,
 }
 
@@ -89,36 +88,44 @@ impl<'a> ClientSession<'a> {
             last_udp_rx: now,
             udp_state,
             discovery_task: None,
-            exit: None,
             metrics,
         }
     }
 
     /// Run the session event loop until shutdown or error.
-    pub(super) async fn run(&mut self) -> io::Result<SessionExit> {
+    pub(super) async fn run(&mut self) -> SessionExit {
         let mut next_ping_at = self.schedule_next_ping();
         let result = loop {
             if self.tcp.has_buffered_input() {
                 match self.handle_tcp_read().await {
-                    Ok(SessionControl::Close) => break Ok(self.exit_or_default()),
                     Ok(SessionControl::Continue) => {}
-                    Err(err) => break Err(err),
+                    Ok(SessionControl::Close(exit)) => break exit,
+                    Err(err) => break Self::classify_error(&err),
                 }
             }
 
             let event = match self.poll_event(next_ping_at).await {
                 Ok(event) => event,
-                Err(err) => break Err(err),
+                Err(err) => break Self::classify_error(&err),
             };
             match self.handle_event(event, &mut next_ping_at).await {
-                Ok(SessionControl::Close) => break Ok(self.exit_or_default()),
                 Ok(SessionControl::Continue) => {}
-                Err(err) => break Err(err),
+                Ok(SessionControl::Close(exit)) => break exit,
+                Err(err) => break Self::classify_error(&err),
             }
         };
 
         self.shutdown_background_tasks().await;
         result
+    }
+
+    /// Classify an I/O error into the appropriate exit variant.
+    fn classify_error(err: &io::Error) -> SessionExit {
+        match err.kind() {
+            io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => SessionExit::ProtocolError,
+            io::ErrorKind::PermissionDenied => SessionExit::PermissionDenied,
+            _ => SessionExit::ConnectionError,
+        }
     }
 
     /// Poll for the next session event.
@@ -181,18 +188,16 @@ impl<'a> ClientSession<'a> {
             SessionEvent::Shutdown => {
                 info!("shutdown requested");
                 self.metrics.inc_disconnect_shutdown();
-                self.exit = Some(SessionExit::Shutdown);
                 if let Err(err) = self.send_close(CloseCode::Normal).await {
                     debug!(error = %err, "failed to send close on shutdown");
                 }
-                Ok(SessionControl::Close)
+                Ok(SessionControl::Close(SessionExit::Shutdown))
             }
             SessionEvent::TcpRead(n) => {
                 if n == 0 {
                     info!("tcp connection closed");
                     self.metrics.inc_disconnect_close();
-                    self.exit = Some(SessionExit::TcpClosed);
-                    return Ok(SessionControl::Close);
+                    return Ok(SessionControl::Close(SessionExit::TcpClosed));
                 }
                 self.note_tcp_activity();
                 self.handle_tcp_read().await
@@ -200,11 +205,10 @@ impl<'a> ClientSession<'a> {
             SessionEvent::TunPacket(maybe) => {
                 let Some(packet) = maybe else {
                     info!("tun channel closed");
-                    self.exit = Some(SessionExit::TunClosed);
                     if let Err(err) = self.send_close(CloseCode::Normal).await {
                         debug!(error = %err, "failed to send close after tun shutdown");
                     }
-                    return Ok(SessionControl::Close);
+                    return Ok(SessionControl::Close(SessionExit::TunClosed));
                 };
                 self.handle_tun_packet(packet).await
             }
@@ -241,11 +245,10 @@ impl<'a> ClientSession<'a> {
                 ActiveTransport::Tcp => {
                     info!("idle timeout reached");
                     self.metrics.inc_disconnect_idle_timeout();
-                    self.exit = Some(SessionExit::IdleTimeout);
                     if let Err(err) = self.send_close(CloseCode::IdleTimeout).await {
                         debug!(error = %err, "failed to send idle close");
                     }
-                    Ok(SessionControl::Close)
+                    Ok(SessionControl::Close(SessionExit::IdleTimeout))
                 }
                 ActiveTransport::UdpQsp => {
                     warn!("udp-qsp idle timeout; switching to tcp");

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload};
 use tracing::{trace, warn};
 
-use super::{ClientSession, SessionExit};
+use super::ClientSession;
 use crate::runtime::session::state::ActiveTransport;
 
 impl ClientSession<'_> {
@@ -73,11 +73,6 @@ impl ClientSession<'_> {
             io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
         })?;
         udp.write_message(message).await
-    }
-
-    /// Get the stored exit reason or a default.
-    pub(super) fn exit_or_default(&mut self) -> SessionExit {
-        self.exit.take().unwrap_or(SessionExit::TcpClosed)
     }
 
     /// Abort and await the discovery task if running.

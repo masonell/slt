@@ -140,30 +140,34 @@ async fn try_connect(
 }
 
 /// Determine what action to take based on session exit result.
-fn handle_session_exit(
-    exit: io::Result<session::SessionExit>,
-    cancel: &CancellationToken,
-) -> SessionAction {
+fn handle_session_exit(exit: session::SessionExit, cancel: &CancellationToken) -> SessionAction {
+    if cancel.is_cancelled() {
+        return SessionAction::Break;
+    }
+
     match exit {
-        Ok(session::SessionExit::Shutdown) => SessionAction::Break,
-        Ok(session::SessionExit::TunClosed) => {
+        session::SessionExit::Shutdown => SessionAction::Break,
+        session::SessionExit::TunClosed => {
             warn!("tun tasks stopped; shutting down");
             SessionAction::Break
         }
-        Ok(reason) => {
-            warn!(reason = ?reason, "session ended; reconnecting");
-            SessionAction::Reconnect
+        session::SessionExit::ProtocolError => {
+            warn!(reason = ?exit, "protocol error; exiting");
+            SessionAction::Fatal(io::Error::new(io::ErrorKind::InvalidData, "protocol error"))
         }
-        Err(err) => {
-            if cancel.is_cancelled() {
-                return SessionAction::Break;
-            }
-            if should_reconnect(&err) {
-                warn!(kind = ?err.kind(), error = %err, "session error; reconnecting");
-                SessionAction::Reconnect
-            } else {
-                SessionAction::Fatal(err)
-            }
+        session::SessionExit::PermissionDenied => {
+            warn!(reason = ?exit, "permission denied; exiting");
+            SessionAction::Fatal(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
+        }
+        session::SessionExit::TcpClosed
+        | session::SessionExit::IdleTimeout
+        | session::SessionExit::RemoteClose(_)
+        | session::SessionExit::ConnectionError => {
+            warn!(reason = ?exit, "session ended; reconnecting");
+            SessionAction::Reconnect
         }
     }
 }

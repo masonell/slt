@@ -52,16 +52,14 @@ impl ClientSession<'_> {
                     .await
                     .is_err()
                 {
-                    self.exit = Some(SessionExit::TunClosed);
-                    return Ok(SessionControl::Close);
+                    return Ok(SessionControl::Close(SessionExit::TunClosed));
                 }
                 Ok(SessionControl::Continue)
             }
             Message::Close { payload } => {
                 let close = ClosePayload::decode(payload).map_err(wire::map_payload_error)?;
                 info!(code = ?close.code, "received udp close");
-                self.exit = Some(SessionExit::RemoteClose(close.code));
-                Ok(SessionControl::Close)
+                Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
             }
             Message::RegisterCid { .. }
             | Message::Auth { .. }
