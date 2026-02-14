@@ -1,11 +1,13 @@
 //! Session lifecycle: ping/pong, idle timeout, shutdown, and write helpers.
 
-use super::{ClientSession, SessionExit};
-use crate::runtime::session::state::ActiveTransport;
-use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload};
 use std::io;
 use std::time::{Duration, Instant};
+
+use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload};
 use tracing::{trace, warn};
+
+use super::{ClientSession, SessionExit};
+use crate::runtime::session::state::ActiveTransport;
 
 impl ClientSession<'_> {
     /// Send a ping on the active transport.

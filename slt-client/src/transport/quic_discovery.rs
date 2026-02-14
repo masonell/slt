@@ -1,11 +1,12 @@
-use slt_core::config::ClientConfig;
-use slt_core::crypto::quic_client_chrome_config_with_ca;
-use slt_core::types::cid::CidError;
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use slt_core::config::ClientConfig;
+use slt_core::crypto::quic_client_chrome_config_with_ca;
+use slt_core::types::cid::CidError;
+use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
 use tokio::net::{UdpSocket, lookup_host};
 use tokio::time;
 use tokio_util::sync::CancellationToken;

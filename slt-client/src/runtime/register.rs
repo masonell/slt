@@ -1,12 +1,14 @@
-use crate::transport::quic_discovery as quic;
-use crate::transport::tcp::TcpTransport;
-use crate::transport::udp_qsp::ClientUdpIo;
+use std::io;
+
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
 use slt_core::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, RegisterCidPayload,
 };
-use std::io;
+
+use crate::transport::quic_discovery as quic;
+use crate::transport::tcp::TcpTransport;
+use crate::transport::udp_qsp::ClientUdpIo;
 
 /// Prepared state for a UDP-QSP `REGISTER_CID` exchange.
 ///

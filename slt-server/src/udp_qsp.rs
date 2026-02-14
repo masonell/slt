@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 
-use tracing::{debug, error, trace, warn};
-
 use slt_core::crypto::udp_qsp::{OpenedPacket, QspCryptoError, UdpQspKeys};
 use slt_core::proto::RegisterCidPayload;
 use slt_core::types::{Cid, CidPrefix};
+use tracing::{debug, error, trace, warn};
 
 /// CID map entry for a single UDP-QSP session.
 #[derive(Debug, Clone)]
@@ -233,9 +232,10 @@ impl CidMap {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
     use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+
+    use super::*;
 
     #[test]
     fn cid_map_insert_lookup_remove() {

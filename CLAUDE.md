@@ -50,7 +50,7 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 
 - Use Conventional Commit messages: `<type>(<scope>): <subject>` (e.g., `feat(slt-core): add udp-qsp key phase tracking`).
 - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
-- Always run `cargo fmt --all` before committing (pre-commit hook also runs fmt/clippy/test).
+- Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy/test).
 - Run `cargo build`, `cargo test`, and `cargo clippy` before finalizing
 - Changes under `vendor/` must be in a separate commit
 

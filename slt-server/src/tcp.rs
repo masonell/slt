@@ -4,14 +4,14 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use slt_core::classifier::{Verdict, classify_tcp_client_hello};
+use slt_core::config::ServerConfig;
+use slt_core::types::SharedSecret;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use super::metrics::Metrics;
-use slt_core::classifier::{Verdict, classify_tcp_client_hello};
-use slt_core::config::ServerConfig;
-use slt_core::types::SharedSecret;
 
 const PEEK_LEN: usize = 16 * 1024;
 const PEEK_ATTEMPTS: usize = 4;

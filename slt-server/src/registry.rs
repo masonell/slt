@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
 use parking_lot::RwLock;
+use slt_core::types::CidPrefix;
 use tracing::{debug, info, trace, warn};
 
 use super::{AssignedIp, ClientId};
 use crate::sessions::SessionTx;
-use slt_core::types::CidPrefix;
 
 /// Error returned when inserting a CID prefix into the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,11 +281,12 @@ impl Default for SessionRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::Ipv4Addr;
-    use tokio::sync::mpsc;
 
     use slt_core::types::QUIC_DCID_PREFIX_LEN;
+    use tokio::sync::mpsc;
+
+    use super::*;
 
     fn make_tx() -> SessionTx {
         let (tx, _rx) = mpsc::channel(1);

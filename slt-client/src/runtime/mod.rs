@@ -2,14 +2,17 @@ mod limits;
 mod register;
 mod session;
 
-use crate::{auth, metrics::Metrics, transport, tun};
-use slt_core::config::ClientConfig;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+
+use slt_core::config::ClientConfig;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+use crate::metrics::Metrics;
+use crate::{auth, transport, tun};
 
 /// Run the client runtime until shutdown.
 pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyhow::Result<()> {

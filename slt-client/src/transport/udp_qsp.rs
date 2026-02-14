@@ -1,10 +1,12 @@
-use crate::metrics::Metrics;
-use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, SessionIo};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, SessionIo};
 use tokio::net::UdpSocket;
 use tracing::{info, trace, warn};
+
+use crate::metrics::Metrics;
 
 /// Client-side UDP-QSP socket I/O backed by a `tokio::net::UdpSocket`.
 pub struct ClientUdpIo {

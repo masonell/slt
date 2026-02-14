@@ -1,11 +1,13 @@
 //! TCP message handling for `ClientSession`.
 
+use std::io;
+
+use slt_core::proto::{ClosePayload, Message, PingPayload, PongPayload};
+use tracing::{debug, info, trace};
+
 use super::{ClientSession, SessionControl, SessionExit};
 use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
-use slt_core::proto::{ClosePayload, Message, PingPayload, PongPayload};
-use std::io;
-use tracing::{debug, info, trace};
 
 impl ClientSession<'_> {
     /// Process buffered TCP data and dispatch messages.

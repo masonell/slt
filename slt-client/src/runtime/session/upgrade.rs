@@ -1,15 +1,17 @@
 //! UDP upgrade logic: discovery, registration, and retries.
 
+use std::io;
+use std::time::Instant;
+
+use slt_core::proto::{RegisterFailPayload, RegisterOkPayload};
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
+
 use super::{ClientSession, SessionControl, UdpState};
 use crate::runtime::session::state::{ActiveTransport, PendingUdpQspRegistration};
 use crate::runtime::{ReconnectBackoff, register};
 use crate::transport::quic_discovery as quic;
 use crate::transport::udp_qsp::UdpQspTransport;
-use slt_core::proto::{RegisterFailPayload, RegisterOkPayload};
-use std::io;
-use std::time::Instant;
-use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
 
 impl ClientSession<'_> {
     /// Spawn QUIC discovery task. Returns a `JoinHandle`.

@@ -1,9 +1,10 @@
 //! UDP transport lifecycle state types.
+use std::time::Instant;
+
 use crate::runtime::ReconnectBackoff;
 use crate::runtime::register::PreparedUdpQspRegistration;
 use crate::transport::quic_discovery as quic;
 use crate::transport::udp_qsp::UdpQspTransport;
-use std::time::Instant;
 
 /// UDP transport lifecycle state.
 pub(super) enum UdpState {

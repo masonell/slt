@@ -3,30 +3,13 @@
 mod limits;
 mod udp_io;
 
-pub use self::limits::message_limits_from_mtu;
-pub use self::udp_io::UdpSocketIo;
-
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use self::udp_io::UdpIo;
 use boring::ssl::SslRef;
 use fastrand;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::mpsc;
-use tokio::time;
-use tracing::{debug, error, info, trace, warn};
-use tun_rs::AsyncDevice;
-
-use super::metrics::Metrics;
-use super::quic::UdpClaim;
-use super::registry::{CidInsertError, SessionRegistry};
-use super::router::PacketRouter;
-use super::{AssignedIp, ClientId};
-use crate::tun::TunDeviceIo;
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, UdpQspKeys};
 use slt_core::proto::{
     CloseCode, ClosePayload, FrameError, Message, MessageError, MessageLimits, PayloadError,
@@ -36,6 +19,22 @@ use slt_core::proto::{
 use slt_core::transport::tcp::{
     IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::mpsc;
+use tokio::time;
+use tracing::{debug, error, info, trace, warn};
+use tun_rs::AsyncDevice;
+
+pub use self::limits::message_limits_from_mtu;
+use self::udp_io::UdpIo;
+pub use self::udp_io::UdpSocketIo;
+use super::metrics::Metrics;
+use super::quic::UdpClaim;
+use super::registry::{CidInsertError, SessionRegistry};
+use super::router::PacketRouter;
+use super::{AssignedIp, ClientId};
+use crate::tun::TunDeviceIo;
 
 /// Active transport for a client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -792,20 +791,21 @@ fn map_payload_error(err: PayloadError) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use boring::ssl::{SslAcceptor, SslConnector, SslFiletype, SslMethod, SslVerifyMode};
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-    use tokio::sync::mpsc;
-    use tokio::time::{Duration, timeout};
 
+    use boring::ssl::{SslAcceptor, SslConnector, SslFiletype, SslMethod, SslVerifyMode};
     use slt_core::proto::{
         AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, CloseCode, ClosePayload, HP_KEY_LEN,
         RegisterFailCode, RegisterFailPayload,
     };
     use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::sync::mpsc;
+    use tokio::time::{Duration, timeout};
+
+    use super::*;
 
     #[derive(Clone)]
     struct TestTun {

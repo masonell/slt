@@ -381,11 +381,13 @@ impl<'a> HandshakeReader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::crypto::client_hello::client_hello_session_id_callback;
+    use std::io::{self, Read, Write};
+
     use boring::ssl::{HandshakeError, Ssl, SslContextBuilder, SslMethod, SslVerifyMode};
     use quiche::Header;
-    use std::io::{self, Read, Write};
+
+    use super::*;
+    use crate::crypto::client_hello::client_hello_session_id_callback;
 
     #[derive(Default, Debug)]
     struct CaptureStream {

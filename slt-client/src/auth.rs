@@ -1,14 +1,16 @@
-use crate::metrics::Metrics;
+use std::io;
+use std::time::Instant;
+
 use ed25519_dalek::{Signer, SigningKey};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, Message, MessageLimits,
     PingPayload, PongPayload,
 };
-use std::io;
-use std::time::Instant;
 use tokio::time;
 use tracing::{debug, info, trace, warn};
+
+use crate::metrics::Metrics;
 
 const AUTH_MAX_FRAME: usize = 16 * 1024;
 
@@ -151,13 +153,15 @@ enum AuthResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::net::Ipv4Addr;
+
     use ed25519_dalek::{Signature, Verifier};
     use slt_core::types::{
         ClientId, ClientIdentity, ClientNetworkConfig, ClientTimingConfig, ClientTlsConfig,
         PrivKeyEd25519, SharedSecret, TlsMaterial, TunConfig,
     };
-    use std::net::Ipv4Addr;
+
+    use super::*;
 
     #[test]
     fn auth_payload_roundtrip_and_signature_verifies() {

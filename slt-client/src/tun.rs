@@ -1,8 +1,9 @@
-use slt_core::config::ClientConfig;
-use slt_core::packet::extract_src_ipv4;
 use std::io;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+
+use slt_core::config::ClientConfig;
+use slt_core::packet::extract_src_ipv4;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

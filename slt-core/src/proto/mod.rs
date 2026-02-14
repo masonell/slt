@@ -9,10 +9,6 @@ pub mod payloads;
 /// Message type identifiers.
 pub mod types;
 
-/// Maximum QUIC DCID length for UDP-QSP.
-pub use crate::types::MAX_DCID_LEN;
-/// QUIC DCID prefix length for UDP-QSP.
-pub use crate::types::QUIC_DCID_PREFIX_LEN;
 /// Frame encoding/decoding and frame types.
 pub use framing::{Frame, FrameError, HEADER_LEN, decode_frame, encode_frame};
 /// Message-level helpers and limits.
@@ -26,3 +22,8 @@ pub use payloads::{
 };
 /// Message type identifiers.
 pub use types::MessageType;
+
+/// Maximum QUIC DCID length for UDP-QSP.
+pub use crate::types::MAX_DCID_LEN;
+/// QUIC DCID prefix length for UDP-QSP.
+pub use crate::types::QUIC_DCID_PREFIX_LEN;

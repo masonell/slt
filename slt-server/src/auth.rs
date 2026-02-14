@@ -7,21 +7,19 @@ use std::time::Instant;
 
 use boring::ssl::SslAcceptor;
 use ed25519_dalek::{Signature, VerifyingKey};
-use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio::time;
-use tokio_boring::accept as tls_accept;
-use tracing::{debug, error, info, trace, warn};
-use tun_rs::AsyncDevice;
-
 use slt_core::config::ServerConfig;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, Message,
     MessageError, MessageLimits, PayloadError, PingPayload, PongPayload,
 };
 use slt_core::transport::tcp::TcpChannel;
-use slt_core::types::ClientId;
-use slt_core::types::ServerClient;
+use slt_core::types::{ClientId, ServerClient};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use tokio::time;
+use tokio_boring::accept as tls_accept;
+use tracing::{debug, error, info, trace, warn};
+use tun_rs::AsyncDevice;
 
 use super::AssignedIp;
 use super::metrics::Metrics;
@@ -411,15 +409,16 @@ fn verify_auth_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
     use std::net::{Ipv4Addr, SocketAddr};
 
+    use ed25519_dalek::{Signer, SigningKey};
     use slt_core::proto::AUTH_CHALLENGE_LEN;
     use slt_core::types::{
         PubKeyEd25519, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, SharedSecret,
         TlsMaterial, TunConfig,
     };
+
+    use super::*;
 
     fn make_client(
         client_id: ClientId,

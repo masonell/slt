@@ -15,28 +15,26 @@ mod tcp;
 mod udp;
 mod upgrade;
 
-use crate::metrics::Metrics;
-use crate::transport::quic_discovery as quic;
-use crate::transport::tcp::TcpSession;
-use crate::transport::tcp::TcpTransport;
-use crate::tun::TunChannels;
-use slt_core::config::ClientConfig;
-use slt_core::proto::{CloseCode, Message, MessageLimits};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
+
+pub(super) use event::SessionExit;
+use event::{SessionControl, SessionEvent};
+use slt_core::config::ClientConfig;
+use slt_core::proto::{CloseCode, Message, MessageLimits};
+use state::{ActiveTransport, UdpState};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::{ReconnectBackoff, limits};
-
-pub(super) use event::SessionExit;
-
-use event::{SessionControl, SessionEvent};
-use state::{ActiveTransport, UdpState};
+use crate::metrics::Metrics;
+use crate::transport::quic_discovery as quic;
+use crate::transport::tcp::{TcpSession, TcpTransport};
+use crate::tun::TunChannels;
 
 /// Session managing a single VPN connection.
 pub(super) struct ClientSession<'a> {

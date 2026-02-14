@@ -1,9 +1,11 @@
 //! Session event and control types.
 
+use std::io;
+
+use slt_core::proto::CloseCode;
+
 use super::quic;
 use crate::wire;
-use slt_core::proto::CloseCode;
-use std::io;
 
 /// Session termination reason used by the runtime to decide reconnect behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,5 +1,6 @@
-use serde::{Deserialize, Deserializer, Serializer, de};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Deserializer, Serializer, de};
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -73,11 +74,13 @@ impl<'de, const N: usize> serde::Deserialize<'de> for SerdeSecret<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde::Deserialize;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use serde::Deserialize;
+
+    use super::*;
 
     #[derive(Debug, Deserialize)]
     struct Wrapper {

@@ -1,6 +1,7 @@
 //! IPv4 packet parsing utilities.
 
 use std::net::Ipv4Addr;
+
 use tracing::trace;
 
 /// Extract the source IPv4 address from an IPv4 packet.

@@ -1,6 +1,7 @@
 //! Metrics and counters.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
 use tracing::trace;
 
 /// Server counters for basic observability.

@@ -491,12 +491,13 @@ const fn next_rekey_after(pn: u64, interval: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
+
     use super::*;
     use crate::proto::{
         AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, MessageLimits, PingPayload,
         PongPayload, decode_message, encode_message,
     };
-    use tokio::sync::mpsc;
 
     struct ChanIo {
         tx: mpsc::Sender<Vec<u8>>,

@@ -3,6 +3,8 @@
 pub mod client_hello;
 pub mod udp_qsp;
 
+use std::io::{Cursor, Write};
+
 use boring::error::ErrorStack;
 use boring::ssl::{
     CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef,
@@ -11,7 +13,6 @@ use boring::x509::X509;
 use boring_sys as ffi;
 use brotli::enc::BrotliEncoderParams;
 use foreign_types::ForeignTypeRef;
-use std::io::{Cursor, Write};
 
 use crate::types::TlsMaterial;
 

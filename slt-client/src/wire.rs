@@ -1,5 +1,6 @@
-use slt_core::proto::{FrameError, MessageError, MessageType, PayloadError};
 use std::io;
+
+use slt_core::proto::{FrameError, MessageError, MessageType, PayloadError};
 
 /// An owned protocol frame buffer that can be reborrowed as a decoded `Message`.
 pub struct OwnedMessageBuf {

@@ -17,7 +17,7 @@
 - Project status: early-stage development. Prefer clear, correct changes over compatibility preservation; breaking changes are acceptable unless a task explicitly requires compatibility.
 
 ## Coding Style & Naming Conventions
-- Rust 2024 workspace; format with `cargo fmt --all`.
+- Rust 2024 workspace; format with `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate`.
 - Workspace lints are strict: rustc warnings are denied, clippy `all` is denied, and `pedantic`/`nursery` run at warn level.
 - Keep shared protocol/config/crypto logic in `slt-core`; keep runtime/orchestration logic in `slt-client` and `slt-server`.
 - Prefer small, focused modules and descriptive names (`configure_client_chrome_ssl`, `message_limits_from_mtu`).
@@ -35,7 +35,7 @@
 ## Commit & Pull Request Guidelines
 - Use Conventional Commit messages: `<type>(<scope>): <subject>` (e.g., `feat(slt-core): add udp-qsp key phase tracking`).
 - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
-- Always run `cargo fmt --all` before committing (pre-commit hook also runs fmt/clippy/test).
+- Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy/test).
 - Run `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets` and fix errors before the final response.
 - Changes under `vendor/` must be in a separate commit.
 - Separate vendor updates from project changes when possible.

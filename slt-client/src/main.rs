@@ -1,8 +1,9 @@
+use std::fs;
+use std::path::PathBuf;
+
 use clap::Parser;
 use slt_core::config::ClientConfig;
 use slt_core::types::TlsMaterial;
-use std::fs;
-use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use tracing_error::ErrorLayer;

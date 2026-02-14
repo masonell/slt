@@ -1,3 +1,7 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::{fs, io};
+
 use boring::pkey::PKey;
 use boring::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use boring::x509::X509;
@@ -9,13 +13,8 @@ use slt_server::auth::{AuthHandler, Authenticator};
 use slt_server::metrics::Metrics;
 use slt_server::quic::QuicEndpoint;
 use slt_server::registry::SessionRegistry;
-use slt_server::sessions::SessionEvent;
-use slt_server::sessions::{SessionTimeouts, message_limits_from_mtu};
+use slt_server::sessions::{SessionEvent, SessionTimeouts, message_limits_from_mtu};
 use slt_server::tcp::TcpFrontDoor;
-use std::fs;
-use std::io;
-use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;

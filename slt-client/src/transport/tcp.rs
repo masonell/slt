@@ -1,3 +1,8 @@
+use std::io;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
 use boring::error::ErrorStack;
 use boring::ssl::{Ssl, SslRef, SslVerifyMode};
 use boring::x509::verify::X509CheckFlags;
@@ -9,10 +14,6 @@ use slt_core::crypto::{
 use slt_core::transport::tcp::{
     IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
 };
-use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::{TcpStream, lookup_host};
 use tokio::time::timeout;
 use tokio_boring::HandshakeError;

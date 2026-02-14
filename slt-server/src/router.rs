@@ -2,10 +2,11 @@
 
 use std::net::Ipv4Addr;
 
-use crate::sessions::{ClientSessionBase, UdpSocketIo};
-use crate::tun::TunDeviceIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, trace, warn};
+
+use crate::sessions::{ClientSessionBase, UdpSocketIo};
+use crate::tun::TunDeviceIo;
 
 /// Routes packets between TUN and sessions.
 #[derive(Debug, Default)]

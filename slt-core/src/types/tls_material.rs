@@ -1,8 +1,9 @@
 //! TLS certificate/key material for configuration.
 
+use std::path::PathBuf;
+
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::path::PathBuf;
 
 /// TLS material provided inline as PEM or loaded from a file.
 #[derive(Debug, Clone, PartialEq, Eq)]

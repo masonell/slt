@@ -1,8 +1,9 @@
 //! Server configuration intermediate types.
 
-use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigError;
 use crate::types::{ClientId, PubKeyEd25519, TlsMaterial};

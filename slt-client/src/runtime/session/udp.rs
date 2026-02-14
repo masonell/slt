@@ -1,11 +1,13 @@
 //! UDP-QSP message handling for `ClientSession`.
 
+use std::io;
+
+use slt_core::proto::{ClosePayload, Message, PingPayload, PongPayload};
+use tracing::{info, trace, warn};
+
 use super::{ClientSession, SessionControl, SessionExit};
 use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
-use slt_core::proto::{ClosePayload, Message, PingPayload, PongPayload};
-use std::io;
-use tracing::{info, trace, warn};
 
 impl ClientSession<'_> {
     /// Handle a UDP-QSP message.

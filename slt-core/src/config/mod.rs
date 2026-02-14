@@ -4,10 +4,10 @@ pub mod client;
 pub mod server;
 
 use std::time::Duration;
-use thiserror::Error;
 
 pub use client::ClientConfig;
 pub use server::ServerConfig;
+use thiserror::Error;
 
 /// Ethernet IP MTU used as the transport envelope target.
 pub const ETHERNET_IP_MTU: u16 = 1500;

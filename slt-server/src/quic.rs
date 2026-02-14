@@ -6,9 +6,6 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::metrics::Metrics;
-use super::registry::SessionRegistry;
-use crate::sessions::SessionEvent;
 use lru::LruCache;
 use slt_core::classifier::{QuicVerdict, classify_quic_datagram};
 use slt_core::config::ServerConfig;
@@ -17,6 +14,10 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
+
+use super::metrics::Metrics;
+use super::registry::SessionRegistry;
+use crate::sessions::SessionEvent;
 
 const QUIC_BUF_LEN: usize = 2 * 1024;
 

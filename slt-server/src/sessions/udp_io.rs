@@ -4,9 +4,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::net::UdpSocket;
-
 use slt_core::crypto::udp_qsp::SessionIo;
+use tokio::net::UdpSocket;
 
 /// UDP socket interface used for session traffic.
 pub trait UdpSocketIo: Send + Sync + 'static {

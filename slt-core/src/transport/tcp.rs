@@ -325,11 +325,12 @@ fn request_tls_key_update(ssl: &mut SslRef, request_peer_update: bool) -> io::Re
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use boring::ssl::{SslAcceptor, SslConnector, SslFiletype, SslMethod, SslVerifyMode};
     use std::path::PathBuf;
+
+    use boring::ssl::{SslAcceptor, SslConnector, SslFiletype, SslMethod, SslVerifyMode};
     use tokio::io::DuplexStream;
 
+    use super::*;
     use crate::proto::{Message, MessageLimits, PingPayload, PongPayload};
 
     fn cert_paths() -> (PathBuf, PathBuf) {
