@@ -12,105 +12,157 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Run the client runtime until shutdown.
-#[allow(clippy::too_many_lines)]
 pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
     let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
 
+    let (tun_handles, mut tun_channels) = tun::create(&config, cancel.clone())?;
+
+    let result = run_sessions(&config, &cancel, &metrics, &mut tun_channels).await;
+
+    cancel.cancel();
+    tun_handles.shutdown().await;
+    let _ = metrics_reporter.await;
+
+    if let Err(ref err) = result {
+        warn!(error = %err, "client runtime exited with error");
+    } else {
+        info!("client shutdown complete");
+    }
+    result.map_err(Into::into)
+}
+
+/// Run the session loop until shutdown or fatal error.
+async fn run_sessions(
+    config: &ClientConfig,
+    cancel: &CancellationToken,
+    metrics: &Arc<Metrics>,
+    tun_channels: &mut tun::TunChannels,
+) -> io::Result<()> {
     let mut backoff =
         ReconnectBackoff::new(config.timing.reconnect_min, config.timing.reconnect_max);
     let mut attempt: u64 = 0;
 
-    let (tun_handles, mut tun_channels) = tun::create(&config, cancel.clone())?;
-
-    let result: io::Result<()> = loop {
-        if cancel.is_cancelled() {
-            break Ok(());
+    loop {
+        match try_connect(config, cancel, metrics, &mut backoff, &mut attempt).await {
+            ConnectOutcome::Connected(tcp) => {
+                backoff.reset();
+                let mut session = session::ClientSession::new(
+                    config,
+                    tcp,
+                    tun_channels,
+                    cancel.clone(),
+                    metrics.clone(),
+                );
+                match handle_session_exit(session.run().await, cancel) {
+                    SessionAction::Break => break Ok(()),
+                    SessionAction::Fatal(err) => break Err(err),
+                    SessionAction::Reconnect => sleep_backoff(cancel, &mut backoff).await,
+                }
+            }
+            ConnectOutcome::Reconnect => {} // backoff already handled in try_connect
+            ConnectOutcome::FatalError(err) => break Err(err),
+            ConnectOutcome::Shutdown => break Ok(()),
         }
+    }
+}
 
-        attempt = attempt.saturating_add(1);
-        info!(attempt, hostname = %config.network.hostname, port = config.network.port, "connecting");
+/// Outcome of a connection attempt.
+enum ConnectOutcome {
+    /// Successfully connected and authenticated.
+    Connected(transport::tcp::TcpSession),
+    /// Connection failed; retry after backoff (already slept).
+    Reconnect,
+    /// Fatal error; exit the runtime.
+    FatalError(io::Error),
+    /// Shutdown requested.
+    Shutdown,
+}
 
-        let tcp = match connect_authenticated(&config, &cancel, &metrics).await {
-            Ok(tcp) => tcp,
-            Err(err) => {
-                if cancel.is_cancelled() {
-                    break Ok(());
-                }
-                if err.kind() == io::ErrorKind::PermissionDenied {
-                    warn!(error = %err, "authentication rejected");
-                    break Err(err);
-                }
+/// Action to take after a session exits.
+enum SessionAction {
+    /// Break the main loop and exit.
+    Break,
+    /// Fatal error; exit with error.
+    Fatal(io::Error),
+    /// Reconnect to the server (caller should sleep backoff).
+    Reconnect,
+}
 
-                if !should_reconnect(&err) {
-                    warn!(
-                        attempt,
-                        kind = ?err.kind(),
-                        error = %err,
-                        "connect/auth failed (non-recoverable)"
-                    );
-                    break Err(err);
-                }
+/// Attempt to connect and authenticate with the server.
+async fn try_connect(
+    config: &ClientConfig,
+    cancel: &CancellationToken,
+    metrics: &Arc<Metrics>,
+    backoff: &mut ReconnectBackoff,
+    attempt: &mut u64,
+) -> ConnectOutcome {
+    if cancel.is_cancelled() {
+        return ConnectOutcome::Shutdown;
+    }
 
+    *attempt = attempt.saturating_add(1);
+    info!(attempt, hostname = %config.network.hostname, port = config.network.port, "connecting");
+
+    match connect_authenticated(config, cancel, metrics).await {
+        Ok(tcp) => ConnectOutcome::Connected(tcp),
+        Err(err) => {
+            if cancel.is_cancelled() {
+                return ConnectOutcome::Shutdown;
+            }
+            if err.kind() == io::ErrorKind::PermissionDenied {
+                warn!(error = %err, "authentication rejected");
+                return ConnectOutcome::FatalError(err);
+            }
+            if !should_reconnect(&err) {
                 warn!(
                     attempt,
                     kind = ?err.kind(),
                     error = %err,
-                    "connect/auth failed; retrying"
+                    "connect/auth failed (non-recoverable)"
                 );
-                sleep_backoff(&cancel, &mut backoff).await;
-                continue;
+                return ConnectOutcome::FatalError(err);
             }
-        };
-        backoff.reset();
 
-        let mut session = session::ClientSession::new(
-            &config,
-            tcp,
-            &mut tun_channels,
-            cancel.clone(),
-            metrics.clone(),
-        );
+            warn!(
+                attempt,
+                kind = ?err.kind(),
+                error = %err,
+                "connect/auth failed; retrying"
+            );
+            sleep_backoff(cancel, backoff).await;
+            ConnectOutcome::Reconnect
+        }
+    }
+}
 
-        let exit = session.run().await;
-
-        match exit {
-            Ok(session::SessionExit::Shutdown) => break Ok(()),
-            Ok(session::SessionExit::TunClosed) => {
-                warn!("tun tasks stopped; shutting down");
-                break Ok(());
+/// Determine what action to take based on session exit result.
+fn handle_session_exit(
+    exit: io::Result<session::SessionExit>,
+    cancel: &CancellationToken,
+) -> SessionAction {
+    match exit {
+        Ok(session::SessionExit::Shutdown) => SessionAction::Break,
+        Ok(session::SessionExit::TunClosed) => {
+            warn!("tun tasks stopped; shutting down");
+            SessionAction::Break
+        }
+        Ok(reason) => {
+            warn!(reason = ?reason, "session ended; reconnecting");
+            SessionAction::Reconnect
+        }
+        Err(err) => {
+            if cancel.is_cancelled() {
+                return SessionAction::Break;
             }
-            Ok(reason) => {
-                warn!(reason = ?reason, "session ended; reconnecting");
-                sleep_backoff(&cancel, &mut backoff).await;
-            }
-            Err(err) => {
-                if cancel.is_cancelled() {
-                    break Ok(());
-                }
-                if should_reconnect(&err) {
-                    warn!(kind = ?err.kind(), error = %err, "session error; reconnecting");
-                    sleep_backoff(&cancel, &mut backoff).await;
-                } else {
-                    break Err(err);
-                }
+            if should_reconnect(&err) {
+                warn!(kind = ?err.kind(), error = %err, "session error; reconnecting");
+                SessionAction::Reconnect
+            } else {
+                SessionAction::Fatal(err)
             }
         }
-    };
-
-    cancel.cancel();
-    tun_handles.shutdown().await;
-
-    // Wait for metrics reporter to finish
-    let _ = metrics_reporter.await;
-
-    if let Err(err) = result {
-        warn!(error = %err, "client runtime exited with error");
-        return Err(err.into());
     }
-
-    info!("client shutdown complete");
-    Ok(())
 }
 
 fn spawn_metrics_task(
