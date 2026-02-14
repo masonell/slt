@@ -133,7 +133,7 @@ impl<'a> ClientSession<'a> {
     }
 
     /// Classify an I/O error into the appropriate exit variant.
-    fn classify_error(err: &io::Error) -> SessionExit {
+    pub(super) fn classify_error(err: &io::Error) -> SessionExit {
         match err.kind() {
             io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => SessionExit::ProtocolError,
             io::ErrorKind::PermissionDenied => SessionExit::PermissionDenied,

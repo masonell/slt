@@ -88,3 +88,185 @@ impl ClientSession<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    /// Test that ping payload decoding error is mapped correctly.
+    #[test]
+    fn ping_payload_decode_error_maps_to_invalid_data() {
+        // Empty payload should fail decode
+        let result = PingPayload::decode(&[]);
+        assert!(result.is_err());
+
+        // Verify the error maps to InvalidData
+        let err = wire::map_payload_error(result.unwrap_err());
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Test that pong payload decoding error is mapped correctly.
+    #[test]
+    fn pong_payload_decode_error_maps_to_invalid_data() {
+        // Wrong length payload should fail decode
+        let result = PongPayload::decode(&[0x01, 0x02, 0x03]); // 3 bytes instead of 8
+        assert!(result.is_err());
+
+        let err = wire::map_payload_error(result.unwrap_err());
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Test that close payload decoding error is mapped correctly.
+    #[test]
+    fn close_payload_decode_error_maps_to_invalid_data() {
+        // Invalid close code should fail decode
+        let result = ClosePayload::decode(&[0xFF]); // Invalid code
+        assert!(result.is_err());
+
+        let err = wire::map_payload_error(result.unwrap_err());
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Test valid ping payload roundtrip.
+    #[test]
+    fn ping_payload_roundtrip() {
+        let ping = PingPayload { nonce: 0x12345678 };
+        let mut buf = Vec::new();
+        ping.encode(&mut buf);
+
+        let decoded = PingPayload::decode(&buf).unwrap();
+        assert_eq!(decoded.nonce, ping.nonce);
+    }
+
+    /// Test valid pong payload roundtrip.
+    #[test]
+    fn pong_payload_roundtrip() {
+        let pong = PongPayload { nonce: 0xDEADBEEF };
+        let mut buf = Vec::new();
+        pong.encode(&mut buf);
+
+        let decoded = PongPayload::decode(&buf).unwrap();
+        assert_eq!(decoded.nonce, pong.nonce);
+    }
+
+    /// Test valid close payload roundtrip.
+    #[test]
+    fn close_payload_roundtrip() {
+        use slt_core::proto::CloseCode;
+
+        let close = ClosePayload {
+            code: CloseCode::Normal,
+        };
+        let mut buf = Vec::new();
+        close.encode(&mut buf);
+
+        let decoded = ClosePayload::decode(&buf).unwrap();
+        assert_eq!(decoded.code, CloseCode::Normal);
+    }
+
+    /// Test unexpected control message error properties.
+    #[test]
+    fn unexpected_control_message_error_kind() {
+        let err = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected control message on established session",
+        );
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    mod classify_error {
+        use std::io;
+
+        use super::super::super::ClientSession;
+
+        /// Test that InvalidData maps to ProtocolError.
+        #[test]
+        fn invalid_data_maps_to_protocol_error() {
+            let err = io::Error::new(io::ErrorKind::InvalidData, "test");
+            let exit = ClientSession::classify_error(&err);
+            assert_eq!(exit, super::SessionExit::ProtocolError);
+        }
+
+        /// Test that InvalidInput maps to ProtocolError.
+        #[test]
+        fn invalid_input_maps_to_protocol_error() {
+            let err = io::Error::new(io::ErrorKind::InvalidInput, "test");
+            let exit = ClientSession::classify_error(&err);
+            assert_eq!(exit, super::SessionExit::ProtocolError);
+        }
+
+        /// Test that PermissionDenied maps to PermissionDenied.
+        #[test]
+        fn permission_denied_maps_to_permission_denied() {
+            let err = io::Error::new(io::ErrorKind::PermissionDenied, "test");
+            let exit = ClientSession::classify_error(&err);
+            assert_eq!(exit, super::SessionExit::PermissionDenied);
+        }
+
+        /// Test that ConnectionReset maps to ConnectionError.
+        #[test]
+        fn connection_reset_maps_to_connection_error() {
+            let err = io::Error::new(io::ErrorKind::ConnectionReset, "test");
+            let exit = ClientSession::classify_error(&err);
+            assert_eq!(exit, super::SessionExit::ConnectionError);
+        }
+
+        /// Test that BrokenPipe maps to ConnectionError.
+        #[test]
+        fn broken_pipe_maps_to_connection_error() {
+            let err = io::Error::new(io::ErrorKind::BrokenPipe, "test");
+            let exit = ClientSession::classify_error(&err);
+            assert_eq!(exit, super::SessionExit::ConnectionError);
+        }
+
+        /// Test that TimedOut maps to ConnectionError.
+        #[test]
+        fn timed_out_maps_to_connection_error() {
+            let err = io::Error::new(io::ErrorKind::TimedOut, "test");
+            let exit = ClientSession::classify_error(&err);
+            assert_eq!(exit, super::SessionExit::ConnectionError);
+        }
+
+        /// Test that UnexpectedEof maps to ConnectionError.
+        #[test]
+        fn unexpected_eof_maps_to_connection_error() {
+            let err = io::Error::new(io::ErrorKind::UnexpectedEof, "test");
+            let exit = ClientSession::classify_error(&err);
+            assert_eq!(exit, super::SessionExit::ConnectionError);
+        }
+
+        /// Test that Interrupted maps to ConnectionError.
+        #[test]
+        fn interrupted_maps_to_connection_error() {
+            let err = io::Error::new(io::ErrorKind::Interrupted, "test");
+            let exit = ClientSession::classify_error(&err);
+            assert_eq!(exit, super::SessionExit::ConnectionError);
+        }
+
+        /// Test that other error kinds map to ConnectionError.
+        #[test]
+        fn other_errors_map_to_connection_error() {
+            let other_kinds = [
+                io::ErrorKind::NotFound,
+                io::ErrorKind::AddrInUse,
+                io::ErrorKind::AddrNotAvailable,
+                io::ErrorKind::AlreadyExists,
+                io::ErrorKind::WouldBlock,
+                io::ErrorKind::WriteZero,
+                io::ErrorKind::Other,
+            ];
+
+            for kind in other_kinds {
+                let err = io::Error::new(kind, "test");
+                let exit = ClientSession::classify_error(&err);
+                assert_eq!(
+                    exit,
+                    super::SessionExit::ConnectionError,
+                    "{kind:?} should map to ConnectionError"
+                );
+            }
+        }
+    }
+}
