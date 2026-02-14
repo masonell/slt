@@ -139,8 +139,9 @@ async fn run_tun_reader(
             continue;
         }
 
-        if tx.try_send(packet.to_vec()).is_err() {
-            debug!(len = n, "tun packet dropped (session queue full/closed)");
+        if tx.send(packet.to_vec()).await.is_err() {
+            debug!(len = n, "tun queue closed, exiting reader");
+            return Ok(());
         }
     }
 }
