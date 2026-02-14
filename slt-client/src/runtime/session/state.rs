@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::runtime::ReconnectBackoff;
 use crate::runtime::register::PreparedUdpQspRegistration;
 use crate::transport::quic_discovery as quic;
-use crate::transport::udp_qsp::UdpQspTransport;
+use crate::transport::udp_qsp::ClientTransport;
 
 /// UDP transport lifecycle state.
 pub(super) enum UdpState {
@@ -23,7 +23,7 @@ pub(super) enum UdpState {
         registration: Option<Box<PendingUdpQspRegistration>>,
     },
     /// Connected and working.
-    Active(Box<UdpQspTransport>),
+    Active(Box<ClientTransport>),
 }
 
 /// In-flight `REGISTER_CID` exchange state managed by the main session loop.
@@ -64,14 +64,14 @@ impl UdpState {
         }
     }
 
-    pub(super) const fn as_active(&self) -> Option<&UdpQspTransport> {
+    pub(super) const fn as_active(&self) -> Option<&ClientTransport> {
         match self {
             Self::Active(transport) => Some(transport),
             _ => None,
         }
     }
 
-    pub(super) fn as_active_mut(&mut self) -> Option<&mut UdpQspTransport> {
+    pub(super) fn as_active_mut(&mut self) -> Option<&mut ClientTransport> {
         match self {
             Self::Active(transport) => Some(transport),
             _ => None,
@@ -339,7 +339,7 @@ mod tests {
 
         use super::*;
         use crate::metrics::Metrics;
-        use crate::transport::udp_qsp::UdpQspTransport;
+        use crate::transport::udp_qsp::ClientTransport;
 
         fn make_active_state() -> UdpState {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -364,7 +364,7 @@ mod tests {
 
                 let session = QuicQspSession::new(io, scid, dcid, keys, 0, 0, false);
                 let metrics = Arc::new(Metrics::default());
-                let transport = UdpQspTransport::new(session, metrics);
+                let transport = ClientTransport::new(session, metrics);
                 UdpState::Active(Box::new(transport))
             })
         }
@@ -412,7 +412,7 @@ mod tests {
         use super::*;
         use crate::metrics::Metrics;
         use crate::transport::quic_discovery::QuicIds;
-        use crate::transport::udp_qsp::UdpQspTransport;
+        use crate::transport::udp_qsp::ClientTransport;
 
         fn mock_quic_ids() -> QuicIds {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -500,7 +500,7 @@ mod tests {
 
                 let session = QuicQspSession::new(io, scid, dcid, keys, 0, 0, false);
                 let metrics = Arc::new(Metrics::default());
-                let transport = UdpQspTransport::new(session, metrics);
+                let transport = ClientTransport::new(session, metrics);
                 UdpState::Active(Box::new(transport))
             });
 
