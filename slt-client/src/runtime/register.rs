@@ -4,14 +4,9 @@ use crate::transport::udp_qsp::ClientUdpIo;
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
 use slt_core::proto::{
-    AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, ClosePayload, HP_KEY_LEN, Message, MessageLimits,
-    PingPayload, PongPayload, RegisterCidPayload, RegisterFailPayload, RegisterOkPayload,
+    AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, RegisterCidPayload,
 };
 use std::io;
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-use tokio::time;
-use tokio_util::sync::CancellationToken;
 
 /// Prepared state for a UDP-QSP `REGISTER_CID` exchange.
 ///
@@ -94,139 +89,20 @@ pub(super) fn prepare_udp_qsp_registration(
     })
 }
 
-pub(super) async fn register_udp_qsp(
+/// Start a UDP-QSP `REGISTER_CID` exchange by sending a prepared payload.
+///
+/// Response handling is owned by the main session loop so TCP activity
+/// accounting and idle tracking remain centralized.
+pub(super) async fn start_udp_qsp_registration(
     tcp: &mut TcpTransport,
-    limits: MessageLimits,
-    to_tun_tx: &mpsc::Sender<Vec<u8>>,
     ids: &quic::QuicIds,
-    cancel: &CancellationToken,
-    timeout: Duration,
-) -> io::Result<QuicQspSession<ClientUdpIo>> {
-    let mut prepared = prepare_udp_qsp_registration(ids)?;
+) -> io::Result<PreparedUdpQspRegistration> {
+    let prepared = prepare_udp_qsp_registration(ids)?;
     tcp.write_message(Message::RegisterCid {
         payload: &prepared.payload_buf,
     })
     .await?;
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(session) =
-            handle_register_read(tcp, limits, to_tun_tx, ids, &mut prepared).await?
-        {
-            return Ok(session);
-        }
-
-        let timeout = time::sleep_until(deadline.into());
-        tokio::select! {
-            () = timeout => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "register_cid timed out"));
-            }
-            res = tcp.read_more() => {
-                let n = res?;
-                if n == 0 {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "register_cid connection closed"));
-                }
-            }
-            () = cancel.cancelled() => {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "register_cid cancelled"));
-            }
-        }
-    }
-}
-
-async fn handle_register_read(
-    tcp: &mut TcpTransport,
-    limits: MessageLimits,
-    to_tun_tx: &mpsc::Sender<Vec<u8>>,
-    ids: &quic::QuicIds,
-    prepared: &mut PreparedUdpQspRegistration,
-) -> io::Result<Option<QuicQspSession<ClientUdpIo>>> {
-    loop {
-        let Some(msg_buf) = tcp
-            .try_pop_message(limits)
-            .map_err(crate::wire::map_message_error)?
-        else {
-            return Ok(None);
-        };
-
-        let result =
-            handle_register_message(tcp, msg_buf.message(), to_tun_tx, ids, prepared).await?;
-        if result.is_some() {
-            return Ok(result);
-        }
-    }
-}
-
-async fn handle_register_message(
-    tcp: &mut TcpTransport,
-    message: Message<'_>,
-    to_tun_tx: &mpsc::Sender<Vec<u8>>,
-    ids: &quic::QuicIds,
-    prepared: &mut PreparedUdpQspRegistration,
-) -> io::Result<Option<QuicQspSession<ClientUdpIo>>> {
-    match message {
-        Message::RegisterOk {
-            payload: ok_payload,
-        } => {
-            let ok =
-                RegisterOkPayload::decode(ok_payload).map_err(crate::wire::map_payload_error)?;
-            if ok.dcid != ids.dcid {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "register_ok dcid mismatch",
-                ));
-            }
-            let session = prepared.session.take().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "udp-qsp session missing")
-            })?;
-            Ok(Some(session))
-        }
-        Message::RegisterFail {
-            payload: fail_payload,
-        } => {
-            let fail = RegisterFailPayload::decode(fail_payload)
-                .map_err(crate::wire::map_payload_error)?;
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("register_cid rejected: {:?}", fail.code),
-            ))
-        }
-        Message::Ping { payload } => {
-            let ping_in = PingPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
-            let pong_out = PongPayload {
-                nonce: ping_in.nonce,
-            };
-            let mut pong_buf = Vec::with_capacity(8);
-            pong_out.encode(&mut pong_buf);
-            tcp.write_message(Message::Pong { payload: &pong_buf })
-                .await?;
-            Ok(None)
-        }
-        Message::Pong { .. } => Ok(None),
-        Message::Close { payload } => {
-            let close = ClosePayload::decode(payload).map_err(crate::wire::map_payload_error)?;
-            Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                format!("register_cid closed: {:?}", close.code),
-            ))
-        }
-        Message::Data { packet } => {
-            if to_tun_tx.send(packet.to_vec()).await.is_err() {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "tun channel closed during register",
-                ));
-            }
-            Ok(None)
-        }
-        Message::Auth { .. }
-        | Message::AuthOk { .. }
-        | Message::AuthFail { .. }
-        | Message::RegisterCid { .. } => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unexpected control message during register_cid",
-        )),
-    }
+    Ok(prepared)
 }
 
 fn random_array<const N: usize>() -> io::Result<[u8; N]> {

@@ -220,14 +220,14 @@ async fn sleep_backoff(cancel: &CancellationToken, backoff: &mut ReconnectBackof
     }
 }
 
-struct ReconnectBackoff {
+pub struct ReconnectBackoff {
     base: Duration,
     max: Duration,
     current: Duration,
 }
 
 impl ReconnectBackoff {
-    const fn new(base: Duration, max: Duration) -> Self {
+    pub const fn new(base: Duration, max: Duration) -> Self {
         Self {
             base,
             max,
@@ -235,11 +235,11 @@ impl ReconnectBackoff {
         }
     }
 
-    const fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.current = self.base;
     }
 
-    fn next_delay(&mut self) -> Duration {
+    pub fn next_delay(&mut self) -> Duration {
         let cap = self.current;
         let next = self.current.checked_mul(2).unwrap_or(self.max);
         self.current = std::cmp::min(next, self.max);
