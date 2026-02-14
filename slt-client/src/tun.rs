@@ -164,9 +164,16 @@ async fn run_tun_writer(
             continue;
         }
 
+        // TUN writes are atomic: the kernel either accepts the entire packet or
+        // fails with an error. Partial writes should never occur; if they do,
+        // something is very wrong and worth investigating.
         let written = tun.send(&packet).await?;
         if written != packet.len() {
-            debug!(written, expected = packet.len(), "partial tun write");
+            warn!(
+                written,
+                expected = packet.len(),
+                "unexpected partial tun write"
+            );
         }
     }
 }
