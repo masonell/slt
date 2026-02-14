@@ -63,6 +63,12 @@ pub async fn authenticate(
                         "auth failed",
                     ));
                 }
+                AuthResult::Disconnected => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "server closed during auth",
+                    ));
+                }
             }
         }
     }
@@ -135,7 +141,7 @@ async fn handle_auth_message(
         }
         Message::Close { .. } => {
             warn!("received close during auth");
-            Ok(AuthResult::Rejected)
+            Ok(AuthResult::Disconnected)
         }
         other => {
             warn!(message = ?other, "unexpected message during auth");
@@ -149,6 +155,7 @@ enum AuthResult {
     Continue,
     Accepted,
     Rejected,
+    Disconnected,
 }
 
 #[cfg(test)]
