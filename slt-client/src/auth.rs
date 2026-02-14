@@ -7,6 +7,8 @@ use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, Message, MessageLimits,
     PingPayload, PongPayload,
 };
+use slt_core::transport::tcp::{KeyUpdater, TcpChannel};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time;
 use tracing::{debug, info, trace, warn};
 
@@ -20,6 +22,19 @@ pub async fn authenticate(
     config: &ClientConfig,
     metrics: &Metrics,
 ) -> io::Result<()> {
+    authenticate_with_channel(tcp, config, metrics).await
+}
+
+/// Generic auth implementation that works with any `TcpChannel`.
+async fn authenticate_with_channel<S, K>(
+    tcp: &mut TcpChannel<S, K>,
+    config: &ClientConfig,
+    metrics: &Metrics,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    K: KeyUpdater,
+{
     let challenge = export_challenge(tcp)?;
     let payload = build_auth_payload(config, challenge);
     send_auth(tcp, &payload).await?;
@@ -74,9 +89,11 @@ pub async fn authenticate(
     }
 }
 
-fn export_challenge(
-    tcp: &crate::transport::tcp::TcpTransport,
-) -> io::Result<[u8; AUTH_CHALLENGE_LEN]> {
+fn export_challenge<S, K>(tcp: &TcpChannel<S, K>) -> io::Result<[u8; AUTH_CHALLENGE_LEN]>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    K: KeyUpdater,
+{
     let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
     tcp.ssl()
         .export_keying_material(&mut challenge, "slt-auth-challenge", None)
@@ -84,7 +101,10 @@ fn export_challenge(
     Ok(challenge)
 }
 
-fn build_auth_payload(config: &ClientConfig, challenge: [u8; AUTH_CHALLENGE_LEN]) -> AuthPayload {
+pub fn build_auth_payload(
+    config: &ClientConfig,
+    challenge: [u8; AUTH_CHALLENGE_LEN],
+) -> AuthPayload {
     let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
     context.extend_from_slice(b"slt-auth-v1");
     context.extend_from_slice(config.identity.client_id.as_bytes());
@@ -102,10 +122,11 @@ fn build_auth_payload(config: &ClientConfig, challenge: [u8; AUTH_CHALLENGE_LEN]
     }
 }
 
-async fn send_auth(
-    tcp: &mut crate::transport::tcp::TcpTransport,
-    payload: &AuthPayload,
-) -> io::Result<()> {
+async fn send_auth<S, K>(tcp: &mut TcpChannel<S, K>, payload: &AuthPayload) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    K: KeyUpdater,
+{
     let mut payload_buf = Vec::with_capacity(slt_core::proto::AUTH_PAYLOAD_LEN);
     payload.encode(&mut payload_buf);
     tcp.write_message(Message::Auth {
@@ -114,10 +135,14 @@ async fn send_auth(
     .await
 }
 
-async fn handle_auth_message(
-    tcp: &mut crate::transport::tcp::TcpTransport,
+async fn handle_auth_message<S, K>(
+    tcp: &mut TcpChannel<S, K>,
     message: Message<'_>,
-) -> io::Result<AuthResult> {
+) -> io::Result<AuthResult>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    K: KeyUpdater,
+{
     match message {
         Message::AuthOk { payload } => {
             AuthOkPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
@@ -411,5 +436,134 @@ mod tests {
         assert_eq!(AuthResult::Accepted, AuthResult::Accepted);
         assert_ne!(AuthResult::Continue, AuthResult::Accepted);
         assert_ne!(AuthResult::Rejected, AuthResult::Disconnected);
+    }
+}
+
+/// Integration tests requiring a mock TLS server.
+#[cfg(test)]
+mod integration_tests {
+    use std::sync::Arc;
+
+    use slt_core::proto::AuthFailCode;
+    use slt_core::transport::tcp::TcpChannel;
+    use tokio::io::DuplexStream;
+
+    use super::*;
+    use crate::test_support::{MockTlsServer, test_config, tls_server_pair};
+
+    /// Create a mock TCP transport pair for testing.
+    /// Returns (client_transport, server_stream).
+    async fn mock_transport_pair() -> (
+        TcpChannel<DuplexStream, crate::transport::tcp::ClientKeyUpdater>,
+        tokio_boring::SslStream<DuplexStream>,
+    ) {
+        let (client_stream, server_stream) = tls_server_pair().await;
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let updater = crate::transport::tcp::ClientKeyUpdater::new(metrics);
+        let client = TcpChannel::with_key_updater(client_stream, updater);
+        (client, server_stream)
+    }
+
+    #[tokio::test]
+    async fn full_auth_flow_success() {
+        let config = test_config();
+        let (mut client, server) = mock_transport_pair().await;
+        let mut server = MockTlsServer::new(server);
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+
+        // Run authenticate and server concurrently
+        let client_fut = authenticate_with_channel(&mut client, &config, &metrics);
+        let server_fut = server.recv_auth_and_send_ok(&config);
+
+        let (client_result, server_result) = tokio::join!(client_fut, server_fut);
+        server_result.expect("server should complete without error");
+        client_result.expect("client auth should succeed");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_handling() {
+        let config = test_config();
+        let (mut client, server) = mock_transport_pair().await;
+        let mut server = MockTlsServer::new(server);
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+
+        // Run authenticate and server concurrently
+        let client_fut = authenticate_with_channel(&mut client, &config, &metrics);
+        let server_fut = server.recv_auth_and_send_fail(&config, AuthFailCode::BadSignature);
+
+        let (client_result, server_result) = tokio::join!(client_fut, server_fut);
+        server_result.expect("server should complete without error");
+
+        let err = client_result.expect_err("client auth should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn auth_timeout_handling() {
+        let mut config = test_config();
+        // Set a very short timeout
+        config.timing.auth_timeout = std::time::Duration::from_millis(10);
+
+        let (mut client, server) = mock_transport_pair().await;
+        let _server = MockTlsServer::new(server); // Server doesn't respond
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+
+        let result = authenticate_with_channel(&mut client, &config, &metrics).await;
+        let err = result.expect_err("client auth should timeout");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn auth_handles_ping_during_auth() {
+        let config = test_config();
+        let (mut client, server) = mock_transport_pair().await;
+        let mut server = MockTlsServer::new(server);
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+
+        // Server will receive AUTH first (client sends it immediately), then send PING,
+        // wait for PONG, and finally send AUTH_OK
+        let server_fut = async {
+            // Receive AUTH first
+            server.recv_auth_verify(&config).await?;
+            // Send PING (client should respond with PONG)
+            server.send_ping(0xABCDEF00).await?;
+            // Receive PONG (client's auth loop handles it)
+            let nonce = server.recv_pong().await?;
+            assert_eq!(nonce, 0xABCDEF00);
+            // Now send AUTH_OK
+            server
+                .write_message(slt_core::proto::Message::AuthOk { payload: &[] })
+                .await
+        };
+
+        let client_fut = authenticate_with_channel(&mut client, &config, &metrics);
+
+        let (client_result, server_result) = tokio::join!(client_fut, server_fut);
+        server_result.expect("server should complete without error");
+        client_result.expect("client auth should succeed despite PING");
+    }
+
+    #[tokio::test]
+    async fn auth_handles_close_during_auth() {
+        let config = test_config();
+        let (mut client, server) = mock_transport_pair().await;
+        let mut server = MockTlsServer::new(server);
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+
+        // Server sends CLOSE instead of AUTH_OK
+        let server_fut = async {
+            // Wait for AUTH message first
+            server.recv_auth_verify(&config).await?;
+            // Send CLOSE
+            server.send_close(slt_core::proto::CloseCode::Normal).await
+        };
+
+        let client_fut = authenticate_with_channel(&mut client, &config, &metrics);
+
+        let (client_result, server_result) = tokio::join!(client_fut, server_fut);
+        server_result.expect("server should complete without error");
+
+        let err = client_result.expect_err("client auth should fail on CLOSE");
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
     }
 }
