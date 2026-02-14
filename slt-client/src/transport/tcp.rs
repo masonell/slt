@@ -182,10 +182,10 @@ fn configure_hostname_verification(ssl: &mut Ssl, host: &str) -> Result<(), Erro
     }
 }
 
-fn map_error(err: impl std::fmt::Debug) -> io::Error {
-    io::Error::other(format!("{err:?}"))
+fn map_error(err: impl std::fmt::Display) -> io::Error {
+    io::Error::other(err.to_string())
 }
 
 fn map_handshake_error(err: &HandshakeError<TcpStream>) -> io::Error {
-    io::Error::other(format!("{err:?}"))
+    io::Error::other(format!("tls handshake failed: {err}"))
 }

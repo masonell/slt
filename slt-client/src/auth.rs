@@ -80,7 +80,7 @@ fn export_challenge(
     let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
     tcp.ssl()
         .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-        .map_err(|err| io::Error::other(format!("{err:?}")))?;
+        .map_err(|err| io::Error::other(format!("tls key export failed: {err}")))?;
     Ok(challenge)
 }
 
