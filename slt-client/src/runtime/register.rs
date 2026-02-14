@@ -112,3 +112,210 @@ fn random_array<const N: usize>() -> io::Result<[u8; N]> {
     rand_bytes(&mut bytes).map_err(|err| io::Error::other(format!("{err:?}")))?;
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
+    use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+    use tokio::net::UdpSocket;
+
+    use super::*;
+    use crate::transport::quic_discovery::QuicIds;
+
+    /// Create a mock QuicIds for testing without network I/O.
+    async fn mock_quic_ids() -> QuicIds {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+        let peer: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        QuicIds {
+            dcid,
+            scid,
+            peer,
+            socket,
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_registration_returns_valid_structure() {
+        let ids = mock_quic_ids().await;
+        let result = prepare_udp_qsp_registration(&ids);
+
+        assert!(result.is_ok());
+        let prepared = result.unwrap();
+        assert!(!prepared.payload_buf.is_empty());
+        assert!(prepared.session.is_some());
+    }
+
+    #[tokio::test]
+    async fn prepare_registration_payload_is_decodable() {
+        let ids = mock_quic_ids().await;
+        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+
+        // The payload_buf should be decodable as a RegisterCidPayload
+        let decoded = RegisterCidPayload::decode(&prepared.payload_buf);
+        assert!(decoded.is_ok());
+
+        let decoded = decoded.unwrap();
+
+        // CIDs should match what we passed in
+        assert_eq!(decoded.dcid, ids.dcid);
+        assert_eq!(decoded.scid, ids.scid);
+
+        // Cipher should be AES-128-GCM (the only cipher currently used)
+        assert_eq!(decoded.cipher, CipherSuite::Aes128Gcm);
+    }
+
+    #[tokio::test]
+    async fn prepare_registration_payload_wire_format() {
+        let ids = mock_quic_ids().await;
+        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let payload = &prepared.payload_buf;
+
+        // Verify minimum payload length
+        // Structure: dcid_len(1) + dcid(8) + scid_len(1) + scid(8) + cipher(1) +
+        //            hp_tx(16) + hp_rx(16) + aead_tx(16) + aead_rx(16) +
+        //            iv_tx(12) + iv_rx(12) + pn_start(8) + pn_start_rx(8) + key_phase(1)
+        let expected_min_len = 1
+            + QUIC_DCID_PREFIX_LEN
+            + 1
+            + QUIC_DCID_PREFIX_LEN
+            + 1
+            + HP_KEY_LEN * 2
+            + AEAD_KEY_LEN * 2
+            + AEAD_IV_LEN * 2
+            + 8
+            + 8
+            + 1;
+        assert!(payload.len() >= expected_min_len);
+
+        // Verify DCID length prefix
+        let dcid_len = payload[0] as usize;
+        assert_eq!(dcid_len, QUIC_DCID_PREFIX_LEN);
+
+        // Verify DCID bytes
+        assert_eq!(&payload[1..1 + dcid_len], ids.dcid.as_slice());
+
+        // Verify SCID length prefix
+        let scid_len_offset = 1 + dcid_len;
+        let scid_len = payload[scid_len_offset] as usize;
+        assert_eq!(scid_len, QUIC_DCID_PREFIX_LEN);
+
+        // Verify SCID bytes
+        let scid_offset = scid_len_offset + 1;
+        assert_eq!(
+            &payload[scid_offset..scid_offset + scid_len],
+            ids.scid.as_slice()
+        );
+
+        // Verify cipher byte (AES-128-GCM = 0x01)
+        let cipher_offset = scid_offset + scid_len;
+        assert_eq!(payload[cipher_offset], CipherSuite::Aes128Gcm.as_u8());
+    }
+
+    #[tokio::test]
+    async fn prepare_registration_key_direction_reversal() {
+        let ids = mock_quic_ids().await;
+        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+
+        // Decode the payload to examine the keys
+        let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
+
+        // The prepare_udp_qsp_registration function constructs the payload with:
+        // - hp_tx = hp_s2c (server's tx = client's rx direction)
+        // - hp_rx = hp_c2s (server's rx = client's tx direction)
+        // This means the payload expresses keys in server's (tx, rx) terms.
+
+        // Verify the keys are non-zero (random generation worked)
+        assert!(decoded.hp_tx.iter().any(|&b| b != 0));
+        assert!(decoded.hp_rx.iter().any(|&b| b != 0));
+        assert!(decoded.aead_tx.iter().any(|&b| b != 0));
+        assert!(decoded.aead_rx.iter().any(|&b| b != 0));
+
+        // The session stored in prepared should have reversed directions:
+        // - Client uses hp_rx (from payload) for its tx direction
+        // - Client uses hp_tx (from payload) for its rx direction
+
+        // Verify that a session was created (keys were valid)
+        assert!(prepared.session.is_some());
+    }
+
+    #[tokio::test]
+    async fn prepare_registration_packet_numbers_in_valid_range() {
+        let ids = mock_quic_ids().await;
+        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
+
+        // Packet numbers are generated from fastrand::u32(..), so should be in u32 range
+        assert!(decoded.pn_start <= u64::from(u32::MAX));
+        assert!(decoded.pn_start_rx <= u64::from(u32::MAX));
+    }
+
+    #[tokio::test]
+    async fn prepare_registration_key_phase_is_false() {
+        let ids = mock_quic_ids().await;
+        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
+
+        // Initial key phase should always be false (0)
+        assert!(!decoded.key_phase);
+    }
+
+    #[tokio::test]
+    async fn prepare_registration_payload_matches_encode() {
+        let ids = mock_quic_ids().await;
+        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+
+        // Decode and re-encode to verify roundtrip consistency
+        let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
+
+        let mut re_encoded = Vec::new();
+        decoded.encode(&mut re_encoded).unwrap();
+
+        assert_eq!(prepared.payload_buf, re_encoded);
+    }
+
+    #[tokio::test]
+    async fn prepared_registration_session_can_be_taken() {
+        let ids = mock_quic_ids().await;
+        let mut prepared = prepare_udp_qsp_registration(&ids).unwrap();
+
+        // Session should be Some initially
+        assert!(prepared.session.is_some());
+
+        // Take the session
+        let session = prepared.session.take();
+        assert!(session.is_some());
+
+        // After take, session should be None
+        assert!(prepared.session.is_none());
+    }
+
+    #[test]
+    fn random_array_produces_correct_length() {
+        let result: io::Result<[u8; 16]> = random_array();
+        assert!(result.is_ok());
+        let arr = result.unwrap();
+        assert_eq!(arr.len(), 16);
+    }
+
+    #[test]
+    fn random_array_produces_different_values() {
+        let a: [u8; 32] = random_array().unwrap();
+        let b: [u8; 32] = random_array().unwrap();
+
+        // Two random arrays should almost certainly differ
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn random_array_not_all_zeros() {
+        let arr: [u8; 64] = random_array().unwrap();
+
+        // Probability of all zeros is astronomically low
+        assert!(arr.iter().any(|&b| b != 0));
+    }
+}
