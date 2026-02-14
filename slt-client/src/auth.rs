@@ -150,7 +150,7 @@ async fn handle_auth_message(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthResult {
     Continue,
     Accepted,
@@ -170,9 +170,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn auth_payload_roundtrip_and_signature_verifies() {
-        let config = ClientConfig {
+    fn make_config(client_id: ClientId, ipv4: Ipv4Addr, privkey: PrivKeyEd25519) -> ClientConfig {
+        ClientConfig {
             network: ClientNetworkConfig {
                 hostname: "example.com".to_string(),
                 port: 443,
@@ -182,10 +181,10 @@ mod tests {
                 tls_ca: TlsMaterial::Pem(String::new()),
             },
             identity: ClientIdentity {
-                client_id: ClientId([0x11; 16]),
+                client_id,
                 shared_secret: SharedSecret([0x22; 32]),
-                assigned_ipv4: Ipv4Addr::new(10, 10, 0, 2),
-                privkey_ed25519: PrivKeyEd25519([0x33; 32]),
+                assigned_ipv4: ipv4,
+                privkey_ed25519: privkey,
             },
             tun: TunConfig {
                 tun_name: "tun0".to_string(),
@@ -201,7 +200,30 @@ mod tests {
                 reconnect_min: std::time::Duration::from_millis(200),
                 reconnect_max: std::time::Duration::from_secs(5),
             },
-        };
+        }
+    }
+
+    fn verify_signature(
+        payload: &AuthPayload,
+        challenge: [u8; AUTH_CHALLENGE_LEN],
+        verifying_key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), ed25519_dalek::SignatureError> {
+        let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
+        context.extend_from_slice(b"slt-auth-v1");
+        context.extend_from_slice(payload.client_id.as_bytes());
+        context.extend_from_slice(&payload.assigned_ipv4.octets());
+        context.extend_from_slice(&challenge);
+        let signature = Signature::from_bytes(&payload.signature);
+        verifying_key.verify(&context, &signature)
+    }
+
+    #[test]
+    fn auth_payload_roundtrip_and_signature_verifies() {
+        let config = make_config(
+            ClientId([0x11; 16]),
+            Ipv4Addr::new(10, 10, 0, 2),
+            PrivKeyEd25519([0x33; 32]),
+        );
 
         let challenge = [0x44; AUTH_CHALLENGE_LEN];
         let payload = build_auth_payload(&config, challenge);
@@ -212,15 +234,216 @@ mod tests {
         let decoded = AuthPayload::decode(&buf).unwrap();
         assert_eq!(decoded, payload);
 
-        let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
-        context.extend_from_slice(b"slt-auth-v1");
-        context.extend_from_slice(config.identity.client_id.as_bytes());
-        context.extend_from_slice(&config.identity.assigned_ipv4.octets());
-        context.extend_from_slice(&challenge);
-
         let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
         let verifying_key = signing_key.verifying_key();
-        let signature = Signature::from_bytes(&payload.signature);
-        verifying_key.verify(&context, &signature).unwrap();
+        verify_signature(&payload, challenge, &verifying_key).unwrap();
+    }
+
+    #[test]
+    fn auth_payload_various_client_ids() {
+        let test_cases = [
+            (ClientId([0x00; 16]), "all zeros"),
+            (ClientId([0xFF; 16]), "all ones"),
+            (
+                ClientId([
+                    0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76,
+                    0x54, 0x32, 0x10,
+                ]),
+                "mixed",
+            ),
+        ];
+
+        for (client_id, desc) in test_cases {
+            let config = make_config(
+                client_id,
+                Ipv4Addr::new(10, 10, 0, 2),
+                PrivKeyEd25519([0x33; 32]),
+            );
+            let challenge = [0x44; AUTH_CHALLENGE_LEN];
+            let payload = build_auth_payload(&config, challenge);
+
+            assert_eq!(payload.client_id, client_id, "{desc}");
+
+            let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
+            verify_signature(&payload, challenge, &signing_key.verifying_key())
+                .expect("{desc}: signature should verify");
+        }
+    }
+
+    #[test]
+    fn auth_payload_various_ipv4_addresses() {
+        let test_cases = [
+            (Ipv4Addr::new(0, 0, 0, 0), "zero"),
+            (Ipv4Addr::new(10, 0, 0, 1), "private 10.x"),
+            (Ipv4Addr::new(192, 168, 1, 100), "private 192.168.x"),
+            (Ipv4Addr::new(172, 16, 0, 1), "private 172.16.x"),
+            (Ipv4Addr::new(255, 255, 255, 255), "broadcast"),
+        ];
+
+        for (ipv4, desc) in test_cases {
+            let config = make_config(ClientId([0x11; 16]), ipv4, PrivKeyEd25519([0x33; 32]));
+            let challenge = [0x44; AUTH_CHALLENGE_LEN];
+            let payload = build_auth_payload(&config, challenge);
+
+            assert_eq!(payload.assigned_ipv4, ipv4, "{desc}");
+
+            let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
+            verify_signature(&payload, challenge, &signing_key.verifying_key())
+                .expect("{desc}: signature should verify");
+        }
+    }
+
+    #[test]
+    fn auth_payload_various_challenges() {
+        let test_cases = [
+            ([0x00; AUTH_CHALLENGE_LEN], "all zeros"),
+            ([0xFF; AUTH_CHALLENGE_LEN], "all ones"),
+            ([0x01; AUTH_CHALLENGE_LEN], "repeated byte"),
+        ];
+
+        for (challenge, desc) in test_cases {
+            let config = make_config(
+                ClientId([0x11; 16]),
+                Ipv4Addr::new(10, 10, 0, 2),
+                PrivKeyEd25519([0x33; 32]),
+            );
+            let payload = build_auth_payload(&config, challenge);
+
+            assert_eq!(payload.challenge, challenge, "{desc}");
+
+            let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
+            verify_signature(&payload, challenge, &signing_key.verifying_key())
+                .expect("{desc}: signature should verify");
+        }
+    }
+
+    #[test]
+    fn auth_payload_signature_fails_with_wrong_verifying_key() {
+        let config = make_config(
+            ClientId([0x11; 16]),
+            Ipv4Addr::new(10, 10, 0, 2),
+            PrivKeyEd25519([0x33; 32]),
+        );
+        let challenge = [0x44; AUTH_CHALLENGE_LEN];
+        let payload = build_auth_payload(&config, challenge);
+
+        // Generate a different key pair
+        let wrong_signing_key = SigningKey::from_bytes(&[0x99; 32]);
+        let wrong_verifying_key = wrong_signing_key.verifying_key();
+
+        // Signature should NOT verify with wrong key
+        let result = verify_signature(&payload, challenge, &wrong_verifying_key);
+        assert!(
+            result.is_err(),
+            "signature should not verify with wrong key"
+        );
+    }
+
+    #[test]
+    fn auth_payload_signature_fails_with_tampered_signature() {
+        let config = make_config(
+            ClientId([0x11; 16]),
+            Ipv4Addr::new(10, 10, 0, 2),
+            PrivKeyEd25519([0x33; 32]),
+        );
+        let challenge = [0x44; AUTH_CHALLENGE_LEN];
+        let mut payload = build_auth_payload(&config, challenge);
+
+        // Tamper with the signature
+        payload.signature[0] ^= 0xFF;
+
+        let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
+        let result = verify_signature(&payload, challenge, &signing_key.verifying_key());
+        assert!(result.is_err(), "tampered signature should not verify");
+    }
+
+    #[test]
+    fn auth_payload_signature_fails_with_tampered_challenge() {
+        let config = make_config(
+            ClientId([0x11; 16]),
+            Ipv4Addr::new(10, 10, 0, 2),
+            PrivKeyEd25519([0x33; 32]),
+        );
+        let challenge = [0x44; AUTH_CHALLENGE_LEN];
+        let payload = build_auth_payload(&config, challenge);
+
+        // Verify with a different challenge
+        let wrong_challenge = [0x55; AUTH_CHALLENGE_LEN];
+        let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
+        let result = verify_signature(&payload, wrong_challenge, &signing_key.verifying_key());
+        assert!(
+            result.is_err(),
+            "signature should not verify with different challenge"
+        );
+    }
+
+    #[test]
+    fn auth_payload_signature_fails_with_tampered_client_id() {
+        let config = make_config(
+            ClientId([0x11; 16]),
+            Ipv4Addr::new(10, 10, 0, 2),
+            PrivKeyEd25519([0x33; 32]),
+        );
+        let challenge = [0x44; AUTH_CHALLENGE_LEN];
+        let mut payload = build_auth_payload(&config, challenge);
+
+        // Tamper with client_id
+        payload.client_id.0[0] ^= 0xFF;
+
+        let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
+        let result = verify_signature(&payload, challenge, &signing_key.verifying_key());
+        assert!(
+            result.is_err(),
+            "signature should not verify with tampered client_id"
+        );
+    }
+
+    #[test]
+    fn auth_payload_signature_fails_with_tampered_ipv4() {
+        let config = make_config(
+            ClientId([0x11; 16]),
+            Ipv4Addr::new(10, 10, 0, 2),
+            PrivKeyEd25519([0x33; 32]),
+        );
+        let challenge = [0x44; AUTH_CHALLENGE_LEN];
+        let mut payload = build_auth_payload(&config, challenge);
+
+        // Tamper with IPv4
+        payload.assigned_ipv4 = Ipv4Addr::new(10, 10, 0, 3);
+
+        let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
+        let result = verify_signature(&payload, challenge, &signing_key.verifying_key());
+        assert!(
+            result.is_err(),
+            "signature should not verify with tampered ipv4"
+        );
+    }
+
+    #[test]
+    fn auth_result_variants_are_debug_clone_copy() {
+        // Test Debug trait
+        assert_eq!(format!("{:?}", AuthResult::Continue), "Continue");
+        assert_eq!(format!("{:?}", AuthResult::Accepted), "Accepted");
+        assert_eq!(format!("{:?}", AuthResult::Rejected), "Rejected");
+        assert_eq!(format!("{:?}", AuthResult::Disconnected), "Disconnected");
+
+        // Test Clone trait
+        let original = AuthResult::Accepted;
+        let cloned = original.clone();
+        assert!(matches!(cloned, AuthResult::Accepted));
+
+        // Test Copy trait
+        let original = AuthResult::Rejected;
+        let copied = original;
+        assert!(matches!(original, AuthResult::Rejected)); // still valid due to Copy
+        assert!(matches!(copied, AuthResult::Rejected));
+    }
+
+    #[test]
+    fn auth_result_variant_equality() {
+        assert_eq!(AuthResult::Continue, AuthResult::Continue);
+        assert_eq!(AuthResult::Accepted, AuthResult::Accepted);
+        assert_ne!(AuthResult::Continue, AuthResult::Accepted);
+        assert_ne!(AuthResult::Rejected, AuthResult::Disconnected);
     }
 }
