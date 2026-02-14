@@ -106,7 +106,7 @@ impl UdpQspTransport {
     pub async fn read_next_message(
         &mut self,
         limits: slt_core::proto::MessageLimits,
-    ) -> io::Result<crate::wire::OwnedMessageBuf> {
+    ) -> io::Result<slt_core::proto::OwnedMessageBuf> {
         let rx_phase_before = self.session.rx_key_phase();
         let opened = match self.session.recv(&mut self.packet_buf).await {
             Ok(opened) => opened,
@@ -143,7 +143,7 @@ impl UdpQspTransport {
         // Per protocol.md Section 4.4: receivers MUST ignore any trailing bytes
         // after decoding the first framed message (may be padding for HP sample).
 
-        Ok(crate::wire::OwnedMessageBuf::new(message.ty(), payload))
+        Ok(slt_core::proto::OwnedMessageBuf::new(message.ty(), payload))
     }
 
     fn handle_recv_error(&self, err: QspSessionError) -> io::Result<()> {

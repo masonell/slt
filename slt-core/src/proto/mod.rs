@@ -10,7 +10,7 @@ pub mod payloads;
 pub mod types;
 
 /// Frame encoding/decoding and frame types.
-pub use framing::{Frame, FrameError, HEADER_LEN, decode_frame, encode_frame};
+pub use framing::{Frame, FrameError, HEADER_LEN, OwnedMessageBuf, decode_frame, encode_frame};
 /// Message-level helpers and limits.
 pub use message::{Message, MessageError, MessageLimits, decode_message, encode_message};
 /// Payload schemas, constants, and codes.

@@ -10,37 +10,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_boring::SslStream;
 
 use crate::proto::{
-    Frame, FrameError, Message, MessageError, MessageLimits, MessageType, PayloadError,
+    FrameError, Message, MessageError, MessageLimits, MessageType, OwnedMessageBuf, PayloadError,
     decode_frame, encode_message,
 };
-
-/// An owned protocol frame buffer that can be reborrowed as a decoded `Message`.
-#[derive(Debug)]
-pub struct OwnedMessageBuf {
-    ty: MessageType,
-    buf: Vec<u8>,
-}
-
-impl OwnedMessageBuf {
-    /// Create an owned message buffer from a frame type and full frame bytes.
-    ///
-    /// `buf` must contain the 5-byte header plus payload bytes.
-    #[must_use]
-    pub const fn new(ty: MessageType, buf: Vec<u8>) -> Self {
-        Self { ty, buf }
-    }
-
-    /// Returns a decoded `Message` view into the owned frame buffer.
-    #[must_use]
-    pub fn message(&self) -> Message<'_> {
-        debug_assert!(self.buf.len() >= crate::proto::HEADER_LEN);
-        let payload = &self.buf[crate::proto::HEADER_LEN..];
-        Message::from(Frame {
-            ty: self.ty,
-            payload,
-        })
-    }
-}
 
 /// Hook invoked by `TcpChannel` before each outbound application message.
 pub trait KeyUpdater {

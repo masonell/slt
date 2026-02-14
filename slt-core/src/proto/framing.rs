@@ -1,3 +1,4 @@
+use super::message::Message;
 use super::types::MessageType;
 
 /// Frame header length: 1 byte type + 4 bytes length.
@@ -10,6 +11,34 @@ pub struct Frame<'a> {
     pub ty: MessageType,
     /// Frame payload bytes.
     pub payload: &'a [u8],
+}
+
+/// An owned protocol frame buffer that can be reborrowed as a decoded `Message`.
+#[derive(Debug)]
+pub struct OwnedMessageBuf {
+    ty: MessageType,
+    buf: Vec<u8>,
+}
+
+impl OwnedMessageBuf {
+    /// Create an owned message buffer from a frame type and full frame bytes.
+    ///
+    /// `buf` must contain the 5-byte header plus payload bytes.
+    #[must_use]
+    pub const fn new(ty: MessageType, buf: Vec<u8>) -> Self {
+        Self { ty, buf }
+    }
+
+    /// Returns a decoded `Message` view into the owned frame buffer.
+    #[must_use]
+    pub fn message(&self) -> Message<'_> {
+        debug_assert!(self.buf.len() >= HEADER_LEN);
+        let payload = &self.buf[HEADER_LEN..];
+        Message::from(Frame {
+            ty: self.ty,
+            payload,
+        })
+    }
 }
 
 /// Framing errors for encode/decode.

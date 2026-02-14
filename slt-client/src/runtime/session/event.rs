@@ -2,10 +2,9 @@
 
 use std::io;
 
-use slt_core::proto::CloseCode;
+use slt_core::proto::{CloseCode, OwnedMessageBuf};
 
 use super::quic;
-use crate::wire;
 
 /// Session termination reason used by the runtime to decide reconnect behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +21,7 @@ pub(super) enum SessionEvent {
     Shutdown,
     TcpRead(usize),
     TunPacket(Option<Vec<u8>>),
-    UdpResult(io::Result<wire::OwnedMessageBuf>),
+    UdpResult(io::Result<OwnedMessageBuf>),
     PingTick,
     IdleTimeout,
     UdpReconnectTick,
