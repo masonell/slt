@@ -204,7 +204,9 @@ Cipher suites:
 nonce: u64 (big-endian)
 ```
 
-`PONG` MUST echo the received `PING` nonce.
+`PONG` MUST echo the received `PING` nonce. Clients need not validate the
+nonce on receipt: transport security (TLS on TCP, AEAD on UDP-QSP) prevents
+injection, and a late PONG with a stale nonce still proves liveness.
 
 #### CLOSE payload (1 byte)
 
