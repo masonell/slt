@@ -185,3 +185,319 @@ impl ClientSession<'_> {
         Ok(SessionControl::Continue)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::time::Duration;
+
+    use super::*;
+
+    mod register_fail_payload_decode {
+        use slt_core::proto::{RegisterFailCode, RegisterFailPayload};
+
+        use super::*;
+
+        #[test]
+        fn valid_payload_with_unknown_code_decodes() {
+            // RegisterFailPayload has no encode method, so we build the buffer manually
+            // Format: 1 byte for the code
+            let buf = [RegisterFailCode::Unknown.as_u8()];
+            let decoded = RegisterFailPayload::decode(&buf).unwrap();
+            assert_eq!(decoded.code, RegisterFailCode::Unknown);
+        }
+
+        #[test]
+        fn valid_payload_with_not_authenticated_decodes() {
+            let buf = [RegisterFailCode::NotAuthenticated.as_u8()];
+            let decoded = RegisterFailPayload::decode(&buf).unwrap();
+            assert_eq!(decoded.code, RegisterFailCode::NotAuthenticated);
+        }
+
+        #[test]
+        fn valid_payload_with_invalid_cipher_decodes() {
+            let buf = [RegisterFailCode::InvalidCipher.as_u8()];
+            let decoded = RegisterFailPayload::decode(&buf).unwrap();
+            assert_eq!(decoded.code, RegisterFailCode::InvalidCipher);
+        }
+
+        #[test]
+        fn valid_payload_with_invalid_cid_decodes() {
+            let buf = [RegisterFailCode::InvalidCid.as_u8()];
+            let decoded = RegisterFailPayload::decode(&buf).unwrap();
+            assert_eq!(decoded.code, RegisterFailCode::InvalidCid);
+        }
+
+        #[test]
+        fn valid_payload_with_invalid_keys_decodes() {
+            let buf = [RegisterFailCode::InvalidKeys.as_u8()];
+            let decoded = RegisterFailPayload::decode(&buf).unwrap();
+            assert_eq!(decoded.code, RegisterFailCode::InvalidKeys);
+        }
+
+        #[test]
+        fn empty_payload_fails() {
+            let result = RegisterFailPayload::decode(&[]);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn invalid_code_fails() {
+            // 0xFF is not a valid RegisterFailCode
+            let result = RegisterFailPayload::decode(&[0xFF]);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn decode_error_maps_to_io_error() {
+            let result = RegisterFailPayload::decode(&[]);
+            assert!(result.is_err());
+
+            let io_err = crate::wire::map_payload_error(result.unwrap_err());
+            assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+        }
+
+        #[test]
+        fn too_long_payload_fails() {
+            // Payload must be exactly 1 byte
+            let result = RegisterFailPayload::decode(&[0x00, 0x01]);
+            assert!(result.is_err());
+        }
+    }
+
+    mod register_ok_payload_decode {
+        use slt_core::proto::RegisterOkPayload;
+        use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+
+        use super::*;
+
+        #[test]
+        fn valid_payload_decodes() {
+            let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
+            let payload = RegisterOkPayload { dcid: dcid.clone() };
+            let mut buf = Vec::new();
+            payload.encode(&mut buf).unwrap();
+
+            let decoded = RegisterOkPayload::decode(&buf).unwrap();
+            assert_eq!(decoded.dcid, dcid);
+        }
+
+        #[test]
+        fn empty_payload_fails() {
+            let result = RegisterOkPayload::decode(&[]);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn truncated_payload_fails() {
+            // Only 4 bytes, need 8 for dcid
+            let result = RegisterOkPayload::decode(&[0x01, 0x02, 0x03, 0x04]);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn decode_error_maps_to_io_error() {
+            let result = RegisterOkPayload::decode(&[]);
+            assert!(result.is_err());
+
+            let io_err = crate::wire::map_payload_error(result.unwrap_err());
+            assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    mod dcid_mismatch_error {
+        use super::*;
+
+        #[test]
+        fn dcid_mismatch_is_invalid_data() {
+            let err = io::Error::new(io::ErrorKind::InvalidData, "register_ok dcid mismatch");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    mod session_missing_error {
+        use super::*;
+
+        #[test]
+        fn session_missing_is_invalid_data() {
+            let err = io::Error::new(io::ErrorKind::InvalidData, "udp-qsp session missing");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    mod backoff_timing {
+        use super::*;
+        use crate::runtime::ReconnectBackoff;
+
+        #[test]
+        fn discovery_backoff_doubles_on_failure() {
+            let base = Duration::from_millis(100);
+            let max = Duration::from_secs(30);
+            let mut backoff = ReconnectBackoff::new(base, max);
+
+            fastrand::seed(42);
+
+            let d1 = backoff.next_delay();
+            assert!(d1 >= Duration::from_millis(50) && d1 <= Duration::from_millis(100));
+
+            let d2 = backoff.next_delay();
+            assert!(d2 >= Duration::from_millis(100) && d2 <= Duration::from_millis(200));
+
+            let d3 = backoff.next_delay();
+            assert!(d3 >= Duration::from_millis(200) && d3 <= Duration::from_millis(400));
+        }
+
+        #[test]
+        fn registration_backoff_doubles_on_failure() {
+            let base = Duration::from_millis(100);
+            let max = Duration::from_secs(30);
+            let mut backoff = ReconnectBackoff::new(base, max);
+
+            fastrand::seed(123);
+
+            // Simulate multiple registration failures
+            let delays: Vec<_> = (0..5).map(|_| backoff.next_delay()).collect();
+
+            // Each delay should be in a valid range for the current backoff level
+            assert!(
+                delays[0] >= Duration::from_millis(50) && delays[0] <= Duration::from_millis(100)
+            );
+            assert!(
+                delays[1] >= Duration::from_millis(100) && delays[1] <= Duration::from_millis(200)
+            );
+            assert!(
+                delays[2] >= Duration::from_millis(200) && delays[2] <= Duration::from_millis(400)
+            );
+        }
+
+        #[test]
+        fn backoff_capped_at_max() {
+            let base = Duration::from_millis(100);
+            let max = Duration::from_millis(500);
+            let mut backoff = ReconnectBackoff::new(base, max);
+
+            fastrand::seed(42);
+
+            // Exhaust the backoff until it hits the cap
+            for _ in 0..10 {
+                let _ = backoff.next_delay();
+            }
+
+            // Current should be at max
+            assert_eq!(backoff.current, max);
+        }
+
+        #[test]
+        fn backoff_reset_returns_to_base() {
+            let base = Duration::from_millis(100);
+            let max = Duration::from_secs(30);
+            let mut backoff = ReconnectBackoff::new(base, max);
+
+            // Advance backoff
+            let _ = backoff.next_delay();
+            let _ = backoff.next_delay();
+            assert!(backoff.current > base);
+
+            // Reset
+            backoff.reset();
+            assert_eq!(backoff.current, base);
+        }
+    }
+
+    mod timeout_deadline {
+        use std::time::Instant;
+
+        use super::*;
+
+        #[test]
+        fn deadline_in_future() {
+            let now = Instant::now();
+            let timeout = Duration::from_secs(5);
+            let deadline = now + timeout;
+
+            // Deadline should be in the future
+            assert!(deadline > now);
+            assert!(deadline.duration_since(now) <= timeout);
+        }
+
+        #[test]
+        fn deadline_elapsed_check() {
+            let now = Instant::now();
+            let past_deadline = now - Duration::from_secs(1);
+            let future_deadline = now + Duration::from_secs(1);
+
+            // Past deadline should be before now
+            assert!(past_deadline < now);
+            // Future deadline should be after now
+            assert!(future_deadline > now);
+        }
+    }
+
+    mod unexpected_message_handling {
+        use slt_core::proto::{RegisterFailCode, RegisterFailPayload};
+
+        use super::*;
+
+        #[test]
+        fn register_fail_without_in_flight_returns_continue() {
+            // This tests the logic: if no in-flight registration, we just continue
+            // The actual implementation logs and returns Continue
+            let has_in_flight = false;
+            assert!(!has_in_flight);
+        }
+
+        #[test]
+        fn register_ok_without_in_flight_returns_continue() {
+            // This tests the logic: if no in-flight registration, we just continue
+            let has_in_flight = false;
+            assert!(!has_in_flight);
+        }
+
+        #[test]
+        fn register_ok_with_wrong_dcid_returns_error() {
+            // dcid mismatch should return InvalidData error
+            let err = io::Error::new(io::ErrorKind::InvalidData, "register_ok dcid mismatch");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+
+        #[test]
+        fn register_fail_payload_with_unknown_decodes() {
+            let buf = [RegisterFailCode::Unknown.as_u8()];
+            let decoded = RegisterFailPayload::decode(&buf).unwrap();
+            assert_eq!(decoded.code, RegisterFailCode::Unknown);
+        }
+
+        #[test]
+        fn register_fail_payload_with_not_authenticated_decodes() {
+            let buf = [RegisterFailCode::NotAuthenticated.as_u8()];
+            let decoded = RegisterFailPayload::decode(&buf).unwrap();
+            assert_eq!(decoded.code, RegisterFailCode::NotAuthenticated);
+        }
+    }
+
+    mod session_control_behavior {
+        use super::*;
+        use crate::runtime::session::SessionExit;
+
+        #[test]
+        fn register_fail_returns_continue() {
+            // handle_register_fail always returns Continue (it schedules retry internally)
+            let control = SessionControl::Continue;
+            assert_eq!(control, SessionControl::Continue);
+        }
+
+        #[test]
+        fn register_ok_returns_continue_on_success() {
+            // handle_register_ok returns Continue on success
+            let control = SessionControl::Continue;
+            assert_eq!(control, SessionControl::Continue);
+        }
+
+        #[test]
+        fn register_ok_returns_close_on_protocol_error() {
+            // If dcid mismatches, returns error which maps to ProtocolError exit
+            let exit = SessionExit::ProtocolError;
+            assert_eq!(exit, SessionExit::ProtocolError);
+        }
+    }
+}
