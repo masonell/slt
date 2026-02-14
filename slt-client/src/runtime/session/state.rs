@@ -85,3 +85,95 @@ pub(super) enum ActiveTransport {
     Tcp,
     UdpQsp,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod active_transport {
+        use super::*;
+
+        #[test]
+        fn tcp_is_tcp() {
+            assert_eq!(ActiveTransport::Tcp, ActiveTransport::Tcp);
+        }
+
+        #[test]
+        fn udp_qsp_is_udp_qsp() {
+            assert_eq!(ActiveTransport::UdpQsp, ActiveTransport::UdpQsp);
+        }
+
+        #[test]
+        fn tcp_is_not_udp_qsp() {
+            assert_ne!(ActiveTransport::Tcp, ActiveTransport::UdpQsp);
+        }
+
+        #[test]
+        fn variants_are_debug_clone_copy() {
+            let tcp = ActiveTransport::Tcp;
+            let _tcp_copy: ActiveTransport = tcp;
+            assert!(format!("{tcp:?}").contains("Tcp"));
+        }
+    }
+
+    mod udp_state {
+        use std::time::{Duration, Instant};
+
+        use super::*;
+
+        #[test]
+        fn disabled_is_not_waiting() {
+            let state = UdpState::Disabled;
+            assert!(!state.is_waiting());
+        }
+
+        #[test]
+        fn disabled_has_no_reconnect_at() {
+            let state = UdpState::Disabled;
+            assert!(state.reconnect_at().is_none());
+        }
+
+        #[test]
+        fn disabled_has_no_register_deadline() {
+            let state = UdpState::Disabled;
+            assert!(state.register_deadline().is_none());
+        }
+
+        #[test]
+        fn disabled_has_no_active_transport() {
+            let state = UdpState::Disabled;
+            assert!(state.as_active().is_none());
+        }
+
+        #[test]
+        fn need_discovery_is_waiting() {
+            let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
+            let state = UdpState::NeedDiscovery {
+                backoff,
+                reconnect_at: Instant::now(),
+            };
+            assert!(state.is_waiting());
+        }
+
+        #[test]
+        fn need_discovery_has_reconnect_at() {
+            let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
+            let reconnect_at = Instant::now();
+            let state = UdpState::NeedDiscovery {
+                backoff,
+                reconnect_at,
+            };
+            assert_eq!(state.reconnect_at(), Some(reconnect_at));
+        }
+
+        #[test]
+        fn need_discovery_has_no_register_deadline() {
+            let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
+            let state = UdpState::NeedDiscovery {
+                backoff,
+                reconnect_at: Instant::now(),
+            };
+            assert!(state.register_deadline().is_none());
+        }
+    }
+}

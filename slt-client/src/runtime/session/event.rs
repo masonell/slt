@@ -77,3 +77,101 @@ pub(super) enum SessionControl {
     /// Close the session with the specified exit reason.
     Close(SessionExit),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod session_exit {
+        use super::*;
+
+        #[test]
+        fn variants_are_debug_clone_copy() {
+            let shutdown = SessionExit::Shutdown;
+            let _shutdown_copy: SessionExit = shutdown;
+            assert!(format!("{shutdown:?}").contains("Shutdown"));
+        }
+
+        #[test]
+        fn shutdown_is_shutdown() {
+            assert_eq!(SessionExit::Shutdown, SessionExit::Shutdown);
+        }
+
+        #[test]
+        fn tcp_closed_is_tcp_closed() {
+            assert_eq!(SessionExit::TcpClosed, SessionExit::TcpClosed);
+        }
+
+        #[test]
+        fn tun_closed_is_tun_closed() {
+            assert_eq!(SessionExit::TunClosed, SessionExit::TunClosed);
+        }
+
+        #[test]
+        fn idle_timeout_is_idle_timeout() {
+            assert_eq!(SessionExit::IdleTimeout, SessionExit::IdleTimeout);
+        }
+
+        #[test]
+        fn remote_close_carries_close_code() {
+            use slt_core::proto::CloseCode;
+
+            let close = SessionExit::RemoteClose(CloseCode::Normal);
+            assert_eq!(close, SessionExit::RemoteClose(CloseCode::Normal));
+            assert_ne!(close, SessionExit::RemoteClose(CloseCode::ProtocolError));
+        }
+
+        #[test]
+        fn protocol_error_is_protocol_error() {
+            assert_eq!(SessionExit::ProtocolError, SessionExit::ProtocolError);
+        }
+
+        #[test]
+        fn permission_denied_is_permission_denied() {
+            assert_eq!(SessionExit::PermissionDenied, SessionExit::PermissionDenied);
+        }
+
+        #[test]
+        fn connection_error_is_connection_error() {
+            assert_eq!(SessionExit::ConnectionError, SessionExit::ConnectionError);
+        }
+
+        #[test]
+        fn different_variants_are_not_equal() {
+            assert_ne!(SessionExit::Shutdown, SessionExit::TcpClosed);
+            assert_ne!(SessionExit::TcpClosed, SessionExit::TunClosed);
+            assert_ne!(SessionExit::IdleTimeout, SessionExit::ProtocolError);
+        }
+    }
+
+    mod session_control {
+        use super::*;
+
+        #[test]
+        fn continue_is_continue() {
+            assert_eq!(SessionControl::Continue, SessionControl::Continue);
+        }
+
+        #[test]
+        fn close_carries_session_exit() {
+            let control = SessionControl::Close(SessionExit::Shutdown);
+            assert_eq!(control, SessionControl::Close(SessionExit::Shutdown));
+            assert_ne!(control, SessionControl::Close(SessionExit::TcpClosed));
+        }
+
+        #[test]
+        fn continue_is_not_close() {
+            assert_ne!(
+                SessionControl::Continue,
+                SessionControl::Close(SessionExit::Shutdown)
+            );
+        }
+
+        #[test]
+        fn variants_are_debug_clone_copy() {
+            let control = SessionControl::Continue;
+            let _control_copy: SessionControl = control;
+            assert!(format!("{control:?}").contains("Continue"));
+        }
+    }
+}
