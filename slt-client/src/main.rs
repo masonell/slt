@@ -18,6 +18,9 @@ mod transport;
 mod tun;
 mod wire;
 
+#[cfg(test)]
+mod test_support;
+
 #[derive(Parser, Debug)]
 #[command(about = "Run the SLT client.")]
 struct Args {

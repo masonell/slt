@@ -115,29 +115,11 @@ fn random_array<const N: usize>() -> io::Result<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-
     use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
-    use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
-    use tokio::net::UdpSocket;
+    use slt_core::types::QUIC_DCID_PREFIX_LEN;
 
     use super::*;
-    use crate::transport::quic_discovery::QuicIds;
-
-    /// Create a mock QuicIds for testing without network I/O.
-    async fn mock_quic_ids() -> QuicIds {
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-        let peer: SocketAddr = "127.0.0.1:443".parse().unwrap();
-        QuicIds {
-            dcid,
-            scid,
-            peer,
-            socket,
-        }
-    }
+    use crate::test_support::mock_quic_ids;
 
     #[tokio::test]
     async fn prepare_registration_returns_valid_structure() {

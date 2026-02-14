@@ -163,45 +163,10 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use ed25519_dalek::{Signature, Verifier};
-    use slt_core::types::{
-        ClientId, ClientIdentity, ClientNetworkConfig, ClientTimingConfig, ClientTlsConfig,
-        PrivKeyEd25519, SharedSecret, TlsMaterial, TunConfig,
-    };
+    use slt_core::types::{ClientId, PrivKeyEd25519};
 
     use super::*;
-
-    fn make_config(client_id: ClientId, ipv4: Ipv4Addr, privkey: PrivKeyEd25519) -> ClientConfig {
-        ClientConfig {
-            network: ClientNetworkConfig {
-                hostname: "example.com".to_string(),
-                port: 443,
-                ip: None,
-            },
-            tls: ClientTlsConfig {
-                tls_ca: TlsMaterial::Pem(String::new()),
-            },
-            identity: ClientIdentity {
-                client_id,
-                shared_secret: SharedSecret([0x22; 32]),
-                assigned_ipv4: ipv4,
-                privkey_ed25519: privkey,
-            },
-            tun: TunConfig {
-                tun_name: "tun0".to_string(),
-                tun_mtu: 1280,
-            },
-            enable_upgrade: false,
-            timing: ClientTimingConfig {
-                ping_min: std::time::Duration::from_secs(10),
-                ping_max: std::time::Duration::from_secs(20),
-                auth_timeout: std::time::Duration::from_secs(10),
-                register_timeout: std::time::Duration::from_secs(10),
-                idle_timeout: std::time::Duration::from_secs(60),
-                reconnect_min: std::time::Duration::from_millis(200),
-                reconnect_max: std::time::Duration::from_secs(5),
-            },
-        }
-    }
+    use crate::test_support::test_config_with_identity;
 
     fn verify_signature(
         payload: &AuthPayload,
@@ -219,7 +184,7 @@ mod tests {
 
     #[test]
     fn auth_payload_roundtrip_and_signature_verifies() {
-        let config = make_config(
+        let config = test_config_with_identity(
             ClientId([0x11; 16]),
             Ipv4Addr::new(10, 10, 0, 2),
             PrivKeyEd25519([0x33; 32]),
@@ -254,7 +219,7 @@ mod tests {
         ];
 
         for (client_id, desc) in test_cases {
-            let config = make_config(
+            let config = test_config_with_identity(
                 client_id,
                 Ipv4Addr::new(10, 10, 0, 2),
                 PrivKeyEd25519([0x33; 32]),
@@ -281,7 +246,8 @@ mod tests {
         ];
 
         for (ipv4, desc) in test_cases {
-            let config = make_config(ClientId([0x11; 16]), ipv4, PrivKeyEd25519([0x33; 32]));
+            let config =
+                test_config_with_identity(ClientId([0x11; 16]), ipv4, PrivKeyEd25519([0x33; 32]));
             let challenge = [0x44; AUTH_CHALLENGE_LEN];
             let payload = build_auth_payload(&config, challenge);
 
@@ -302,7 +268,7 @@ mod tests {
         ];
 
         for (challenge, desc) in test_cases {
-            let config = make_config(
+            let config = test_config_with_identity(
                 ClientId([0x11; 16]),
                 Ipv4Addr::new(10, 10, 0, 2),
                 PrivKeyEd25519([0x33; 32]),
@@ -319,7 +285,7 @@ mod tests {
 
     #[test]
     fn auth_payload_signature_fails_with_wrong_verifying_key() {
-        let config = make_config(
+        let config = test_config_with_identity(
             ClientId([0x11; 16]),
             Ipv4Addr::new(10, 10, 0, 2),
             PrivKeyEd25519([0x33; 32]),
@@ -341,7 +307,7 @@ mod tests {
 
     #[test]
     fn auth_payload_signature_fails_with_tampered_signature() {
-        let config = make_config(
+        let config = test_config_with_identity(
             ClientId([0x11; 16]),
             Ipv4Addr::new(10, 10, 0, 2),
             PrivKeyEd25519([0x33; 32]),
@@ -359,7 +325,7 @@ mod tests {
 
     #[test]
     fn auth_payload_signature_fails_with_tampered_challenge() {
-        let config = make_config(
+        let config = test_config_with_identity(
             ClientId([0x11; 16]),
             Ipv4Addr::new(10, 10, 0, 2),
             PrivKeyEd25519([0x33; 32]),
@@ -379,7 +345,7 @@ mod tests {
 
     #[test]
     fn auth_payload_signature_fails_with_tampered_client_id() {
-        let config = make_config(
+        let config = test_config_with_identity(
             ClientId([0x11; 16]),
             Ipv4Addr::new(10, 10, 0, 2),
             PrivKeyEd25519([0x33; 32]),
@@ -400,7 +366,7 @@ mod tests {
 
     #[test]
     fn auth_payload_signature_fails_with_tampered_ipv4() {
-        let config = make_config(
+        let config = test_config_with_identity(
             ClientId([0x11; 16]),
             Ipv4Addr::new(10, 10, 0, 2),
             PrivKeyEd25519([0x33; 32]),

@@ -178,34 +178,14 @@ mod tests {
     }
 
     mod pending_state {
-        use std::sync::Arc;
         use std::time::{Duration, Instant};
 
-        use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
-        use tokio::net::UdpSocket;
-
         use super::*;
-        use crate::transport::quic_discovery::QuicIds;
-
-        fn mock_quic_ids() -> QuicIds {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-                let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-                let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-                let peer = "127.0.0.1:443".parse().unwrap();
-                QuicIds {
-                    dcid,
-                    scid,
-                    peer,
-                    socket,
-                }
-            })
-        }
+        use crate::test_support::mock_quic_ids_sync;
 
         fn make_pending_state_without_registration() -> UdpState {
             let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             UdpState::Pending {
                 quic_ids,
                 backoff,
@@ -224,7 +204,7 @@ mod tests {
         fn pending_without_registration_has_reconnect_at() {
             let reconnect_at = Instant::now();
             let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             let state = UdpState::Pending {
                 quic_ids,
                 backoff,
@@ -249,7 +229,7 @@ mod tests {
         #[test]
         fn pending_with_registration_is_not_waiting() {
             let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
                 crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
@@ -270,7 +250,7 @@ mod tests {
         #[test]
         fn pending_with_registration_has_no_reconnect_at() {
             let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
                 crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
@@ -292,7 +272,7 @@ mod tests {
         fn pending_with_registration_has_register_deadline() {
             let deadline = Instant::now() + Duration::from_secs(5);
             let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
                 crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
@@ -310,7 +290,7 @@ mod tests {
         #[test]
         fn pending_with_registration_has_no_active_transport() {
             let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
                 crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
@@ -411,24 +391,8 @@ mod tests {
 
         use super::*;
         use crate::metrics::Metrics;
-        use crate::transport::quic_discovery::QuicIds;
+        use crate::test_support::mock_quic_ids_sync;
         use crate::transport::udp_qsp::ClientTransport;
-
-        fn mock_quic_ids() -> QuicIds {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-                let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-                let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-                let peer = "127.0.0.1:443".parse().unwrap();
-                QuicIds {
-                    dcid,
-                    scid,
-                    peer,
-                    socket,
-                }
-            })
-        }
 
         #[test]
         fn need_discovery_to_pending_transition() {
@@ -445,7 +409,7 @@ mod tests {
             assert!(initial_state.register_deadline().is_none());
 
             // After discovery success, state becomes Pending with fresh backoff
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             let new_backoff =
                 ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
             let new_state = UdpState::Pending {
@@ -465,7 +429,7 @@ mod tests {
         fn pending_to_active_transition() {
             // Simulate registration success: Pending -> Active
             let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             let initial_state = UdpState::Pending {
                 quic_ids,
                 backoff,
@@ -515,7 +479,7 @@ mod tests {
         fn pending_retry_clears_registration() {
             // Simulate registration failure: Pending with registration -> Pending without
             let backoff = ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30));
-            let quic_ids = mock_quic_ids();
+            let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
                 crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
@@ -526,7 +490,7 @@ mod tests {
             }));
 
             let state_before = UdpState::Pending {
-                quic_ids: mock_quic_ids(),
+                quic_ids: mock_quic_ids_sync(),
                 backoff,
                 reconnect_at: Instant::now(),
                 registration,
@@ -538,7 +502,7 @@ mod tests {
 
             // After retry scheduling: registration cleared, waiting again
             let state_after = UdpState::Pending {
-                quic_ids: mock_quic_ids(),
+                quic_ids: mock_quic_ids_sync(),
                 backoff: ReconnectBackoff::new(Duration::from_secs(1), Duration::from_secs(30)),
                 reconnect_at: Instant::now() + Duration::from_secs(2),
                 registration: None,
