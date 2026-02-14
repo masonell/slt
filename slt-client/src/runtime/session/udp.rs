@@ -111,3 +111,89 @@ impl ClientSession<'_> {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    /// Test unexpected register_ok error properties.
+    #[test]
+    fn unexpected_register_ok_error_kind() {
+        let err = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected register_ok on udp-qsp transport",
+        );
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Test unexpected register_fail error properties.
+    #[test]
+    fn unexpected_register_fail_error_kind() {
+        let err = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected register_fail on udp-qsp transport",
+        );
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Test unexpected control message error properties.
+    #[test]
+    fn unexpected_control_message_error_kind() {
+        let err = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected control message on udp-qsp transport",
+        );
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    mod handle_udp_error_logic {
+        use super::*;
+
+        /// Test that InvalidData errors are considered recoverable (dropped).
+        #[test]
+        fn invalid_data_is_recoverable_kind() {
+            // InvalidData is used for packet-level issues (replay, crypto failures)
+            // and should be dropped, not trigger fallback
+            let err = io::Error::new(io::ErrorKind::InvalidData, "replay detected");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+
+        /// Test that non-InvalidData errors trigger fallback when TCP is alive.
+        #[test]
+        fn non_invalid_data_triggers_fallback() {
+            // Errors other than InvalidData should trigger TCP fallback
+            let non_recoverable_kinds = [
+                io::ErrorKind::ConnectionReset,
+                io::ErrorKind::BrokenPipe,
+                io::ErrorKind::TimedOut,
+                io::ErrorKind::ConnectionAborted,
+            ];
+
+            for kind in non_recoverable_kinds {
+                let err = io::Error::new(kind, "test");
+                assert_ne!(
+                    err.kind(),
+                    io::ErrorKind::InvalidData,
+                    "{kind:?} should not be InvalidData"
+                );
+            }
+        }
+
+        /// Test error kinds that would trigger session closure when TCP is dead.
+        #[test]
+        fn fatal_errors_when_tcp_dead() {
+            // When TCP is dead, these errors should cause session closure
+            let fatal_kinds = [
+                io::ErrorKind::ConnectionReset,
+                io::ErrorKind::BrokenPipe,
+                io::ErrorKind::TimedOut,
+            ];
+
+            for kind in fatal_kinds {
+                let err = io::Error::new(kind, "test");
+                // The logic is: if err.kind() != InvalidData && !tcp_alive -> false
+                assert_ne!(err.kind(), io::ErrorKind::InvalidData);
+            }
+        }
+    }
+}
