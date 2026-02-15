@@ -1,5 +1,7 @@
 use std::net::Ipv4Addr;
 
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+
 use crate::types::{Cid, ClientId, MAX_DCID_LEN, QUIC_DCID_PREFIX_LEN};
 /// Length of the authentication challenge in bytes.
 pub const AUTH_CHALLENGE_LEN: usize = 32;
@@ -19,7 +21,7 @@ pub const PING_PAYLOAD_LEN: usize = 8;
 pub const CLOSE_PAYLOAD_LEN: usize = 1;
 
 /// Cipher identifiers for UDP-QSP payload protection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum CipherSuite {
     /// AES-128-GCM.
@@ -28,26 +30,8 @@ pub enum CipherSuite {
     ChaCha20Poly1305 = 0x02,
 }
 
-impl CipherSuite {
-    /// Convert a wire byte into a cipher suite, if known.
-    #[must_use]
-    pub const fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0x01 => Some(Self::Aes128Gcm),
-            0x02 => Some(Self::ChaCha20Poly1305),
-            _ => None,
-        }
-    }
-
-    /// Return the wire byte for this cipher suite.
-    #[must_use]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
-}
-
 /// Authentication failure reasons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum AuthFailCode {
     /// Unspecified failure.
@@ -64,30 +48,8 @@ pub enum AuthFailCode {
     ChallengeInvalid = 0x05,
 }
 
-impl AuthFailCode {
-    /// Convert a wire byte into an auth failure code.
-    #[must_use]
-    pub const fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0x00 => Some(Self::Unknown),
-            0x01 => Some(Self::UnknownClient),
-            0x02 => Some(Self::Disabled),
-            0x03 => Some(Self::BadSignature),
-            0x04 => Some(Self::IpMismatch),
-            0x05 => Some(Self::ChallengeInvalid),
-            _ => None,
-        }
-    }
-
-    /// Return the wire byte for this failure code.
-    #[must_use]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
-}
-
 /// Register-CID failure reasons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum RegisterFailCode {
     /// Unspecified failure.
@@ -102,29 +64,8 @@ pub enum RegisterFailCode {
     InvalidKeys = 0x04,
 }
 
-impl RegisterFailCode {
-    /// Convert a wire byte into a register failure code.
-    #[must_use]
-    pub const fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0x00 => Some(Self::Unknown),
-            0x01 => Some(Self::NotAuthenticated),
-            0x02 => Some(Self::InvalidCipher),
-            0x03 => Some(Self::InvalidCid),
-            0x04 => Some(Self::InvalidKeys),
-            _ => None,
-        }
-    }
-
-    /// Return the wire byte for this failure code.
-    #[must_use]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
-}
-
 /// Close reasons for terminating a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum CloseCode {
     /// Normal shutdown.
@@ -137,27 +78,6 @@ pub enum CloseCode {
     ProtocolError = 0x03,
     /// Server shutdown or restart.
     ServerRestart = 0x04,
-}
-
-impl CloseCode {
-    /// Convert a wire byte into a close reason code.
-    #[must_use]
-    pub const fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0x00 => Some(Self::Normal),
-            0x01 => Some(Self::AuthTimeout),
-            0x02 => Some(Self::IdleTimeout),
-            0x03 => Some(Self::ProtocolError),
-            0x04 => Some(Self::ServerRestart),
-            _ => None,
-        }
-    }
-
-    /// Return the wire byte for this close reason.
-    #[must_use]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
 }
 
 /// Authentication message payload.
@@ -266,14 +186,14 @@ impl AuthFailPayload {
                 actual: payload.len(),
             });
         }
-        let code = AuthFailCode::from_u8(payload[0])
-            .ok_or(PayloadError::InvalidAuthFailCode(payload[0]))?;
+        let code = AuthFailCode::try_from(payload[0])
+            .map_err(|_| PayloadError::InvalidAuthFailCode(payload[0]))?;
         Ok(Self { code })
     }
 
     /// Encode an `AUTH_FAIL` payload.
     pub fn encode(&self, out: &mut Vec<u8>) {
-        out.push(self.code.as_u8());
+        out.push(u8::from(self.code));
     }
 }
 
@@ -383,8 +303,8 @@ impl RegisterCidPayload {
         let scid = Cid::try_from(&payload[offset..offset + scid_len])
             .map_err(|_| PayloadError::InvalidScidLen(scid_len))?;
         offset += scid_len;
-        let cipher = CipherSuite::from_u8(payload[offset])
-            .ok_or(PayloadError::InvalidCipher(payload[offset]))?;
+        let cipher = CipherSuite::try_from(payload[offset])
+            .map_err(|_| PayloadError::InvalidCipher(payload[offset]))?;
         offset += 1;
         let mut hp_tx = [0u8; HP_KEY_LEN];
         hp_tx.copy_from_slice(&payload[offset..offset + HP_KEY_LEN]);
@@ -455,7 +375,7 @@ impl RegisterCidPayload {
         let scid_len = self.scid.len() as u8; // bounded by MAX_DCID_LEN (<= 20)
         out.push(scid_len);
         out.extend_from_slice(self.scid.as_slice());
-        out.push(self.cipher.as_u8());
+        out.push(u8::from(self.cipher));
         out.extend_from_slice(&self.hp_tx);
         out.extend_from_slice(&self.hp_rx);
         out.extend_from_slice(&self.aead_tx);
@@ -551,14 +471,14 @@ impl RegisterFailPayload {
                 actual: payload.len(),
             });
         }
-        let code = RegisterFailCode::from_u8(payload[0])
-            .ok_or(PayloadError::InvalidRegisterFailCode(payload[0]))?;
+        let code = RegisterFailCode::try_from(payload[0])
+            .map_err(|_| PayloadError::InvalidRegisterFailCode(payload[0]))?;
         Ok(Self { code })
     }
 
     /// Encode a `REGISTER_FAIL` payload.
     pub fn encode(&self, out: &mut Vec<u8>) {
-        out.push(self.code.as_u8());
+        out.push(u8::from(self.code));
     }
 }
 
@@ -652,14 +572,14 @@ impl ClosePayload {
                 actual: payload.len(),
             });
         }
-        let code =
-            CloseCode::from_u8(payload[0]).ok_or(PayloadError::InvalidCloseCode(payload[0]))?;
+        let code = CloseCode::try_from(payload[0])
+            .map_err(|_| PayloadError::InvalidCloseCode(payload[0]))?;
         Ok(Self { code })
     }
 
     /// Encode a CLOSE payload.
     pub fn encode(&self, out: &mut Vec<u8>) {
-        out.push(self.code.as_u8());
+        out.push(u8::from(self.code));
     }
 }
 

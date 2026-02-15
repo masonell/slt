@@ -77,7 +77,7 @@ pub fn decode_frame(
         return Ok(None);
     }
 
-    let ty = MessageType::from_u8(buf[0]).ok_or(FrameError::UnknownType(buf[0]))?;
+    let ty = MessageType::try_from(buf[0]).map_err(|_| FrameError::UnknownType(buf[0]))?;
     let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
     if len > max_len {
         return Err(FrameError::LengthTooLarge { len, max: max_len });
@@ -107,7 +107,7 @@ pub fn encode_frame(ty: MessageType, payload: &[u8], out: &mut Vec<u8>) -> Resul
     let len_u32 = u32::try_from(len).map_err(|_| FrameError::LengthOverflow(len))?;
 
     out.reserve(HEADER_LEN + len);
-    out.push(ty.as_u8());
+    out.push(u8::from(ty));
     out.extend_from_slice(&len_u32.to_be_bytes());
     out.extend_from_slice(payload);
     Ok(())
@@ -131,14 +131,14 @@ mod tests {
 
     #[test]
     fn decode_incomplete_header() {
-        let buf = [MessageType::Auth.as_u8(), 0x00];
+        let buf = [u8::from(MessageType::Auth), 0x00];
         assert!(decode_frame(&buf, 1024).unwrap().is_none());
     }
 
     #[test]
     fn decode_incomplete_payload() {
         let buf = [
-            MessageType::Auth.as_u8(),
+            u8::from(MessageType::Auth),
             0x00,
             0x00,
             0x00,
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn decode_length_too_large() {
-        let buf = [MessageType::Auth.as_u8(), 0x00, 0x00, 0x10, 0x00];
+        let buf = [u8::from(MessageType::Auth), 0x00, 0x00, 0x10, 0x00];
         assert_eq!(
             decode_frame(&buf, 1024),
             Err(FrameError::LengthTooLarge {

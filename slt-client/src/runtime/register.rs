@@ -195,7 +195,7 @@ mod tests {
 
         // Verify cipher byte (AES-128-GCM = 0x01)
         let cipher_offset = scid_offset + scid_len;
-        assert_eq!(payload[cipher_offset], CipherSuite::Aes128Gcm.as_u8());
+        assert_eq!(payload[cipher_offset], u8::from(CipherSuite::Aes128Gcm));
     }
 
     #[tokio::test]

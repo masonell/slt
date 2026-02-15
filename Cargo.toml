@@ -30,6 +30,7 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
 tun-rs = { version = "2.7.8", features = ["async_tokio"] }
 thiserror = "2.0"
 anyhow = "1.0"
+num_enum = "0.7"
 
 slt-core = { path = "slt-core" }
 

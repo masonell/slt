@@ -202,35 +202,35 @@ mod tests {
         fn valid_payload_with_unknown_code_decodes() {
             // RegisterFailPayload has no encode method, so we build the buffer manually
             // Format: 1 byte for the code
-            let buf = [RegisterFailCode::Unknown.as_u8()];
+            let buf = [u8::from(RegisterFailCode::Unknown)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::Unknown);
         }
 
         #[test]
         fn valid_payload_with_not_authenticated_decodes() {
-            let buf = [RegisterFailCode::NotAuthenticated.as_u8()];
+            let buf = [u8::from(RegisterFailCode::NotAuthenticated)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::NotAuthenticated);
         }
 
         #[test]
         fn valid_payload_with_invalid_cipher_decodes() {
-            let buf = [RegisterFailCode::InvalidCipher.as_u8()];
+            let buf = [u8::from(RegisterFailCode::InvalidCipher)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::InvalidCipher);
         }
 
         #[test]
         fn valid_payload_with_invalid_cid_decodes() {
-            let buf = [RegisterFailCode::InvalidCid.as_u8()];
+            let buf = [u8::from(RegisterFailCode::InvalidCid)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::InvalidCid);
         }
 
         #[test]
         fn valid_payload_with_invalid_keys_decodes() {
-            let buf = [RegisterFailCode::InvalidKeys.as_u8()];
+            let buf = [u8::from(RegisterFailCode::InvalidKeys)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::InvalidKeys);
         }
@@ -462,14 +462,14 @@ mod tests {
 
         #[test]
         fn register_fail_payload_with_unknown_decodes() {
-            let buf = [RegisterFailCode::Unknown.as_u8()];
+            let buf = [u8::from(RegisterFailCode::Unknown)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::Unknown);
         }
 
         #[test]
         fn register_fail_payload_with_not_authenticated_decodes() {
-            let buf = [RegisterFailCode::NotAuthenticated.as_u8()];
+            let buf = [u8::from(RegisterFailCode::NotAuthenticated)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::NotAuthenticated);
         }

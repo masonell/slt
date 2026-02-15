@@ -391,7 +391,7 @@ mod tests {
             ];
 
             for (code, _name) in codes {
-                let buf = [code.as_u8()];
+                let buf = [u8::from(code)];
                 let decoded = RegisterFailPayload::decode(&buf).unwrap();
                 assert_eq!(decoded.code, code);
             }
