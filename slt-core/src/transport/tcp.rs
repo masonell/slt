@@ -76,6 +76,28 @@ impl IntervalKeyUpdater {
     pub const fn requests_peer_update(&self) -> bool {
         self.request_peer_update
     }
+
+    /// Simulate a message tick without triggering actual TLS key update.
+    ///
+    /// Returns `true` when the countdown reaches zero (an update would be triggered).
+    /// This is primarily for testing the countdown logic.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn tick(&mut self) -> bool {
+        if self.until_update > 1 {
+            self.until_update -= 1;
+            false
+        } else {
+            self.until_update = self.interval.get();
+            true
+        }
+    }
+
+    /// Reset the countdown to the initial interval.
+    #[cfg(test)]
+    pub const fn reset(&mut self) {
+        self.until_update = self.interval.get();
+    }
 }
 
 impl KeyUpdater for IntervalKeyUpdater {
@@ -445,5 +467,84 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.key_updater().calls, 2);
+    }
+
+    #[test]
+    fn interval_key_updater_counts_down() {
+        let mut updater = IntervalKeyUpdater::new(NonZeroU64::new(5).unwrap());
+        assert_eq!(updater.messages_until_update(), 5);
+
+        // Each tick decrements until_update when > 1
+        assert!(!updater.tick()); // 5 -> 4
+        assert_eq!(updater.messages_until_update(), 4);
+        assert!(!updater.tick()); // 4 -> 3
+        assert_eq!(updater.messages_until_update(), 3);
+    }
+
+    #[test]
+    fn interval_key_updater_triggers_at_zero() {
+        let mut updater = IntervalKeyUpdater::new(NonZeroU64::new(3).unwrap());
+        assert_eq!(updater.messages_until_update(), 3);
+
+        assert!(!updater.tick()); // 3 -> 2
+        assert!(!updater.tick()); // 2 -> 1
+        assert!(updater.tick()); // triggers update, resets to 3
+        assert_eq!(updater.messages_until_update(), 3);
+    }
+
+    #[test]
+    fn interval_key_updater_reset_restores_interval() {
+        let mut updater = IntervalKeyUpdater::new(NonZeroU64::new(10).unwrap());
+        assert_eq!(updater.messages_until_update(), 10);
+
+        // Tick down a few times (ignore return value, we're testing reset)
+        let _ = updater.tick();
+        let _ = updater.tick();
+        let _ = updater.tick();
+        assert_eq!(updater.messages_until_update(), 7);
+
+        // Reset should restore to initial interval
+        updater.reset();
+        assert_eq!(updater.messages_until_update(), 10);
+    }
+
+    #[test]
+    fn interval_key_updater_peer_response_config() {
+        let updater = IntervalKeyUpdater::new(NonZeroU64::new(100).unwrap());
+        assert!(!updater.requests_peer_update());
+
+        let updater_with_peer = IntervalKeyUpdater::new(NonZeroU64::new(100).unwrap())
+            .with_peer_response_requested(true);
+        assert!(updater_with_peer.requests_peer_update());
+    }
+
+    #[test]
+    fn map_frame_error_produces_correct_message() {
+        let err = FrameError::UnknownType(0xFF);
+        let io_err = map_frame_error(err);
+        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+        let msg = io_err.to_string();
+        assert!(msg.contains("frame error"));
+        assert!(msg.contains("UnknownType"));
+    }
+
+    #[test]
+    fn map_message_error_produces_correct_message() {
+        let err = MessageError::DataTooLarge { len: 100, max: 50 };
+        let io_err = map_message_error(err);
+        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+        let msg = io_err.to_string();
+        assert!(msg.contains("message error"));
+        assert!(msg.contains("DataTooLarge"));
+    }
+
+    #[test]
+    fn map_payload_error_produces_correct_message() {
+        let err = PayloadError::InvalidCipher(0x99);
+        let io_err = map_payload_error(err);
+        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+        let msg = io_err.to_string();
+        assert!(msg.contains("payload error"));
+        assert!(msg.contains("InvalidCipher"));
     }
 }
