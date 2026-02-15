@@ -228,6 +228,10 @@ async fn sleep_backoff(cancel: &CancellationToken, backoff: &mut ReconnectBackof
     }
 }
 
+/// Exponential backoff with jitter for reconnection attempts.
+///
+/// The backoff starts at `base` duration and doubles each call up to `max`.
+/// Each delay includes equal jitter to prevent thundering herd.
 pub struct ReconnectBackoff {
     base: Duration,
     max: Duration,
@@ -235,6 +239,7 @@ pub struct ReconnectBackoff {
 }
 
 impl ReconnectBackoff {
+    /// Creates a new backoff with the given base and maximum durations.
     pub const fn new(base: Duration, max: Duration) -> Self {
         Self {
             base,
@@ -243,6 +248,7 @@ impl ReconnectBackoff {
         }
     }
 
+    /// Resets the backoff to the base duration.
     pub const fn reset(&mut self) {
         self.current = self.base;
     }
@@ -254,6 +260,10 @@ impl ReconnectBackoff {
         self.current
     }
 
+    /// Returns the next delay duration with jitter and advances the backoff.
+    ///
+    /// The delay is in the range `[current/2, current]` using equal jitter.
+    /// After this call, `current` doubles up to `max`.
     pub fn next_delay(&mut self) -> Duration {
         let cap = self.current;
         let next = self.current.checked_mul(2).unwrap_or(self.max);

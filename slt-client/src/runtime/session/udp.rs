@@ -10,7 +10,18 @@ use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
 
 impl ClientSession<'_> {
-    /// Handle a UDP-QSP message.
+    /// Handles a UDP-QSP message.
+    ///
+    /// Dispatches the message to the appropriate handler based on its type.
+    /// Data, ping/pong, and close frames are handled. Registration responses
+    /// are unexpected on UDP and result in an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Payload decoding fails
+    /// - An unexpected message is received (e.g., `REGISTER_OK` on UDP transport)
+    /// - TUN channel send fails
     pub(super) async fn handle_udp_message(
         &mut self,
         message: Message<'_>,

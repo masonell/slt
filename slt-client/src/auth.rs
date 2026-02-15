@@ -16,7 +16,7 @@ use crate::metrics::Metrics;
 
 const AUTH_MAX_FRAME: usize = 16 * 1024;
 
-/// Perform TLS exporter auth and wait for `AUTH_OK`.
+/// Perform TLS exporter auth and wait for [`AUTH_OK`](slt_core::proto::Message::AuthOk).
 pub async fn authenticate(
     tcp: &mut crate::transport::tcp::TcpTransport,
     config: &ClientConfig,
@@ -89,6 +89,24 @@ where
     }
 }
 
+/// Test-only authentication function that works with any `TcpChannel`.
+///
+/// This is a variant of `authenticate` exposed for testing purposes,
+/// allowing authentication to be tested with mock TCP channels.
+///
+/// # Arguments
+///
+/// * `tcp` - TCP channel for communication
+/// * `config` - Client configuration containing identity and credentials
+/// * `metrics` - Metrics collector for tracking auth results
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - TLS key export fails
+/// - Connection times out during authentication
+/// - Server rejects authentication
+/// - Connection is closed unexpectedly
 #[cfg(test)]
 pub async fn authenticate_with_channel<S, K>(
     tcp: &mut TcpChannel<S, K>,
@@ -114,6 +132,19 @@ where
     Ok(challenge)
 }
 
+/// Build an authentication payload from client config and TLS challenge.
+///
+/// Creates an Ed25519 signature over the challenge combined with client identity
+/// information (client ID, assigned IPv4, and protocol version string).
+///
+/// # Arguments
+///
+/// * `config` - Client configuration containing identity and private key
+/// * `challenge` - 32-byte challenge from TLS key material export
+///
+/// # Returns
+///
+/// A signed `AuthPayload` containing the client's credentials and signature.
 pub fn build_auth_payload(
     config: &ClientConfig,
     challenge: [u8; AUTH_CHALLENGE_LEN],

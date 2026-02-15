@@ -10,7 +10,18 @@ use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
 
 impl ClientSession<'_> {
-    /// Process buffered TCP data and dispatch messages.
+    /// Processes buffered TCP data and dispatches messages.
+    ///
+    /// Repeatedly pops messages from the TCP transport buffer and handles
+    /// each one until the buffer is exhausted. Returns `Continue` if all
+    /// messages were processed successfully, or `Close(exit)` if a message
+    /// handler requests session termination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Message parsing fails (invalid wire format)
+    /// - Payload decoding fails (invalid payload data)
     pub(super) async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
         loop {
             let Some(msg_buf) = self
@@ -27,7 +38,18 @@ impl ClientSession<'_> {
         }
     }
 
-    /// Handle a single TCP message.
+    /// Handles a single TCP message.
+    ///
+    /// Dispatches the message to the appropriate handler based on its type.
+    /// Registration responses, data messages, ping/pong, and close frames
+    /// are each handled specifically. Unexpected messages result in an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Payload decoding fails
+    /// - An unexpected control message is received (e.g., AUTH on established session)
+    /// - TUN channel send fails
     async fn handle_tcp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
         match message {
             Message::RegisterOk { payload } => self.handle_register_ok(payload),

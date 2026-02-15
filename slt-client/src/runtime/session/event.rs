@@ -57,15 +57,27 @@ pub enum SessionExit {
 }
 
 /// Events polled by the session event loop.
+///
+/// These events represent all possible inputs to the session state machine,
+/// including I/O events, timer expirations, and control signals.
 pub(super) enum SessionEvent {
+    /// Shutdown requested via cancellation token.
     Shutdown,
+    /// TCP read completed with byte count (0 means connection closed).
     TcpRead(usize),
+    /// TUN packet received (None means channel closed).
     TunPacket(Option<Vec<u8>>),
+    /// UDP-QSP message read result.
     UdpResult(io::Result<OwnedMessageBuf>),
+    /// Ping timer expired.
     PingTick,
+    /// Idle timeout expired.
     IdleTimeout,
+    /// UDP reconnect timer expired.
     UdpReconnectTick,
+    /// Registration timeout expired.
     RegisterTimeout,
+    /// QUIC discovery task completed.
     DiscoveryResult(Option<quic::QuicIds>),
 }
 

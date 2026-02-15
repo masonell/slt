@@ -27,13 +27,21 @@ pub(super) enum UdpState {
 }
 
 /// In-flight `REGISTER_CID` exchange state managed by the main session loop.
+///
+/// Tracks a pending UDP-QSP registration attempt including the prepared
+/// registration data and the timeout deadline for the server's response.
 pub(super) struct PendingUdpQspRegistration {
+    /// Prepared registration payload and UDP-QSP session.
     pub(super) prepared: PreparedUdpQspRegistration,
+    /// Deadline for receiving `REGISTER_OK` or `REGISTER_FAIL`.
     pub(super) deadline: Instant,
 }
 
 impl UdpState {
-    /// Returns true if waiting for reconnect timer (`NeedDiscovery` or `Pending` without in-flight registration).
+    /// Returns `true` if waiting for reconnect timer.
+    ///
+    /// Returns `true` for `NeedDiscovery` or `Pending` without an in-flight
+    /// registration, `false` otherwise.
     pub(super) const fn is_waiting(&self) -> bool {
         match self {
             Self::NeedDiscovery { .. } => true,
@@ -42,6 +50,10 @@ impl UdpState {
         }
     }
 
+    /// Returns the reconnect deadline if waiting for a retry timer.
+    ///
+    /// Returns `Some(deadline)` for `NeedDiscovery` or `Pending` without an
+    /// in-flight registration, `None` otherwise.
     pub(super) fn reconnect_at(&self) -> Option<Instant> {
         match self {
             Self::NeedDiscovery { reconnect_at, .. } => Some(*reconnect_at),
@@ -54,6 +66,10 @@ impl UdpState {
         }
     }
 
+    /// Returns the registration deadline if an in-flight registration exists.
+    ///
+    /// Returns `Some(deadline)` only for `Pending` with an in-flight
+    /// registration, `None` otherwise.
     pub(super) const fn register_deadline(&self) -> Option<Instant> {
         match self {
             Self::Pending {
@@ -64,6 +80,7 @@ impl UdpState {
         }
     }
 
+    /// Returns a reference to the active UDP transport if in `Active` state.
     pub(super) const fn as_active(&self) -> Option<&ClientTransport> {
         match self {
             Self::Active(transport) => Some(transport),
@@ -71,6 +88,7 @@ impl UdpState {
         }
     }
 
+    /// Returns a mutable reference to the active UDP transport if in `Active` state.
     pub(super) fn as_active_mut(&mut self) -> Option<&mut ClientTransport> {
         match self {
             Self::Active(transport) => Some(transport),
@@ -80,9 +98,15 @@ impl UdpState {
 }
 
 /// Currently active transport for data flow.
+///
+/// The session uses exactly one transport at a time for sending data.
+/// Transport switching can occur based on network conditions or server
+/// direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ActiveTransport {
+    /// TCP transport.
     Tcp,
+    /// UDP-QSP transport.
     UdpQsp,
 }
 

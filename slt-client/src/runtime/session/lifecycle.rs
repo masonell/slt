@@ -10,7 +10,18 @@ use super::ClientSession;
 use crate::runtime::session::state::ActiveTransport;
 
 impl ClientSession<'_> {
-    /// Send a ping on the active transport.
+    /// Sends a ping on the active transport.
+    ///
+    /// Generates a random nonce, encodes a `PING` message, and writes it
+    /// to the active transport. If the active transport is UDP-QSP and the
+    /// write fails, attempts TCP fallback if available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Active transport write fails
+    /// - TCP fallback also fails
+    /// - Both transports are dead
     pub(super) async fn handle_ping_tick(&mut self) -> io::Result<()> {
         let nonce = fastrand::u64(..);
         let ping = PingPayload { nonce };
@@ -38,7 +49,18 @@ impl ClientSession<'_> {
         Ok(())
     }
 
-    /// Send a close frame on the active transport.
+    /// Sends a close frame on the active transport.
+    ///
+    /// Encodes a `CLOSE` message with the given code and writes it to the
+    /// active transport. If the active transport is UDP-QSP and the write
+    /// fails, attempts TCP fallback if available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Active transport write fails
+    /// - TCP fallback also fails
+    /// - Both transports are dead
     pub(super) async fn send_close(&mut self, code: CloseCode) -> io::Result<()> {
         let payload = ClosePayload { code };
         let mut buf = Vec::with_capacity(1);
@@ -64,7 +86,15 @@ impl ClientSession<'_> {
         Ok(())
     }
 
-    /// Write a message on the active transport.
+    /// Writes a message on the active transport.
+    ///
+    /// Dispatches to TCP or UDP-QSP based on the current active transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - UDP-QSP is active but transport is missing
+    /// - Transport write fails
     pub(super) async fn write_active_message(&mut self, message: Message<'_>) -> io::Result<()> {
         match self.active_transport {
             ActiveTransport::Tcp => self.tcp.write_message(message).await,
@@ -77,7 +107,13 @@ impl ClientSession<'_> {
         }
     }
 
-    /// Write a message on the UDP-QSP transport.
+    /// Writes a message on the UDP-QSP transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - UDP-QSP transport is not active
+    /// - Transport write fails
     pub(super) async fn write_udp_message(&mut self, message: Message<'_>) -> io::Result<()> {
         let udp = self.udp_state.as_active_mut().ok_or_else(|| {
             io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
@@ -85,7 +121,10 @@ impl ClientSession<'_> {
         udp.write_message(message).await
     }
 
-    /// Abort and await the discovery task if running.
+    /// Aborts and awaits the discovery task if running.
+    ///
+    /// If a discovery task is active, aborts it and awaits completion.
+    /// Logs an error if the task failed (as opposed to being cancelled).
     pub(super) async fn shutdown_background_tasks(&mut self) {
         if let Some(task) = self.discovery_task.take() {
             task.abort();
@@ -97,7 +136,10 @@ impl ClientSession<'_> {
         }
     }
 
-    /// Schedule the next ping with jitter.
+    /// Schedules the next ping with jitter.
+    ///
+    /// Returns a deadline in the range `[ping_min, ping_max]` using
+    /// uniform jitter. If `ping_min == ping_max`, no jitter is applied.
     pub(super) fn schedule_next_ping(&self) -> Instant {
         let min_ms = u64::try_from(self.config.timing.ping_min.as_millis()).unwrap_or(u64::MAX);
         let max_ms = u64::try_from(self.config.timing.ping_max.as_millis()).unwrap_or(u64::MAX);
@@ -109,12 +151,16 @@ impl ClientSession<'_> {
         Instant::now() + Duration::from_millis(min_ms + jitter_ms)
     }
 
-    /// Update last TCP activity timestamp.
+    /// Updates the last TCP activity timestamp to now.
+    ///
+    /// Should be called whenever data is received from the server via TCP.
     pub(super) fn note_tcp_activity(&mut self) {
         self.last_tcp_rx = Instant::now();
     }
 
-    /// Update last UDP activity timestamp.
+    /// Updates the last UDP activity timestamp to now.
+    ///
+    /// Should be called whenever data is received from the server via UDP-QSP.
     pub(super) fn note_udp_activity(&mut self) {
         self.last_udp_rx = Instant::now();
     }

@@ -29,6 +29,19 @@ pub struct QuicIds {
 }
 
 /// Perform a QUIC handshake to discover the server DCID.
+///
+/// Establishes a real QUIC connection to the server using Chrome-compatible settings
+/// to obtain the server's destination connection ID (DCID) for UDP-QSP registration.
+/// The discovered connection IDs and UDP socket are returned for subsequent UDP-QSP use.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Hostname configuration is empty
+/// - DNS resolution fails or returns no addresses
+/// - UDP socket bind fails
+/// - QUIC handshake fails, times out (5s), or is cancelled
+/// - Connection ID generation fails
 pub async fn discover_quic_ids(
     config: &ClientConfig,
     cancel: &CancellationToken,

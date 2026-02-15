@@ -72,6 +72,19 @@ pub struct TcpSession {
 }
 
 /// Connect to the server and perform a TLS handshake.
+///
+/// Establishes a TCP connection to the server, performs a TLS handshake with
+/// Chrome-compatible settings, and injects an HMAC token into the `ClientHello`
+/// session ID for traffic classification.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - TCP connection fails or times out (30s timeout)
+/// - TLS handshake fails or times out (30s timeout)
+/// - Hostname configuration is empty
+/// - CA certificate configuration fails
+/// - Hostname verification fails
 pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result<TcpSession> {
     metrics.inc_tcp_connections();
 

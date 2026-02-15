@@ -3,11 +3,33 @@ use std::io;
 use slt_core::proto::{FrameError, MessageError, PayloadError};
 
 /// Map a protocol framing error into an `io::Error`.
+///
+/// Converts `FrameError` variants into `io::Error` with `InvalidData` kind,
+/// preserving the original error context in the message.
+///
+/// # Arguments
+///
+/// * `err` - The framing error to convert
+///
+/// # Returns
+///
+/// An `io::Error` with `InvalidData` kind containing the framing error details.
 pub fn map_frame_error(err: FrameError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
 }
 
 /// Map a protocol message error into an `io::Error`.
+///
+/// Converts `MessageError` variants into `io::Error` with `InvalidData` kind,
+/// preserving the original error context in the message.
+///
+/// # Arguments
+///
+/// * `err` - The message error to convert
+///
+/// # Returns
+///
+/// An `io::Error` with `InvalidData` kind containing the message error details.
 pub fn map_message_error(err: MessageError) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -16,6 +38,17 @@ pub fn map_message_error(err: MessageError) -> io::Error {
 }
 
 /// Map a protocol payload decode error into an `io::Error`.
+///
+/// Converts `PayloadError` variants into `io::Error` with `InvalidData` kind,
+/// preserving the original error context in the message.
+///
+/// # Arguments
+///
+/// * `err` - The payload error to convert
+///
+/// # Returns
+///
+/// An `io::Error` with `InvalidData` kind containing the payload error details.
 pub fn map_payload_error(err: PayloadError) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,

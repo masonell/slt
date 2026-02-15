@@ -24,10 +24,19 @@ pub(super) struct PreparedUdpQspRegistration {
     pub(super) session: Option<QuicQspSession<ClientUdpIo>>,
 }
 
-/// Build a `REGISTER_CID` payload and a matching UDP-QSP transport.
+/// Builds a `REGISTER_CID` payload and a matching UDP-QSP session.
 ///
-/// The payload is expressed in the server's `(tx, rx)` terms; the returned
-/// transport uses the reversed directions for the client.
+/// Generates random cryptographic keys for the UDP-QSP session and encodes
+/// them in a `RegisterCidPayload` for transmission to the server. The payload
+/// is expressed in the server's `(tx, rx)` terms; the returned session uses
+/// the reversed directions for the client.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Random bytes generation fails
+/// - Key derivation fails (invalid cipher parameters)
+/// - Payload encoding fails
 pub(super) fn prepare_udp_qsp_registration(
     ids: &quic::QuicIds,
 ) -> io::Result<PreparedUdpQspRegistration> {
@@ -91,10 +100,17 @@ pub(super) fn prepare_udp_qsp_registration(
     })
 }
 
-/// Start a UDP-QSP `REGISTER_CID` exchange by sending a prepared payload.
+/// Starts a UDP-QSP `REGISTER_CID` exchange by sending a prepared payload.
 ///
-/// Response handling is owned by the main session loop so TCP activity
-/// accounting and idle tracking remain centralized.
+/// Prepares the registration payload and sends `REGISTER_CID` to the server
+/// over the TCP transport. Response handling is owned by the main session loop
+/// so TCP activity accounting and idle tracking remain centralized.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Registration preparation fails (see `prepare_udp_qsp_registration`)
+/// - TCP write fails
 pub(super) async fn start_udp_qsp_registration(
     tcp: &mut TcpTransport,
     ids: &quic::QuicIds,

@@ -28,6 +28,9 @@ pub struct TunChannels {
 
 impl TunHandles {
     /// Wait for the TUN reader/writer tasks to stop.
+    ///
+    /// Gracefully shuts down the TUN reader and writer tasks, logging any
+    /// errors or panics that occurred during execution.
     pub async fn shutdown(self) {
         join_task("tun_reader", self.reader).await;
         join_task("tun_writer", self.writer).await;
@@ -36,7 +39,25 @@ impl TunHandles {
 
 /// Create TUN device and spawn reader/writer tasks.
 ///
-/// Returns handles for shutdown coordination and channels for packet I/O.
+/// Configures and creates a TUN device with the specified name and MTU,
+/// then spawns reader and writer tasks for asynchronous packet I/O.
+///
+/// # Arguments
+///
+/// * `config` - Client configuration containing TUN device settings
+/// * `cancel` - Cancellation token to signal task shutdown
+///
+/// # Returns
+///
+/// A tuple containing:
+/// - `TunHandles`: Join handles for the reader/writer tasks
+/// - `TunChannels`: MPSC channels for packet I/O
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - TUN device creation fails (permission denied, device name invalid, etc.)
+/// - MTU configuration is invalid
 pub fn create(
     config: &ClientConfig,
     cancel: CancellationToken,

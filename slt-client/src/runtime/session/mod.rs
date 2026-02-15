@@ -37,6 +37,9 @@ use crate::transport::tcp::{TcpSession, TcpTransport};
 use crate::tun::TunChannels;
 
 /// Session managing a single VPN connection.
+///
+/// Handles the complete lifecycle of a VPN session including TCP/UDP transport
+/// management, message handling, transport upgrades, and idle timeout detection.
 pub(super) struct ClientSession<'a> {
     config: &'a ClientConfig,
     tcp: TcpTransport,
@@ -56,7 +59,11 @@ pub(super) struct ClientSession<'a> {
 }
 
 impl<'a> ClientSession<'a> {
-    /// Create a new session from an authenticated TCP connection.
+    /// Creates a new session from an authenticated TCP connection.
+    ///
+    /// Initializes the session with the given TCP transport, configuration,
+    /// TUN channels, and cancellation token. UDP state is initialized based
+    /// on the `enable_upgrade` configuration option.
     pub(super) fn new(
         config: &'a ClientConfig,
         tcp: TcpSession,
@@ -96,7 +103,11 @@ impl<'a> ClientSession<'a> {
         }
     }
 
-    /// Run the session event loop until shutdown or error.
+    /// Runs the session event loop until shutdown or error.
+    ///
+    /// Polls for events from TCP, UDP, TUN, timers, and the cancellation token.
+    /// Dispatches each event to the appropriate handler and continues until
+    /// the session exits for any reason.
     pub(super) async fn run(&mut self) -> SessionExit {
         let mut next_ping_at = self.schedule_next_ping();
         let result = loop {
@@ -132,7 +143,12 @@ impl<'a> ClientSession<'a> {
         result
     }
 
-    /// Classify an I/O error into the appropriate exit variant.
+    /// Classifies an I/O error into the appropriate [`SessionExit`] variant.
+    ///
+    /// Maps `io::ErrorKind` to session exit reasons:
+    /// - `InvalidData` / `InvalidInput` → `ProtocolError`
+    /// - `PermissionDenied` → `PermissionDenied`
+    /// - All other kinds → `ConnectionError`
     pub(super) fn classify_error(err: &io::Error) -> SessionExit {
         match err.kind() {
             io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => SessionExit::ProtocolError,
@@ -141,7 +157,18 @@ impl<'a> ClientSession<'a> {
         }
     }
 
-    /// Poll for the next session event.
+    /// Polls for the next session event.
+    ///
+    /// Uses `tokio::select!` to wait for the first of:
+    /// - Shutdown signal
+    /// - TCP data (if TCP is alive)
+    /// - TUN packet
+    /// - UDP-QSP message (if UDP is active)
+    /// - Ping timer
+    /// - Idle timeout
+    /// - UDP reconnect timer (if waiting)
+    /// - Registration timeout (if in-flight registration)
+    /// - Discovery task completion (if discovery is running)
     async fn poll_event(&mut self, next_ping_at: Instant) -> io::Result<SessionEvent> {
         let idle_deadline = match self.active_transport {
             ActiveTransport::Tcp => self.last_tcp_rx + self.config.timing.idle_timeout,
@@ -190,7 +217,11 @@ impl<'a> ClientSession<'a> {
         }
     }
 
-    /// Dispatch a session event to the appropriate handler.
+    /// Dispatches a session event to the appropriate handler.
+    ///
+    /// Matches the event type and calls the corresponding handler method.
+    /// Returns `Ok(SessionControl::Continue)` to continue processing events
+    /// or `Ok(SessionControl::Close(exit))` to terminate the session.
     #[allow(clippy::too_many_lines)]
     async fn handle_event(
         &mut self,
@@ -337,7 +368,11 @@ impl<'a> ClientSession<'a> {
         }
     }
 
-    /// Forward a TUN packet to the active transport.
+    /// Forwards a TUN packet to the active transport.
+    ///
+    /// Writes the packet as a `DATA` message on the active transport.
+    /// If UDP-QSP write fails, attempts TCP fallback if available.
+    /// Drops oversized packets and updates metrics.
     async fn handle_tun_packet(&mut self, packet: Vec<u8>) -> io::Result<SessionControl> {
         if packet.is_empty() {
             return Ok(SessionControl::Continue);

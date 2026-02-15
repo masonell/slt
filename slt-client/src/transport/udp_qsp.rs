@@ -62,6 +62,18 @@ impl<I: SessionIo> UdpQspTransport<I> {
     }
 
     /// Encode and send a VPN protocol message over UDP-QSP.
+    ///
+    /// Frames the message using the SLT wire protocol, encrypts it with UDP-QSP
+    /// packet protection, and sends it to the peer. Tracks TX key phase transitions
+    /// in metrics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Message encoding fails
+    /// - UDP-QSP session is dead (connection aborted)
+    /// - Socket send fails
+    /// - Packet number overflows
     pub async fn write_message(&mut self, message: slt_core::proto::Message<'_>) -> io::Result<()> {
         self.write_buf.clear();
         slt_core::proto::encode_message(message, &mut self.write_buf)
@@ -92,6 +104,18 @@ impl<I: SessionIo> UdpQspTransport<I> {
     }
 
     /// Receive and decode a single VPN protocol message from UDP-QSP.
+    ///
+    /// Receives a UDP-QSP protected packet, decrypts and validates it, then
+    /// decodes the framed message payload. Tracks RX key phase transitions in
+    /// metrics and ignores trailing bytes after the first message per protocol spec.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Packet decryption fails (replay, too old, crypto error, etc.)
+    /// - UDP-QSP session is dead (connection aborted)
+    /// - Message decoding fails
+    /// - Message is incomplete
     pub async fn read_next_message(
         &mut self,
         limits: slt_core::proto::MessageLimits,
@@ -136,6 +160,17 @@ impl<I: SessionIo> UdpQspTransport<I> {
         Ok(slt_core::proto::OwnedMessageBuf::new(message.ty(), frame))
     }
 
+    /// Handle a UDP-QSP receive error and update metrics.
+    ///
+    /// Classifies the error type, updates the corresponding metrics counter,
+    /// and returns an appropriate `io::Error` for the failure.
+    ///
+    /// # Errors
+    ///
+    /// Always returns an error with kind:
+    /// - `InvalidData` for replay, too old, crypto, and packet number overflow errors
+    /// - `ConnectionAborted` for dead channel errors
+    /// - Preserves original error kind for I/O errors
     fn handle_recv_error(&self, err: QspSessionError) -> io::Result<()> {
         match err {
             QspSessionError::Replay => {

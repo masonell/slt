@@ -14,7 +14,11 @@ use crate::transport::quic_discovery as quic;
 use crate::transport::udp_qsp::UdpQspTransport;
 
 impl ClientSession<'_> {
-    /// Spawn QUIC discovery task. Returns a `JoinHandle`.
+    /// Spawns a QUIC discovery task.
+    ///
+    /// Returns a `JoinHandle` for the background task that will resolve to
+    /// `Some(ids)` on success or `None` on failure/cancellation. The task
+    /// is cancelled if the session's cancellation token is triggered.
     pub(super) fn spawn_quic_discovery(&self) -> JoinHandle<Option<quic::QuicIds>> {
         let config = self.config.clone();
         let cancel = self.cancel.clone();
@@ -43,7 +47,11 @@ impl ClientSession<'_> {
         })
     }
 
-    /// Start a UDP-QSP registration attempt and track it in session state.
+    /// Starts a UDP-QSP registration attempt and tracks it in session state.
+    ///
+    /// If the session is in `Pending` state without an in-flight registration,
+    /// prepares and sends `REGISTER_CID` over TCP, then stores the prepared
+    /// state with a deadline. If preparation or sending fails, schedules a retry.
     pub(super) async fn attempt_udp_registration(&mut self) {
         let quic_ids = match &mut self.udp_state {
             UdpState::Pending {
@@ -74,7 +82,10 @@ impl ClientSession<'_> {
         }
     }
 
-    /// Schedule a QUIC discovery retry with backoff.
+    /// Schedules a QUIC discovery retry with backoff.
+    ///
+    /// Transitions to `NeedDiscovery` state (if not already) and sets the
+    /// reconnect deadline using exponential backoff with jitter.
     pub(super) fn schedule_discovery_retry(&mut self) {
         let UdpState::NeedDiscovery {
             backoff,
@@ -99,7 +110,10 @@ impl ClientSession<'_> {
         debug!(delay_ms = delay.as_millis(), "scheduled quic discovery");
     }
 
-    /// Schedule a UDP registration retry with backoff.
+    /// Schedules a UDP registration retry with backoff.
+    ///
+    /// Clears any in-flight registration, advances the backoff, and sets
+    /// the reconnect deadline. Only valid if already in `Pending` state.
     pub(super) fn schedule_registration_retry(&mut self) {
         let UdpState::Pending {
             backoff,
@@ -117,7 +131,18 @@ impl ClientSession<'_> {
         debug!(delay_ms = delay.as_millis(), "scheduled udp registration");
     }
 
-    /// Handle `REGISTER_OK` received on TCP transport.
+    /// Handles `REGISTER_OK` received on TCP transport.
+    ///
+    /// Validates the payload DCID matches the pending registration, installs
+    /// the pre-built UDP-QSP session, and transitions to `Active` state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Not in `Pending` state with an in-flight registration
+    /// - Payload decoding fails
+    /// - DCID in response doesn't match expected DCID
+    /// - Pre-built session is missing (double-take bug)
     pub(super) fn handle_register_ok(&mut self, payload: &[u8]) -> io::Result<SessionControl> {
         let (quic_ids, session) = {
             let UdpState::Pending {
@@ -164,7 +189,15 @@ impl ClientSession<'_> {
         Ok(SessionControl::Continue)
     }
 
-    /// Handle `REGISTER_FAIL` received on TCP transport.
+    /// Handles `REGISTER_FAIL` received on TCP transport.
+    ///
+    /// Decodes the failure code, logs it, updates metrics, and schedules
+    /// a retry. If received without an in-flight registration, logs and
+    /// continues.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if payload decoding fails.
     pub(super) fn handle_register_fail(&mut self, payload: &[u8]) -> io::Result<SessionControl> {
         let has_in_flight_registration = matches!(
             &self.udp_state,

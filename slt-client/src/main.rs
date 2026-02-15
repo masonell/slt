@@ -35,6 +35,16 @@ struct Args {
     log: Option<String>,
 }
 
+/// Entry point for the SLT client binary.
+///
+/// Parses command-line arguments, loads the client configuration,
+/// initializes logging, and spawns the client runtime.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Configuration file cannot be read or parsed
+/// - Client runtime fails to start or encounters a fatal error
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
