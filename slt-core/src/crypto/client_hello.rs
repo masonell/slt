@@ -265,4 +265,136 @@ mod tests {
         assert_eq!(mapped.errors().len(), crypto_err.errors().len());
         assert_eq!(mapped.to_string(), crypto_err.to_string());
     }
+
+    use crate::test_support::generate_client_hello_handshake;
+
+    #[test]
+    fn parse_client_hello_extracts_x25519_public_key() {
+        let secret = SharedSecret([0x42; 32]);
+        let handshake = generate_client_hello_handshake(secret);
+
+        let result = parse_client_hello(&handshake);
+        assert!(result.is_some(), "should parse valid ClientHello");
+
+        let (random, key_share) = result.unwrap();
+        assert_eq!(random.len(), 32, "random should be 32 bytes");
+        assert_eq!(key_share.len(), 32, "key_share should be 32 bytes");
+        // Key share should not be all zeros (BoringSSL generates real keys)
+        assert_ne!(key_share, [0u8; 32], "key_share should be non-zero");
+    }
+
+    #[test]
+    fn parse_client_hello_rejects_empty_buffer() {
+        assert_eq!(parse_client_hello(&[]), None);
+    }
+
+    #[test]
+    fn parse_client_hello_rejects_incomplete_header() {
+        // Need at least 4 bytes for handshake type + length
+        assert_eq!(parse_client_hello(&[0x01]), None);
+        assert_eq!(parse_client_hello(&[0x01, 0x00]), None);
+        assert_eq!(parse_client_hello(&[0x01, 0x00, 0x00]), None);
+    }
+
+    #[test]
+    fn parse_client_hello_rejects_wrong_content_type() {
+        // 0x02 is ServerHello, not ClientHello (0x01)
+        let buf = [0x02, 0x00, 0x00, 0x10];
+        assert_eq!(parse_client_hello(&buf), None);
+    }
+
+    #[test]
+    fn parse_client_hello_rejects_truncated_body() {
+        // Declares 16 bytes but only provides 4
+        let buf = [0x01, 0x00, 0x00, 0x10, 0x03, 0x03];
+        assert_eq!(parse_client_hello(&buf), None);
+    }
+
+    /// Build a minimal ClientHello handshake message with custom extensions.
+    fn build_minimal_client_hello(random: &[u8; 32], extensions: &[u8]) -> Vec<u8> {
+        let session_id: &[u8] = &[];
+        let cipher_suites: &[u8] = &[0x00, 0x02, 0x13, 0x01]; // len + TLS_AES_128_GCM_SHA256
+        let compression: &[u8] = &[0x01, 0x00]; // len + null
+
+        let body_len = 2 // legacy_version
+            + 32 // random
+            + 1 + session_id.len() // session_id_len + session_id
+            + cipher_suites.len()
+            + compression.len()
+            + 2 + extensions.len(); // extensions_len + extensions
+
+        let mut buf = Vec::with_capacity(4 + body_len);
+        buf.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        buf.extend_from_slice(&(body_len as u32).to_be_bytes()[1..]); // u24 length
+        buf.extend_from_slice(&[0x03, 0x03]); // legacy_version TLS 1.2
+        buf.extend_from_slice(random);
+        buf.push(session_id.len() as u8);
+        buf.extend_from_slice(session_id);
+        buf.extend_from_slice(cipher_suites);
+        buf.extend_from_slice(compression);
+        buf.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        buf.extend_from_slice(extensions);
+        buf
+    }
+
+    #[test]
+    fn parse_client_hello_rejects_missing_key_share() {
+        let random = [0xAB; 32];
+        let extensions: &[u8] = &[]; // no extensions
+        let buf = build_minimal_client_hello(&random, extensions);
+
+        assert_eq!(parse_client_hello(&buf), None);
+    }
+
+    #[test]
+    fn parse_client_hello_rejects_non_x25519_key_share() {
+        let random = [0xCD; 32];
+
+        // Build key_share extension with secp256r1 (0x0017) instead of X25519 (0x001d)
+        let key_share_data = [
+            0x00, 0x04, // list_len = 4 bytes
+            0x00, 0x17, // group = secp256r1
+            0x00, 0x20, // key_exchange_len = 32
+        ];
+        let key: [u8; 32] = [0x11; 32];
+
+        let mut ext = vec![];
+        ext.extend_from_slice(&EXT_KEY_SHARE.to_be_bytes());
+        ext.extend_from_slice(&((key_share_data.len() + key.len()) as u16).to_be_bytes());
+        ext.extend_from_slice(&key_share_data);
+        ext.extend_from_slice(&key);
+
+        let buf = build_minimal_client_hello(&random, &ext);
+        assert_eq!(parse_client_hello(&buf), None);
+    }
+
+    #[test]
+    fn parse_client_hello_extracts_specific_random() {
+        let random = [0xAB; 32];
+        let key_share = [0x55; 32];
+
+        // Build key_share extension with X25519
+        let key_share_data = [
+            0x00,
+            0x24, // list_len = 36 bytes (4 header + 32 key)
+            0x00,
+            GROUP_X25519 as u8, // group = X25519 (0x001d)
+            0x00,
+            0x20, // key_exchange_len = 32
+        ];
+
+        let mut ext = vec![];
+        ext.extend_from_slice(&EXT_KEY_SHARE.to_be_bytes());
+        ext.extend_from_slice(&((key_share_data.len() + key_share.len()) as u16).to_be_bytes());
+        ext.extend_from_slice(&key_share_data);
+        ext.extend_from_slice(&key_share);
+
+        let buf = build_minimal_client_hello(&random, &ext);
+        let result = parse_client_hello(&buf);
+
+        assert!(result.is_some());
+        let (extracted_random, extracted_key) = result.unwrap();
+        assert_eq!(extracted_random, random);
+        assert_eq!(extracted_key, key_share);
+    }
 }

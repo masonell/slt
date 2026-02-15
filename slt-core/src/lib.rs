@@ -1,6 +1,9 @@
 /// TCP `ClientHello` classifier and verdicts.
 pub mod classifier;
+
 pub mod crypto;
+#[cfg(test)]
+mod test_support;
 /// `ClientHello` parsing and `legacy_session_id` helpers.
 pub use crypto::client_hello;
 /// Static configuration types.

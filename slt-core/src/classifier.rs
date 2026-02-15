@@ -381,60 +381,15 @@ impl<'a> HandshakeReader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Read, Write};
-
-    use boring::ssl::{HandshakeError, Ssl, SslContextBuilder, SslMethod, SslVerifyMode};
     use quiche::Header;
 
     use super::*;
-    use crate::crypto::client_hello::client_hello_session_id_callback;
-
-    #[derive(Default, Debug)]
-    struct CaptureStream {
-        written: Vec<u8>,
-    }
-
-    impl Read for CaptureStream {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::ErrorKind::WouldBlock.into())
-        }
-    }
-
-    impl Write for CaptureStream {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.written.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn generate_client_hello(secret: SharedSecret) -> Vec<u8> {
-        let mut ctx = SslContextBuilder::new(SslMethod::tls()).unwrap();
-        ctx.set_verify(SslVerifyMode::NONE);
-        ctx.set_curves_list("X25519").unwrap();
-        ctx.set_client_hello_session_id_callback(client_hello_session_id_callback(secret));
-
-        let ctx = ctx.build();
-        let mut ssl = Ssl::new(&ctx).unwrap();
-        ssl.set_hostname("example.com").unwrap();
-
-        let mid = ssl.setup_connect(CaptureStream::default());
-        let mid = match mid.handshake() {
-            Err(HandshakeError::WouldBlock(mid)) => mid,
-            Err(err) => panic!("handshake failed: {err:?}"),
-            Ok(_) => panic!("handshake unexpectedly completed"),
-        };
-
-        mid.into_source_stream().written
-    }
+    use crate::test_support::generate_client_hello_tls_record;
 
     #[test]
     fn classifier_claims_boring_client_hello() {
         let secret = SharedSecret([0x42u8; 32]);
-        let client_hello = generate_client_hello(secret);
+        let client_hello = generate_client_hello_tls_record(secret);
 
         assert_eq!(
             classify_tcp_client_hello(&client_hello, &secret),
@@ -445,7 +400,7 @@ mod tests {
     #[test]
     fn classifier_rejects_wrong_secret() {
         let secret = SharedSecret([0x11u8; 32]);
-        let client_hello = generate_client_hello(secret);
+        let client_hello = generate_client_hello_tls_record(secret);
         let wrong_secret = SharedSecret([0x22u8; 32]);
 
         assert_eq!(
