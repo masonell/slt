@@ -18,32 +18,26 @@ const WINDOW_WORDS: usize = PN_REPLAY_WINDOW / WINDOW_WORD_BITS;
 const DEAD_CHANNEL_FAILURE_THRESHOLD: u32 = 64;
 
 /// UDP-QSP session errors.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum QspSessionError {
     /// I/O error from the underlying transport.
-    Io(io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
     /// Packet crypto failed.
-    Crypto(QspCryptoError),
+    #[error("crypto error: {0}")]
+    Crypto(#[from] QspCryptoError),
     /// Packet is a replay.
+    #[error("packet is a replay")]
     Replay,
     /// Packet is too old to fit within the replay window.
+    #[error("packet too old")]
     TooOld,
     /// Packet number would overflow.
+    #[error("packet number overflow")]
     PacketNumberOverflow,
     /// Too many consecutive decrypt failures; channel is considered dead.
+    #[error("channel is dead")]
     DeadChannel,
-}
-
-impl From<io::Error> for QspSessionError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
-    }
-}
-
-impl From<QspCryptoError> for QspSessionError {
-    fn from(err: QspCryptoError) -> Self {
-        Self::Crypto(err)
-    }
 }
 
 /// Async IO abstraction for UDP-QSP sessions.
@@ -58,11 +52,13 @@ pub trait SessionIo {
 }
 
 /// Replay window outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ReplayError {
     /// Packet is a replay of an already-accepted packet.
+    #[error("packet is a replay")]
     Replay,
     /// Packet is older than the replay window.
+    #[error("packet older than replay window")]
     TooOld,
 }
 

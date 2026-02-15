@@ -1,5 +1,3 @@
-use std::fmt;
-
 /// Maximum QUIC DCID length supported by the protocol.
 pub const MAX_DCID_LEN: usize = 20;
 /// Prefix length used to classify QUIC short headers.
@@ -18,9 +16,10 @@ pub struct Cid {
 }
 
 /// Errors returned when parsing a CID from bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CidError {
     /// The CID length does not match protocol bounds.
+    #[error("invalid CID length {0}; expected {QUIC_DCID_PREFIX_LEN}..={MAX_DCID_LEN}")]
     InvalidLen(usize),
 }
 
@@ -110,13 +109,3 @@ impl TryFrom<&[u8]> for Cid {
         Self::new(value)
     }
 }
-
-impl fmt::Display for CidError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidLen(len) => write!(f, "invalid CID length {len}"),
-        }
-    }
-}
-
-impl std::error::Error for CidError {}

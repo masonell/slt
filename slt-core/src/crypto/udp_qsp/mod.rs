@@ -20,17 +20,22 @@ pub const HP_SAMPLE_LEN: usize = 16;
 pub const AEAD_TAG_LEN: usize = 16;
 
 /// Errors returned by UDP-QSP crypto helpers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum QspCryptoError {
     /// Unsupported cipher suite for this build.
+    #[error("unsupported cipher suite")]
     UnsupportedCipher,
     /// Packet is too short to parse.
+    #[error("packet too short")]
     PacketTooShort,
     /// Packet header is invalid.
+    #[error("invalid packet header")]
     InvalidHeader,
     /// Packet number length is invalid.
+    #[error("invalid packet number")]
     InvalidPacketNumber,
     /// Crypto operation failed.
+    #[error("crypto operation failed")]
     CryptoFail,
 }
 

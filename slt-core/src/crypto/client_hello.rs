@@ -17,6 +17,35 @@ pub const EXT_KEY_SHARE: u16 = 0x0033;
 /// `NamedGroup` for `X25519`.
 pub const GROUP_X25519: u16 = 0x001d;
 
+/// Errors from `ClientHello` session ID generation.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ClientHelloError {
+    /// The `session_id` buffer has wrong length.
+    #[error("session_id buffer has wrong length: expected {expected}, got {actual}")]
+    InvalidSessionIdLength {
+        /// Expected buffer length.
+        expected: usize,
+        /// Actual buffer length.
+        actual: usize,
+    },
+    /// The `ClientHello` is malformed or missing required extensions.
+    #[error("malformed ClientHello: {0}")]
+    MalformedClientHello(&'static str),
+    /// HMAC computation failed.
+    #[error("HMAC computation failed: {0}")]
+    HmacFailed(#[source] ErrorStack),
+}
+
+impl From<ClientHelloError> for ErrorStack {
+    fn from(err: ClientHelloError) -> Self {
+        match err {
+            // Preserve the original OpenSSL stack from crypto operations.
+            ClientHelloError::HmacFailed(err) => err,
+            other => Self::internal_error(other),
+        }
+    }
+}
+
 /// Parse a serialized `ClientHello` (including handshake header) and extract
 /// the legacy random and `X25519` `key_share`.
 ///
@@ -151,17 +180,23 @@ pub fn fill_legacy_session_id(
     client_hello: &[u8],
     session_id: &mut [u8],
     secret: &SharedSecret,
-) -> Result<(), ErrorStack> {
+) -> Result<(), ClientHelloError> {
     if session_id.len() != LEGACY_SESSION_ID_LEN {
-        return Err(ErrorStack::get());
+        return Err(ClientHelloError::InvalidSessionIdLength {
+            expected: LEGACY_SESSION_ID_LEN,
+            actual: session_id.len(),
+        });
     }
 
     let Some((random, key_share)) = parse_client_hello(client_hello) else {
-        return Err(ErrorStack::get());
+        return Err(ClientHelloError::MalformedClientHello(
+            "missing X25519 key_share or invalid structure",
+        ));
     };
 
-    let part1 = hmac_sha256(secret.as_bytes(), &random[..RANDOM_PREFIX_LEN])?;
-    let part2 = hmac_sha256(secret.as_bytes(), &key_share)?;
+    let part1 = hmac_sha256(secret.as_bytes(), &random[..RANDOM_PREFIX_LEN])
+        .map_err(ClientHelloError::HmacFailed)?;
+    let part2 = hmac_sha256(secret.as_bytes(), &key_share).map_err(ClientHelloError::HmacFailed)?;
 
     session_id[..PART_LEN].copy_from_slice(&part1[..PART_LEN]);
     session_id[PART_LEN..].copy_from_slice(&part2[..PART_LEN]);
@@ -176,5 +211,58 @@ pub fn fill_legacy_session_id(
 pub fn client_hello_session_id_callback(
     secret: SharedSecret,
 ) -> impl Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<(), ErrorStack> + Sync + Send + 'static {
-    move |_ssl, client_hello, session_id| fill_legacy_session_id(client_hello, session_id, &secret)
+    move |_ssl, client_hello, session_id| {
+        fill_legacy_session_id(client_hello, session_id, &secret).map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use boring::symm::{Cipher, encrypt};
+
+    use super::*;
+
+    #[test]
+    fn fill_legacy_session_id_rejects_wrong_session_id_len() {
+        let secret = SharedSecret([0x11; 32]);
+        let mut session_id = [0u8; LEGACY_SESSION_ID_LEN - 1];
+
+        let err = fill_legacy_session_id(&[], &mut session_id, &secret).unwrap_err();
+
+        match err {
+            ClientHelloError::InvalidSessionIdLength { expected, actual } => {
+                assert_eq!(expected, LEGACY_SESSION_ID_LEN);
+                assert_eq!(actual, LEGACY_SESSION_ID_LEN - 1);
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fill_legacy_session_id_rejects_malformed_client_hello() {
+        let secret = SharedSecret([0x22; 32]);
+        let mut session_id = [0u8; LEGACY_SESSION_ID_LEN];
+
+        let err = fill_legacy_session_id(&[], &mut session_id, &secret).unwrap_err();
+
+        assert!(matches!(err, ClientHelloError::MalformedClientHello(_)));
+    }
+
+    #[test]
+    fn client_hello_error_stack_uses_internal_error_for_structural_failures() {
+        let err = ClientHelloError::MalformedClientHello("test malformed hello");
+        let stack: ErrorStack = err.into();
+
+        assert!(!stack.errors().is_empty());
+        assert!(stack.to_string().contains("malformed ClientHello"));
+    }
+
+    #[test]
+    fn client_hello_error_stack_preserves_crypto_error_stack() {
+        let crypto_err = encrypt(Cipher::aes_128_cbc(), &[], None, &[]).unwrap_err();
+        let mapped: ErrorStack = ClientHelloError::HmacFailed(crypto_err.clone()).into();
+
+        assert_eq!(mapped.errors().len(), crypto_err.errors().len());
+        assert_eq!(mapped.to_string(), crypto_err.to_string());
+    }
 }

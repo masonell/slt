@@ -42,13 +42,21 @@ impl OwnedMessageBuf {
 }
 
 /// Framing errors for encode/decode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
     /// The type byte is unknown.
+    #[error("unknown frame type: {0:#02x}")]
     UnknownType(u8),
     /// Frame length exceeds the configured maximum.
-    LengthTooLarge { len: usize, max: usize },
+    #[error("frame length {len} exceeds maximum {max}")]
+    LengthTooLarge {
+        /// Frame length from header.
+        len: usize,
+        /// Configured maximum.
+        max: usize,
+    },
     /// Payload length does not fit in the u32 length field.
+    #[error("payload length {0} overflows u32")]
     LengthOverflow(usize),
 }
 
