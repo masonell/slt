@@ -351,9 +351,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 self.metrics.inc_disconnect_close();
                 Ok(SessionControl::Close)
             }
-            Message::RegisterCid { payload } => {
-                self.handle_register_cid(payload, Transport::Tcp).await
-            }
+            Message::RegisterCid { payload } => self.handle_register_cid(payload).await,
         }
     }
 
@@ -548,9 +546,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 Ok(SessionControl::Continue)
             }
             Message::Close { .. } => Ok(SessionControl::Close),
-            Message::RegisterCid { payload } => {
-                self.handle_register_cid(payload, Transport::Udp).await
-            }
+            Message::RegisterCid { payload } => self.handle_register_cid(payload).await,
             Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. }
@@ -560,20 +556,16 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn handle_register_cid(
-        &mut self,
-        payload: &[u8],
-        transport: Transport,
-    ) -> io::Result<SessionControl> {
+    async fn handle_register_cid(&mut self, payload: &[u8]) -> io::Result<SessionControl> {
         let Ok(register) = RegisterCidPayload::decode(payload) else {
             warn!(
                 session_id = self.session_id,
                 client_id = %self.client_id,
-                transport = ?transport,
+                active_transport = ?self.active_transport,
                 reason = "decode_failed",
                 "register_cid rejected"
             );
-            self.send_register_fail(RegisterFailCode::InvalidCid, transport)
+            self.send_register_fail(RegisterFailCode::InvalidCid)
                 .await?;
             return Ok(SessionControl::Continue);
         };
@@ -582,11 +574,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             warn!(
                 session_id = self.session_id,
                 client_id = %self.client_id,
-                transport = ?transport,
+                active_transport = ?self.active_transport,
                 reason = "invalid_keys",
                 "register_cid rejected"
             );
-            self.send_register_fail(RegisterFailCode::InvalidKeys, transport)
+            self.send_register_fail(RegisterFailCode::InvalidKeys)
                 .await?;
             return Ok(SessionControl::Continue);
         };
@@ -598,12 +590,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             warn!(
                 session_id = self.session_id,
                 client_id = %self.client_id,
-                transport = ?transport,
+                active_transport = ?self.active_transport,
                 dcid_prefix = ?register.dcid.prefix(),
                 reason = "prefix_collision",
                 "register_cid rejected"
             );
-            self.send_register_fail(RegisterFailCode::InvalidCid, transport)
+            self.send_register_fail(RegisterFailCode::InvalidCid)
                 .await?;
             return Ok(SessionControl::Continue);
         }
@@ -636,7 +628,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         debug!(
             session_id = self.session_id,
             client_id = %self.client_id,
-            transport = ?transport,
+            active_transport = ?self.active_transport,
             dcid_prefix = ?register.dcid.prefix(),
             scid = ?register.scid,
             "register_cid accepted"
@@ -647,7 +639,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         };
         let mut ok_buf = Vec::new();
         ok.encode(&mut ok_buf).map_err(map_payload_error)?;
-        self.send_message(Message::RegisterOk { payload: &ok_buf }, transport)
+        self.send_message(Message::RegisterOk { payload: &ok_buf })
             .await?;
 
         Ok(SessionControl::Continue)
@@ -694,10 +686,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.active_transport = transport;
     }
 
-    async fn send_message(&mut self, message: Message<'_>, transport: Transport) -> io::Result<()> {
-        match transport {
-            Transport::Tcp => self.send_tcp_message(message).await,
-            Transport::Udp => self.send_udp_message(message).await,
+    async fn send_message(&mut self, message: Message<'_>) -> io::Result<()> {
+        match self.active_transport {
+            ActiveTransport::Tcp => self.send_tcp_message(message).await,
+            ActiveTransport::UdpQsp => self.send_udp_message(message).await,
         }
     }
 
@@ -749,15 +741,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         }
     }
 
-    async fn send_register_fail(
-        &mut self,
-        code: RegisterFailCode,
-        transport: Transport,
-    ) -> io::Result<()> {
+    async fn send_register_fail(&mut self, code: RegisterFailCode) -> io::Result<()> {
         let payload = RegisterFailPayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
-        self.send_message(Message::RegisterFail { payload: &buf }, transport)
+        self.send_message(Message::RegisterFail { payload: &buf })
             .await
     }
 
@@ -800,12 +788,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.registry
             .remove_session(self.session_id, self.client_id, self.assigned_ipv4);
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Transport {
-    Tcp,
-    Udp,
 }
 
 fn map_message_error(err: MessageError) -> io::Error {
