@@ -5,11 +5,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigError;
+use crate::config::{ConfigError, validate_ping_interval, validate_timeout};
 use crate::types::{ClientId, PubKeyEd25519, TlsMaterial};
-
-/// Maximum allowed timeout duration (1 hour).
-const MAX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// Server network configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,37 +52,30 @@ const fn default_enabled() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerTimingConfig {
     /// Minimum ping interval.
-    #[serde(default = "default_ping_min", with = "humantime_serde")]
+    #[serde(default = "crate::config::default_ping_min", with = "humantime_serde")]
     pub ping_min: Duration,
     /// Maximum ping interval.
-    #[serde(default = "default_ping_max", with = "humantime_serde")]
+    #[serde(default = "crate::config::default_ping_max", with = "humantime_serde")]
     pub ping_max: Duration,
     /// Authentication timeout.
-    #[serde(default = "default_auth_timeout", with = "humantime_serde")]
+    #[serde(
+        default = "crate::config::default_auth_timeout",
+        with = "humantime_serde"
+    )]
     pub auth_timeout: Duration,
     /// Idle connection timeout.
-    #[serde(default = "default_idle_timeout", with = "humantime_serde")]
+    #[serde(
+        default = "crate::config::default_idle_timeout",
+        with = "humantime_serde"
+    )]
     pub idle_timeout: Duration,
-}
-
-const fn default_ping_min() -> Duration {
-    Duration::from_secs(10)
-}
-
-const fn default_ping_max() -> Duration {
-    Duration::from_secs(30)
-}
-
-const fn default_auth_timeout() -> Duration {
-    Duration::from_secs(10)
-}
-
-const fn default_idle_timeout() -> Duration {
-    Duration::from_secs(60)
 }
 
 impl Default for ServerTimingConfig {
     fn default() -> Self {
+        use crate::config::{
+            default_auth_timeout, default_idle_timeout, default_ping_max, default_ping_min,
+        };
         Self {
             ping_min: default_ping_min(),
             ping_max: default_ping_max(),
@@ -104,31 +94,11 @@ impl ServerTimingConfig {
     /// - `ping_min > ping_max`
     /// - Any timeout is zero or exceeds 1 hour
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.ping_min > self.ping_max {
-            return Err(ConfigError::InvalidPingInterval {
-                ping_min: self.ping_min,
-                ping_max: self.ping_max,
-            });
-        }
+        validate_ping_interval(self.ping_min, self.ping_max)?;
         validate_timeout("auth_timeout", self.auth_timeout)?;
         validate_timeout("idle_timeout", self.idle_timeout)?;
         Ok(())
     }
-}
-
-/// Validate a timeout field is non-zero and within maximum.
-fn validate_timeout(field: &'static str, value: Duration) -> Result<(), ConfigError> {
-    if value.is_zero() {
-        return Err(ConfigError::ZeroTimeout { field });
-    }
-    if value > MAX_TIMEOUT {
-        return Err(ConfigError::TimeoutTooLarge {
-            field,
-            value,
-            max: MAX_TIMEOUT,
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]

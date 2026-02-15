@@ -1,13 +1,25 @@
 //! Configuration types for client and server.
 
 pub mod client;
+pub mod defaults;
 pub mod server;
+pub mod validate;
 
 use std::time::Duration;
 
 pub use client::ClientConfig;
+pub use defaults::{
+    DEFAULT_AUTH_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_PING_MAX, DEFAULT_PING_MIN,
+    DEFAULT_RECONNECT_MAX, DEFAULT_RECONNECT_MIN, DEFAULT_REGISTER_TIMEOUT, default_auth_timeout,
+    default_idle_timeout, default_ping_max, default_ping_min, default_reconnect_max,
+    default_reconnect_min, default_register_timeout,
+};
 pub use server::ServerConfig;
 use thiserror::Error;
+pub use validate::{validate_ping_interval, validate_timeout};
+
+/// Maximum allowed timeout duration (1 hour).
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// Ethernet IP MTU used as the transport envelope target.
 pub const ETHERNET_IP_MTU: u16 = 1500;
