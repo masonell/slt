@@ -72,4 +72,58 @@ mod tests {
         let decoded: Wrapper = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded.bytes, bytes);
     }
+
+    #[test]
+    fn rejects_invalid_hex_characters() {
+        let encoded = "bytes = \"not valid hex!!!\"";
+        let result: Result<Wrapper, _> = toml::from_str(encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_length() {
+        // Too short
+        let encoded = "bytes = \"aabbcc\"";
+        let result: Result<Wrapper, _> = toml::from_str(encoded);
+        assert!(result.is_err());
+
+        // Too long
+        let encoded =
+            "bytes = \"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabb\"";
+        let result: Result<Wrapper, _> = toml::from_str(encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        let encoded = "bytes = \"\"";
+        let result: Result<Wrapper, _> = toml::from_str(encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_0x_prefix_only() {
+        let encoded = "bytes = \"0x\"";
+        let result: Result<Wrapper, _> = toml::from_str(encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn accepts_mixed_case() {
+        let bytes = [
+            0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45,
+            0x67, 0x89,
+        ];
+        let encoded = "bytes = \"AbCdEf0123456789AbCdEf0123456789\"";
+        let decoded: Wrapper = toml::from_str(encoded).unwrap();
+        assert_eq!(decoded.bytes, bytes);
+    }
+
+    #[test]
+    fn accepts_whitespace_surrounding() {
+        let bytes = [0xAB; 16];
+        let encoded = format!("bytes = \"  0x{}  \"", hex::encode(bytes));
+        let decoded: Wrapper = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.bytes, bytes);
+    }
 }
