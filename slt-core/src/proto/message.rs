@@ -195,10 +195,7 @@ pub fn encode_message(message: Message<'_>, out: &mut Vec<u8>) -> Result<(), Fra
 mod tests {
     use super::*;
 
-    #[test]
-    fn decode_roundtrip_message() {
-        let payload = b"ping";
-        let message = Message::Ping { payload };
+    fn roundtrip(message: Message<'_>) {
         let mut buf = Vec::new();
         encode_message(message, &mut buf).unwrap();
 
@@ -206,6 +203,72 @@ mod tests {
         let (decoded, consumed) = decode_message(&buf, limits).unwrap().unwrap();
         assert_eq!(consumed, buf.len());
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ping_roundtrip() {
+        roundtrip(Message::Ping { payload: b"ping" });
+    }
+
+    #[test]
+    fn auth_roundtrip() {
+        roundtrip(Message::Auth {
+            payload: b"auth_payload",
+        });
+    }
+
+    #[test]
+    fn auth_ok_roundtrip() {
+        roundtrip(Message::AuthOk {
+            payload: b"auth_ok_payload",
+        });
+    }
+
+    #[test]
+    fn auth_fail_roundtrip() {
+        roundtrip(Message::AuthFail {
+            payload: b"auth_fail_payload",
+        });
+    }
+
+    #[test]
+    fn register_cid_roundtrip() {
+        roundtrip(Message::RegisterCid {
+            payload: b"register_cid_payload",
+        });
+    }
+
+    #[test]
+    fn register_ok_roundtrip() {
+        roundtrip(Message::RegisterOk {
+            payload: b"register_ok_payload",
+        });
+    }
+
+    #[test]
+    fn register_fail_roundtrip() {
+        roundtrip(Message::RegisterFail {
+            payload: b"register_fail_payload",
+        });
+    }
+
+    #[test]
+    fn pong_roundtrip() {
+        roundtrip(Message::Pong { payload: b"pong" });
+    }
+
+    #[test]
+    fn close_roundtrip() {
+        roundtrip(Message::Close {
+            payload: b"close_payload",
+        });
+    }
+
+    #[test]
+    fn data_roundtrip() {
+        roundtrip(Message::Data {
+            packet: b"ip_packet_data",
+        });
     }
 
     #[test]
@@ -220,5 +283,37 @@ mod tests {
             decode_message(&buf, limits),
             Err(MessageError::DataTooLarge { len: 16, max: 8 })
         );
+    }
+
+    #[test]
+    fn message_limits_from_mtu_zero() {
+        let limits = MessageLimits::from_mtu(0);
+        assert_eq!(limits.max_data_len, 0);
+        // max_frame_len should be at least MAX_CONTROL_FRAME_LEN
+        assert!(limits.max_frame_len >= MAX_CONTROL_FRAME_LEN);
+    }
+
+    #[test]
+    fn message_limits_from_mtu_one() {
+        let limits = MessageLimits::from_mtu(1);
+        assert_eq!(limits.max_data_len, 1);
+        // max_frame_len should be at least MAX_CONTROL_FRAME_LEN
+        assert!(limits.max_frame_len >= MAX_CONTROL_FRAME_LEN);
+    }
+
+    #[test]
+    fn message_limits_from_mtu_max() {
+        let limits = MessageLimits::from_mtu(65535);
+        assert_eq!(limits.max_data_len, 65535);
+        assert_eq!(limits.max_frame_len, 65535);
+    }
+
+    #[test]
+    fn message_limits_from_mtu_default() {
+        let default_mtu: u16 = 1500;
+        let limits = MessageLimits::from_mtu(default_mtu);
+        assert_eq!(limits.max_data_len, 1500);
+        // max_frame_len should be at least MAX_CONTROL_FRAME_LEN
+        assert!(limits.max_frame_len >= MAX_CONTROL_FRAME_LEN);
     }
 }
