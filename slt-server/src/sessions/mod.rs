@@ -777,14 +777,19 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     }
 
     fn schedule_next_ping(&self) -> Instant {
-        let min_ms = u64::try_from(self.timeouts.ping_min.as_millis()).unwrap_or(u64::MAX);
-        let max_ms = u64::try_from(self.timeouts.ping_max.as_millis()).unwrap_or(u64::MAX);
-        let jitter_ms = if max_ms > min_ms {
-            fastrand::u64(0..=(max_ms - min_ms))
+        let min = self.timeouts.ping_min;
+        let max = self.timeouts.ping_max;
+
+        // Config validation ensures timeouts <= 1 hour (fits in u64) and min <= max.
+        #[allow(clippy::cast_possible_truncation, clippy::unchecked_time_subtraction)]
+        let range_ms = (max - min).as_millis() as u64;
+        let jitter = if range_ms > 0 {
+            Duration::from_millis(fastrand::u64(0..=range_ms))
         } else {
-            0
+            Duration::ZERO
         };
-        Instant::now() + Duration::from_millis(min_ms + jitter_ms)
+
+        Instant::now() + min + jitter
     }
 
     fn note_activity(&mut self) {
