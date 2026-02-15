@@ -766,4 +766,292 @@ mod tests {
             Err(PayloadError::InvalidCloseCode(0xff))
         );
     }
+
+    #[test]
+    fn auth_ok_roundtrip() {
+        let payload = AuthOkPayload;
+        let mut buf = Vec::new();
+        payload.encode(&mut buf);
+        assert!(buf.is_empty());
+        let decoded = AuthOkPayload::decode(&buf).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn close_payload_roundtrip() {
+        let payload = ClosePayload {
+            code: CloseCode::IdleTimeout,
+        };
+        let mut buf = Vec::new();
+        payload.encode(&mut buf);
+        let decoded = ClosePayload::decode(&buf).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn auth_payload_length_mismatch() {
+        // Too short
+        let buf = [0u8; AUTH_PAYLOAD_LEN - 1];
+        assert_eq!(
+            AuthPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: AUTH_PAYLOAD_LEN,
+                actual: AUTH_PAYLOAD_LEN - 1
+            })
+        );
+
+        // Too long
+        let buf = [0u8; AUTH_PAYLOAD_LEN + 1];
+        assert_eq!(
+            AuthPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: AUTH_PAYLOAD_LEN,
+                actual: AUTH_PAYLOAD_LEN + 1
+            })
+        );
+    }
+
+    #[test]
+    fn ping_payload_length_mismatch() {
+        // Too short
+        let buf = [0u8; PING_PAYLOAD_LEN - 1];
+        assert_eq!(
+            PingPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: PING_PAYLOAD_LEN,
+                actual: PING_PAYLOAD_LEN - 1
+            })
+        );
+
+        // Too long
+        let buf = [0u8; PING_PAYLOAD_LEN + 1];
+        assert_eq!(
+            PingPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: PING_PAYLOAD_LEN,
+                actual: PING_PAYLOAD_LEN + 1
+            })
+        );
+    }
+
+    #[test]
+    fn pong_payload_length_mismatch() {
+        // Too short
+        let buf = [0u8; PING_PAYLOAD_LEN - 1];
+        assert_eq!(
+            PongPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: PING_PAYLOAD_LEN,
+                actual: PING_PAYLOAD_LEN - 1
+            })
+        );
+
+        // Too long
+        let buf = [0u8; PING_PAYLOAD_LEN + 1];
+        assert_eq!(
+            PongPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: PING_PAYLOAD_LEN,
+                actual: PING_PAYLOAD_LEN + 1
+            })
+        );
+    }
+
+    #[test]
+    fn close_payload_length_mismatch() {
+        // Too short (empty)
+        let buf: [u8; 0] = [];
+        assert_eq!(
+            ClosePayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: CLOSE_PAYLOAD_LEN,
+                actual: 0
+            })
+        );
+
+        // Too long
+        let buf = [0u8; 2];
+        assert_eq!(
+            ClosePayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: CLOSE_PAYLOAD_LEN,
+                actual: 2
+            })
+        );
+    }
+
+    #[test]
+    fn auth_fail_payload_length_mismatch() {
+        // Too short (empty)
+        let buf: [u8; 0] = [];
+        assert_eq!(
+            AuthFailPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: 1,
+                actual: 0
+            })
+        );
+
+        // Too long
+        let buf = [0u8; 2];
+        assert_eq!(
+            AuthFailPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: 1,
+                actual: 2
+            })
+        );
+    }
+
+    #[test]
+    fn register_fail_payload_length_mismatch() {
+        // Too short (empty)
+        let buf: [u8; 0] = [];
+        assert_eq!(
+            RegisterFailPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: 1,
+                actual: 0
+            })
+        );
+
+        // Too long
+        let buf = [0u8; 2];
+        assert_eq!(
+            RegisterFailPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: 1,
+                actual: 2
+            })
+        );
+    }
+
+    #[test]
+    fn register_cid_invalid_dcid_len() {
+        // DCID length too short (below QUIC_DCID_PREFIX_LEN)
+        let mut buf = vec![0u8]; // dcid_len = 0
+        buf.extend_from_slice(&[0u8; MAX_DCID_LEN + 1]); // rest of payload
+
+        assert_eq!(
+            RegisterCidPayload::decode(&buf),
+            Err(PayloadError::InvalidDcidLen(0))
+        );
+    }
+
+    #[test]
+    fn register_cid_invalid_scid_len() {
+        let dcid = Cid::from([0x55u8; QUIC_DCID_PREFIX_LEN]);
+        let mut buf = vec![];
+        buf.push(dcid.len() as u8);
+        buf.extend_from_slice(dcid.as_slice());
+        buf.push(0); // scid_len = 0 (invalid)
+
+        assert_eq!(
+            RegisterCidPayload::decode(&buf),
+            Err(PayloadError::InvalidScidLen(0))
+        );
+    }
+
+    #[test]
+    fn register_ok_invalid_dcid_len() {
+        // DCID length too short (below QUIC_DCID_PREFIX_LEN)
+        let buf = vec![0u8]; // dcid_len = 0
+
+        assert_eq!(
+            RegisterOkPayload::decode(&buf),
+            Err(PayloadError::InvalidDcidLen(0))
+        );
+
+        // DCID length too long (exceeds MAX_DCID_LEN)
+        let mut buf = vec![(MAX_DCID_LEN + 1) as u8];
+        buf.extend_from_slice(&[0u8; MAX_DCID_LEN + 1]);
+
+        assert_eq!(
+            RegisterOkPayload::decode(&buf),
+            Err(PayloadError::InvalidDcidLen(MAX_DCID_LEN + 1))
+        );
+    }
+
+    #[test]
+    fn register_ok_length_mismatch() {
+        let dcid = Cid::from([0xAAu8; QUIC_DCID_PREFIX_LEN]);
+        let mut buf = vec![];
+        buf.push(dcid.len() as u8);
+        buf.extend_from_slice(dcid.as_slice());
+        buf.push(0xFF); // extra byte
+
+        assert_eq!(
+            RegisterOkPayload::decode(&buf),
+            Err(PayloadError::LengthMismatch {
+                expected: 1 + dcid.len(),
+                actual: 1 + dcid.len() + 1
+            })
+        );
+    }
+
+    #[test]
+    fn auth_fail_invalid_code() {
+        let buf = [0xFF];
+        assert_eq!(
+            AuthFailPayload::decode(&buf),
+            Err(PayloadError::InvalidAuthFailCode(0xFF))
+        );
+    }
+
+    #[test]
+    fn register_fail_invalid_code() {
+        let buf = [0xFF];
+        assert_eq!(
+            RegisterFailPayload::decode(&buf),
+            Err(PayloadError::InvalidRegisterFailCode(0xFF))
+        );
+    }
+
+    #[test]
+    fn register_cid_invalid_cipher() {
+        let dcid = Cid::from([0x55u8; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x44u8; QUIC_DCID_PREFIX_LEN]);
+
+        let mut buf = vec![];
+        buf.push(dcid.len() as u8);
+        buf.extend_from_slice(dcid.as_slice());
+        buf.push(scid.len() as u8);
+        buf.extend_from_slice(scid.as_slice());
+        buf.push(0xFF); // invalid cipher
+        buf.extend_from_slice(&[0x01; HP_KEY_LEN * 2]);
+        buf.extend_from_slice(&[0x02; AEAD_KEY_LEN * 2]);
+        buf.extend_from_slice(&[0x03; AEAD_IV_LEN * 2]);
+        buf.extend_from_slice(&0u64.to_be_bytes()); // pn_start
+        buf.extend_from_slice(&0u64.to_be_bytes()); // pn_start_rx
+        buf.push(0); // key_phase
+
+        assert_eq!(
+            RegisterCidPayload::decode(&buf),
+            Err(PayloadError::InvalidCipher(0xFF))
+        );
+    }
+
+    #[test]
+    fn register_cid_invalid_key_phase() {
+        let dcid = Cid::from([0x55u8; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x44u8; QUIC_DCID_PREFIX_LEN]);
+
+        let mut buf = vec![];
+        buf.push(dcid.len() as u8);
+        buf.extend_from_slice(dcid.as_slice());
+        buf.push(scid.len() as u8);
+        buf.extend_from_slice(scid.as_slice());
+        buf.push(CipherSuite::Aes128Gcm as u8);
+        buf.extend_from_slice(&[0x01; HP_KEY_LEN * 2]);
+        buf.extend_from_slice(&[0x02; AEAD_KEY_LEN * 2]);
+        buf.extend_from_slice(&[0x03; AEAD_IV_LEN * 2]);
+        buf.extend_from_slice(&0u64.to_be_bytes()); // pn_start
+        buf.extend_from_slice(&0u64.to_be_bytes()); // pn_start_rx
+        buf.push(0xFF); // invalid key phase
+
+        assert_eq!(
+            RegisterCidPayload::decode(&buf),
+            Err(PayloadError::InvalidKeyPhase(0xFF))
+        );
+    }
 }
