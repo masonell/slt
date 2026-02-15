@@ -1,5 +1,8 @@
 //! Packet number helpers.
 
+/// Maximum packet number length in bytes on the wire (per QUIC short header spec).
+pub(super) const MAX_WIRE_PN_LEN: usize = 4;
+
 /// Compute the minimum packet number length for `pn`.
 #[inline]
 pub(super) const fn packet_number_len(pn: u64) -> usize {
@@ -21,7 +24,7 @@ pub(super) const fn packet_number_len(pn: u64) -> usize {
 #[inline]
 #[must_use]
 pub const fn reconstruct_packet_number(truncated_pn: u64, expected_pn: u64, pn_len: usize) -> u64 {
-    if pn_len == 0 || pn_len > 4 {
+    if pn_len == 0 || pn_len > MAX_WIRE_PN_LEN {
         return truncated_pn;
     }
 

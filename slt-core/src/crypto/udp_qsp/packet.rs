@@ -1,13 +1,12 @@
 //! Packet header helpers and decoded packet metadata.
 
-use super::pn::packet_number_len;
+use super::pn::{MAX_WIRE_PN_LEN, packet_number_len};
 use super::{AEAD_TAG_LEN, HP_MASK_LEN, HP_SAMPLE_LEN, QspCryptoError};
 
 const FIXED_BIT: u8 = 0x40;
 const KEY_PHASE_BIT: u8 = 0x04;
 const RESERVED_MASK: u8 = 0x18;
 const PN_LEN_MASK: u8 = 0x03;
-const MAX_PN_LEN: usize = 4;
 
 /// Decrypted UDP-QSP packet metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +53,7 @@ pub(super) fn build_header(
     out: &mut Vec<u8>,
 ) -> Result<BuiltHeader, QspCryptoError> {
     let pn_len = packet_number_len(pn);
-    if pn_len == 0 || pn_len > MAX_PN_LEN {
+    if pn_len == 0 || pn_len > MAX_WIRE_PN_LEN {
         return Err(QspCryptoError::InvalidPacketNumber);
     }
 
@@ -90,16 +89,16 @@ pub(super) fn parse_header(
     }
 
     let pn_len = ((first & PN_LEN_MASK) + 1) as usize;
-    if pn_len == 0 || pn_len > MAX_PN_LEN {
+    if pn_len == 0 || pn_len > MAX_WIRE_PN_LEN {
         return Err(QspCryptoError::InvalidPacketNumber);
     }
     if packet.len() < pn_offset + pn_len + AEAD_TAG_LEN {
         return Err(QspCryptoError::PacketTooShort);
     }
 
-    let mut pn_bytes = [0u8; MAX_PN_LEN];
+    let mut pn_bytes = [0u8; MAX_WIRE_PN_LEN];
     for i in 0..pn_len {
-        pn_bytes[MAX_PN_LEN - pn_len + i] = packet[pn_offset + i] ^ mask[1 + i];
+        pn_bytes[MAX_WIRE_PN_LEN - pn_len + i] = packet[pn_offset + i] ^ mask[1 + i];
     }
     let pn = u64::from(u32::from_be_bytes(pn_bytes));
 
@@ -107,7 +106,7 @@ pub(super) fn parse_header(
     let mut header = Vec::with_capacity(pn_offset + pn_len);
     header.push(first);
     header.extend_from_slice(&packet[1..pn_offset]);
-    header.extend_from_slice(&pn_bytes[MAX_PN_LEN - pn_len..]);
+    header.extend_from_slice(&pn_bytes[MAX_WIRE_PN_LEN - pn_len..]);
 
     Ok(ParsedHeader {
         pn,
@@ -123,7 +122,7 @@ pub(super) fn apply_header_protection(
     pn_len: usize,
     mask: [u8; HP_MASK_LEN],
 ) -> Result<(), QspCryptoError> {
-    if pn_len == 0 || pn_len > MAX_PN_LEN {
+    if pn_len == 0 || pn_len > MAX_WIRE_PN_LEN {
         return Err(QspCryptoError::InvalidPacketNumber);
     }
     if packet.len() < pn_offset + pn_len {
