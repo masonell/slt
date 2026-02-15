@@ -504,3 +504,406 @@ fn hkdf_expand_sha256<const N: usize>(
 
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN};
+
+    /// Create keys where TX == RX for self-contained roundtrip tests.
+    fn make_symmetric_keys() -> UdpQspKeys {
+        UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0xAA; HP_KEY_LEN], // hp_tx == hp_rx
+            [0xAA; HP_KEY_LEN],
+            [0xBB; AEAD_KEY_LEN], // aead_tx == aead_rx
+            [0xBB; AEAD_KEY_LEN],
+            [0xCC; AEAD_IV_LEN], // iv_tx == iv_rx
+            [0xCC; AEAD_IV_LEN],
+        )
+        .unwrap()
+    }
+
+    /// Create keys with distinct TX/RX for direction-specific tests.
+    fn make_directional_keys() -> UdpQspKeys {
+        UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],   // hp_tx
+            [0x22; HP_KEY_LEN],   // hp_rx
+            [0x33; AEAD_KEY_LEN], // aead_tx
+            [0x44; AEAD_KEY_LEN], // aead_rx
+            [0x55; AEAD_IV_LEN],  // iv_tx
+            [0x66; AEAD_IV_LEN],  // iv_rx
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn new_keys_with_aes128gcm_succeeds() {
+        let keys = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0u8; HP_KEY_LEN],
+            [0u8; HP_KEY_LEN],
+            [0u8; AEAD_KEY_LEN],
+            [0u8; AEAD_KEY_LEN],
+            [0u8; AEAD_IV_LEN],
+            [0u8; AEAD_IV_LEN],
+        );
+        assert!(keys.is_ok());
+    }
+
+    #[test]
+    fn new_keys_rejects_unsupported_cipher() {
+        let keys = UdpQspKeys::new(
+            CipherSuite::ChaCha20Poly1305,
+            [0u8; HP_KEY_LEN],
+            [0u8; HP_KEY_LEN],
+            [0u8; AEAD_KEY_LEN],
+            [0u8; AEAD_KEY_LEN],
+            [0u8; AEAD_IV_LEN],
+            [0u8; AEAD_IV_LEN],
+        );
+        assert!(matches!(keys, Err(QspCryptoError::UnsupportedCipher)));
+    }
+
+    #[test]
+    fn with_next_tx_keys_produces_valid_keys() {
+        let keys = make_directional_keys();
+        let next = keys.with_next_tx_keys();
+        assert!(next.is_ok());
+    }
+
+    #[test]
+    fn with_next_rx_keys_produces_valid_keys() {
+        let keys = make_directional_keys();
+        let next = keys.with_next_rx_keys();
+        assert!(next.is_ok());
+    }
+
+    #[test]
+    fn tx_key_rotation_changes_encrypt_keys() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        let keys = make_directional_keys();
+        let next_keys = keys.with_next_tx_keys().unwrap();
+
+        // Encrypt with original keys
+        let packet_original = keys.protect(&dcid, pn, false, plaintext).unwrap();
+
+        // Encrypt with rotated keys
+        let packet_rotated = next_keys.protect(&dcid, pn, false, plaintext).unwrap();
+
+        // Different keys should produce different ciphertext
+        assert_ne!(
+            packet_original, packet_rotated,
+            "rotated TX keys should produce different ciphertext"
+        );
+    }
+
+    #[test]
+    fn rx_key_rotation_changes_decrypt_keys() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        // Use symmetric keys so original keys can protect AND open
+        let keys = make_symmetric_keys();
+        let next_keys = keys.with_next_rx_keys().unwrap();
+
+        // Encrypt with original keys (TX)
+        let packet = keys.protect(&dcid, pn, false, plaintext).unwrap();
+
+        // Original keys can decrypt (RX == TX in symmetric)
+        let opened = keys.open(dcid.len(), &packet, pn);
+        assert!(opened.is_ok());
+
+        // Rotated RX keys cannot decrypt (different RX keys)
+        let opened_rotated = next_keys.open(dcid.len(), &packet, pn);
+        assert!(
+            opened_rotated.is_err(),
+            "rotated RX keys should not decrypt packets from original keys"
+        );
+    }
+
+    #[test]
+    fn tx_rotation_rx_keys_match_after_rotation() {
+        // Test that RX keys are unchanged after TX rotation by using two key sets
+        // that share the same RX direction (simulating client/server)
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        // Create "server" keys where TX and RX are distinct
+        let server_tx = [0x33; AEAD_KEY_LEN];
+        let server_rx = [0x44; AEAD_KEY_LEN];
+        let server_iv_tx = [0x55; AEAD_IV_LEN];
+        let server_iv_rx = [0x66; AEAD_IV_LEN];
+        let server_hp_tx = [0x11; HP_KEY_LEN];
+        let server_hp_rx = [0x22; HP_KEY_LEN];
+
+        // Server keys
+        let server_keys = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            server_hp_tx,
+            server_hp_rx,
+            server_tx,
+            server_rx,
+            server_iv_tx,
+            server_iv_rx,
+        )
+        .unwrap();
+
+        // Rotate server's TX keys - RX should stay the same
+        let server_next = server_keys.with_next_tx_keys().unwrap();
+
+        // Create a "peer" that has TX=server's RX and RX=server's original TX
+        // This simulates the other party in the communication
+        let peer_keys = UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            server_hp_rx, // peer's hp_tx = server's hp_rx
+            server_hp_tx, // peer's hp_rx = server's hp_tx
+            server_rx,    // peer's aead_tx = server's aead_rx
+            server_tx,    // peer's aead_rx = server's aead_tx
+            server_iv_rx, // peer's iv_tx = server's iv_rx
+            server_iv_tx, // peer's iv_rx = server's iv_tx
+        )
+        .unwrap();
+
+        // Peer encrypts with its TX (which is server's original RX)
+        let packet = peer_keys.protect(&dcid, pn, false, plaintext).unwrap();
+
+        // Both server_keys and server_next should be able to decrypt
+        // because RX keys are preserved after TX rotation
+        let opened_orig = server_keys.open(dcid.len(), &packet, pn);
+        let opened_next = server_next.open(dcid.len(), &packet, pn);
+
+        assert!(opened_orig.is_ok(), "original server RX should decrypt");
+        assert!(
+            opened_next.is_ok(),
+            "rotated server RX should still decrypt (RX unchanged)"
+        );
+        assert_eq!(opened_orig.unwrap().payload, plaintext);
+        assert_eq!(opened_next.unwrap().payload, plaintext);
+    }
+
+    #[test]
+    fn rx_rotation_preserves_tx_keys() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        let keys = make_directional_keys();
+        let next_rx = keys.with_next_rx_keys().unwrap();
+
+        // Both can encrypt (same TX keys)
+        let packet_orig = keys.protect(&dcid, pn, false, plaintext).unwrap();
+        let packet_next = next_rx.protect(&dcid, pn, false, plaintext).unwrap();
+
+        // Same TX keys should produce same ciphertext
+        assert_eq!(
+            packet_orig, packet_next,
+            "same TX keys should produce identical ciphertext"
+        );
+    }
+
+    #[test]
+    fn multiple_tx_rotations_produce_different_keys() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        let keys = make_directional_keys();
+        let keys1 = keys.with_next_tx_keys().unwrap();
+        let keys2 = keys1.with_next_tx_keys().unwrap();
+        let keys3 = keys2.with_next_tx_keys().unwrap();
+
+        let p0 = keys.protect(&dcid, pn, false, plaintext).unwrap();
+        let p1 = keys1.protect(&dcid, pn, true, plaintext).unwrap();
+        let p2 = keys2.protect(&dcid, pn, false, plaintext).unwrap();
+        let p3 = keys3.protect(&dcid, pn, true, plaintext).unwrap();
+
+        // Each rotation should produce different output
+        assert_ne!(p0, p1);
+        assert_ne!(p1, p2);
+        assert_ne!(p2, p3);
+        assert_ne!(p0, p2);
+        assert_ne!(p1, p3);
+    }
+
+    #[test]
+    fn multiple_rx_rotations_produce_different_keys() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        // Use symmetric keys as the base
+        let keys = make_symmetric_keys();
+
+        // Rotate RX multiple times
+        let rx1 = keys.with_next_rx_keys().unwrap();
+        let rx2 = rx1.with_next_rx_keys().unwrap();
+        let rx3 = rx2.with_next_rx_keys().unwrap();
+
+        // Rotate TX the same number of times to create matching keys
+        let tx1 = keys.with_next_tx_keys().unwrap();
+        let tx2 = tx1.with_next_tx_keys().unwrap();
+        let tx3 = tx2.with_next_tx_keys().unwrap();
+
+        // Encrypt with each TX generation (these are symmetric)
+        let p1 = tx1.protect(&dcid, pn, true, plaintext).unwrap();
+        let p2 = tx2.protect(&dcid, pn, false, plaintext).unwrap();
+        let p3 = tx3.protect(&dcid, pn, true, plaintext).unwrap();
+
+        // Each RX generation should only decrypt its matching TX generation
+        assert!(rx1.open(dcid.len(), &p1, pn).is_ok(), "rx1 should open p1");
+        assert!(rx2.open(dcid.len(), &p2, pn).is_ok(), "rx2 should open p2");
+        assert!(rx3.open(dcid.len(), &p3, pn).is_ok(), "rx3 should open p3");
+
+        // Cross-decryption should fail
+        assert!(
+            rx1.open(dcid.len(), &p2, pn).is_err(),
+            "rx1 should not open p2"
+        );
+        assert!(
+            rx2.open(dcid.len(), &p3, pn).is_err(),
+            "rx2 should not open p3"
+        );
+        assert!(
+            rx3.open(dcid.len(), &p1, pn).is_err(),
+            "rx3 should not open p1"
+        );
+    }
+
+    #[test]
+    fn hkdf_expand_produces_expected_length() {
+        // Test the HKDF expand function produces correct output lengths
+        let prk = [0x42u8; 32];
+        let info = b"test info";
+
+        // Test various output lengths
+        let out16: [u8; 16] = hkdf_expand_sha256(&prk, info).unwrap();
+        assert_eq!(out16.len(), 16);
+
+        let out32: [u8; 32] = hkdf_expand_sha256(&prk, info).unwrap();
+        assert_eq!(out32.len(), 32);
+
+        let out64: [u8; 64] = hkdf_expand_sha256(&prk, info).unwrap();
+        assert_eq!(out64.len(), 64);
+    }
+
+    #[test]
+    fn hkdf_expand_deterministic() {
+        let prk = [0x42u8; 32];
+        let info = b"test info";
+
+        let out1: [u8; 32] = hkdf_expand_sha256(&prk, info).unwrap();
+        let out2: [u8; 32] = hkdf_expand_sha256(&prk, info).unwrap();
+
+        assert_eq!(out1, out2, "HKDF expand should be deterministic");
+    }
+
+    #[test]
+    fn hkdf_expand_different_info_produces_different_output() {
+        let prk = [0x42u8; 32];
+
+        let out1: [u8; 32] = hkdf_expand_sha256(&prk, b"info 1").unwrap();
+        let out2: [u8; 32] = hkdf_expand_sha256(&prk, b"info 2").unwrap();
+
+        assert_ne!(out1, out2, "different info should produce different output");
+    }
+
+    #[test]
+    fn hkdf_expand_different_prk_produces_different_output() {
+        let prk1 = [0x42u8; 32];
+        let prk2 = [0x24u8; 32];
+        let info = b"test info";
+
+        let out1: [u8; 32] = hkdf_expand_sha256(&prk1, info).unwrap();
+        let out2: [u8; 32] = hkdf_expand_sha256(&prk2, info).unwrap();
+
+        assert_ne!(out1, out2, "different PRK should produce different output");
+    }
+
+    #[test]
+    fn hkdf_extract_produces_32_bytes() {
+        let salt = [0x01u8; 12];
+        let ikm = b"input key material";
+
+        let prk = hkdf_extract_sha256(&salt, ikm);
+        assert!(prk.is_ok());
+        assert_eq!(prk.unwrap().len(), 32);
+    }
+
+    #[test]
+    fn hkdf_extract_deterministic() {
+        let salt = [0x01u8; 12];
+        let ikm = b"input key material";
+
+        let prk1 = hkdf_extract_sha256(&salt, ikm).unwrap();
+        let prk2 = hkdf_extract_sha256(&salt, ikm).unwrap();
+
+        assert_eq!(prk1, prk2, "HKDF extract should be deterministic");
+    }
+
+    #[test]
+    fn hkdf_extract_different_salt_different_output() {
+        let salt1 = [0x01u8; 12];
+        let salt2 = [0x02u8; 12];
+        let ikm = b"input key material";
+
+        let prk1 = hkdf_extract_sha256(&salt1, ikm).unwrap();
+        let prk2 = hkdf_extract_sha256(&salt2, ikm).unwrap();
+
+        assert_ne!(prk1, prk2, "different salt should produce different PRK");
+    }
+
+    #[test]
+    fn protect_and_open_roundtrip() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"hello, world!";
+        let pn = 1;
+
+        let keys = make_symmetric_keys();
+        let protected = keys.protect(&dcid, pn, false, plaintext).unwrap();
+
+        let opened = keys.open(dcid.len(), &protected, pn).unwrap();
+        assert_eq!(opened.pn, pn);
+        assert_eq!(opened.key_phase, false);
+        assert_eq!(opened.payload, plaintext);
+    }
+
+    #[test]
+    fn protect_and_open_with_different_dcids() {
+        let dcid1 = [0x01; 8];
+        let dcid2 = [0x02; 8];
+        let plaintext = b"hello";
+        let pn = 1;
+
+        let keys = make_symmetric_keys();
+        let protected1 = keys.protect(&dcid1, pn, false, plaintext).unwrap();
+        let protected2 = keys.protect(&dcid2, pn, false, plaintext).unwrap();
+
+        // Different DCIDs should produce different packets
+        assert_ne!(protected1, protected2);
+
+        // Each should decrypt with its respective DCID length
+        let opened1 = keys.open(dcid1.len(), &protected1, pn).unwrap();
+        assert_eq!(opened1.payload, plaintext);
+
+        let opened2 = keys.open(dcid2.len(), &protected2, pn).unwrap();
+        assert_eq!(opened2.payload, plaintext);
+    }
+
+    #[test]
+    fn debug_redacts_key_material() {
+        let keys = make_directional_keys();
+        let debug_str = format!("{:?}", keys);
+
+        assert!(debug_str.contains("UdpQspKeys"));
+        assert!(debug_str.contains("cipher"));
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("0x11")); // The actual key bytes shouldn't appear
+    }
+}
