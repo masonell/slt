@@ -17,8 +17,9 @@ pub use message::{Message, MessageError, MessageLimits, decode_message, encode_m
 pub use payloads::{
     AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_CHALLENGE_LEN, AUTH_PAYLOAD_LEN, AUTH_SIGNATURE_LEN,
     AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, CLOSE_PAYLOAD_LEN, CipherSuite,
-    CloseCode, ClosePayload, HP_KEY_LEN, PING_PAYLOAD_LEN, PayloadError, PingPayload, PongPayload,
-    RegisterCidPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload,
+    CloseCode, ClosePayload, HP_KEY_LEN, MAX_CONTROL_FRAME_LEN, PING_PAYLOAD_LEN, PayloadError,
+    PingPayload, PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload,
+    RegisterOkPayload,
 };
 /// Message type identifiers.
 pub use types::MessageType;

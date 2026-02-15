@@ -20,6 +20,23 @@ pub const PING_PAYLOAD_LEN: usize = 8;
 /// Length of the CLOSE payload in bytes.
 pub const CLOSE_PAYLOAD_LEN: usize = 1;
 
+/// Maximum encoded length of any control (non-DATA) frame.
+///
+/// Currently bounded by `REGISTER_CID`. When adding new message types or
+/// changing payload layouts, verify this value still exceeds all control
+/// payloads. See `protocol.md` for wire format specification.
+pub const MAX_CONTROL_FRAME_LEN: usize = 1
+    + MAX_DCID_LEN
+    + 1
+    + MAX_DCID_LEN
+    + 1
+    + (HP_KEY_LEN * 2)
+    + (AEAD_KEY_LEN * 2)
+    + (AEAD_IV_LEN * 2)
+    + 8
+    + 8
+    + 1;
+
 /// Cipher identifiers for UDP-QSP payload protection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]

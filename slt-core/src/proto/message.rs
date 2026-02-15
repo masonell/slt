@@ -1,7 +1,6 @@
 use super::framing::{Frame, FrameError, decode_frame, encode_frame};
-use super::payloads::{AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_PAYLOAD_LEN, HP_KEY_LEN};
+use super::payloads::MAX_CONTROL_FRAME_LEN;
 use super::types::MessageType;
-use crate::types::MAX_DCID_LEN;
 
 /// Application-layer message with a payload view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,22 +131,11 @@ impl MessageLimits {
     /// Compute message size limits based on TUN MTU.
     ///
     /// The frame buffer must accommodate the largest possible message, which is
-    /// either a DATA packet (up to MTU bytes) or a `REGISTER_CID` payload.
+    /// either a DATA packet (up to MTU bytes) or a control frame.
     #[must_use]
     pub fn from_mtu(mtu: u16) -> Self {
         let max_data_len = mtu as usize;
-        let max_register_len = 1
-            + MAX_DCID_LEN
-            + 1
-            + MAX_DCID_LEN
-            + 1
-            + (HP_KEY_LEN * 2)
-            + (AEAD_KEY_LEN * 2)
-            + (AEAD_IV_LEN * 2)
-            + 8
-            + 8
-            + 1;
-        let max_frame_len = max_data_len.max(max_register_len).max(AUTH_PAYLOAD_LEN);
+        let max_frame_len = max_data_len.max(MAX_CONTROL_FRAME_LEN);
         Self::new(max_frame_len, max_data_len)
     }
 }
