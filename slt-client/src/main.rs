@@ -21,6 +21,9 @@ mod wire;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(test)]
+mod test_integration;
+
 #[derive(Parser, Debug)]
 #[command(about = "Run the SLT client.")]
 struct Args {

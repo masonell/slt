@@ -100,7 +100,7 @@ impl MockTlsServer {
     }
 
     /// Attempt to pop the next message from the internal read buffer.
-    fn try_pop_message(&mut self) -> Result<Option<MockMessage>, io::Error> {
+    pub fn try_pop_message(&mut self) -> Result<Option<MockMessage>, io::Error> {
         let limits = MessageLimits::new(MAX_FRAME, MAX_FRAME);
         let Some((frame, consumed)) =
             slt_core::proto::decode_frame(&self.read_buf, limits.max_frame_len)
@@ -278,6 +278,20 @@ pub struct MockMessage {
     pub ty: slt_core::proto::MessageType,
     /// Raw message buffer (includes frame header).
     pub buf: Vec<u8>,
+}
+
+impl MockMessage {
+    /// Returns a decoded `Message` view into the frame buffer.
+    #[must_use]
+    pub fn message(&self) -> slt_core::proto::Message<'_> {
+        const HEADER_LEN: usize = 5;
+        debug_assert!(self.buf.len() >= HEADER_LEN);
+        let payload = &self.buf[HEADER_LEN..];
+        slt_core::proto::Message::from(slt_core::proto::Frame {
+            ty: self.ty,
+            payload,
+        })
+    }
 }
 
 /// Verify an auth signature against the client config's public key.

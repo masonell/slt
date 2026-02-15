@@ -247,6 +247,13 @@ impl ReconnectBackoff {
         self.current = self.base;
     }
 
+    /// Returns the current backoff duration.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn current(&self) -> Duration {
+        self.current
+    }
+
     pub fn next_delay(&mut self) -> Duration {
         let cap = self.current;
         let next = self.current.checked_mul(2).unwrap_or(self.max);

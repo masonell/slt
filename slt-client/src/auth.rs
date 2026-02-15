@@ -22,11 +22,11 @@ pub async fn authenticate(
     config: &ClientConfig,
     metrics: &Metrics,
 ) -> io::Result<()> {
-    authenticate_with_channel(tcp, config, metrics).await
+    authenticate_with_channel_impl(tcp, config, metrics).await
 }
 
 /// Generic auth implementation that works with any `TcpChannel`.
-async fn authenticate_with_channel<S, K>(
+async fn authenticate_with_channel_impl<S, K>(
     tcp: &mut TcpChannel<S, K>,
     config: &ClientConfig,
     metrics: &Metrics,
@@ -87,6 +87,19 @@ where
             }
         }
     }
+}
+
+#[cfg(test)]
+pub async fn authenticate_with_channel<S, K>(
+    tcp: &mut TcpChannel<S, K>,
+    config: &ClientConfig,
+    metrics: &Metrics,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    K: KeyUpdater,
+{
+    authenticate_with_channel_impl(tcp, config, metrics).await
 }
 
 fn export_challenge<S, K>(tcp: &TcpChannel<S, K>) -> io::Result<[u8; AUTH_CHALLENGE_LEN]>
