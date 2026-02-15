@@ -752,8 +752,15 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         let payload = ClosePayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
-        self.send_tcp_message(Message::Close { payload: &buf })
-            .await
+        // Prefer TCP for close messages to maximize delivery reliability.
+        // Only use UDP when TCP is no longer available.
+        if self.tcp_alive {
+            self.send_tcp_message(Message::Close { payload: &buf })
+                .await
+        } else {
+            self.send_udp_message(Message::Close { payload: &buf })
+                .await
+        }
     }
 
     fn schedule_next_ping(&self) -> Instant {
