@@ -136,4 +136,47 @@ mod tests {
 
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn rejects_missing_file() {
+        let encoded = r#"secret = { file = "/nonexistent/path/that/does/not/exist" }"#;
+        let result: Result<Wrapper, _> = toml::from_str(encoded);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_file_with_invalid_hex_content() {
+        let path = temp_path("invalid_hex");
+        fs::write(&path, "not valid hex!!!").unwrap();
+
+        let encoded = format!("secret = {{ file = \"{}\" }}", toml_path(&path));
+        let result: Result<Wrapper, _> = toml::from_str(&encoded);
+        assert!(result.is_err());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_file_with_wrong_length_raw_bytes() {
+        let path = temp_path("wrong_raw");
+        fs::write(&path, b"short").unwrap();
+
+        let encoded = format!("secret = {{ file = \"{}\" }}", toml_path(&path));
+        let result: Result<Wrapper, _> = toml::from_str(&encoded);
+        assert!(result.is_err());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_file_with_wrong_length_hex_text() {
+        let path = temp_path("wrong_hex");
+        fs::write(&path, "aabbcc").unwrap();
+
+        let encoded = format!("secret = {{ file = \"{}\" }}", toml_path(&path));
+        let result: Result<Wrapper, _> = toml::from_str(&encoded);
+        assert!(result.is_err());
+
+        let _ = fs::remove_file(path);
+    }
 }
