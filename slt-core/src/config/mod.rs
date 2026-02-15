@@ -96,7 +96,9 @@ pub enum ConfigLoadError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ETHERNET_IP_MTU, MAX_TUN_MTU};
+    use std::time::Duration;
+
+    use super::{ConfigError, ConfigLoadError, ETHERNET_IP_MTU, MAX_TUN_MTU};
     use crate::crypto::udp_qsp::AEAD_TAG_LEN;
     use crate::proto::HEADER_LEN;
     use crate::types::MAX_DCID_LEN;
@@ -114,5 +116,134 @@ mod tests {
 
         assert_eq!(MAX_TUN_MTU, 1406);
         assert_eq!(usize::from(MAX_TUN_MTU), calculated);
+    }
+
+    // === ConfigError display tests ===
+
+    #[test]
+    fn config_error_invalid_tun_mtu_display() {
+        let err = ConfigError::InvalidTunMtu {
+            tun_mtu: 2000,
+            max_tun_mtu: MAX_TUN_MTU,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("invalid tun_mtu"));
+        assert!(msg.contains("2000"));
+        assert!(msg.contains("1406"));
+    }
+
+    #[test]
+    fn config_error_invalid_ping_interval_display() {
+        let err = ConfigError::InvalidPingInterval {
+            ping_min: Duration::from_secs(30),
+            ping_max: Duration::from_secs(10),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("ping_min"));
+        assert!(msg.contains("ping_max"));
+        assert!(msg.contains("must not exceed"));
+    }
+
+    #[test]
+    fn config_error_invalid_reconnect_interval_display() {
+        let err = ConfigError::InvalidReconnectInterval {
+            reconnect_min: Duration::from_secs(10),
+            reconnect_max: Duration::from_secs(5),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("reconnect_min"));
+        assert!(msg.contains("reconnect_max"));
+        assert!(msg.contains("must not exceed"));
+    }
+
+    #[test]
+    fn config_error_empty_hostname_display() {
+        let err = ConfigError::EmptyHostname;
+        let msg = err.to_string();
+        assert!(msg.contains("hostname"));
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn config_error_empty_tun_name_display() {
+        let err = ConfigError::EmptyTunName;
+        let msg = err.to_string();
+        assert!(msg.contains("tun_name"));
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn config_error_zero_session_queue_size_display() {
+        let err = ConfigError::ZeroSessionQueueSize;
+        let msg = err.to_string();
+        assert!(msg.contains("session_queue_size"));
+        assert!(msg.contains("greater than zero"));
+    }
+
+    #[test]
+    fn config_error_zero_udp_nat_max_entries_display() {
+        let err = ConfigError::ZeroUdpNatMaxEntries;
+        let msg = err.to_string();
+        assert!(msg.contains("udp_nat_max_entries"));
+        assert!(msg.contains("greater than zero"));
+    }
+
+    #[test]
+    fn config_error_zero_timeout_display() {
+        let err = ConfigError::ZeroTimeout {
+            field: "auth_timeout",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("auth_timeout"));
+        assert!(msg.contains("greater than zero"));
+    }
+
+    #[test]
+    fn config_error_timeout_too_large_display() {
+        let err = ConfigError::TimeoutTooLarge {
+            field: "idle_timeout",
+            value: Duration::from_secs(7200),
+            max: Duration::from_secs(3600),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("idle_timeout"));
+        assert!(msg.contains("exceeds maximum"));
+    }
+
+    // === ConfigLoadError display tests ===
+
+    #[test]
+    fn config_load_error_parse_toml_display() {
+        let toml_err = toml::from_str::<toml::Value>("invalid [toml").unwrap_err();
+        let err = ConfigLoadError::ParseToml(toml_err);
+        let msg = err.to_string();
+        assert!(msg.contains("failed to parse config TOML"));
+    }
+
+    #[test]
+    fn config_load_error_validate_display() {
+        let err = ConfigLoadError::Validate(ConfigError::EmptyHostname);
+        let msg = err.to_string();
+        assert!(msg.contains("invalid config"));
+        assert!(msg.contains("hostname"));
+    }
+
+    // === ConfigError error conversion tests ===
+
+    #[test]
+    fn config_error_converts_to_config_load_error() {
+        let config_err = ConfigError::EmptyTunName;
+        let load_err: ConfigLoadError = config_err.into();
+        assert!(matches!(
+            load_err,
+            ConfigLoadError::Validate(ConfigError::EmptyTunName)
+        ));
+    }
+
+    #[test]
+    fn toml_error_converts_to_config_load_error() {
+        let toml_err = toml::from_str::<toml::Value>("bad").unwrap_err();
+        let load_err: ConfigLoadError = toml_err.into();
+        assert!(matches!(load_err, ConfigLoadError::ParseToml(_)));
     }
 }
