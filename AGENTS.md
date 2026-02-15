@@ -36,6 +36,8 @@
 - Use Conventional Commit messages: `<type>(<scope>): <subject>` (e.g., `feat(slt-core): add udp-qsp key phase tracking`).
 - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
 - Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy/test).
+- Commit hooks run tests and may need capabilities unavailable in the sandbox (for example local socket binds). Agents should perform `git commit` outside the sandbox so hooks can run successfully.
+- Do not bypass hooks with `--no-verify` unless explicitly requested by the user.
 - Run `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets` and fix errors before the final response.
 - Changes under `vendor/` must be in a separate commit.
 - Separate vendor updates from project changes when possible.
