@@ -64,3 +64,79 @@ impl TlsMaterial {
         matches!(self, Self::File { .. })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct Config {
+        cert: TlsMaterial,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ConfigRef<'a> {
+        cert: &'a TlsMaterial,
+    }
+
+    // Simple PEM-like string without newlines for TOML compatibility
+    const PEM_DATA: &str = "-----BEGIN CERTIFICATE----- MIIBIjAN -----END CERTIFICATE-----";
+
+    #[test]
+    fn deserialize_pem_string_directly() {
+        let config: Config = toml::from_str(&format!("cert = \"{PEM_DATA}\"")).unwrap();
+        assert!(config.cert.is_pem());
+        assert!(matches!(config.cert, TlsMaterial::Pem(s) if s == PEM_DATA));
+    }
+
+    #[test]
+    fn deserialize_pem_via_map() {
+        let config: Config = toml::from_str(&format!("cert = {{ pem = \"{PEM_DATA}\" }}")).unwrap();
+        assert!(config.cert.is_pem());
+        assert!(matches!(config.cert, TlsMaterial::Pem(s) if s == PEM_DATA));
+    }
+
+    #[test]
+    fn deserialize_file_reference() {
+        let config: Config = toml::from_str("cert = { file = \"/path/to/cert.pem\" }").unwrap();
+        assert!(config.cert.is_file());
+        assert!(
+            matches!(config.cert, TlsMaterial::File { file } if file == PathBuf::from("/path/to/cert.pem"))
+        );
+    }
+
+    #[test]
+    fn serialize_pem_as_string() {
+        let material = TlsMaterial::Pem(PEM_DATA.to_string());
+        let wrapper = ConfigRef { cert: &material };
+        let toml_str = toml::to_string(&wrapper).unwrap();
+        assert!(toml_str.contains(PEM_DATA));
+        assert!(!toml_str.contains("pem ="));
+    }
+
+    #[test]
+    fn serialize_file_as_map() {
+        let material = TlsMaterial::File {
+            file: PathBuf::from("/path/to/cert.pem"),
+        };
+        let wrapper = ConfigRef { cert: &material };
+        let toml_str = toml::to_string(&wrapper).unwrap();
+        assert!(toml_str.contains("file = \"/path/to/cert.pem\""));
+    }
+
+    #[test]
+    fn is_pem_returns_true_for_pem_variant() {
+        let material = TlsMaterial::Pem("data".to_string());
+        assert!(material.is_pem());
+        assert!(!material.is_file());
+    }
+
+    #[test]
+    fn is_file_returns_true_for_file_variant() {
+        let material = TlsMaterial::File {
+            file: PathBuf::from("/path"),
+        };
+        assert!(material.is_file());
+        assert!(!material.is_pem());
+    }
+}
