@@ -1631,4 +1631,258 @@ mod tests {
         assert!(registry.lookup_ip(assigned.addr()).is_none());
         assert!(!registry.has_cid(register.dcid.prefix()));
     }
+
+    #[tokio::test]
+    async fn session_continues_on_udp_after_tcp_close() {
+        let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+            spawn_session().await;
+
+        // Register UDP
+        let dcid = Cid::from([0x61; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x62; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            decode_message(&buf, limits).unwrap().unwrap().0,
+            Message::RegisterOk { .. }
+        ));
+
+        // Activate UDP with a data packet
+        let keys = UdpQspKeys::from_register(&register).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 22222));
+        let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 10), 8);
+        let mut data_frame = Vec::new();
+        encode_message(
+            Message::Data {
+                packet: &uplink_packet,
+            },
+            &mut data_frame,
+        )
+        .unwrap();
+        let udp_packet = keys
+            .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+            .unwrap();
+        tx.send(SessionEvent::Udp(UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: udp_packet,
+        }))
+        .await
+        .unwrap();
+
+        let received = timeout(Duration::from_secs(1), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, uplink_packet);
+
+        // Close TCP connection
+        drop(client);
+
+        // Session should still handle UDP traffic
+        let uplink_packet2 = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 11), 8);
+        let mut data_frame2 = Vec::new();
+        encode_message(
+            Message::Data {
+                packet: &uplink_packet2,
+            },
+            &mut data_frame2,
+        )
+        .unwrap();
+        let udp_packet2 = keys
+            .protect(
+                register.dcid.as_slice(),
+                1,
+                register.key_phase,
+                &data_frame2,
+            )
+            .unwrap();
+        tx.send(SessionEvent::Udp(UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: udp_packet2,
+        }))
+        .await
+        .unwrap();
+
+        let received2 = timeout(Duration::from_secs(1), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received2, uplink_packet2);
+
+        // Clean shutdown
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_drops_oversized_tun_packet() {
+        let (join, mut client, tx, _tun_rx, _udp_rx, limits, assigned, _registry) =
+            spawn_session().await;
+
+        // Create a packet larger than max_data_len
+        let max_payload = limits.max_data_len - 20; // IPv4 header is 20 bytes
+        let oversized_packet = ipv4_packet(
+            assigned.addr(),
+            Ipv4Addr::new(192, 0, 2, 1),
+            max_payload + 100,
+        );
+
+        tx.send(SessionEvent::TunPacket(oversized_packet))
+            .await
+            .unwrap();
+
+        // Should not forward anything to client via TCP
+        match timeout(
+            Duration::from_millis(200),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        {
+            Ok(Ok(_)) => panic!("oversized packet should not be forwarded to client"),
+            Ok(Err(_)) | Err(_) => {}
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_drops_tcp_data_when_udp_active() {
+        let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+            spawn_session().await;
+
+        // Register and activate UDP
+        let dcid = Cid::from([0x71; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x72; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            decode_message(&buf, limits).unwrap().unwrap().0,
+            Message::RegisterOk { .. }
+        ));
+
+        let keys = UdpQspKeys::from_register(&register).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 33333));
+        let udp_data = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 20), 8);
+        let mut udp_frame = Vec::new();
+        encode_message(Message::Data { packet: &udp_data }, &mut udp_frame).unwrap();
+        let udp_packet = keys
+            .protect(register.dcid.as_slice(), 0, register.key_phase, &udp_frame)
+            .unwrap();
+        tx.send(SessionEvent::Udp(UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: udp_packet,
+        }))
+        .await
+        .unwrap();
+        let _ = timeout(Duration::from_secs(1), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Now send data via TCP - should be dropped since UDP is active
+        let tcp_data = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 21), 8);
+        let mut tcp_frame = Vec::new();
+        encode_message(Message::Data { packet: &tcp_data }, &mut tcp_frame).unwrap();
+        client.write_all(&tcp_frame).await.unwrap();
+
+        // Should NOT appear on TUN (dropped because TCP is not active transport)
+        match timeout(Duration::from_millis(200), tun_rx.recv()).await {
+            Ok(Some(_)) => panic!("TCP data should be dropped when UDP is active"),
+            Ok(None) | Err(_) => {}
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_drops_udp_message_with_trailing_data() {
+        let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+            spawn_session().await;
+
+        // Register UDP
+        let dcid = Cid::from([0x81; QUIC_DCID_PREFIX_LEN]);
+        let scid = Cid::from([0x82; QUIC_DCID_PREFIX_LEN]);
+        let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+        let mut reg_buf = Vec::new();
+        register.encode(&mut reg_buf).unwrap();
+        let mut frame = Vec::new();
+        encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            decode_message(&buf, limits).unwrap().unwrap().0,
+            Message::RegisterOk { .. }
+        ));
+
+        let keys = UdpQspKeys::from_register(&register).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 44444));
+
+        // Create a valid data frame then append garbage
+        let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 30), 8);
+        let mut data_frame = Vec::new();
+        encode_message(
+            Message::Data {
+                packet: &uplink_packet,
+            },
+            &mut data_frame,
+        )
+        .unwrap();
+        data_frame.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // trailing garbage
+
+        let udp_packet = keys
+            .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+            .unwrap();
+        tx.send(SessionEvent::Udp(UdpClaim {
+            peer,
+            dcid_prefix: register.dcid.prefix(),
+            payload: udp_packet,
+        }))
+        .await
+        .unwrap();
+
+        // Should NOT forward to TUN (dropped due to trailing data)
+        match timeout(Duration::from_millis(200), tun_rx.recv()).await {
+            Ok(Some(_)) => panic!("UDP message with trailing data should be dropped"),
+            Ok(None) | Err(_) => {}
+        }
+
+        let _ = tx.send(SessionEvent::Shutdown).await;
+        let _ = join.await.unwrap();
+    }
 }
