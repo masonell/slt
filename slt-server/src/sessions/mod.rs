@@ -137,7 +137,13 @@ pub struct ClientSessionBase<
     tcp: SessionTcpChannel<S>,
     tun: Arc<T>,
     udp_socket: Arc<U>,
-    udp_peer: Option<SocketAddr>,
+    /// UDP-QSP session for encrypted UDP traffic. The session's peer address is
+    /// updated on every incoming UDP packet from `handle_udp_claim`. This is
+    /// safe because `send_udp_message` is only called when either:
+    /// - `active_transport == UdpQsp` (meaning we've received at least one UDP packet)
+    /// - We're inside `handle_udp_claim` processing an incoming UDP packet
+    ///
+    /// In both cases, the peer has already been set on the session.
     udp_session: Option<QuicQspSession<UdpIo<U>>>,
     rx: SessionRx,
     limits: MessageLimits,
@@ -185,7 +191,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             tcp,
             tun,
             udp_socket,
-            udp_peer: None,
             udp_session: None,
             rx,
             limits,
@@ -460,7 +465,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     );
                     self.registry.remove_cids_for_session(self.session_id);
                     self.udp_session = None;
-                    self.udp_peer = None;
                     self.set_active_transport(ActiveTransport::Tcp);
                     return Ok(SessionControl::Continue);
                 }
@@ -489,11 +493,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             }
         };
 
-        if self.udp_peer != Some(peer) {
-            self.udp_peer = Some(peer);
-            if let Some(session) = self.udp_session.as_mut() {
-                session.io_mut().set_peer(peer);
-            }
+        // Update the session's peer address on every incoming UDP packet.
+        // The peer address comes from the UDP packet's source, which may change
+        // if the client's NAT mapping changes.
+        if let Some(session) = self.udp_session.as_mut() {
+            session.io_mut().set_peer(peer);
         }
 
         let decoded = decode_message(&opened_payload, self.limits).map_err(map_message_error)?;
@@ -607,10 +611,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.registry
             .remove_cids_for_session_except(self.session_id, register.dcid.prefix());
 
-        let peer = self
-            .udp_peer
-            .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
-        let io = UdpIo::new(self.udp_socket.clone(), peer);
+        // Create the UDP session with a placeholder peer address. The actual peer
+        // is set by `handle_udp_claim` when the first UDP packet arrives.
+        // This is safe because:
+        // 1. We don't switch `active_transport` to UDP until after the first valid UDP claim
+        // 2. `send_udp_message` is only called when `active_transport == UdpQsp`
+        // 3. Therefore, we never send to this placeholder address
+        let placeholder_peer = SocketAddr::from(([0, 0, 0, 0], 0));
+        let io = UdpIo::new(self.udp_socket.clone(), placeholder_peer);
         let udp = QuicQspSession::new(
             io,
             register.scid,
@@ -623,7 +631,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 
         self.udp_session = Some(udp);
         // Do not switch transport until the first valid UDP claim arrives.
-        // This avoids dropping downlink data before we learn `udp_peer`.
+        // This ensures the session's peer address is set before we send any data.
 
         debug!(
             session_id = self.session_id,
@@ -697,13 +705,18 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.tcp.write_message(message).await
     }
 
+    /// Send a message via UDP-QSP.
+    ///
+    /// This method is only called when either:
+    /// - `active_transport == UdpQsp` (meaning we've switched to UDP after receiving a packet)
+    /// - We're inside `handle_udp_claim` responding to an incoming UDP message
+    ///
+    /// In both cases, the session's peer has already been set by `handle_udp_claim`,
+    /// so we can safely send without checking for a valid peer address.
     async fn send_udp_message(&mut self, message: Message<'_>) -> io::Result<()> {
         let Some(session) = self.udp_session.as_mut() else {
             return Ok(());
         };
-        if self.udp_peer.is_none() {
-            return Ok(());
-        }
 
         self.udp_write_buf.clear();
         encode_message(message, &mut self.udp_write_buf).map_err(map_frame_error)?;
