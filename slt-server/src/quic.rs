@@ -283,13 +283,13 @@ impl QuicNatState {
         }
     }
     fn handle_reader_done(&mut self, peer: SocketAddr, token: u64) {
-        if let Some(entry) = self.peers.pop(&peer)
-            && entry.token != token
-        {
-            trace!(peer = %peer, expected_token = entry.token, received_token = token, "Reader token mismatch, restoring entry");
-            self.peers.put(peer, entry);
-        } else if self.peers.pop(&peer).is_some() {
-            trace!(peer = %peer, token = token, "Removed completed reader from NAT state");
+        if let Some(entry) = self.peers.pop(&peer) {
+            if entry.token == token {
+                trace!(peer = %peer, token = token, "Removed completed reader from NAT state");
+            } else {
+                trace!(peer = %peer, expected_token = entry.token, received_token = token, "Reader token mismatch, restoring entry");
+                self.peers.put(peer, entry);
+            }
         }
     }
 
