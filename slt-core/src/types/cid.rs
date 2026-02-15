@@ -109,3 +109,53 @@ impl TryFrom<&[u8]> for Cid {
         Self::new(value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_too_short_cid() {
+        let short = &[0u8; 7];
+        let result = Cid::new(short);
+        assert!(matches!(result, Err(CidError::InvalidLen(7))));
+    }
+
+    #[test]
+    fn rejects_too_long_cid() {
+        let long = &[0xAA; 21];
+        let result = Cid::new(long);
+        assert!(matches!(result, Err(CidError::InvalidLen(21))));
+    }
+
+    #[test]
+    fn accepts_minimum_length_cid() {
+        let min = &[0xAA; 8];
+        let cid = Cid::new(min).unwrap();
+        assert_eq!(cid.len(), 8);
+        assert_eq!(cid.as_slice(), min);
+    }
+
+    #[test]
+    fn accepts_maximum_length_cid() {
+        let max = &[0xBB; 20];
+        let cid = Cid::new(max).unwrap();
+        assert_eq!(cid.len(), 20);
+        assert_eq!(cid.as_slice(), max);
+    }
+
+    #[test]
+    fn cid_prefix_new_succeeds() {
+        let bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let prefix = CidPrefix::new(bytes);
+        assert_eq!(prefix.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn cid_prefix_as_bytes_returns_correct_slice() {
+        let bytes = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
+        let prefix = CidPrefix::new(bytes);
+        assert_eq!(prefix.as_bytes(), &bytes);
+        assert_eq!(prefix.as_slice(), &bytes[..]);
+    }
+}
