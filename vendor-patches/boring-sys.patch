@@ -1,0 +1,105 @@
+diff --git a/build/main.rs b/build/main.rs
+index 2aade03..36c9b26 100644
+--- a/build/main.rs
++++ b/build/main.rs
+@@ -455,6 +455,9 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
+     println!("cargo:warning=applying post quantum crypto patch to boringssl");
+     apply_patch(config, "boring-pq.patch")?;
+ 
++    println!("cargo:warning=applying client hello session id patch to boringssl");
++    apply_patch(config, "client-hello-session-id.patch")?;
++
+     if config.features.rpk {
+         println!("cargo:warning=applying RPK patch to boringssl");
+         apply_patch(config, "rpk.patch")?;
+diff --git a/patches/client-hello-session-id.patch b/patches/client-hello-session-id.patch
+new file mode 100644
+index 0000000..4bcc339
+--- /dev/null
++++ b/patches/client-hello-session-id.patch
+@@ -0,0 +1,85 @@
++--- a/include/openssl/ssl.h
+++++ b/include/openssl/ssl.h
++@@ -5059,6 +5059,15 @@
++     SSL_CTX *ctx,
++     enum ssl_select_cert_result_t (*cb)(const SSL_CLIENT_HELLO *));
++ 
+++// SSL_CTX_set_client_hello_session_id_cb sets a callback that is invoked on
+++// clients just before the ClientHello is hashed. The callback may overwrite
+++// the legacy_session_id in place. |client_hello| contains the serialized
+++// ClientHello, including the handshake header if present.
+++OPENSSL_EXPORT void SSL_CTX_set_client_hello_session_id_cb(
+++    SSL_CTX *ctx,
+++    int (*cb)(SSL *ssl, const uint8_t *client_hello, size_t client_hello_len,
+++              uint8_t *session_id, size_t session_id_len));
+++
++ // SSL_CTX_set_dos_protection_cb sets a callback that is called once the
++ // resumption decision for a ClientHello has been made. It can return one to
++ // allow the handshake to continue or zero to cause the handshake to abort.
++
++--- a/ssl/internal.h
+++++ b/ssl/internal.h
++@@ -3865,6 +3865,14 @@
++   ssl_select_cert_result_t (*select_certificate_cb)(const SSL_CLIENT_HELLO *) =
++       nullptr;
++ 
+++  // client_hello_session_id_cb is called on the client after ClientHello has
+++  // been serialized but before it is hashed. It may overwrite the
+++  // legacy_session_id in place.
+++  int (*client_hello_session_id_cb)(SSL *ssl, const uint8_t *client_hello,
+++                                    size_t client_hello_len,
+++                                    uint8_t *session_id,
+++                                    size_t session_id_len) = nullptr;
+++
++   // dos_protection_cb is called once the resumption decision for a ClientHello
++   // has been made. It returns one to continue the handshake or zero to
++   // abort.
++
++--- a/ssl/ssl_lib.cc
+++++ b/ssl/ssl_lib.cc
++@@ -2865,6 +2865,13 @@
++   ctx->select_certificate_cb = cb;
++ }
++ 
+++void SSL_CTX_set_client_hello_session_id_cb(
+++    SSL_CTX *ctx,
+++    int (*cb)(SSL *ssl, const uint8_t *client_hello, size_t client_hello_len,
+++              uint8_t *session_id, size_t session_id_len)) {
+++  ctx->client_hello_session_id_cb = cb;
+++}
+++
++ void SSL_CTX_set_dos_protection_cb(SSL_CTX *ctx,
++                                    int (*cb)(const SSL_CLIENT_HELLO *)) {
++   ctx->dos_protection_cb = cb;
++
++--- a/ssl/handshake_client.cc
+++++ b/ssl/handshake_client.cc
++@@ -233,6 +233,27 @@
++     return false;
++   }
++ 
+++  if (ssl->ctx->client_hello_session_id_cb != nullptr) {
+++    const size_t header_len =
+++        SSL_is_dtls(ssl) ? DTLS1_HM_HEADER_LENGTH : SSL3_HM_HEADER_LENGTH;
+++    if (msg.size() < header_len) {
+++      return false;
+++    }
+++
+++    SSL_CLIENT_HELLO client_hello;
+++    if (!SSL_parse_client_hello(ssl, &client_hello, msg.data() + header_len,
+++                                msg.size() - header_len)) {
+++      return false;
+++    }
+++
+++    if (!ssl->ctx->client_hello_session_id_cb(
+++            ssl, msg.data(), msg.size(),
+++            const_cast<uint8_t *>(client_hello.session_id),
+++            client_hello.session_id_len)) {
+++      return false;
+++    }
+++  }
+++
++   // Now that the length prefixes have been computed, fill in the placeholder
++   // PSK binder.
++   if (needs_psk_binder) {
++

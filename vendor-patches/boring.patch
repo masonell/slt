@@ -1,0 +1,88 @@
+diff --git a/src/error.rs b/src/error.rs
+index 5087d10..c640127 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -61,7 +61,7 @@ impl ErrorStack {
+ 
+     /// Used to report errors from the Rust crate
+     #[cold]
+-    pub(crate) fn internal_error(err: impl error::Error) -> Self {
++    pub fn internal_error(err: impl error::Error) -> Self {
+         Self(vec![Error::new_internal(Data::String(err.to_string()))])
+     }
+ 
+diff --git a/src/ssl/callbacks.rs b/src/ssl/callbacks.rs
+index f08409b..7868516 100644
+--- a/src/ssl/callbacks.rs
++++ b/src/ssl/callbacks.rs
+@@ -387,6 +387,37 @@ where
+     }
+ }
+ 
++pub(super) unsafe extern "C" fn raw_client_hello_session_id<F>(
++    ssl: *mut ffi::SSL,
++    client_hello: *const c_uchar,
++    client_hello_len: usize,
++    session_id: *mut c_uchar,
++    session_id_len: usize,
++) -> c_int
++where
++    F: Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<(), ErrorStack> + Sync + Send + 'static,
++{
++    // SAFETY: boring provides valid inputs.
++    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
++    let client_hello =
++        unsafe { slice::from_raw_parts(client_hello, client_hello_len) };
++    let session_id =
++        unsafe { slice::from_raw_parts_mut(session_id, session_id_len) };
++
++    let ssl_context = ssl.ssl_context().to_owned();
++    let callback = ssl_context
++        .ex_data(SslContext::cached_ex_index::<F>())
++        .expect("BUG: client hello session id callback missing");
++
++    match callback(ssl, client_hello, session_id) {
++        Ok(()) => 1,
++        Err(e) => {
++            e.put();
++            0
++        }
++    }
++}
++
+ pub(super) unsafe extern "C" fn raw_tlsext_status<F>(ssl: *mut ffi::SSL, _: *mut c_void) -> c_int
+ where
+     F: Fn(&mut SslRef) -> Result<bool, ErrorStack> + 'static + Sync + Send,
+diff --git a/src/ssl/mod.rs b/src/ssl/mod.rs
+index dd17a8a..48667c5 100644
+--- a/src/ssl/mod.rs
++++ b/src/ssl/mod.rs
+@@ -1646,6 +1646,28 @@ impl SslContextBuilder {
+         }
+     }
+ 
++    /// Sets a callback that can overwrite the legacy_session_id in the ClientHello on the client.
++    ///
++    /// The callback receives the raw ClientHello bytes (including the handshake header if present)
++    /// and a mutable slice pointing to the legacy_session_id field. It should overwrite the slice
++    /// in place. Returning an error will abort the handshake.
++    #[corresponds(SSL_CTX_set_client_hello_session_id_cb)]
++    pub fn set_client_hello_session_id_callback<F>(&mut self, callback: F)
++    where
++        F: Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<(), ErrorStack>
++            + Sync
++            + Send
++            + 'static,
++    {
++        unsafe {
++            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
++            ffi::SSL_CTX_set_client_hello_session_id_cb(
++                self.as_ptr(),
++                Some(callbacks::raw_client_hello_session_id::<F>),
++            );
++        }
++    }
++
+     /// Registers a certificate compression algorithm.
+     ///
+     /// [`SSL_CTX_add_cert_compression_alg`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_CTX_add_cert_compression_alg

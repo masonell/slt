@@ -1,0 +1,10 @@
+[versions]
+boring = "5.0.0-alpha.2"
+boring-sys = "5.0.0-alpha.2"
+tokio-boring = "5.0.0-alpha.1"
+quiche = "0.24.8"
+
+[patches]
+boring = "vendor-patches/boring.patch"
+boring-sys = "vendor-patches/boring-sys.patch"
+quiche = "vendor-patches/quiche.patch"
