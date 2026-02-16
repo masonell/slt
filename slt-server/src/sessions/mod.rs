@@ -35,7 +35,18 @@ use super::router::PacketRouter;
 use super::{AssignedIp, ClientId};
 use crate::tun::TunDeviceIo;
 
-/// A single authenticated client session.
+/// Core session structure for an authenticated VPN client.
+///
+/// Manages the client's connection state, active transport (TCP or UDP-QSP),
+/// message routing between TUN device and network transports, and session lifecycle.
+/// The session is generic over the TUN device implementation, TCP stream type,
+/// and UDP socket type to support testing and flexibility.
+///
+/// # Type Parameters
+///
+/// * `T` - TUN device I/O implementation (must implement [`TunDeviceIo`])
+/// * `S` - TCP stream type (defaults to [`TcpStream`], must be async read/write)
+/// * `U` - UDP socket type (defaults to [`UdpSocket`], must implement [`UdpSocketIo`])
 pub struct ClientSessionBase<
     T: TunDeviceIo,
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static = TcpStream,
@@ -75,7 +86,10 @@ pub struct ClientSessionBase<
     tcp_alive: bool,
 }
 
-/// Default client session using a real TUN device.
+/// Default client session type using the async TUN device.
+///
+/// This is the primary session type used in production, combining
+/// `ClientSessionBase` with the runtime `AsyncDevice` implementation.
 pub type ClientSession = ClientSessionBase<AsyncDevice>;
 
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
@@ -281,18 +295,33 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     }
 }
 
-fn map_message_error(err: MessageError) -> io::Error {
+/// Converts a [`MessageError`] into an [`io::Error`].
+///
+/// Wraps the message error with an `InvalidData` kind for consistent
+/// error handling across the session layer.
+#[must_use]
+pub fn map_message_error(err: MessageError) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!("message error: {err:?}"),
     )
 }
 
-fn map_frame_error(err: FrameError) -> io::Error {
+/// Converts a [`FrameError`] into an [`io::Error`].
+///
+/// Wraps the frame error with an `InvalidData` kind for consistent
+/// error handling across the session layer.
+#[must_use]
+pub fn map_frame_error(err: FrameError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
 }
 
-fn map_payload_error(err: PayloadError) -> io::Error {
+/// Converts a [`PayloadError`] into an [`io::Error`].
+///
+/// Wraps the payload error with an `InvalidData` kind for consistent
+/// error handling across the session layer.
+#[must_use]
+pub fn map_payload_error(err: PayloadError) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!("payload error: {err:?}"),

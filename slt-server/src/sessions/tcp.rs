@@ -13,6 +13,17 @@ use crate::tun::TunDeviceIo;
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
     ClientSessionBase<T, S, U>
 {
+    /// Reads and processes all pending messages from the TCP transport.
+    ///
+    /// Drains the TCP message buffer, dispatching each complete message to
+    /// `handle_tcp_message` for processing. Returns early if any message
+    /// results in a session close request.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionControl::Continue)` if all messages were processed successfully
+    /// * `Ok(SessionControl::Close)` if any message requested session termination
+    /// * `Err(io::Error)` if reading from the TCP buffer fails
     pub(super) async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
         loop {
             let Some(msg_buf) = self
@@ -29,6 +40,21 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         }
     }
 
+    /// Processes a single message received from the TCP transport.
+    ///
+    /// Dispatches the message based on its type, handling data forwarding to TUN,
+    /// ping/pong responses, and control messages. Rejects unexpected messages
+    /// for established sessions.
+    ///
+    /// # Parameters
+    ///
+    /// * `message` - The decoded message from the TCP stream
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionControl::Continue)` for most messages
+    /// * `Ok(SessionControl::Close)` if the peer sent a close message
+    /// * `Err(io::Error)` if message handling fails (e.g., unexpected message type)
     async fn handle_tcp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
         match message {
             Message::Auth { .. }

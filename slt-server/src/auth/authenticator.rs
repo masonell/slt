@@ -9,6 +9,10 @@ use tracing::trace;
 use crate::AssignedIp;
 
 /// Simple allowlist-based authenticator.
+///
+/// Maintains a mapping of client IDs to their server configuration entries,
+/// providing methods for client lookup and validation during the authentication
+/// phase. Clients must be present in the allowlist and enabled to authenticate.
 #[derive(Debug, Clone)]
 pub struct Authenticator {
     clients_config: HashMap<ClientId, ServerClient>,
@@ -56,6 +60,33 @@ impl Authenticator {
     }
 }
 
+/// Verifies an authentication payload against the authenticator and challenge.
+///
+/// Performs comprehensive validation including:
+/// - Client existence in the allowlist
+/// - Client enabled status
+/// - Assigned IP address match
+/// - Challenge value correctness
+/// - Ed25519 signature verification over the context string
+///
+/// # Arguments
+///
+/// * `authenticator` - The authenticator containing client configurations
+/// * `payload` - The authentication payload from the client
+/// * `challenge` - The challenge bytes derived from TLS keying material
+///
+/// # Returns
+///
+/// Returns the assigned IP address on success, or an authentication failure
+/// code indicating the specific reason for rejection.
+///
+/// # Signature Context
+///
+/// The signature is verified over a concatenated context string containing:
+/// - `"slt-auth-v1"` (11 bytes)
+/// - Client ID (16 bytes)
+/// - Assigned IPv4 octets (4 bytes)
+/// - Challenge bytes (variable)
 pub(super) fn verify_auth_payload(
     authenticator: &Authenticator,
     payload: &AuthPayload,

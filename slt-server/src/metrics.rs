@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::trace;
 
 /// Server counters for basic observability.
+///
+/// Thread-safe metrics collection using relaxed ordering atomic counters.
+/// Provides snapshot functionality for point-in-time metric reads.
 #[derive(Debug, Default)]
 pub struct Metrics {
     tcp_accepted: AtomicU64,
@@ -86,6 +89,10 @@ pub struct MetricsSnapshot {
     pub udp_qsp_dead_channel: u64,
 }
 
+/// Atomically increments a counter and returns the new value.
+///
+/// Uses relaxed ordering for performance; exact ordering relative to other
+/// operations is not required for metrics collection.
 #[inline]
 fn inc(counter: &AtomicU64) -> u64 {
     counter.fetch_add(1, Ordering::Relaxed) + 1

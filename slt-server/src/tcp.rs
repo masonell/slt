@@ -19,6 +19,10 @@ const CLASSIFY_TIMEOUT: Duration = Duration::from_millis(250);
 const CLASSIFY_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 /// TCP acceptor and `ClientHello` classifier.
+///
+/// Listens for TCP connections, inspects TLS `ClientHello` messages to
+/// identify VPN clients, and routes connections either to the claim handler
+/// (for VPN clients) or proxies them to nginx (for regular traffic).
 #[derive(Debug)]
 pub struct TcpFrontDoor {
     listener: TcpListener,
@@ -118,6 +122,19 @@ impl TcpFrontDoor {
         }
     }
 
+    /// Proxy a TCP stream to the nginx upstream.
+    ///
+    /// Connects to the upstream server and performs bidirectional copying
+    /// of data between the inbound client stream and the upstream stream.
+    ///
+    /// # Arguments
+    ///
+    /// * `inbound` - Client TCP stream
+    /// * `upstream` - Nginx upstream address to connect to
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if connecting to upstream or bidirectional copy fails.
     async fn proxy_to_upstream(mut inbound: TcpStream, upstream: SocketAddr) -> io::Result<()> {
         trace!(upstream_addr = %upstream, "connecting to upstream");
         let mut outbound = TcpStream::connect(upstream).await?;
@@ -135,6 +152,24 @@ impl TcpFrontDoor {
         Ok(())
     }
 
+    /// Classify a TCP stream by inspecting its TLS `ClientHello`.
+    ///
+    /// Peeks at the stream data with retries to handle slow arrivals,
+    /// classifies the buffer, and returns a verdict. Respects the
+    /// classification timeout and drops connections that send no data.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - TCP stream to classify
+    /// * `server_secret` - Secret key for HMAC verification
+    ///
+    /// # Returns
+    ///
+    /// The classification verdict (Claim, Pass, Drop, or Incomplete).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if peeking at the stream fails.
     async fn classify_stream(
         stream: &TcpStream,
         server_secret: SharedSecret,

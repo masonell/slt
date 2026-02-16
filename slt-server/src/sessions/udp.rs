@@ -17,6 +17,23 @@ use crate::tun::TunDeviceIo;
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
     ClientSessionBase<T, S, U>
 {
+    /// Processes a UDP packet claimed for this session.
+    ///
+    /// Handles the full UDP message pipeline:
+    /// 1. Decrypts and validates the packet with UDP-QSP
+    /// 2. Decodes the inner VPN message
+    /// 3. May switch to UDP transport if appropriate
+    /// 4. Dispatches the message to the appropriate handler
+    ///
+    /// # Parameters
+    ///
+    /// * `claim` - The claimed UDP packet containing peer address and payload
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionControl::Continue)` if the packet was processed or dropped
+    /// * `Ok(SessionControl::Close)` if the message requested session termination
+    /// * `Err(io::Error)` if a non-recoverable error occurs
     pub(super) async fn handle_udp_claim(&mut self, claim: UdpClaim) -> io::Result<SessionControl> {
         let peer = claim.peer;
 
@@ -43,10 +60,27 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.dispatch_udp_message(message).await
     }
 
-    /// Decrypt and validate a UDP-QSP packet.
+    /// Decrypts and validates a UDP-QSP packet.
     ///
-    /// Returns `Some(payload)` on success, or `None` if the packet should be dropped.
-    /// Handles dead channel fallback internally.
+    /// Opens the packet using the session's UDP-QSP crypto state, handling
+    /// various error conditions (replay, too old, dead channel, crypto failures).
+    /// Tracks key phase transitions for metrics.
+    ///
+    /// # Parameters
+    ///
+    /// * `payload` - The encrypted UDP-QSP packet bytes
+    ///
+    /// # Returns
+    ///
+    /// * `Some(payload)` - The decrypted plaintext payload on success
+    /// * `None` - If the packet should be dropped (with appropriate metrics logged)
+    ///
+    /// # Behavior
+    ///
+    /// - On `DeadChannel` error: removes all registered CIDs, clears the UDP session,
+    ///   and falls back to TCP transport
+    /// - On replay/old/crypto errors: logs and returns None
+    /// - Tracks RX key phase transitions for metrics
     fn open_udp_packet(&mut self, payload: &[u8]) -> Option<Vec<u8>> {
         let session = self.udp_session.as_mut()?;
         let rx_phase_before = session.rx_key_phase();
@@ -125,10 +159,20 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         Some(payload_vec)
     }
 
-    /// Decode a message from the decrypted UDP payload.
+    /// Decodes a VPN message from the decrypted UDP payload.
     ///
-    /// Returns `Some(message)` on success, or `None` if the message
-    /// is malformed or has trailing data.
+    /// Parses the message and validates that no trailing data remains
+    /// (which would indicate malformed or padded input).
+    ///
+    /// # Parameters
+    ///
+    /// * `payload` - The decrypted plaintext payload from UDP-QSP
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(message))` - A valid message was decoded
+    /// * `Ok(None)` - The payload was empty or incomplete
+    /// * `Err(io::Error)` - The message was malformed or had trailing data
     fn decode_udp_message<'a>(&self, payload: &'a [u8]) -> io::Result<Option<Message<'a>>> {
         let decoded = decode_message(payload, self.limits).map_err(map_message_error)?;
         let Some((message, consumed)) = decoded else {
@@ -140,7 +184,15 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         Ok(Some(message))
     }
 
-    /// Activate UDP transport if the message warrants it.
+    /// Switches the session to UDP transport if the message type warrants it.
+    ///
+    /// Activates UDP-QSP for data-bearing messages (Ping, Pong, Data, Close,
+    /// `RegisterCid`) but not for authentication/handshake messages which shouldn't
+    /// arrive on UDP.
+    ///
+    /// # Parameters
+    ///
+    /// * `message` - The decoded message to evaluate
     fn maybe_activate_udp(&mut self, message: &Message<'_>) {
         let should_activate = matches!(
             message,
@@ -155,7 +207,25 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         }
     }
 
-    /// Dispatch a decrypted UDP message to the appropriate handler.
+    /// Dispatches a decoded UDP message to its appropriate handler.
+    ///
+    /// Routes the message based on type:
+    /// - Ping: Responds with Pong
+    /// - Pong: Logs and continues
+    /// - Data: Forwards to TUN device if valid
+    /// - Close: Initiates session shutdown
+    /// - `RegisterCid`: Handles CID registration
+    /// - Auth messages: Silently ignored (shouldn't arrive on UDP)
+    ///
+    /// # Parameters
+    ///
+    /// * `message` - The decoded message to dispatch
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionControl::Continue)` for most messages
+    /// * `Ok(SessionControl::Close)` if the message requested termination
+    /// * `Err(io::Error)` if message handling fails
     async fn dispatch_udp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
         match message {
             Message::Ping { payload } => {

@@ -19,7 +19,10 @@ use crate::tun::TunDeviceIo;
 
 /// Manages session creation and lifecycle.
 ///
-/// Encapsulates all resources needed to spawn and manage client sessions.
+/// Encapsulates all resources needed to spawn and manage client sessions,
+/// including the session registry, TUN device, UDP socket, metrics, and
+/// configuration limits. Provides methods for creating new sessions after
+/// successful authentication.
 #[derive(Clone)]
 pub struct SessionManager<T: TunDeviceIo> {
     registry: Arc<SessionRegistry>,
@@ -84,6 +87,17 @@ impl<T: TunDeviceIo> SessionManager<T> {
     }
 
     /// Spawns a new client session after successful authentication.
+    ///
+    /// Creates the session channel, registers the session in the registry,
+    /// and spawns a task to run the session. If an existing session with
+    /// the same client ID exists, it is gracefully shut down before
+    /// the new session is created.
+    ///
+    /// # Arguments
+    ///
+    /// * `client_id` - The unique identifier for the client
+    /// * `assigned_ip` - The IPv4 address assigned to this client
+    /// * `tcp_channel` - The established TLS/TCP channel for the session
     fn spawn_session(
         &self,
         client_id: ClientId,
@@ -146,6 +160,19 @@ impl<T: TunDeviceIo> SessionManager<T> {
     }
 
     /// Test-only session spawning for generic streams.
+    ///
+    /// Similar to [`spawn_session`] but accepts any async read/write stream,
+    /// enabling use with mock connections in tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `client_id` - The unique identifier for the client
+    /// * `assigned_ip` - The IPv4 address assigned to this client
+    /// * `tcp_channel` - The TCP channel (any compatible stream type)
+    ///
+    /// # Type Parameters
+    ///
+    /// * `S` - The underlying stream type (must implement async read/write)
     #[cfg(test)]
     fn spawn_session_test<S>(
         &self,

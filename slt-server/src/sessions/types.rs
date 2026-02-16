@@ -15,7 +15,11 @@ use tracing::trace;
 use crate::metrics::Metrics;
 use crate::quic::UdpClaim;
 
-/// Active transport for a client session.
+/// Indicates which transport is currently active for a client session.
+///
+/// The session can send data over either TLS-over-TCP or UDP-QSP at any given time.
+/// The active transport determines which underlying network connection is used
+/// for outgoing messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTransport {
     /// TLS-over-TCP transport.
@@ -24,7 +28,10 @@ pub enum ActiveTransport {
     UdpQsp,
 }
 
-/// Inbound events delivered to a `ClientSession`.
+/// Events that can be delivered to a running client session.
+///
+/// These events are sent via the session's event channel and processed
+/// by the session's event loop in `run_inner`.
 #[derive(Debug)]
 pub enum SessionEvent {
     /// Claimed UDP-QSP datagram destined for this session.
@@ -35,9 +42,15 @@ pub enum SessionEvent {
     Shutdown,
 }
 
-/// Sender for delivering events to a session.
+/// Channel sender for delivering events to a session.
+///
+/// Used by other server components (TUN reader, UDP router, etc.) to send
+/// events to the session's event loop.
 pub type SessionTx = mpsc::Sender<SessionEvent>;
-/// Receiver for session events.
+
+/// Channel receiver for session events.
+///
+/// Owned by the session's event loop and consumed during `run_inner`.
 pub type SessionRx = mpsc::Receiver<SessionEvent>;
 
 /// Metrics-aware TLS key updater used by server session channels.
@@ -80,14 +93,25 @@ impl KeyUpdater for SessionKeyUpdater {
 /// Session TCP channel with interval-based TLS key updates.
 pub type SessionTcpChannel<S = TcpStream> = TcpChannel<S, SessionKeyUpdater>;
 
-/// Session-internal control flow indicator.
+/// Control flow return value for session message handlers.
+///
+/// Indicates whether the session should continue processing messages
+/// or initiate a graceful shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionControl {
     Continue,
     Close,
 }
 
-/// Configurable timeouts for a client session.
+/// Timeout configuration for a client session.
+///
+/// Controls keepalive ping scheduling and session idle timeout.
+///
+/// # Fields
+///
+/// * `ping_min` - Minimum interval between keepalive pings
+/// * `ping_max` - Maximum interval between keepalive pings (actual interval is randomized)
+/// * `idle_timeout` - Maximum idle time before the session is terminated
 #[derive(Debug, Clone, Copy)]
 pub struct SessionTimeouts {
     /// Minimum interval between keepalive pings.

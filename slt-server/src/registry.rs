@@ -17,12 +17,20 @@ pub enum CidInsertError {
     PrefixCollision(CidPrefix),
 }
 
+/// Internal CID routing entry.
+///
+/// Maps a CID prefix to the session that owns it, providing the
+/// session ID for validation and the channel sender for delivery.
 #[derive(Debug, Clone)]
 struct CidRoute {
     session_id: u64,
     tx: SessionTx,
 }
 
+/// Handle for a registered session.
+///
+/// Contains all metadata needed to route packets to a session and
+/// track its lifecycle. Cloned for use in routing tables.
 #[derive(Debug, Clone)]
 pub struct SessionHandle {
     /// Stable session identifier.
@@ -35,6 +43,10 @@ pub struct SessionHandle {
     pub tx: SessionTx,
 }
 
+/// Internal state of the session registry.
+///
+/// Maintains mappings from client IDs, IPv4 addresses, and CID prefixes
+/// to session handles. Tracks the next session ID for assignment.
 #[derive(Debug)]
 struct RegistryInner {
     next_session_id: u64,
@@ -44,6 +56,10 @@ struct RegistryInner {
 }
 
 /// Global session registry.
+///
+/// Thread-safe registry mapping client IDs, IPv4 addresses, and CID prefixes
+/// to active sessions. Supports session registration, CID routing, and
+/// cleanup on session replacement or removal.
 #[derive(Debug)]
 pub struct SessionRegistry {
     inner: RwLock<RegistryInner>,

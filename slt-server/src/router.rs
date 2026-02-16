@@ -9,10 +9,17 @@ use crate::sessions::{ClientSessionBase, UdpSocketIo};
 use crate::tun::TunDeviceIo;
 
 /// Routes packets between TUN and sessions.
+///
+/// Provides packet validation to prevent IP spoofing by enforcing that
+/// packets from a session must have the session's assigned IPv4 address
+/// as their source.
 #[derive(Debug, Default)]
 pub struct PacketRouter;
 
 /// Minimal session metadata needed for packet validation.
+///
+/// Abstraction over session types to access the assigned IPv4 address
+/// for source validation without requiring the full session type.
 pub trait SessionMeta {
     /// Returns the assigned IPv4 address for the session.
     fn assigned_ipv4(&self) -> Ipv4Addr;

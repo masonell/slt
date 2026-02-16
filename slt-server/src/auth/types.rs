@@ -66,8 +66,14 @@ impl AuthPhaseResult {
     }
 }
 
+/// Step result for auth loop iteration.
+///
+/// Indicates whether the auth loop should continue processing messages
+/// or terminate with a final result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AuthStep {
+    /// Continue processing auth messages.
     Continue,
+    /// Auth phase is complete; return the result.
     Done(AuthPhaseResult),
 }

@@ -19,6 +19,32 @@ use crate::tun::TunDeviceIo;
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
     ClientSessionBase<T, S, U>
 {
+    /// Handles an incoming `RegisterCid` message from the client.
+    ///
+    /// This message registers the client's UDP-QSP connection IDs (DCID/SCID) and
+    /// cryptographic keys, enabling the session to switch to UDP transport. The function:
+    ///
+    /// 1. Decodes and validates the registration payload
+    /// 2. Extracts UDP-QSP keys from the payload
+    /// 3. Registers the DCID prefix in the session registry for packet routing
+    /// 4. Creates a new UDP-QSP session with the provided parameters
+    /// 5. Sends a `RegisterOk` response on success
+    ///
+    /// # Parameters
+    ///
+    /// * `payload` - The encoded `RegisterCidPayload` from the client message
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SessionControl::Continue)` if registration succeeds or fails gracefully
+    /// * `Err(io::Error)` if sending the response fails
+    ///
+    /// # Behavior
+    ///
+    /// - Sends `RegisterFail` with `InvalidCid` if the payload is malformed
+    /// - Sends `RegisterFail` with `InvalidKeys` if key derivation fails
+    /// - Sends `RegisterFail` with `InvalidCid` if the DCID prefix collides
+    /// - Does NOT switch to UDP transport until the first valid UDP packet arrives
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_register_cid(
         &mut self,
@@ -112,6 +138,19 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         Ok(SessionControl::Continue)
     }
 
+    /// Sends a `RegisterFail` message to the client.
+    ///
+    /// Encodes the failure code into a payload and sends it via the currently
+    /// active transport (TCP or UDP-QSP).
+    ///
+    /// # Parameters
+    ///
+    /// * `code` - The specific failure reason to report to the client
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` if the message was sent successfully
+    /// * `Err(io::Error)` if sending fails
     async fn send_register_fail(&mut self, code: RegisterFailCode) -> io::Result<()> {
         let payload = RegisterFailPayload { code };
         let mut buf = Vec::with_capacity(1);

@@ -40,6 +40,10 @@ where
 }
 
 /// TLS + AUTH handler that creates client sessions.
+///
+/// Manages the full authentication flow from incoming TCP connection through
+/// TLS handshake to successful authentication and session spawning. Includes
+/// timeout handling and metrics recording.
 #[derive(Clone)]
 pub struct AuthHandlerBase<T: TunDeviceIo> {
     acceptor: SslAcceptor,
@@ -49,6 +53,9 @@ pub struct AuthHandlerBase<T: TunDeviceIo> {
 }
 
 /// Default auth handler using a real TUN device.
+///
+/// Type alias for [`AuthHandlerBase`] parameterized with `AsyncDevice`,
+/// used in production server configurations.
 pub type AuthHandler = AuthHandlerBase<AsyncDevice>;
 
 impl<T: TunDeviceIo> AuthHandlerBase<T> {

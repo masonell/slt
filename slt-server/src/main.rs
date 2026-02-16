@@ -26,6 +26,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tun_rs::DeviceBuilder;
 
+/// Command-line arguments for the SLT server.
+///
+/// Parsed using `clap` from command-line invocation.
 #[derive(Parser, Debug)]
 #[command(about = "Run the SLT server front door.")]
 struct Args {
@@ -167,6 +170,10 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     shutdown_result
 }
 
+/// Spawns a task that listens for Ctrl+C and triggers graceful shutdown.
+///
+/// When Ctrl+C is received, the cancellation token is cancelled, which
+/// signals all worker tasks to begin graceful shutdown.
 fn spawn_ctrl_c(cancel: CancellationToken) {
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
@@ -176,6 +183,20 @@ fn spawn_ctrl_c(cancel: CancellationToken) {
     });
 }
 
+/// Spawns the TCP front door listener task.
+///
+/// Accepts incoming TCP connections and spawns authentication handlers for
+/// each claimed connection.
+///
+/// # Arguments
+///
+/// * `frontdoor` - TCP listener and connection classifier
+/// * `auth_handler` - Handler for TLS and client authentication
+/// * `cancel` - Token to signal graceful shutdown
+///
+/// # Returns
+///
+/// A join handle for the spawned task.
 fn spawn_tcp_task(
     frontdoor: TcpFrontDoor,
     auth_handler: Arc<AuthHandler>,
@@ -213,6 +234,18 @@ fn classify_task_result(
     }
 }
 
+/// Spawns the UDP front door listener task.
+///
+/// Runs the QUIC endpoint which processes incoming UDP packets.
+///
+/// # Arguments
+///
+/// * `quic` - QUIC endpoint for UDP packet handling
+/// * `cancel` - Token to signal graceful shutdown
+///
+/// # Returns
+///
+/// A join handle for the spawned task.
 fn spawn_udp_task(
     quic: QuicEndpoint,
     cancel: CancellationToken,
@@ -220,6 +253,22 @@ fn spawn_udp_task(
     tokio::spawn(async move { quic.run(cancel).await })
 }
 
+/// Spawns the TUN device reader task.
+///
+/// Reads packets from the TUN device and routes them to the appropriate
+/// session based on destination IP address.
+///
+/// # Arguments
+///
+/// * `tun` - TUN device for reading VPN packets
+/// * `registry` - Session registry for IP-to-session lookups
+/// * `metrics` - Metrics tracker for queue overflow drops
+/// * `cancel` - Token to signal graceful shutdown
+/// * `mtu` - Maximum transmission unit for buffer sizing
+///
+/// # Returns
+///
+/// A join handle for the spawned task.
 fn spawn_tun_task(
     tun: Arc<tun_rs::AsyncDevice>,
     registry: Arc<SessionRegistry>,
@@ -230,6 +279,18 @@ fn spawn_tun_task(
     tokio::spawn(async move { run_tun_reader(tun, registry, metrics, cancel, mtu).await })
 }
 
+/// Spawns the metrics reporting task.
+///
+/// Periodically logs a snapshot of all metric counters at 30-second intervals.
+///
+/// # Arguments
+///
+/// * `metrics` - Metrics tracker to read snapshots from
+/// * `cancel` - Token to signal graceful shutdown
+///
+/// # Returns
+///
+/// A join handle for the spawned task.
 fn spawn_metrics_task(
     metrics: Arc<Metrics>,
     cancel: CancellationToken,
@@ -274,6 +335,24 @@ fn spawn_metrics_task(
     })
 }
 
+/// Builds a TLS acceptor from server configuration.
+///
+/// Loads TLS certificates and private keys from either file paths or inline
+/// PEM data, then constructs an `SslAcceptor` configured with Mozilla
+/// Intermediate v5 settings.
+///
+/// # Arguments
+///
+/// * `config` - Server configuration containing TLS material
+///
+/// # Returns
+///
+/// A configured `SslAcceptor` ready for TLS handshakes.
+///
+/// # Errors
+///
+/// Returns an error if certificate/key loading fails or if the private key
+/// doesn't match the certificate.
 fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std::error::Error>> {
     let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
 
@@ -323,6 +402,24 @@ fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std:
     Ok(builder.build())
 }
 
+/// Reads packets from the TUN device and routes them to active sessions.
+///
+/// Continuously reads IPv4 packets from the TUN device, extracts the
+/// destination IP, and forwards the packet to the corresponding session.
+/// Packets are dropped if no session exists for the destination IP or if
+/// the session's queue is full.
+///
+/// # Arguments
+///
+/// * `tun` - TUN device to read packets from
+/// * `registry` - Session registry for IP-to-session lookups
+/// * `metrics` - Metrics tracker for queue overflow drops
+/// * `cancel` - Token to signal graceful shutdown
+/// * `mtu` - Maximum transmission unit for buffer size
+///
+/// # Returns
+///
+/// `Ok(())` on graceful shutdown, or an I/O error if reading fails.
 async fn run_tun_reader(
     tun: Arc<tun_rs::AsyncDevice>,
     registry: Arc<SessionRegistry>,

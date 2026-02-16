@@ -170,6 +170,11 @@ pub enum CidMapError {
 }
 
 /// CID map keyed by UDP-QSP destination connection ID prefixes.
+///
+/// Thread-local map tracking CID entries for UDP-QSP sessions. Each entry
+/// contains the connection IDs, keys, and packet number state for a single
+/// UDP-QSP flow. Supports insert, lookup, and removal operations with
+/// collision detection.
 #[derive(Debug, Default)]
 pub struct CidMap {
     entries: HashMap<CidPrefix, CidEntry>,

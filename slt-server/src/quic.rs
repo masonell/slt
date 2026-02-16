@@ -19,9 +19,13 @@ use super::metrics::Metrics;
 use super::registry::SessionRegistry;
 use crate::sessions::SessionEvent;
 
+/// Buffer size for UDP datagram reads.
 const QUIC_BUF_LEN: usize = 2 * 1024;
 
 /// Claimed UDP-QSP datagram metadata.
+///
+/// Contains information about a UDP datagram that has been classified as
+/// belonging to a registered VPN session, to be delivered via the session event channel.
 #[derive(Debug, Clone)]
 pub struct UdpClaim {
     /// Peer address.
@@ -32,6 +36,10 @@ pub struct UdpClaim {
     pub payload: Vec<u8>,
 }
 
+/// NAT entry for a single UDP peer.
+///
+/// Tracks the upstream socket, last activity timestamp, reader task handle,
+/// and unique token for a single peer connection in the QUIC NAT.
 #[derive(Debug)]
 struct PeerEntry {
     socket: Arc<UdpSocket>,
@@ -40,6 +48,10 @@ struct PeerEntry {
     token: u64,
 }
 
+/// QUIC NAT state managing per-peer upstream sockets.
+///
+/// Maintains an LRU cache of peer connections, each with its own upstream socket
+/// to preserve 4-tuple state. Tracks reader task completion via token-based signaling.
 struct QuicNatState {
     peers: LruCache<SocketAddr, PeerEntry>,
     done_rx: mpsc::UnboundedReceiver<(SocketAddr, u64)>,
@@ -47,7 +59,11 @@ struct QuicNatState {
     next_token: u64,
 }
 
-/// QUIC endpoint wrapper.
+/// QUIC endpoint for UDP front-door handling.
+///
+/// Wraps a UDP socket that receives datagrams, classifies them as VPN traffic
+/// or passthrough, and forwards to either session handlers or nginx upstream.
+/// Maintains per-peer NAT state for passthrough traffic.
 pub struct QuicEndpoint {
     socket: Arc<UdpSocket>,
     nginx_upstream: SocketAddr,
@@ -145,6 +161,16 @@ impl QuicEndpoint {
         }
     }
 
+    /// Handle a single UDP datagram.
+    ///
+    /// Classifies the datagram and routes it appropriately:
+    /// - Drops invalid packets
+    /// - Forwards passthrough traffic to nginx upstream
+    /// - Delivers claimed UDP-QSP traffic to registered sessions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if sending to the upstream socket fails.
     async fn handle_datagram(
         &self,
         state: &mut QuicNatState,
@@ -229,6 +255,24 @@ impl QuicEndpoint {
         Ok(())
     }
 
+    /// Spawn a task that reads from upstream and forwards to the peer.
+    ///
+    /// Creates a reader task that continuously receives datagrams from the
+    /// upstream socket and forwards them to the downstream peer. Sends a
+    /// completion notification via `done_tx` when the task exits.
+    ///
+    /// # Arguments
+    ///
+    /// * `upstream` - Socket connected to nginx upstream
+    /// * `downstream` - Server's UDP socket for sending to peers
+    /// * `peer` - Client address to forward data to
+    /// * `token` - Unique identifier for this reader task
+    /// * `cancel` - Token to signal task shutdown
+    /// * `done_tx` - Channel for sending completion notification
+    ///
+    /// # Returns
+    ///
+    /// A join handle for the spawned reader task.
     fn spawn_upstream_reader(
         upstream: Arc<UdpSocket>,
         downstream: Arc<UdpSocket>,
@@ -284,6 +328,11 @@ impl QuicNatState {
             next_token: 0,
         }
     }
+    /// Handle completion notification from an upstream reader task.
+    ///
+    /// Removes the peer entry from the NAT state if the token matches,
+    /// ensuring only the most recent task's completion is processed.
+    /// Restores the entry if tokens don't match (stale notification).
     fn handle_reader_done(&mut self, peer: SocketAddr, token: u64) {
         if let Some(entry) = self.peers.pop(&peer) {
             if entry.token == token {
@@ -311,6 +360,26 @@ impl QuicNatState {
         }
     }
 
+    /// Get an existing upstream socket for the peer or create a new one.
+    ///
+    /// Reuses existing NAT entries to preserve the 4-tuple. Creates a new
+    /// connected socket and reader task if no entry exists. Evicts LRU
+    /// entries when capacity is exceeded.
+    ///
+    /// # Arguments
+    ///
+    /// * `downstream` - Server's UDP socket for forwarding responses
+    /// * `upstream_addr` - Nginx upstream address to connect to
+    /// * `peer` - Client peer address
+    /// * `cancel` - Cancellation token for reader tasks
+    ///
+    /// # Returns
+    ///
+    /// The upstream socket connected to nginx.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if socket binding or connection fails.
     async fn get_or_create_upstream(
         &mut self,
         downstream: Arc<UdpSocket>,
