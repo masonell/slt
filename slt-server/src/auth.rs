@@ -1,7 +1,8 @@
 //! Client authentication helpers.
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, ErrorKind};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,7 +11,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use slt_core::config::ServerConfig;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, Message,
-    MessageError, MessageLimits, PayloadError, PingPayload, PongPayload,
+    MessageLimits, PayloadError, PingPayload, PongPayload,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{ClientId, ServerClient};
@@ -29,10 +30,76 @@ use crate::sessions::{
 };
 use crate::tun::TunDeviceIo;
 
+/// Result of an authentication operation with explicit failure modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthPhaseResult {
+    /// Authentication completed successfully.
+    Success,
+    /// Authentication failed with a specific code.
+    Failed(AuthFailCode),
+    /// Operation timed out.
+    Timeout,
+    /// Connection was closed by peer.
+    ConnectionClosed,
+}
+
+impl AuthPhaseResult {
+    /// Converts the auth result to an IO result.
+    ///
+    /// Returns `Ok(())` for success, appropriate `io::Error` for failures.
+    fn into_io_result(self) -> io::Result<()> {
+        match self {
+            Self::Success => Ok(()),
+            Self::Failed(code) => Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!("auth failed: {code:?}"),
+            )),
+            Self::Timeout => Err(io::Error::new(ErrorKind::TimedOut, "auth timed out")),
+            Self::ConnectionClosed => Err(io::Error::new(
+                ErrorKind::ConnectionReset,
+                "connection closed",
+            )),
+        }
+    }
+
+    /// Returns true if this result indicates a failure.
+    const fn is_failure(self) -> bool {
+        matches!(
+            self,
+            Self::Failed(_) | Self::Timeout | Self::ConnectionClosed
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthStep {
     Continue,
     Done,
+}
+
+/// Helper function to extract TCP channel from Option.
+///
+/// # Errors
+///
+/// Returns an error with `ErrorKind::Other` if the channel is missing.
+fn as_tcp_channel(
+    channel: &mut Option<SessionTcpChannel<TcpStream>>,
+) -> io::Result<&mut SessionTcpChannel<TcpStream>> {
+    channel
+        .as_mut()
+        .ok_or_else(|| io::Error::other("tcp channel missing"))
+}
+
+#[cfg(test)]
+fn as_tcp_channel_test<S>(
+    channel: &mut Option<TcpChannel<S, SessionKeyUpdater>>,
+) -> io::Result<&mut TcpChannel<S, SessionKeyUpdater>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    channel
+        .as_mut()
+        .ok_or_else(|| io::Error::other("tcp channel missing"))
 }
 
 /// Simple allowlist-based authenticator.
@@ -136,84 +203,139 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// # Errors
     ///
     /// Returns an error if the TLS handshake, exporter, or socket IO fails.
+    /// Returns `ErrorKind::TimedOut` if the auth phase times out.
+    /// Returns `ErrorKind::ConnectionReset` if the connection is closed.
     pub async fn handle(&self, stream: TcpStream) -> io::Result<()> {
         let peer_addr = stream.peer_addr().ok();
-        debug!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "starting TLS handshake");
 
-        let tls = match time::timeout(self.auth_timeout, tls_accept(&self.acceptor, stream)).await {
-            Ok(Ok(stream)) => {
-                debug!(peer_addr = ?peer_addr, "TLS handshake completed");
-                stream
-            }
-            Ok(Err(err)) => {
-                warn!(peer_addr = ?peer_addr, error = ?err, "TLS handshake failed");
-                self.metrics.inc_auth_failures();
-                return Err(io::Error::other(format!("{err:?}")));
-            }
-            Err(_) => {
-                warn!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "TLS handshake timed out");
-                self.metrics.inc_auth_failures();
-                return Ok(());
-            }
-        };
+        let tls = self.tls_handshake(stream, peer_addr.as_ref()).await?;
         let mut tcp = Some(TcpChannel::with_key_updater(
             tls,
             SessionKeyUpdater::new(self.metrics.clone()),
         ));
 
+        let challenge = Self::generate_challenge(
+            tcp.as_ref()
+                .ok_or_else(|| io::Error::other("tcp channel missing"))?,
+        )?;
+
+        let result = self
+            .run_auth_loop(&mut tcp, &challenge, peer_addr.as_ref())
+            .await?;
+        self.record_result(result);
+        result.into_io_result()
+    }
+
+    /// Performs TLS handshake with timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorKind::TimedOut` if handshake times out.
+    /// Returns `ErrorKind::Other` if handshake fails.
+    async fn tls_handshake(
+        &self,
+        stream: TcpStream,
+        peer_addr: Option<&SocketAddr>,
+    ) -> io::Result<tokio_boring::SslStream<TcpStream>> {
+        debug!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "starting TLS handshake");
+
+        match time::timeout(self.auth_timeout, tls_accept(&self.acceptor, stream)).await {
+            Ok(Ok(stream)) => {
+                debug!(peer_addr = ?peer_addr, "TLS handshake completed");
+                Ok(stream)
+            }
+            Ok(Err(err)) => {
+                warn!(peer_addr = ?peer_addr, error = ?err, "TLS handshake failed");
+                Err(io::Error::other(format!("{err:?}")))
+            }
+            Err(_) => {
+                warn!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "TLS handshake timed out");
+                Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "tls handshake timed out",
+                ))
+            }
+        }
+    }
+
+    /// Generates auth challenge from TLS keying material.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorKind::Other` if keying material export fails.
+    fn generate_challenge(
+        tcp: &SessionTcpChannel<TcpStream>,
+    ) -> io::Result<[u8; AUTH_CHALLENGE_LEN]> {
         let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-        let tcp_ref = tcp
-            .as_ref()
-            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-        tcp_ref
-            .ssl()
+        tcp.ssl()
             .export_keying_material(&mut challenge, "slt-auth-challenge", None)
             .map_err(|err| io::Error::other(format!("{err:?}")))?;
+        Ok(challenge)
+    }
 
+    /// Runs the main auth loop, processing messages until completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns IO errors from socket operations.
+    async fn run_auth_loop(
+        &self,
+        tcp: &mut Option<SessionTcpChannel<TcpStream>>,
+        challenge: &[u8; AUTH_CHALLENGE_LEN],
+        peer_addr: Option<&SocketAddr>,
+    ) -> io::Result<AuthPhaseResult> {
         let deadline = Instant::now() + self.auth_timeout;
 
         loop {
-            let timeout = time::sleep_until(deadline.into());
+            let timeout_fut = time::sleep_until(deadline.into());
+            tokio::pin!(timeout_fut);
+
             tokio::select! {
-                () = timeout => {
+                () = timeout_fut.as_mut() => {
                     warn!(peer_addr = ?peer_addr, "auth phase timed out waiting for message");
-                    self.metrics.inc_auth_failures();
-                    return Ok(());
+                    return Ok(AuthPhaseResult::Timeout);
                 },
                 res = async {
-                    let tcp_ref = tcp
-                        .as_mut()
-                        .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                    tcp_ref.read_more().await
+                    as_tcp_channel(tcp)?.read_more().await
                 } => {
                     let n = res?;
                     if n == 0 {
                         trace!(peer_addr = ?peer_addr, "connection closed during auth phase");
-                        self.metrics.inc_auth_failures();
-                        return Ok(());
+                        return Ok(AuthPhaseResult::ConnectionClosed);
                     }
                     trace!(bytes_read = n, peer_addr = ?peer_addr, "received data during auth phase");
                 }
             }
 
+            // Process all available messages
             loop {
-                let Some(msg_buf) = tcp
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("tcp channel missing"))?
-                    .try_pop_message(self.limits)
-                    .map_err(map_message_error)?
-                else {
-                    break;
+                let msg_buf = match as_tcp_channel(tcp)?.try_pop_message(self.limits) {
+                    Ok(Some(buf)) => buf,
+                    Ok(None) => break,
+                    Err(e) => {
+                        warn!(error = ?e, peer_addr = ?peer_addr, "message parse error");
+                        if let Ok(t) = as_tcp_channel(tcp) {
+                            let _ = self.send_auth_fail(t, AuthFailCode::Unknown).await;
+                        }
+                        return Ok(AuthPhaseResult::Failed(AuthFailCode::Unknown));
+                    }
                 };
 
                 match self
-                    .handle_auth_message(msg_buf.message(), &mut tcp, &challenge)
+                    .handle_auth_message(msg_buf.message(), tcp, challenge)
                     .await?
                 {
                     AuthStep::Continue => {}
-                    AuthStep::Done => return Ok(()),
+                    AuthStep::Done => return Ok(AuthPhaseResult::Success),
                 }
             }
+        }
+    }
+
+    /// Records the auth result in metrics.
+    fn record_result(&self, result: AuthPhaseResult) {
+        if result.is_failure() {
+            self.metrics.inc_auth_failures();
         }
     }
 
@@ -224,102 +346,123 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         challenge: &[u8; AUTH_CHALLENGE_LEN],
     ) -> io::Result<AuthStep> {
         match message {
-            Message::Auth { payload } => {
-                let auth = AuthPayload::decode(payload).map_err(map_payload_error)?;
-                trace!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, "processing auth message");
-
-                match self.verify_auth(&auth, challenge) {
-                    Ok(assigned_ip) => {
-                        self.metrics.inc_auth_successes();
-                        info!(client_id = %auth.client_id, assigned_ip = %assigned_ip, "authentication successful");
-
-                        let mut ok_buf = Vec::new();
-                        let ok = AuthOkPayload;
-                        ok.encode(&mut ok_buf);
-                        {
-                            let tcp_ref = tcp
-                                .as_mut()
-                                .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                            self.send_message(tcp_ref, Message::AuthOk { payload: &ok_buf })
-                                .await?;
-                        }
-
-                        self.ensure_session_queue_size()?;
-                        let (tx, rx) = mpsc::channel(self.session_queue_size);
-                        let (handle, old) =
-                            self.registry
-                                .register_session(auth.client_id, assigned_ip, tx.clone());
-                        if let Some(old) = old {
-                            debug!(client_id = %auth.client_id, session_id = %handle.session_id, replaced_session_id = %old.session_id, "replacing existing session");
-                            tokio::spawn(async move {
-                                let _ = old.tx.send(SessionEvent::Shutdown).await;
-                            });
-                        }
-
-                        let tcp_channel = tcp
-                            .take()
-                            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                        let session = ClientSessionBase::new(
-                            handle.session_id,
-                            auth.client_id,
-                            assigned_ip,
-                            tcp_channel,
-                            self.tun.clone(),
-                            self.udp_socket.clone(),
-                            self.registry.clone(),
-                            self.metrics.clone(),
-                            tx,
-                            rx,
-                            self.limits,
-                            self.session_timeouts,
-                        );
-
-                        tokio::spawn(async move {
-                            let _ = session.run().await;
-                        });
-
-                        Ok(AuthStep::Done)
-                    }
-                    Err(code) => {
-                        self.metrics.inc_auth_failures();
-                        warn!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, code = ?code, "authentication failed");
-                        let tcp_ref = tcp
-                            .as_mut()
-                            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                        self.send_auth_fail(tcp_ref, code).await?;
-                        Ok(AuthStep::Done)
-                    }
-                }
-            }
-            Message::Ping { payload } => {
-                let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
-                trace!(nonce = ping_in.nonce, "received ping during auth phase");
-                let pong_out = PongPayload {
-                    nonce: ping_in.nonce,
-                };
-                let mut pong_buf = Vec::new();
-                pong_out.encode(&mut pong_buf);
-                let tcp_ref = tcp
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                self.send_message(tcp_ref, Message::Pong { payload: &pong_buf })
-                    .await?;
-                Ok(AuthStep::Continue)
-            }
+            Message::Auth { payload } => self.handle_auth(payload, tcp, challenge).await,
+            Message::Ping { payload } => self.handle_ping(payload, tcp).await,
             Message::Close { .. } => {
                 trace!("received close message during auth phase");
                 Ok(AuthStep::Done)
             }
-            _ => {
+            other => self.handle_unexpected_message(other, tcp).await,
+        }
+    }
+
+    /// Handles AUTH message processing.
+    async fn handle_auth(
+        &self,
+        payload: &[u8],
+        tcp: &mut Option<SessionTcpChannel<TcpStream>>,
+        challenge: &[u8; AUTH_CHALLENGE_LEN],
+    ) -> io::Result<AuthStep> {
+        let auth = AuthPayload::decode(payload).map_err(map_payload_error)?;
+        trace!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, "processing auth message");
+
+        match self.verify_auth(&auth, challenge) {
+            Ok(assigned_ip) => {
+                self.metrics.inc_auth_successes();
+                info!(client_id = %auth.client_id, assigned_ip = %assigned_ip, "authentication successful");
+
+                let mut ok_buf = Vec::new();
+                AuthOkPayload.encode(&mut ok_buf);
+                self.send_message(as_tcp_channel(tcp)?, Message::AuthOk { payload: &ok_buf })
+                    .await?;
+
+                self.spawn_session(auth.client_id, assigned_ip, tcp)?;
+                Ok(AuthStep::Done)
+            }
+            Err(code) => {
                 self.metrics.inc_auth_failures();
-                warn!(message = ?message, "received unexpected message during auth phase");
-                let tcp_ref = tcp
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                self.send_auth_fail(tcp_ref, AuthFailCode::Unknown).await?;
+                warn!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, code = ?code, "authentication failed");
+                self.send_auth_fail(as_tcp_channel(tcp)?, code).await?;
                 Ok(AuthStep::Done)
             }
         }
+    }
+
+    /// Handles PING message by responding with PONG.
+    async fn handle_ping(
+        &self,
+        payload: &[u8],
+        tcp: &mut Option<SessionTcpChannel<TcpStream>>,
+    ) -> io::Result<AuthStep> {
+        let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
+        trace!(nonce = ping_in.nonce, "received ping during auth phase");
+
+        let mut pong_buf = Vec::new();
+        PongPayload {
+            nonce: ping_in.nonce,
+        }
+        .encode(&mut pong_buf);
+        self.send_message(as_tcp_channel(tcp)?, Message::Pong { payload: &pong_buf })
+            .await?;
+        Ok(AuthStep::Continue)
+    }
+
+    /// Handles unexpected messages during auth phase.
+    async fn handle_unexpected_message(
+        &self,
+        message: Message<'_>,
+        tcp: &mut Option<SessionTcpChannel<TcpStream>>,
+    ) -> io::Result<AuthStep> {
+        self.metrics.inc_auth_failures();
+        warn!(message = ?message, "received unexpected message during auth phase");
+        self.send_auth_fail(as_tcp_channel(tcp)?, AuthFailCode::Unknown)
+            .await?;
+        Ok(AuthStep::Done)
+    }
+
+    /// Spawns a new client session after successful authentication.
+    fn spawn_session(
+        &self,
+        client_id: ClientId,
+        assigned_ip: AssignedIp,
+        tcp: &mut Option<SessionTcpChannel<TcpStream>>,
+    ) -> io::Result<()> {
+        self.ensure_session_queue_size()?;
+        let (tx, rx) = mpsc::channel(self.session_queue_size);
+        let (handle, old) = self
+            .registry
+            .register_session(client_id, assigned_ip, tx.clone());
+
+        if let Some(old) = old {
+            debug!(client_id = %client_id, session_id = %handle.session_id, replaced_session_id = %old.session_id, "replacing existing session");
+            tokio::spawn(async move {
+                let _ = old.tx.send(SessionEvent::Shutdown).await;
+            });
+        }
+
+        let tcp_channel = tcp
+            .take()
+            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+        let session = ClientSessionBase::new(
+            handle.session_id,
+            client_id,
+            assigned_ip,
+            tcp_channel,
+            self.tun.clone(),
+            self.udp_socket.clone(),
+            self.registry.clone(),
+            self.metrics.clone(),
+            tx,
+            rx,
+            self.limits,
+            self.session_timeouts,
+        );
+
+        tokio::spawn(async move {
+            let _ = session.run().await;
+        });
+
+        Ok(())
     }
 
     fn ensure_session_queue_size(&self) -> io::Result<()> {
@@ -374,54 +517,66 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             SessionKeyUpdater::new(self.metrics.clone()),
         ));
 
-        let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-        let tcp_ref = tcp
-            .as_ref()
-            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-        tcp_ref
-            .ssl()
-            .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-            .map_err(|err| io::Error::other(format!("{err:?}")))?;
+        let challenge = {
+            let tcp_ref = tcp
+                .as_ref()
+                .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+            let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
+            tcp_ref
+                .ssl()
+                .export_keying_material(&mut challenge, "slt-auth-challenge", None)
+                .map_err(|err| io::Error::other(format!("{err:?}")))?;
+            challenge
+        };
 
+        let result = self.run_auth_loop_test(&mut tcp, &challenge).await?;
+        self.record_result(result);
+        result.into_io_result()
+    }
+
+    /// Test-only auth loop that works with generic streams.
+    #[cfg(test)]
+    async fn run_auth_loop_test<S>(
+        &self,
+        tcp: &mut Option<TcpChannel<S, SessionKeyUpdater>>,
+        challenge: &[u8; AUTH_CHALLENGE_LEN],
+    ) -> io::Result<AuthPhaseResult>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
         let deadline = Instant::now() + self.auth_timeout;
 
         loop {
             let timeout_fut = time::sleep_until(deadline.into());
             tokio::pin!(timeout_fut);
+
             tokio::select! {
                 () = timeout_fut.as_mut() => {
-                    self.metrics.inc_auth_failures();
-                    return Ok(());
+                    return Ok(AuthPhaseResult::Timeout);
                 },
                 res = async {
-                    let tcp_ref = tcp
-                        .as_mut()
-                        .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                    tcp_ref.read_more().await
+                    as_tcp_channel_test(tcp)?.read_more().await
                 } => {
                     let n = res?;
                     if n == 0 {
-                        self.metrics.inc_auth_failures();
-                        return Ok(());
+                        return Ok(AuthPhaseResult::ConnectionClosed);
                     }
                 }
             }
 
             loop {
-                let Some(msg_buf) = tcp
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("tcp channel missing"))?
-                    .try_pop_message(self.limits)
-                    .map_err(map_message_error)?
-                else {
-                    break;
+                let msg_buf = match as_tcp_channel_test(tcp)?.try_pop_message(self.limits) {
+                    Ok(Some(buf)) => buf,
+                    Ok(None) => break,
+                    Err(_) => return Ok(AuthPhaseResult::Failed(AuthFailCode::Unknown)),
                 };
 
-                let step = self
-                    .handle_auth_message_test(msg_buf.message(), &mut tcp, &challenge)
-                    .await?;
-                if step == AuthStep::Done {
-                    return Ok(());
+                match self
+                    .handle_auth_message_test(msg_buf.message(), tcp, challenge)
+                    .await?
+                {
+                    AuthStep::Continue => {}
+                    AuthStep::Done => return Ok(AuthPhaseResult::Success),
                 }
             }
         }
@@ -449,59 +604,19 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                         // Send AuthOk
                         let mut ok_buf = Vec::new();
                         AuthOkPayload.encode(&mut ok_buf);
-                        {
-                            let tcp_ref = tcp
-                                .as_mut()
-                                .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                            tcp_ref
-                                .write_message(Message::AuthOk { payload: &ok_buf })
-                                .await?;
-                        }
+                        as_tcp_channel_test(tcp)?
+                            .write_message(Message::AuthOk { payload: &ok_buf })
+                            .await?;
 
-                        self.ensure_session_queue_size()?;
-                        let (tx, rx) = mpsc::channel(self.session_queue_size);
-                        let (handle, old) =
-                            self.registry
-                                .register_session(auth.client_id, assigned_ip, tx.clone());
-                        if let Some(old) = old {
-                            tokio::spawn(async move {
-                                let _ = old.tx.send(SessionEvent::Shutdown).await;
-                            });
-                        }
-
-                        let tcp_channel = tcp
-                            .take()
-                            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                        let session = ClientSessionBase::new(
-                            handle.session_id,
-                            auth.client_id,
-                            assigned_ip,
-                            tcp_channel,
-                            self.tun.clone(),
-                            self.udp_socket.clone(),
-                            self.registry.clone(),
-                            self.metrics.clone(),
-                            tx,
-                            rx,
-                            self.limits,
-                            self.session_timeouts,
-                        );
-
-                        tokio::spawn(async move {
-                            let _ = session.run().await;
-                        });
-
+                        self.spawn_session_test(auth.client_id, assigned_ip, tcp)?;
                         Ok(AuthStep::Done)
                     }
                     Err(code) => {
                         self.metrics.inc_auth_failures();
-                        let tcp_ref = tcp
-                            .as_mut()
-                            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
                         let payload = AuthFailPayload { code };
                         let mut buf = Vec::with_capacity(1);
                         payload.encode(&mut buf);
-                        tcp_ref
+                        as_tcp_channel_test(tcp)?
                             .write_message(Message::AuthFail { payload: &buf })
                             .await?;
                         Ok(AuthStep::Done)
@@ -510,15 +625,12 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             }
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
-                let pong_out = PongPayload {
-                    nonce: ping_in.nonce,
-                };
                 let mut pong_buf = Vec::new();
-                pong_out.encode(&mut pong_buf);
-                let tcp_ref = tcp
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-                tcp_ref
+                PongPayload {
+                    nonce: ping_in.nonce,
+                }
+                .encode(&mut pong_buf);
+                as_tcp_channel_test(tcp)?
                     .write_message(Message::Pong { payload: &pong_buf })
                     .await?;
                 Ok(AuthStep::Continue)
@@ -526,23 +638,72 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             Message::Close { .. } => Ok(AuthStep::Done),
             _ => {
                 self.metrics.inc_auth_failures();
-                let tcp_ref = tcp
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("tcp channel missing"))?;
                 let payload = AuthFailPayload {
                     code: AuthFailCode::Unknown,
                 };
                 let mut buf = Vec::with_capacity(1);
                 payload.encode(&mut buf);
-                tcp_ref
+                as_tcp_channel_test(tcp)?
                     .write_message(Message::AuthFail { payload: &buf })
                     .await?;
                 Ok(AuthStep::Done)
             }
         }
     }
+
+    /// Test-only session spawning for generic streams.
+    #[cfg(test)]
+    fn spawn_session_test<S>(
+        &self,
+        client_id: ClientId,
+        assigned_ip: AssignedIp,
+        tcp: &mut Option<TcpChannel<S, SessionKeyUpdater>>,
+    ) -> io::Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        self.ensure_session_queue_size()?;
+        let (tx, rx) = mpsc::channel(self.session_queue_size);
+        let (handle, old) = self
+            .registry
+            .register_session(client_id, assigned_ip, tx.clone());
+
+        if let Some(old) = old {
+            tokio::spawn(async move {
+                let _ = old.tx.send(SessionEvent::Shutdown).await;
+            });
+        }
+
+        let tcp_channel = tcp
+            .take()
+            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+        let session = ClientSessionBase::new(
+            handle.session_id,
+            client_id,
+            assigned_ip,
+            tcp_channel,
+            self.tun.clone(),
+            self.udp_socket.clone(),
+            self.registry.clone(),
+            self.metrics.clone(),
+            tx,
+            rx,
+            self.limits,
+            self.session_timeouts,
+        );
+
+        tokio::spawn(async move {
+            let _ = session.run().await;
+        });
+
+        Ok(())
+    }
 }
 
+#[cfg(test)]
+use slt_core::proto::MessageError;
+
+#[cfg(test)]
 fn map_message_error(err: MessageError) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -612,6 +773,8 @@ mod tests {
     };
 
     use super::*;
+    #[allow(unused_imports)]
+    use super::{MessageError, map_message_error};
 
     fn make_client(
         client_id: ClientId,
