@@ -360,6 +360,187 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         self.send_message(tcp, Message::AuthFail { payload: &buf })
             .await
     }
+
+    /// Test-only method to handle auth with a pre-established TLS stream.
+    ///
+    /// This bypasses the TLS accept step and uses the provided stream directly.
+    #[cfg(test)]
+    pub async fn handle_with_tls<S>(&self, tls: tokio_boring::SslStream<S>) -> io::Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        let mut tcp: Option<TcpChannel<S, SessionKeyUpdater>> = Some(TcpChannel::with_key_updater(
+            tls,
+            SessionKeyUpdater::new(self.metrics.clone()),
+        ));
+
+        let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
+        let tcp_ref = tcp
+            .as_ref()
+            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+        tcp_ref
+            .ssl()
+            .export_keying_material(&mut challenge, "slt-auth-challenge", None)
+            .map_err(|err| io::Error::other(format!("{err:?}")))?;
+
+        let deadline = Instant::now() + self.auth_timeout;
+
+        loop {
+            let timeout_fut = time::sleep_until(deadline.into());
+            tokio::pin!(timeout_fut);
+            tokio::select! {
+                () = timeout_fut.as_mut() => {
+                    self.metrics.inc_auth_failures();
+                    return Ok(());
+                },
+                res = async {
+                    let tcp_ref = tcp
+                        .as_mut()
+                        .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                    tcp_ref.read_more().await
+                } => {
+                    let n = res?;
+                    if n == 0 {
+                        self.metrics.inc_auth_failures();
+                        return Ok(());
+                    }
+                }
+            }
+
+            loop {
+                let Some(msg_buf) = tcp
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("tcp channel missing"))?
+                    .try_pop_message(self.limits)
+                    .map_err(map_message_error)?
+                else {
+                    break;
+                };
+
+                let step = self
+                    .handle_auth_message_test(msg_buf.message(), &mut tcp, &challenge)
+                    .await?;
+                if step == AuthStep::Done {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Test-only message handler that works with generic streams.
+    #[cfg(test)]
+    async fn handle_auth_message_test<S>(
+        &self,
+        message: Message<'_>,
+        tcp: &mut Option<TcpChannel<S, SessionKeyUpdater>>,
+        challenge: &[u8; AUTH_CHALLENGE_LEN],
+    ) -> io::Result<AuthStep>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        match message {
+            Message::Auth { payload } => {
+                let auth = AuthPayload::decode(payload).map_err(map_payload_error)?;
+
+                match self.verify_auth(&auth, challenge) {
+                    Ok(assigned_ip) => {
+                        self.metrics.inc_auth_successes();
+
+                        // Send AuthOk
+                        let mut ok_buf = Vec::new();
+                        AuthOkPayload.encode(&mut ok_buf);
+                        {
+                            let tcp_ref = tcp
+                                .as_mut()
+                                .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                            tcp_ref
+                                .write_message(Message::AuthOk { payload: &ok_buf })
+                                .await?;
+                        }
+
+                        self.ensure_session_queue_size()?;
+                        let (tx, rx) = mpsc::channel(self.session_queue_size);
+                        let (handle, old) =
+                            self.registry
+                                .register_session(auth.client_id, assigned_ip, tx.clone());
+                        if let Some(old) = old {
+                            tokio::spawn(async move {
+                                let _ = old.tx.send(SessionEvent::Shutdown).await;
+                            });
+                        }
+
+                        let tcp_channel = tcp
+                            .take()
+                            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                        let session = ClientSessionBase::new(
+                            handle.session_id,
+                            auth.client_id,
+                            assigned_ip,
+                            tcp_channel,
+                            self.tun.clone(),
+                            self.udp_socket.clone(),
+                            self.registry.clone(),
+                            self.metrics.clone(),
+                            tx,
+                            rx,
+                            self.limits,
+                            self.session_timeouts,
+                        );
+
+                        tokio::spawn(async move {
+                            let _ = session.run().await;
+                        });
+
+                        Ok(AuthStep::Done)
+                    }
+                    Err(code) => {
+                        self.metrics.inc_auth_failures();
+                        let tcp_ref = tcp
+                            .as_mut()
+                            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                        let payload = AuthFailPayload { code };
+                        let mut buf = Vec::with_capacity(1);
+                        payload.encode(&mut buf);
+                        tcp_ref
+                            .write_message(Message::AuthFail { payload: &buf })
+                            .await?;
+                        Ok(AuthStep::Done)
+                    }
+                }
+            }
+            Message::Ping { payload } => {
+                let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
+                let pong_out = PongPayload {
+                    nonce: ping_in.nonce,
+                };
+                let mut pong_buf = Vec::new();
+                pong_out.encode(&mut pong_buf);
+                let tcp_ref = tcp
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                tcp_ref
+                    .write_message(Message::Pong { payload: &pong_buf })
+                    .await?;
+                Ok(AuthStep::Continue)
+            }
+            Message::Close { .. } => Ok(AuthStep::Done),
+            _ => {
+                self.metrics.inc_auth_failures();
+                let tcp_ref = tcp
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+                let payload = AuthFailPayload {
+                    code: AuthFailCode::Unknown,
+                };
+                let mut buf = Vec::with_capacity(1);
+                payload.encode(&mut buf);
+                tcp_ref
+                    .write_message(Message::AuthFail { payload: &buf })
+                    .await?;
+                Ok(AuthStep::Done)
+            }
+        }
+    }
 }
 
 fn map_message_error(err: MessageError) -> io::Error {
@@ -660,5 +841,375 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("session_queue_size"));
+    }
+
+    // =========================================================================
+    // Integration tests using TLS pairs
+    // =========================================================================
+
+    use slt_core::proto::ClosePayload;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{Duration, timeout};
+
+    use crate::test_support::{TestAuthHandler, TlsDuplexStream, tls_pair};
+
+    async fn read_message(
+        stream: &mut TlsDuplexStream,
+        limits: MessageLimits,
+    ) -> io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "tls closed"));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            match slt_core::proto::decode_message(&buf, limits) {
+                Ok(Some((_msg, _))) => return Ok(buf),
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("message error: {err:?}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_phase_responds_to_ping_with_pong() {
+        let (handler, _registry, _metrics) = TestAuthHandler::builder()
+            .with_auth_timeout(Duration::from_secs(5))
+            .build_async()
+            .await;
+
+        let (server_tls, mut client_tls) = tls_pair().await;
+        let limits = MessageLimits::from_mtu(1500);
+
+        // Spawn the auth handler
+        let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+        // Send a ping
+        let nonce = 0xA1B2_C3D4_E5F6_0708u64;
+        let ping_payload = PingPayload { nonce };
+        let mut ping_buf = Vec::new();
+        ping_payload.encode(&mut ping_buf);
+        let mut frame = Vec::new();
+        slt_core::proto::encode_message(Message::Ping { payload: &ping_buf }, &mut frame).unwrap();
+        client_tls.write_all(&frame).await.unwrap();
+
+        // Read the pong response
+        let buf = timeout(
+            Duration::from_secs(2),
+            read_message(&mut client_tls, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = slt_core::proto::decode_message(&buf, limits)
+            .unwrap()
+            .unwrap();
+        match message {
+            Message::Pong { payload } => {
+                let pong = PongPayload::decode(payload).unwrap();
+                assert_eq!(pong.nonce, nonce);
+            }
+            _ => panic!("expected pong, got {message:?}"),
+        }
+
+        // Close the connection to end the auth loop
+        let close = ClosePayload {
+            code: slt_core::proto::CloseCode::Normal,
+        };
+        let mut close_buf = Vec::new();
+        close.encode(&mut close_buf);
+        let mut frame = Vec::new();
+        slt_core::proto::encode_message(
+            Message::Close {
+                payload: &close_buf,
+            },
+            &mut frame,
+        )
+        .unwrap();
+        client_tls.write_all(&frame).await.unwrap();
+
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_phase_handles_close_message() {
+        let (handler, _registry, _metrics) = TestAuthHandler::builder()
+            .with_auth_timeout(Duration::from_secs(5))
+            .build_async()
+            .await;
+
+        let (server_tls, _client_tls) = tls_pair().await;
+
+        // Spawn the auth handler
+        let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+        // Drop the client side - this will cause the server to read 0 bytes
+        drop(_client_tls);
+
+        // Handler should complete
+        let result = timeout(Duration::from_secs(2), handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn auth_phase_rejects_unexpected_message_with_auth_fail() {
+        let (handler, _registry, _metrics) = TestAuthHandler::builder()
+            .with_auth_timeout(Duration::from_secs(5))
+            .build_async()
+            .await;
+
+        let (server_tls, mut client_tls) = tls_pair().await;
+        let limits = MessageLimits::from_mtu(1500);
+
+        // Spawn the auth handler
+        let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+        // Send an unexpected message (AuthOk from client is invalid)
+        let mut frame = Vec::new();
+        slt_core::proto::encode_message(Message::AuthOk { payload: &[] }, &mut frame).unwrap();
+        client_tls.write_all(&frame).await.unwrap();
+
+        // Read the auth fail response
+        let buf = timeout(
+            Duration::from_secs(2),
+            read_message(&mut client_tls, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = slt_core::proto::decode_message(&buf, limits)
+            .unwrap()
+            .unwrap();
+        match message {
+            Message::AuthFail { payload } => {
+                let fail = AuthFailPayload::decode(payload).unwrap();
+                assert_eq!(fail.code, AuthFailCode::Unknown);
+            }
+            _ => panic!("expected auth fail, got {message:?}"),
+        }
+
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_phase_successful_authentication() {
+        let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+        let client_id = ClientId([0xA1; 16]);
+        let assigned_ipv4 = Ipv4Addr::new(10, 0, 0, 9);
+        let client = make_client(client_id, &signing_key, assigned_ipv4, true);
+
+        let (handler, registry, metrics) = TestAuthHandler::builder()
+            .with_client(client)
+            .with_auth_timeout(Duration::from_secs(5))
+            .build_async()
+            .await;
+
+        let (server_tls, mut client_tls) = tls_pair().await;
+        let limits = MessageLimits::from_mtu(1500);
+
+        // Get the challenge from the TLS keying material
+        let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
+        server_tls
+            .ssl()
+            .export_keying_material(&mut challenge, "slt-auth-challenge", None)
+            .unwrap();
+
+        // Spawn the auth handler
+        let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+        // Build and send auth message
+        let auth_payload = make_payload(client_id, assigned_ipv4, challenge, &signing_key);
+        let mut auth_buf = Vec::new();
+        auth_payload.encode(&mut auth_buf);
+        let mut frame = Vec::new();
+        slt_core::proto::encode_message(Message::Auth { payload: &auth_buf }, &mut frame).unwrap();
+        client_tls.write_all(&frame).await.unwrap();
+
+        // Read the auth ok response
+        let buf = timeout(
+            Duration::from_secs(2),
+            read_message(&mut client_tls, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = slt_core::proto::decode_message(&buf, limits)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(message, Message::AuthOk { .. }));
+
+        // Verify session was registered
+        assert!(registry.lookup_ip(assigned_ipv4).is_some());
+
+        // Verify metrics
+        assert_eq!(metrics.snapshot().auth_successes, 1);
+
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_phase_failed_authentication_sends_auth_fail() {
+        let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+        let client_id = ClientId([0xA1; 16]);
+        let assigned_ipv4 = Ipv4Addr::new(10, 0, 0, 9);
+        let client = make_client(client_id, &signing_key, assigned_ipv4, false); // disabled
+
+        let (handler, _registry, metrics) = TestAuthHandler::builder()
+            .with_client(client)
+            .with_auth_timeout(Duration::from_secs(5))
+            .build_async()
+            .await;
+
+        let (server_tls, mut client_tls) = tls_pair().await;
+        let limits = MessageLimits::from_mtu(1500);
+
+        // Get the challenge
+        let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
+        server_tls
+            .ssl()
+            .export_keying_material(&mut challenge, "slt-auth-challenge", None)
+            .unwrap();
+
+        // Spawn the auth handler
+        let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+        // Build and send auth message
+        let auth_payload = make_payload(client_id, assigned_ipv4, challenge, &signing_key);
+        let mut auth_buf = Vec::new();
+        auth_payload.encode(&mut auth_buf);
+        let mut frame = Vec::new();
+        slt_core::proto::encode_message(Message::Auth { payload: &auth_buf }, &mut frame).unwrap();
+        client_tls.write_all(&frame).await.unwrap();
+
+        // Read the auth fail response
+        let buf = timeout(
+            Duration::from_secs(2),
+            read_message(&mut client_tls, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = slt_core::proto::decode_message(&buf, limits)
+            .unwrap()
+            .unwrap();
+        match message {
+            Message::AuthFail { payload } => {
+                let fail = AuthFailPayload::decode(payload).unwrap();
+                assert_eq!(fail.code, AuthFailCode::Disabled);
+            }
+            _ => panic!("expected auth fail, got {message:?}"),
+        }
+
+        // Verify metrics
+        assert_eq!(metrics.snapshot().auth_failures, 1);
+
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_phase_timeout_increments_failure_metrics() {
+        let (handler, _registry, metrics) = TestAuthHandler::builder()
+            .with_auth_timeout(Duration::from_millis(50))
+            .build_async()
+            .await;
+
+        let (server_tls, _client_tls) = tls_pair().await;
+
+        // Spawn the auth handler
+        let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+        // Wait for timeout
+        let _ = handle.await.unwrap();
+
+        // Verify failure was recorded
+        assert_eq!(metrics.snapshot().auth_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn auth_phase_connection_close_increments_failure_metrics() {
+        let (handler, _registry, metrics) = TestAuthHandler::builder()
+            .with_auth_timeout(Duration::from_secs(5))
+            .build_async()
+            .await;
+
+        let (server_tls, client_tls) = tls_pair().await;
+
+        // Spawn the auth handler
+        let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+        // Close the client side immediately
+        drop(client_tls);
+
+        // Wait for handler to complete
+        let _ = handle.await.unwrap();
+
+        // Verify failure was recorded
+        assert_eq!(metrics.snapshot().auth_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn auth_phase_replaces_existing_session() {
+        let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+        let client_id = ClientId([0xA1; 16]);
+        let assigned_ipv4 = Ipv4Addr::new(10, 0, 0, 9);
+        let client = make_client(client_id, &signing_key, assigned_ipv4, true);
+
+        let (handler, registry, _metrics) = TestAuthHandler::builder()
+            .with_client(client)
+            .with_auth_timeout(Duration::from_secs(5))
+            .build_async()
+            .await;
+
+        // Pre-register an old session
+        let (old_tx, mut old_rx) = tokio::sync::mpsc::channel(1);
+        registry.register_session(client_id, AssignedIp(assigned_ipv4), old_tx);
+
+        let (server_tls, mut client_tls) = tls_pair().await;
+        let limits = MessageLimits::from_mtu(1500);
+
+        // Get the challenge
+        let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
+        server_tls
+            .ssl()
+            .export_keying_material(&mut challenge, "slt-auth-challenge", None)
+            .unwrap();
+
+        // Spawn the auth handler
+        let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+        // Send auth message
+        let auth_payload = make_payload(client_id, assigned_ipv4, challenge, &signing_key);
+        let mut auth_buf = Vec::new();
+        auth_payload.encode(&mut auth_buf);
+        let mut frame = Vec::new();
+        slt_core::proto::encode_message(Message::Auth { payload: &auth_buf }, &mut frame).unwrap();
+        client_tls.write_all(&frame).await.unwrap();
+
+        // Read auth ok
+        let _ = timeout(
+            Duration::from_secs(2),
+            read_message(&mut client_tls, limits),
+        )
+        .await
+        .unwrap();
+
+        // Verify old session received shutdown
+        let event = timeout(Duration::from_millis(100), old_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, SessionEvent::Shutdown));
+
+        // Verify new session is registered (lookup succeeds)
+        assert!(registry.lookup_ip(assigned_ipv4).is_some());
+
+        let _ = handle.await.unwrap();
     }
 }

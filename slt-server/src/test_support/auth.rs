@@ -78,7 +78,48 @@ impl TestAuthHandlerBuilder {
         self
     }
 
-    /// Builds the test auth handler.
+    /// Builds the test auth handler (async version for use with #[tokio::test]).
+    ///
+    /// Returns (handler, registry, metrics) for inspection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if UDP socket binding fails.
+    pub async fn build_async(self) -> (TestAuthHandler, Arc<SessionRegistry>, Arc<Metrics>) {
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+
+        // Create a UDP socket (required for handler but not used in auth phase)
+        let udp_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind UDP socket");
+
+        let authenticator = Authenticator::new(self.clients);
+
+        let handler = AuthHandlerBase::new(
+            tls_acceptor(),
+            authenticator,
+            registry.clone(),
+            metrics.clone(),
+            Arc::new(NullTun),
+            Arc::new(udp_socket),
+            MessageLimits::from_mtu(1500),
+            self.timeouts,
+            self.auth_timeout,
+            self.session_queue_size,
+        );
+
+        (
+            TestAuthHandler {
+                inner: handler,
+                _udp_runtime: None,
+            },
+            registry,
+            metrics,
+        )
+    }
+
+    /// Builds the test auth handler (sync version for use with #[test]).
     ///
     /// Returns (handler, registry, metrics) for inspection.
     ///
@@ -116,7 +157,7 @@ impl TestAuthHandlerBuilder {
         (
             TestAuthHandler {
                 inner: handler,
-                _udp_runtime: rt,
+                _udp_runtime: Some(rt),
             },
             registry,
             metrics,
@@ -128,8 +169,8 @@ impl TestAuthHandlerBuilder {
 pub struct TestAuthHandler {
     /// The underlying auth handler.
     pub inner: AuthHandlerBase<NullTun>,
-    /// Runtime kept alive for UDP socket.
-    _udp_runtime: tokio::runtime::Runtime,
+    /// Runtime kept alive for UDP socket (only for sync build).
+    _udp_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl TestAuthHandler {
