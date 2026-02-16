@@ -84,18 +84,15 @@ impl<T: TunDeviceIo> SessionManager<T> {
     }
 
     /// Spawns a new client session after successful authentication.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if queue size is zero or channel allocation fails.
     fn spawn_session(
         &self,
         client_id: ClientId,
         assigned_ip: AssignedIp,
         tcp_channel: SessionTcpChannel<TcpStream>,
-        tx: mpsc::Sender<SessionEvent>,
-        rx: mpsc::Receiver<SessionEvent>,
     ) {
+        debug_assert!(self.session_queue_size > 0);
+        let (tx, rx) = mpsc::channel(self.session_queue_size);
+
         let (handle, old) = self
             .registry
             .register_session(client_id, assigned_ip, tx.clone());
@@ -139,13 +136,12 @@ impl<T: TunDeviceIo> SessionManager<T> {
         tcp: &mut Option<SessionTcpChannel<TcpStream>>,
     ) -> io::Result<()> {
         self.ensure_queue_size()?;
-        let (tx, rx) = mpsc::channel(self.session_queue_size);
 
         let tcp_channel = tcp
             .take()
             .ok_or_else(|| io::Error::other("tcp channel missing"))?;
 
-        self.spawn_session(client_id, assigned_ip, tcp_channel, tx, rx);
+        self.spawn_session(client_id, assigned_ip, tcp_channel);
         Ok(())
     }
 
@@ -156,11 +152,12 @@ impl<T: TunDeviceIo> SessionManager<T> {
         client_id: ClientId,
         assigned_ip: AssignedIp,
         tcp_channel: TcpChannel<S, SessionKeyUpdater>,
-        tx: mpsc::Sender<SessionEvent>,
-        rx: mpsc::Receiver<SessionEvent>,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
+        debug_assert!(self.session_queue_size > 0);
+        let (tx, rx) = mpsc::channel(self.session_queue_size);
+
         let (handle, old) = self
             .registry
             .register_session(client_id, assigned_ip, tx.clone());
@@ -203,13 +200,12 @@ impl<T: TunDeviceIo> SessionManager<T> {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
         self.ensure_queue_size()?;
-        let (tx, rx) = mpsc::channel(self.session_queue_size);
 
         let tcp_channel = tcp
             .take()
             .ok_or_else(|| io::Error::other("tcp channel missing"))?;
 
-        self.spawn_session_test(client_id, assigned_ip, tcp_channel, tx, rx);
+        self.spawn_session_test(client_id, assigned_ip, tcp_channel);
         Ok(())
     }
 }

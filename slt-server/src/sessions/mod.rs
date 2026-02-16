@@ -83,6 +83,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 {
     /// Create a new client session with TCP active.
     #[must_use]
+    // All constructor inputs are required session wiring dependencies, and we
+    // keep them explicit at call sites instead of hiding them behind a builder.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: u64,
