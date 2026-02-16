@@ -86,210 +86,187 @@ pub struct MetricsSnapshot {
     pub udp_qsp_dead_channel: u64,
 }
 
+#[inline]
+fn inc(counter: &AtomicU64) -> u64 {
+    counter.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 impl Metrics {
     /// Increment TCP accepted counter.
     pub fn inc_tcp_accepted(&self) {
-        let prev = self.tcp_accepted.fetch_add(1, Ordering::Relaxed);
-        trace!(tcp_accepted = prev + 1, "TCP connection accepted");
+        let count = inc(&self.tcp_accepted);
+        trace!(tcp_accepted = count, "TCP connection accepted");
     }
 
     /// Increment UDP accepted counter.
     pub fn inc_udp_accepted(&self) {
-        let prev = self.udp_accepted.fetch_add(1, Ordering::Relaxed);
-        trace!(udp_accepted = prev + 1, "UDP connection accepted");
+        let count = inc(&self.udp_accepted);
+        trace!(udp_accepted = count, "UDP connection accepted");
     }
 
     /// Increment claimed counter.
     pub fn inc_claimed(&self) {
-        let prev = self.claimed.fetch_add(1, Ordering::Relaxed);
-        trace!(claimed = prev + 1, "Connection claimed by server");
+        let count = inc(&self.claimed);
+        trace!(claimed = count, "Connection claimed by server");
     }
 
     /// Increment passed counter.
     pub fn inc_passed(&self) {
-        let prev = self.passed.fetch_add(1, Ordering::Relaxed);
-        trace!(passed = prev + 1, "Connection passed through");
+        let count = inc(&self.passed);
+        trace!(passed = count, "Connection passed through");
     }
 
     /// Increment dropped counter.
     pub fn inc_dropped(&self) {
-        let prev = self.dropped.fetch_add(1, Ordering::Relaxed);
-        trace!(dropped = prev + 1, "Connection dropped");
+        let count = inc(&self.dropped);
+        trace!(dropped = count, "Connection dropped");
     }
 
     /// Increment upstream-send-failure counter.
     pub fn inc_upstream_send_failures(&self) {
-        let prev = self.upstream_send_failures.fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.upstream_send_failures);
         trace!(
-            upstream_send_failures = prev + 1,
+            upstream_send_failures = count,
             "Failed to send datagram to upstream"
         );
     }
 
     /// Increment TUN queue-overflow drop counter.
     pub fn inc_tun_queue_overflow_drops(&self) {
-        let prev = self
-            .tun_queue_overflow_drops
-            .fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.tun_queue_overflow_drops);
         trace!(
-            tun_queue_overflow_drops = prev + 1,
+            tun_queue_overflow_drops = count,
             "TUN packet dropped: session queue full"
         );
     }
 
     /// Increment auth failure counter.
     pub fn inc_auth_failures(&self) {
-        let prev = self.auth_failures.fetch_add(1, Ordering::Relaxed);
-        trace!(auth_failures = prev + 1, "Authentication failed");
+        let count = inc(&self.auth_failures);
+        trace!(auth_failures = count, "Authentication failed");
     }
 
     /// Increment auth success counter.
     pub fn inc_auth_successes(&self) {
-        let prev = self.auth_successes.fetch_add(1, Ordering::Relaxed);
-        trace!(auth_successes = prev + 1, "Authentication succeeded");
+        let count = inc(&self.auth_successes);
+        trace!(auth_successes = count, "Authentication succeeded");
     }
 
     /// Increment TCP -> UDP transport switch counter.
     pub fn inc_transport_tcp_to_udp(&self) {
-        let prev = self.transport_tcp_to_udp.fetch_add(1, Ordering::Relaxed);
-        trace!(
-            transport_tcp_to_udp = prev + 1,
-            "Transport switch: TCP -> UDP"
-        );
+        let count = inc(&self.transport_tcp_to_udp);
+        trace!(transport_tcp_to_udp = count, "Transport switch: TCP -> UDP");
     }
 
     /// Increment UDP -> TCP transport switch counter.
     pub fn inc_transport_udp_to_tcp(&self) {
-        let prev = self.transport_udp_to_tcp.fetch_add(1, Ordering::Relaxed);
-        trace!(
-            transport_udp_to_tcp = prev + 1,
-            "Transport switch: UDP -> TCP"
-        );
+        let count = inc(&self.transport_udp_to_tcp);
+        trace!(transport_udp_to_tcp = count, "Transport switch: UDP -> TCP");
     }
 
     /// Increment idle timeout disconnect counter.
     pub fn inc_disconnect_idle_timeout(&self) {
-        let prev = self.disconnect_idle_timeout.fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.disconnect_idle_timeout);
         trace!(
-            disconnect_idle_timeout = prev + 1,
+            disconnect_idle_timeout = count,
             "Disconnect due to idle timeout"
         );
     }
 
     /// Increment disconnect close counter.
     pub fn inc_disconnect_close(&self) {
-        let prev = self.disconnect_close.fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.disconnect_close);
         trace!(
-            disconnect_close = prev + 1,
+            disconnect_close = count,
             "Disconnect due to close frame/EOF"
         );
     }
 
     /// Increment disconnect shutdown counter.
     pub fn inc_disconnect_shutdown(&self) {
-        let prev = self.disconnect_shutdown.fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.disconnect_shutdown);
         trace!(
-            disconnect_shutdown = prev + 1,
+            disconnect_shutdown = count,
             "Disconnect due to explicit shutdown"
         );
     }
 
     /// Increment disconnect error counter.
     pub fn inc_disconnect_error(&self) {
-        let prev = self.disconnect_error.fetch_add(1, Ordering::Relaxed);
-        trace!(disconnect_error = prev + 1, "Disconnect due to error");
+        let count = inc(&self.disconnect_error);
+        trace!(disconnect_error = count, "Disconnect due to error");
     }
 
     /// Increment TLS key update requested counter.
     pub fn inc_tls_key_update_requested(&self) {
-        let prev = self
-            .tls_key_update_requested
-            .fetch_add(1, Ordering::Relaxed);
-        trace!(
-            tls_key_update_requested = prev + 1,
-            "TLS key update requested"
-        );
+        let count = inc(&self.tls_key_update_requested);
+        trace!(tls_key_update_requested = count, "TLS key update requested");
     }
 
     /// Increment TLS key update applied counter.
     pub fn inc_tls_key_update_applied(&self) {
-        let prev = self.tls_key_update_applied.fetch_add(1, Ordering::Relaxed);
-        trace!(tls_key_update_applied = prev + 1, "TLS key update applied");
+        let count = inc(&self.tls_key_update_applied);
+        trace!(tls_key_update_applied = count, "TLS key update applied");
     }
 
     /// Increment UDP-QSP TX key-phase transition counter.
     pub fn inc_udp_qsp_tx_key_phase_transition(&self) {
-        let prev = self
-            .udp_qsp_tx_key_phase_transitions
-            .fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.udp_qsp_tx_key_phase_transitions);
         trace!(
-            udp_qsp_tx_key_phase_transitions = prev + 1,
+            udp_qsp_tx_key_phase_transitions = count,
             "UDP-QSP TX key phase transitioned"
         );
     }
 
     /// Increment UDP-QSP RX key-phase transition counter.
     pub fn inc_udp_qsp_rx_key_phase_transition(&self) {
-        let prev = self
-            .udp_qsp_rx_key_phase_transitions
-            .fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.udp_qsp_rx_key_phase_transitions);
         trace!(
-            udp_qsp_rx_key_phase_transitions = prev + 1,
+            udp_qsp_rx_key_phase_transitions = count,
             "UDP-QSP RX key phase transitioned"
         );
     }
 
     /// Increment UDP-QSP replay decrypt failure counter.
     pub fn inc_udp_qsp_decrypt_fail_replay(&self) {
-        let prev = self
-            .udp_qsp_decrypt_fail_replay
-            .fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.udp_qsp_decrypt_fail_replay);
         trace!(
-            udp_qsp_decrypt_fail_replay = prev + 1,
+            udp_qsp_decrypt_fail_replay = count,
             "UDP-QSP decrypt failure: replay"
         );
     }
 
     /// Increment UDP-QSP too-old decrypt failure counter.
     pub fn inc_udp_qsp_decrypt_fail_too_old(&self) {
-        let prev = self
-            .udp_qsp_decrypt_fail_too_old
-            .fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.udp_qsp_decrypt_fail_too_old);
         trace!(
-            udp_qsp_decrypt_fail_too_old = prev + 1,
+            udp_qsp_decrypt_fail_too_old = count,
             "UDP-QSP decrypt failure: too old"
         );
     }
 
     /// Increment UDP-QSP crypto decrypt failure counter.
     pub fn inc_udp_qsp_decrypt_fail_crypto(&self) {
-        let prev = self
-            .udp_qsp_decrypt_fail_crypto
-            .fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.udp_qsp_decrypt_fail_crypto);
         trace!(
-            udp_qsp_decrypt_fail_crypto = prev + 1,
+            udp_qsp_decrypt_fail_crypto = count,
             "UDP-QSP decrypt failure: crypto"
         );
     }
 
     /// Increment UDP-QSP generic decrypt failure counter.
     pub fn inc_udp_qsp_decrypt_fail_other(&self) {
-        let prev = self
-            .udp_qsp_decrypt_fail_other
-            .fetch_add(1, Ordering::Relaxed);
+        let count = inc(&self.udp_qsp_decrypt_fail_other);
         trace!(
-            udp_qsp_decrypt_fail_other = prev + 1,
+            udp_qsp_decrypt_fail_other = count,
             "UDP-QSP decrypt failure: other"
         );
     }
 
     /// Increment UDP-QSP dead-channel counter.
     pub fn inc_udp_qsp_dead_channel(&self) {
-        let prev = self.udp_qsp_dead_channel.fetch_add(1, Ordering::Relaxed);
-        trace!(
-            udp_qsp_dead_channel = prev + 1,
-            "UDP-QSP channel marked dead"
-        );
+        let count = inc(&self.udp_qsp_dead_channel);
+        trace!(udp_qsp_dead_channel = count, "UDP-QSP channel marked dead");
     }
 
     /// Return a point-in-time snapshot of metrics.
