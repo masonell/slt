@@ -7,7 +7,8 @@ use std::sync::Arc;
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, CloseCode, ClosePayload, HP_KEY_LEN, MessageLimits,
-    RegisterCidPayload, RegisterFailCode, RegisterFailPayload, decode_message, encode_message,
+    PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload, decode_message,
+    encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};

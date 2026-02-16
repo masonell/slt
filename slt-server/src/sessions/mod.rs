@@ -1,6 +1,7 @@
 //! Client session tracking and lifecycle helpers.
 
 mod register;
+mod tcp;
 mod types;
 mod udp;
 mod udp_io;
@@ -14,7 +15,7 @@ use fastrand;
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession};
 use slt_core::proto::{
     CloseCode, ClosePayload, FrameError, Message, MessageError, MessageLimits, PayloadError,
-    PingPayload, PongPayload, encode_message,
+    PingPayload, encode_message,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UdpSocket};
@@ -217,65 +218,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         }
     }
 
-    async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
-        loop {
-            let Some(msg_buf) = self
-                .tcp
-                .try_pop_message(self.limits)
-                .map_err(map_message_error)?
-            else {
-                return Ok(SessionControl::Continue);
-            };
-
-            if self.handle_tcp_message(msg_buf.message()).await? == SessionControl::Close {
-                return Ok(SessionControl::Close);
-            }
-        }
-    }
-
-    async fn handle_tcp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
-        match message {
-            Message::Auth { .. }
-            | Message::AuthOk { .. }
-            | Message::AuthFail { .. }
-            | Message::RegisterOk { .. }
-            | Message::RegisterFail { .. } => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected control message on established session",
-            )),
-            Message::Data { packet } => {
-                if self.active_transport != ActiveTransport::Tcp {
-                    trace!(
-                        session_id = self.session_id,
-                        client_id = %self.client_id,
-                        "TCP data dropped: not active transport"
-                    );
-                    return Ok(SessionControl::Continue);
-                }
-                if PacketRouter::validate_packet_src(self, packet) {
-                    self.tun.send(packet).await?;
-                }
-                Ok(SessionControl::Continue)
-            }
-            Message::Ping { payload } => {
-                let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
-                let pong_out = PongPayload {
-                    nonce: ping_in.nonce,
-                };
-                let payload = pong_out.nonce.to_be_bytes();
-                self.send_tcp_message(Message::Pong { payload: &payload })
-                    .await?;
-                Ok(SessionControl::Continue)
-            }
-            Message::Pong { .. } => Ok(SessionControl::Continue),
-            Message::Close { .. } => {
-                self.metrics.inc_disconnect_close();
-                Ok(SessionControl::Close)
-            }
-            Message::RegisterCid { payload } => self.handle_register_cid(payload).await,
-        }
-    }
-
     async fn handle_event(&mut self, event: SessionEvent) -> io::Result<SessionControl> {
         self.note_activity();
         match event {
@@ -321,6 +263,22 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             }
         }
         Ok(SessionControl::Continue)
+    }
+
+    fn should_forward_packet_to_tun(&self, packet: &[u8]) -> bool {
+        PacketRouter::validate_packet_src(self, packet)
+    }
+
+    fn pong_payload_for_ping(payload: &[u8]) -> io::Result<[u8; 8]> {
+        let ping = PingPayload::decode(payload).map_err(map_payload_error)?;
+        Ok(ping.nonce.to_be_bytes())
+    }
+
+    fn peer_close_control(&self, increment_disconnect_close: bool) -> SessionControl {
+        if increment_disconnect_close {
+            self.metrics.inc_disconnect_close();
+        }
+        SessionControl::Close
     }
 
     /// Update the UDP session's peer address.

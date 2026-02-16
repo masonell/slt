@@ -3,7 +3,7 @@
 use std::io;
 
 use slt_core::crypto::udp_qsp::QspSessionError;
-use slt_core::proto::{Message, PingPayload, PongPayload, decode_message};
+use slt_core::proto::{Message, PongPayload, decode_message};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace, warn};
 
@@ -12,7 +12,6 @@ use super::{
     ActiveTransport, ClientSessionBase, UdpSocketIo, map_message_error, map_payload_error,
 };
 use crate::quic::UdpClaim;
-use crate::router::PacketRouter;
 use crate::tun::TunDeviceIo;
 
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
@@ -160,11 +159,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     async fn dispatch_udp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
         match message {
             Message::Ping { payload } => {
-                let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
-                let pong_out = PongPayload {
-                    nonce: ping_in.nonce,
-                };
-                let payload = pong_out.nonce.to_be_bytes();
+                let payload = Self::pong_payload_for_ping(payload)?;
                 self.send_udp_message(Message::Pong { payload: &payload })
                     .await?;
                 Ok(SessionControl::Continue)
@@ -180,12 +175,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 Ok(SessionControl::Continue)
             }
             Message::Data { packet } => {
-                if PacketRouter::validate_packet_src(self, packet) {
+                if self.should_forward_packet_to_tun(packet) {
                     self.tun.send(packet).await?;
                 }
                 Ok(SessionControl::Continue)
             }
-            Message::Close { .. } => Ok(SessionControl::Close),
+            Message::Close { .. } => Ok(self.peer_close_control(false)),
             Message::RegisterCid { payload } => self.handle_register_cid(payload).await,
             Message::Auth { .. }
             | Message::AuthOk { .. }
