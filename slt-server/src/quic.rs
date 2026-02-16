@@ -172,6 +172,7 @@ impl QuicEndpoint {
                         trace!(peer = %peer, sent = sent, "Sent datagram to upstream");
                     }
                     Err(e) => {
+                        self.metrics.inc_upstream_send_failures();
                         warn!(peer = %peer, error = %e, "Failed to send datagram to upstream");
                     }
                 }
@@ -218,6 +219,7 @@ impl QuicEndpoint {
                             trace!(peer = %peer, sent = sent, dcid_prefix = ?dcid_prefix, "Sent datagram to upstream");
                         }
                         Err(e) => {
+                            self.metrics.inc_upstream_send_failures();
                             warn!(peer = %peer, error = %e, dcid_prefix = ?dcid_prefix, "Failed to send datagram to upstream");
                         }
                     }
@@ -705,12 +707,17 @@ mod tests {
             },
         );
 
-        let before = metrics.snapshot().passed;
+        let before = metrics.snapshot();
         let result = endpoint
             .handle_datagram(&mut state, cancel, peer, &payload)
             .await;
         assert!(result.is_ok());
-        assert_eq!(metrics.snapshot().passed, before + 1);
+        let after = metrics.snapshot();
+        assert_eq!(after.passed, before.passed + 1);
+        assert_eq!(
+            after.upstream_send_failures,
+            before.upstream_send_failures + 1
+        );
     }
 
     #[tokio::test]
@@ -843,12 +850,17 @@ mod tests {
             },
         );
 
-        let before = metrics.snapshot().passed;
+        let before = metrics.snapshot();
         let result = endpoint
             .handle_datagram(&mut state, cancel, peer, &payload)
             .await;
         assert!(result.is_ok());
-        assert_eq!(metrics.snapshot().passed, before + 1);
+        let after = metrics.snapshot();
+        assert_eq!(after.passed, before.passed + 1);
+        assert_eq!(
+            after.upstream_send_failures,
+            before.upstream_send_failures + 1
+        );
     }
 
     #[tokio::test]

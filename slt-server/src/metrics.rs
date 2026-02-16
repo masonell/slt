@@ -12,6 +12,8 @@ pub struct Metrics {
     claimed: AtomicU64,
     passed: AtomicU64,
     dropped: AtomicU64,
+    upstream_send_failures: AtomicU64,
+    tun_queue_overflow_drops: AtomicU64,
     auth_successes: AtomicU64,
     auth_failures: AtomicU64,
     transport_tcp_to_udp: AtomicU64,
@@ -44,6 +46,10 @@ pub struct MetricsSnapshot {
     pub passed: u64,
     /// Classified connections dropped.
     pub dropped: u64,
+    /// Failed sends to upstream UDP socket.
+    pub upstream_send_failures: u64,
+    /// TUN packets dropped because session queue was full.
+    pub tun_queue_overflow_drops: u64,
     /// Authentication failures.
     pub auth_failures: u64,
     /// Authentication successes.
@@ -109,6 +115,26 @@ impl Metrics {
     pub fn inc_dropped(&self) {
         let prev = self.dropped.fetch_add(1, Ordering::Relaxed);
         trace!(dropped = prev + 1, "Connection dropped");
+    }
+
+    /// Increment upstream-send-failure counter.
+    pub fn inc_upstream_send_failures(&self) {
+        let prev = self.upstream_send_failures.fetch_add(1, Ordering::Relaxed);
+        trace!(
+            upstream_send_failures = prev + 1,
+            "Failed to send datagram to upstream"
+        );
+    }
+
+    /// Increment TUN queue-overflow drop counter.
+    pub fn inc_tun_queue_overflow_drops(&self) {
+        let prev = self
+            .tun_queue_overflow_drops
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            tun_queue_overflow_drops = prev + 1,
+            "TUN packet dropped: session queue full"
+        );
     }
 
     /// Increment auth failure counter.
@@ -275,6 +301,8 @@ impl Metrics {
             claimed: self.claimed.load(Ordering::Relaxed),
             passed: self.passed.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            upstream_send_failures: self.upstream_send_failures.load(Ordering::Relaxed),
+            tun_queue_overflow_drops: self.tun_queue_overflow_drops.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
             auth_successes: self.auth_successes.load(Ordering::Relaxed),
             transport_tcp_to_udp: self.transport_tcp_to_udp.load(Ordering::Relaxed),

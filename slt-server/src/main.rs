@@ -107,7 +107,13 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
 
     let mut tcp_task = spawn_tcp_task(frontdoor, auth_handler, cancel.clone());
     let mut udp_task = spawn_udp_task(quic, cancel.clone());
-    let mut tun_task = spawn_tun_task(tun, registry, cancel.clone(), config.tun.tun_mtu);
+    let mut tun_task = spawn_tun_task(
+        tun,
+        registry,
+        metrics.clone(),
+        cancel.clone(),
+        config.tun.tun_mtu,
+    );
     let mut metrics_task = spawn_metrics_task(metrics, cancel.clone());
 
     let shutdown_result = tokio::select! {
@@ -217,10 +223,11 @@ fn spawn_udp_task(
 fn spawn_tun_task(
     tun: Arc<tun_rs::AsyncDevice>,
     registry: Arc<SessionRegistry>,
+    metrics: Arc<Metrics>,
     cancel: CancellationToken,
     mtu: u16,
 ) -> tokio::task::JoinHandle<io::Result<()>> {
-    tokio::spawn(async move { run_tun_reader(tun, registry, cancel, mtu).await })
+    tokio::spawn(async move { run_tun_reader(tun, registry, metrics, cancel, mtu).await })
 }
 
 fn spawn_metrics_task(
@@ -240,6 +247,8 @@ fn spawn_metrics_task(
                         claimed = snap.claimed,
                         passed = snap.passed,
                         dropped = snap.dropped,
+                        upstream_send_failures = snap.upstream_send_failures,
+                        tun_queue_overflow_drops = snap.tun_queue_overflow_drops,
                         auth_successes = snap.auth_successes,
                         auth_failures = snap.auth_failures,
                         tcp_to_udp = snap.transport_tcp_to_udp,
@@ -317,6 +326,7 @@ fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std:
 async fn run_tun_reader(
     tun: Arc<tun_rs::AsyncDevice>,
     registry: Arc<SessionRegistry>,
+    metrics: Arc<Metrics>,
     cancel: CancellationToken,
     mtu: u16,
 ) -> io::Result<()> {
@@ -342,6 +352,7 @@ async fn run_tun_reader(
                 .try_send(SessionEvent::TunPacket(packet.to_vec()))
                 .is_err()
             {
+                metrics.inc_tun_queue_overflow_drops();
                 debug!(dst_ip = %dst_ip, "tun packet dropped (session queue full)");
             }
         } else {
