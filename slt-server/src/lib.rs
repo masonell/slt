@@ -10,6 +10,9 @@ pub mod tcp;
 pub mod tun;
 pub mod udp_qsp;
 
+#[cfg(test)]
+mod test_support;
+
 use std::fmt;
 use std::net::Ipv4Addr;
 
