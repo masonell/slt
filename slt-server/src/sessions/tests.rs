@@ -2,10 +2,8 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use boring::ssl::{SslAcceptor, SslConnector, SslFiletype, SslMethod, SslVerifyMode};
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, CloseCode, ClosePayload, HP_KEY_LEN, MessageLimits,
@@ -18,91 +16,13 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
 use super::*;
-use crate::tun::TunDeviceIo;
-
-#[derive(Clone)]
-struct TestTun {
-    tx: mpsc::Sender<Vec<u8>>,
-}
-
-impl TunDeviceIo for TestTun {
-    fn send<'a>(
-        &'a self,
-        buf: &'a [u8],
-    ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a {
-        let tx = self.tx.clone();
-        async move {
-            let _ = tx.send(buf.to_vec()).await;
-            Ok(buf.len())
-        }
-    }
-}
-
-struct TestUdpSocket {
-    tx: mpsc::Sender<Vec<u8>>,
-}
-
-impl UdpSocketIo for TestUdpSocket {
-    fn send_to<'a>(
-        &'a self,
-        buf: &'a [u8],
-        _peer: SocketAddr,
-    ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a {
-        let tx = self.tx.clone();
-        async move {
-            let _ = tx.send(buf.to_vec()).await;
-            Ok(buf.len())
-        }
-    }
-}
-
-fn cert_paths() -> (PathBuf, PathBuf) {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    (
-        root.join("../vendor/boring/test/cert.pem"),
-        root.join("../vendor/boring/test/key.pem"),
-    )
-}
-
-fn tls_acceptor() -> SslAcceptor {
-    let (cert, key) = cert_paths();
-    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
-    builder.set_certificate_chain_file(cert).unwrap();
-    builder.set_private_key_file(key, SslFiletype::PEM).unwrap();
-    builder.check_private_key().unwrap();
-    builder.build()
-}
-
-fn tls_connector() -> SslConnector {
-    let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-    builder.set_verify(SslVerifyMode::NONE);
-    builder.build()
-}
-
-async fn tls_pair() -> (
-    tokio_boring::SslStream<DuplexStream>,
-    tokio_boring::SslStream<DuplexStream>,
-) {
-    let acceptor = tls_acceptor();
-    let connector = tls_connector();
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let server = tokio_boring::accept(&acceptor, server_io);
-    let client = tokio_boring::connect(connector.configure().unwrap(), "localhost", client_io);
-    let (server_tls, client_tls) = tokio::try_join!(server, client).unwrap();
-    (server_tls, client_tls)
-}
-
-fn default_timeouts() -> SessionTimeouts {
-    SessionTimeouts {
-        ping_min: Duration::from_secs(3600),
-        ping_max: Duration::from_secs(3600),
-        idle_timeout: Duration::from_secs(3600),
-    }
-}
+use crate::test_support::{
+    TestTun, TestUdpSocket, TlsDuplexStream, default_session_timeouts, tls_pair,
+};
 
 async fn spawn_session() -> (
     tokio::task::JoinHandle<io::Result<()>>,
-    tokio_boring::SslStream<DuplexStream>,
+    TlsDuplexStream,
     SessionTx,
     mpsc::Receiver<Vec<u8>>,
     mpsc::Receiver<Vec<u8>>,
@@ -110,14 +30,14 @@ async fn spawn_session() -> (
     AssignedIp,
     Arc<SessionRegistry>,
 ) {
-    spawn_session_with_timeouts(default_timeouts()).await
+    spawn_session_with_timeouts(default_session_timeouts()).await
 }
 
 async fn spawn_session_with_timeouts(
     timeouts: SessionTimeouts,
 ) -> (
     tokio::task::JoinHandle<io::Result<()>>,
-    tokio_boring::SslStream<DuplexStream>,
+    TlsDuplexStream,
     SessionTx,
     mpsc::Receiver<Vec<u8>>,
     mpsc::Receiver<Vec<u8>>,
@@ -126,9 +46,8 @@ async fn spawn_session_with_timeouts(
     Arc<SessionRegistry>,
 ) {
     let (server_tls, client_tls) = tls_pair().await;
-    let (tun_tx, tun_rx) = mpsc::channel(8);
-    let (udp_tx, udp_rx) = mpsc::channel(16);
-    let tun = Arc::new(TestTun { tx: tun_tx });
+    let (tun, tun_rx) = TestTun::new(8);
+    let (udp, udp_rx) = TestUdpSocket::new(16);
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
     let (tx, rx) = mpsc::channel(8);
@@ -142,7 +61,7 @@ async fn spawn_session_with_timeouts(
         assigned,
         TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
         tun,
-        Arc::new(TestUdpSocket { tx: udp_tx }),
+        udp,
         registry.clone(),
         metrics,
         tx.clone(),
@@ -157,7 +76,7 @@ async fn spawn_session_with_timeouts(
 }
 
 async fn read_message_bytes(
-    stream: &mut tokio_boring::SslStream<DuplexStream>,
+    stream: &mut TlsDuplexStream,
     limits: MessageLimits,
 ) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
@@ -597,7 +516,7 @@ async fn session_register_rejects_prefix_collision() {
 
 #[tokio::test]
 async fn session_idle_timeout_sends_close() {
-    let mut timeouts = default_timeouts();
+    let mut timeouts = default_session_timeouts();
     timeouts.idle_timeout = Duration::from_millis(50);
     timeouts.ping_min = Duration::from_secs(5);
     timeouts.ping_max = Duration::from_secs(5);
@@ -669,7 +588,7 @@ async fn session_rejects_unexpected_control_message() {
 
 #[tokio::test]
 async fn session_sends_tcp_ping_on_schedule() {
-    let mut timeouts = default_timeouts();
+    let mut timeouts = default_session_timeouts();
     timeouts.ping_min = Duration::from_millis(50);
     timeouts.ping_max = Duration::from_millis(50);
     timeouts.idle_timeout = Duration::from_secs(5);
@@ -695,7 +614,7 @@ async fn session_sends_tcp_ping_on_schedule() {
 
 #[tokio::test]
 async fn session_sends_udp_ping_on_schedule() {
-    let mut timeouts = default_timeouts();
+    let mut timeouts = default_session_timeouts();
     timeouts.ping_min = Duration::from_millis(200);
     timeouts.ping_max = Duration::from_millis(200);
     timeouts.idle_timeout = Duration::from_secs(5);
@@ -1615,7 +1534,7 @@ async fn session_closes_via_udp_when_tcp_dead() {
 async fn session_ping_uses_jitter_when_range_nonzero() {
     // Test that ping scheduling uses jitter when min != max
     // We can't test exact timing, but we can verify the session works with jitter enabled
-    let mut timeouts = default_timeouts();
+    let mut timeouts = default_session_timeouts();
     timeouts.ping_min = Duration::from_millis(50);
     timeouts.ping_max = Duration::from_millis(100); // 50ms jitter range
     timeouts.idle_timeout = Duration::from_secs(5);

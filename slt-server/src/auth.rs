@@ -69,6 +69,18 @@ impl Authenticator {
             .get(client_id)
             .is_some_and(|c| c.enabled)
     }
+
+    /// Creates an authenticator with the given clients (test-only).
+    #[cfg(test)]
+    #[must_use]
+    pub fn new(clients: impl IntoIterator<Item = ServerClient>) -> Self {
+        Self {
+            clients_config: clients
+                .into_iter()
+                .map(|client| (client.client_id, client))
+                .collect(),
+        }
+    }
 }
 
 /// TLS + AUTH handler that creates client sessions.
@@ -626,64 +638,27 @@ mod tests {
 
     #[test]
     fn ensure_session_queue_size_returns_ok_when_nonzero() {
-        // Create minimal handler with session_queue_size = 8
-        let handler = create_test_handler(8);
+        use crate::test_support::TestAuthHandler;
 
-        assert!(handler.ensure_session_queue_size().is_ok());
+        let (handler, _registry, _metrics) = TestAuthHandler::builder()
+            .with_session_queue_size(8)
+            .build();
+
+        assert!(handler.inner.ensure_session_queue_size().is_ok());
     }
 
     #[test]
     fn ensure_session_queue_size_returns_error_when_zero() {
-        // Create minimal handler with session_queue_size = 0
-        let handler = create_test_handler(0);
+        use crate::test_support::TestAuthHandler;
 
-        let result = handler.ensure_session_queue_size();
+        let (handler, _registry, _metrics) = TestAuthHandler::builder()
+            .with_session_queue_size(0)
+            .build();
+
+        let result = handler.inner.ensure_session_queue_size();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("session_queue_size"));
-    }
-
-    fn create_test_handler(queue_size: usize) -> AuthHandlerBase<crate::test_support::NullTun> {
-        use std::path::PathBuf;
-
-        use boring::ssl::{SslAcceptor, SslFiletype, SslMethod};
-
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let cert = root.join("../vendor/boring/test/cert.pem");
-        let key = root.join("../vendor/boring/test/key.pem");
-
-        let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
-        builder.set_certificate_chain_file(cert).unwrap();
-        builder.set_private_key_file(key, SslFiletype::PEM).unwrap();
-        builder.check_private_key().unwrap();
-        let acceptor = builder.build();
-
-        let authenticator = Authenticator {
-            clients_config: HashMap::new(),
-        };
-
-        // We need a UDP socket but only for the struct - we're only testing
-        // ensure_session_queue_size which doesn't use it
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let udp_socket =
-            rt.block_on(async { tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap() });
-
-        AuthHandlerBase::new(
-            acceptor,
-            authenticator,
-            Arc::new(SessionRegistry::new()),
-            Arc::new(Metrics::default()),
-            Arc::new(crate::test_support::NullTun),
-            Arc::new(udp_socket),
-            MessageLimits::from_mtu(1500),
-            SessionTimeouts {
-                ping_min: std::time::Duration::from_secs(30),
-                ping_max: std::time::Duration::from_secs(60),
-                idle_timeout: std::time::Duration::from_secs(300),
-            },
-            std::time::Duration::from_secs(30),
-            queue_size,
-        )
     }
 }
