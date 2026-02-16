@@ -370,3 +370,827 @@ impl QuicNatState {
         Ok(socket)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use slt_core::config::ServerConfig;
+    use slt_core::types::{
+        QUIC_DCID_PREFIX_LEN, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig,
+        SharedSecret, TlsMaterial, TunConfig,
+    };
+    use tokio::sync::mpsc;
+    use tokio::time::{Instant, timeout, timeout_at};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{PeerEntry, QuicEndpoint, QuicNatState};
+    use crate::metrics::Metrics;
+    use crate::registry::SessionRegistry;
+    use crate::sessions::SessionEvent;
+
+    fn test_config() -> ServerConfig {
+        ServerConfig {
+            server_secret: SharedSecret([0u8; 32]),
+            network: ServerNetworkConfig {
+                listen_tcp: SocketAddr::from(([127, 0, 0, 1], 0)),
+                listen_udp: SocketAddr::from(([127, 0, 0, 1], 0)),
+                nginx_tcp_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+                nginx_udp_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            },
+            tls: ServerTlsConfig {
+                tls_cert: TlsMaterial::Pem(String::new()),
+                tls_key: TlsMaterial::Pem(String::new()),
+            },
+            tun: TunConfig {
+                tun_name: "tun0".to_string(),
+                tun_mtu: 1280,
+            },
+            timing: ServerTimingConfig {
+                ping_min: Duration::from_secs(10),
+                ping_max: Duration::from_secs(20),
+                auth_timeout: Duration::from_secs(10),
+                idle_timeout: Duration::from_secs(60),
+            },
+            udp_nat_max_entries: 1024,
+            session_queue_size: 256,
+            clients: vec![],
+        }
+    }
+
+    async fn make_endpoint() -> QuicEndpoint {
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        QuicEndpoint {
+            socket: Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap()),
+            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
+            idle_timeout: Duration::from_secs(60),
+            registry,
+            metrics,
+        }
+    }
+
+    fn make_quic_short_header(dcid_prefix: &[u8; QUIC_DCID_PREFIX_LEN]) -> Vec<u8> {
+        let mut buf = vec![0x40]; // short header + fixed bit
+        buf.extend_from_slice(dcid_prefix);
+        buf.extend_from_slice(&[0u8; 16]); // some payload
+        buf
+    }
+
+    fn make_quic_long_header() -> Vec<u8> {
+        vec![0xC0, 0x00, 0x00, 0x00, 0x01, 0x08] // long header + fixed bit
+    }
+
+    fn make_non_quic_packet() -> Vec<u8> {
+        vec![0x00] // no fixed bit
+    }
+
+    #[tokio::test]
+    async fn bind_rejects_zero_udp_nat_max_entries() {
+        let mut config = test_config();
+        config.udp_nat_max_entries = 0;
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+
+        let result = QuicEndpoint::bind(&config, registry, metrics).await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                err.to_string()
+                    .contains("udp_nat_max_entries must be non-zero")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_rejects_zero_idle_timeout() {
+        let mut config = test_config();
+        config.timing.idle_timeout = Duration::ZERO;
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+
+        let result = QuicEndpoint::bind(&config, registry, metrics).await;
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("idle_timeout must be non-zero"));
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_binds_udp_socket_on_listen_addr() {
+        let config = test_config();
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+
+        let endpoint = QuicEndpoint::bind(&config, registry, metrics).await;
+        assert!(endpoint.is_ok());
+        let endpoint = endpoint.unwrap();
+        let local_addr = endpoint.socket().local_addr().unwrap();
+        assert!(local_addr.port() > 0);
+        assert!(local_addr.ip().is_loopback());
+    }
+
+    #[tokio::test]
+    async fn run_exits_on_cancellation() {
+        let endpoint = make_endpoint().await;
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let handle = tokio::spawn(async move { endpoint.run(cancel_clone).await });
+
+        // Give the run loop a moment to start
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        cancel.cancel();
+
+        let result = timeout(Duration::from_secs(1), handle).await;
+        assert!(result.is_ok());
+        let inner = result.unwrap();
+        assert!(inner.is_ok());
+        assert!(inner.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_forwards_pass_datagrams_and_counts_udp_accepted_and_passed() {
+        let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+
+        let mut config = test_config();
+        config.network.nginx_udp_upstream = upstream_addr;
+        config.timing.idle_timeout = Duration::from_millis(200);
+
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let endpoint = QuicEndpoint::bind(&config, registry, metrics.clone())
+            .await
+            .unwrap();
+        let listen_addr = endpoint.socket().local_addr().unwrap();
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let run_task = tokio::spawn(async move { endpoint.run(cancel_clone).await });
+
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let payload = make_quic_long_header();
+        peer.send_to(&payload, listen_addr).await.unwrap();
+
+        let mut buf = [0u8; 256];
+        let (len, _) = timeout(Duration::from_secs(1), upstream_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, payload.len());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let snap = metrics.snapshot();
+            if snap.udp_accepted == 1 && snap.passed == 1 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "metrics did not update in time");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        cancel.cancel();
+        let run_result = timeout(Duration::from_secs(1), run_task).await.unwrap();
+        assert!(run_result.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_sweep_idle_recreates_nat_socket_after_timeout() {
+        let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+
+        let mut config = test_config();
+        config.network.nginx_udp_upstream = upstream_addr;
+        config.timing.idle_timeout = Duration::from_millis(50);
+
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let endpoint = QuicEndpoint::bind(&config, registry, metrics)
+            .await
+            .unwrap();
+        let listen_addr = endpoint.socket().local_addr().unwrap();
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let run_task = tokio::spawn(async move { endpoint.run(cancel_clone).await });
+
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let payload = make_quic_long_header();
+
+        peer.send_to(&payload, listen_addr).await.unwrap();
+        let mut buf = [0u8; 256];
+        let (_, first_src) = timeout(Duration::from_secs(1), upstream_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Wait for idle sweep to evict the first NAT entry.
+        tokio::time::sleep(Duration::from_millis(220)).await;
+
+        peer.send_to(&payload, listen_addr).await.unwrap();
+        let (_, second_src) = timeout(Duration::from_secs(1), upstream_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(
+            first_src.port(),
+            second_src.port(),
+            "idle eviction should recreate upstream socket with a new local port"
+        );
+
+        cancel.cancel();
+        let run_result = timeout(Duration::from_secs(1), run_task).await.unwrap();
+        assert!(run_result.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_drop_increments_dropped_metric() {
+        let endpoint = make_endpoint().await;
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let payload = make_non_quic_packet();
+
+        let before = endpoint.metrics.snapshot().dropped;
+        let result = endpoint
+            .handle_datagram(&mut state, cancel, peer, &payload)
+            .await;
+        assert!(result.is_ok());
+        let after = endpoint.metrics.snapshot().dropped;
+        assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_pass_forwards_to_upstream_and_increments_passed() {
+        // Create an upstream server to receive forwarded packets
+        let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        let endpoint = QuicEndpoint {
+            socket: downstream.clone(),
+            nginx_upstream: upstream_addr,
+            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
+            idle_timeout: Duration::from_secs(60),
+            registry,
+            metrics,
+        };
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let payload = make_quic_long_header();
+
+        let before = endpoint.metrics.snapshot().passed;
+        let result = endpoint
+            .handle_datagram(&mut state, cancel.clone(), peer, &payload)
+            .await;
+        assert!(result.is_ok());
+
+        // Receive the forwarded packet
+        let mut buf = vec![0u8; 256];
+        let recv_result = timeout(
+            Duration::from_millis(500),
+            upstream_socket.recv_from(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(recv_result.0, payload.len());
+
+        let after = endpoint.metrics.snapshot().passed;
+        assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_pass_with_unconnected_upstream_socket_is_non_fatal() {
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        let endpoint = QuicEndpoint {
+            socket: downstream,
+            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
+            idle_timeout: Duration::from_secs(60),
+            registry,
+            metrics: metrics.clone(),
+        };
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let payload = make_quic_long_header();
+        let upstream_socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        // Seed NAT with an unconnected socket so send() fails with NotConnected.
+        state.peers.put(
+            peer,
+            PeerEntry {
+                socket: upstream_socket,
+                last_seen: std::time::Instant::now(),
+                task: tokio::spawn(async {}),
+                token: 1,
+            },
+        );
+
+        let before = metrics.snapshot().passed;
+        let result = endpoint
+            .handle_datagram(&mut state, cancel, peer, &payload)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(metrics.snapshot().passed, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_short_with_registered_cid_sends_session_event() {
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        let endpoint = QuicEndpoint {
+            socket: downstream.clone(),
+            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
+            idle_timeout: Duration::from_secs(60),
+            registry: registry.clone(),
+            metrics,
+        };
+
+        // Register a CID prefix
+        let dcid_prefix = [0xAA; QUIC_DCID_PREFIX_LEN];
+        let (tx, mut rx) = mpsc::channel(1);
+        registry
+            .insert_cid(1, slt_core::types::CidPrefix::from(dcid_prefix), tx)
+            .unwrap();
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let payload = make_quic_short_header(&dcid_prefix);
+
+        let before = endpoint.metrics.snapshot().claimed;
+        let result = endpoint
+            .handle_datagram(&mut state, cancel, peer, &payload)
+            .await;
+        assert!(result.is_ok());
+
+        // Check that the session event was sent
+        let event = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            SessionEvent::Udp(claim) => {
+                assert_eq!(claim.peer, peer);
+                assert_eq!(claim.dcid_prefix.as_bytes(), &dcid_prefix);
+                assert!(!claim.payload.is_empty());
+            }
+            _ => panic!("expected Udp event"),
+        }
+
+        let after = endpoint.metrics.snapshot().claimed;
+        assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_short_with_missing_cid_passes_to_upstream() {
+        let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        let endpoint = QuicEndpoint {
+            socket: downstream.clone(),
+            nginx_upstream: upstream_addr,
+            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
+            idle_timeout: Duration::from_secs(60),
+            registry,
+            metrics,
+        };
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        // Use a CID prefix that's not registered
+        let dcid_prefix = [0xBB; QUIC_DCID_PREFIX_LEN];
+        let payload = make_quic_short_header(&dcid_prefix);
+
+        let before = endpoint.metrics.snapshot().passed;
+        let result = endpoint
+            .handle_datagram(&mut state, cancel.clone(), peer, &payload)
+            .await;
+        assert!(result.is_ok());
+
+        // Should be forwarded to upstream
+        let mut buf = vec![0u8; 256];
+        let recv_result = timeout(
+            Duration::from_millis(500),
+            upstream_socket.recv_from(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(recv_result.0, payload.len());
+
+        let after = endpoint.metrics.snapshot().passed;
+        assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_short_with_missing_cid_and_unconnected_upstream_is_non_fatal() {
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        let endpoint = QuicEndpoint {
+            socket: downstream,
+            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
+            idle_timeout: Duration::from_secs(60),
+            registry,
+            metrics: metrics.clone(),
+        };
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let dcid_prefix = [0xBD; QUIC_DCID_PREFIX_LEN];
+        let payload = make_quic_short_header(&dcid_prefix);
+        let upstream_socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        // Seed NAT with an unconnected socket so send() fails with NotConnected.
+        state.peers.put(
+            peer,
+            PeerEntry {
+                socket: upstream_socket,
+                last_seen: std::time::Instant::now(),
+                task: tokio::spawn(async {}),
+                token: 1,
+            },
+        );
+
+        let before = metrics.snapshot().passed;
+        let result = endpoint
+            .handle_datagram(&mut state, cancel, peer, &payload)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(metrics.snapshot().passed, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_claim_channel_closed_logs_and_continues() {
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        let endpoint = QuicEndpoint {
+            socket: downstream.clone(),
+            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
+            idle_timeout: Duration::from_secs(60),
+            registry: registry.clone(),
+            metrics,
+        };
+
+        // Register a CID prefix with a channel, then close it
+        let dcid_prefix = [0xCC; QUIC_DCID_PREFIX_LEN];
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx); // Close the receiver to make try_send fail
+        registry
+            .insert_cid(1, slt_core::types::CidPrefix::from(dcid_prefix), tx)
+            .unwrap();
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let payload = make_quic_short_header(&dcid_prefix);
+
+        // Should not error even when channel is closed (try_send fails gracefully)
+        let result = endpoint
+            .handle_datagram(&mut state, cancel, peer, &payload)
+            .await;
+        assert!(result.is_ok());
+
+        // Metric should still be incremented (we tried to claim)
+        let snapshot = endpoint.metrics.snapshot();
+        assert!(snapshot.claimed > 0);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_upstream_reuses_socket_for_same_peer() {
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+
+        let socket1 = state
+            .get_or_create_upstream(downstream.clone(), upstream_addr, peer, cancel.clone())
+            .await
+            .unwrap();
+        let socket2 = state
+            .get_or_create_upstream(downstream, upstream_addr, peer, cancel)
+            .await
+            .unwrap();
+
+        // Should return the same Arc (same socket)
+        assert!(Arc::ptr_eq(&socket1, &socket2));
+    }
+
+    #[tokio::test]
+    async fn get_or_create_upstream_creates_distinct_sockets_per_peer() {
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer1 = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let peer2 = SocketAddr::from(([127, 0, 0, 1], 12346));
+
+        let socket1 = state
+            .get_or_create_upstream(downstream.clone(), upstream_addr, peer1, cancel.clone())
+            .await
+            .unwrap();
+        let socket2 = state
+            .get_or_create_upstream(downstream, upstream_addr, peer2, cancel)
+            .await
+            .unwrap();
+
+        // Should return different Arcs (different sockets)
+        assert!(!Arc::ptr_eq(&socket1, &socket2));
+
+        // Verify they have different local addresses
+        let addr1 = socket1.local_addr().unwrap();
+        let addr2 = socket2.local_addr().unwrap();
+        assert_ne!(addr1.port(), addr2.port());
+    }
+
+    #[tokio::test]
+    async fn get_or_create_upstream_evicts_lru_and_aborts_old_task() {
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+
+        // Create state with LRU size of 2
+        let mut state = QuicNatState::new(NonZeroUsize::new(2).unwrap());
+        let cancel = CancellationToken::new();
+
+        let peer1 = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let peer2 = SocketAddr::from(([127, 0, 0, 1], 12346));
+        let peer3 = SocketAddr::from(([127, 0, 0, 1], 12347));
+
+        // Create entries for peer1 and peer2 (fills LRU)
+        let _socket1 = state
+            .get_or_create_upstream(downstream.clone(), upstream_addr, peer1, cancel.clone())
+            .await
+            .unwrap();
+        let _socket2 = state
+            .get_or_create_upstream(downstream.clone(), upstream_addr, peer2, cancel.clone())
+            .await
+            .unwrap();
+
+        // Create entry for peer3 (should evict peer1)
+        let _socket3 = state
+            .get_or_create_upstream(downstream, upstream_addr, peer3, cancel)
+            .await
+            .unwrap();
+
+        // peer1's socket should no longer be in the LRU (evicted)
+        // peer2 and peer3 should still be there
+        assert!(state.peers.contains(&peer2));
+        assert!(state.peers.contains(&peer3));
+        assert!(!state.peers.contains(&peer1));
+    }
+
+    #[tokio::test]
+    async fn handle_reader_done_removes_matching_token() {
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let token = 42u64;
+
+        // Manually insert a peer entry
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let entry = PeerEntry {
+            socket,
+            last_seen: std::time::Instant::now(),
+            task: tokio::spawn(async {}),
+            token,
+        };
+        state.peers.put(peer, entry);
+
+        assert!(state.peers.contains(&peer));
+
+        // Remove with matching token
+        state.handle_reader_done(peer, token);
+
+        assert!(!state.peers.contains(&peer));
+    }
+
+    #[tokio::test]
+    async fn handle_reader_done_ignores_stale_token() {
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let correct_token = 42u64;
+        let stale_token = 99u64;
+
+        // Manually insert a peer entry
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let entry = PeerEntry {
+            socket,
+            last_seen: std::time::Instant::now(),
+            task: tokio::spawn(async {}),
+            token: correct_token,
+        };
+        state.peers.put(peer, entry);
+
+        // Try to remove with wrong token
+        state.handle_reader_done(peer, stale_token);
+
+        // Entry should still exist (was restored)
+        assert!(state.peers.contains(&peer));
+    }
+
+    #[tokio::test]
+    async fn sweep_idle_evicts_stale_peers() {
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let idle_timeout = Duration::from_secs(60);
+
+        // Manually insert a peer entry with old last_seen
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let old_time = std::time::Instant::now()
+            .checked_sub(idle_timeout + Duration::from_secs(1))
+            .unwrap();
+        let entry = PeerEntry {
+            socket,
+            last_seen: old_time,
+            task: tokio::spawn(async {}),
+            token: 1,
+        };
+        state.peers.put(peer, entry);
+
+        assert!(state.peers.contains(&peer));
+
+        state.sweep_idle(idle_timeout);
+
+        assert!(!state.peers.contains(&peer));
+    }
+
+    #[tokio::test]
+    async fn sweep_idle_keeps_recent_peers() {
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let idle_timeout = Duration::from_secs(60);
+
+        // Manually insert a peer entry with recent last_seen
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let entry = PeerEntry {
+            socket,
+            last_seen: std::time::Instant::now(),
+            task: tokio::spawn(async {}),
+            token: 1,
+        };
+        state.peers.put(peer, entry);
+
+        assert!(state.peers.contains(&peer));
+
+        state.sweep_idle(idle_timeout);
+
+        assert!(state.peers.contains(&peer));
+    }
+
+    #[tokio::test]
+    async fn spawn_upstream_reader_forwards_packets_and_reports_done() {
+        // Create the "peer" socket that will receive forwarded packets from downstream
+        let peer_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = peer_socket.local_addr().unwrap();
+
+        // Create the downstream socket (the server's UDP socket)
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let downstream_addr = downstream.local_addr().unwrap();
+
+        // Create the mock "upstream server"
+        let upstream_server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_server_addr = upstream_server.local_addr().unwrap();
+
+        // Create the upstream client socket (this is the NAT socket)
+        let upstream_client = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        // Connect the upstream_client to the upstream_server
+        upstream_client.connect(upstream_server_addr).await.unwrap();
+
+        let token = 123u64;
+        let cancel = CancellationToken::new();
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+
+        // Spawn the upstream reader
+        // It will read from upstream_client, then send to peer via downstream
+        let handle = QuicEndpoint::spawn_upstream_reader(
+            upstream_client.clone(),
+            downstream.clone(),
+            peer,
+            token,
+            cancel.clone(),
+            done_tx,
+        );
+
+        // Give the task a moment to start
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // To test packet forwarding:
+        // 1. upstream_client is connected to upstream_server
+        // 2. upstream_server sends to upstream_client's address
+        // 3. upstream_client receives and spawn_upstream_reader forwards to peer via downstream
+
+        // Server sends data to the client's bound address
+        let test_data = b"hello from upstream";
+        upstream_server
+            .send_to(test_data, upstream_client.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        // The peer_socket should receive the forwarded packet (from downstream_addr)
+        let mut buf = vec![0u8; 256];
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let (recv_len, from_addr) = timeout_at(deadline, peer_socket.recv_from(&mut buf))
+            .await
+            .expect("should receive forwarded packet")
+            .expect("recv_from should succeed");
+        assert_eq!(recv_len, test_data.len());
+        assert_eq!(&buf[..recv_len], test_data);
+        // Packet comes from downstream socket
+        assert_eq!(from_addr, downstream_addr);
+
+        // Cancel and verify done notification
+        cancel.cancel();
+        handle.await.unwrap();
+
+        // Should receive the done notification
+        let done_msg = timeout(Duration::from_millis(100), done_rx.recv())
+            .await
+            .expect("should receive done notification")
+            .expect("done channel should have message");
+        assert_eq!(done_msg.0, peer);
+        assert_eq!(done_msg.1, token);
+    }
+
+    #[tokio::test]
+    async fn spawn_upstream_reader_handles_downstream_send_error_and_reports_done() {
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let upstream_server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_server_addr = upstream_server.local_addr().unwrap();
+        let upstream_client = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        upstream_client.connect(upstream_server_addr).await.unwrap();
+
+        // Force send_to() error in reader by using IPv6 peer with IPv4 downstream socket.
+        let peer = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 12345));
+
+        let token = 321u64;
+        let cancel = CancellationToken::new();
+        let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+        let handle = QuicEndpoint::spawn_upstream_reader(
+            upstream_client.clone(),
+            downstream,
+            peer,
+            token,
+            cancel.clone(),
+            done_tx,
+        );
+
+        upstream_server
+            .send_to(
+                b"trigger send_to error",
+                upstream_client.local_addr().unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        cancel.cancel();
+        handle.await.unwrap();
+
+        let done_msg = timeout(Duration::from_millis(200), done_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done_msg.0, peer);
+        assert_eq!(done_msg.1, token);
+    }
+}
