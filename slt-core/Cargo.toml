@@ -3,6 +3,11 @@ name = "slt-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+## Exposes test support utilities for use in dependent crate tests.
+testing = []
+
 [dependencies]
 boring = { workspace = true }
 boring-sys = { workspace = true }

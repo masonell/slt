@@ -184,3 +184,609 @@ impl TcpFrontDoor {
         Ok(Verdict::Incomplete)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use slt_core::config::ServerConfig;
+    use slt_core::testing::generate_client_hello_tls_record;
+    use slt_core::types::{
+        ClientId, PubKeyEd25519, ServerClient, ServerNetworkConfig, ServerTimingConfig,
+        ServerTlsConfig, SharedSecret, TlsMaterial, TunConfig,
+    };
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+    use tokio_util::sync::CancellationToken;
+
+    use super::TcpFrontDoor;
+    use crate::metrics::Metrics;
+
+    /// Create a test config with listen address set to "127.0.0.1:0" (any available port)
+    /// and the upstream address set to the provided address.
+    fn test_config(upstream_addr: SocketAddr) -> ServerConfig {
+        ServerConfig {
+            server_secret: SharedSecret([0x42u8; 32]),
+            network: ServerNetworkConfig {
+                listen_tcp: "127.0.0.1:0".parse().unwrap(),
+                listen_udp: "127.0.0.1:0".parse().unwrap(),
+                nginx_tcp_upstream: upstream_addr,
+                nginx_udp_upstream: upstream_addr,
+            },
+            tls: ServerTlsConfig {
+                tls_cert: TlsMaterial::Pem(String::new()),
+                tls_key: TlsMaterial::Pem(String::new()),
+            },
+            tun: TunConfig {
+                tun_name: "tun0".to_string(),
+                tun_mtu: 1280,
+            },
+            timing: ServerTimingConfig {
+                ping_min: Duration::from_secs(10),
+                ping_max: Duration::from_secs(20),
+                auth_timeout: Duration::from_secs(10),
+                idle_timeout: Duration::from_secs(60),
+            },
+            udp_nat_max_entries: 1024,
+            session_queue_size: 256,
+            clients: vec![ServerClient {
+                client_id: ClientId([0u8; 16]),
+                pubkey_ed25519: PubKeyEd25519([0u8; 32]),
+                assigned_ipv4: Ipv4Addr::new(10, 10, 0, 2),
+                enabled: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn classify_delegates_to_classifier() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let client_hello = generate_client_hello_tls_record(secret);
+
+        let metrics = Arc::new(Metrics::default());
+        // Bind upstream first to reserve its port (avoid TOCTOU race)
+        let upstream_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // Keep upstream_listener alive until front_door binds
+            let _upstream = upstream_listener;
+            let front_door = TcpFrontDoor::bind(&config, metrics).await.unwrap();
+
+            // Claim verdict for matching secret
+            assert_eq!(
+                front_door.classify(&client_hello),
+                slt_core::classifier::Verdict::Claim
+            );
+
+            // Pass verdict for non-matching secret
+            let wrong_secret_client_hello =
+                generate_client_hello_tls_record(SharedSecret([0x99u8; 32]));
+            assert_eq!(
+                front_door.classify(&wrong_secret_client_hello),
+                slt_core::classifier::Verdict::Pass
+            );
+
+            // Incomplete for empty buffer
+            assert_eq!(
+                front_door.classify(&[]),
+                slt_core::classifier::Verdict::Incomplete
+            );
+
+            // Incomplete for buffer smaller than TLS record header (5 bytes)
+            assert_eq!(
+                front_door.classify(&[0x00, 0x01, 0x02]),
+                slt_core::classifier::Verdict::Incomplete
+            );
+
+            // Pass for non-TLS handshake data (content_type != 0x16)
+            assert_eq!(
+                front_door.classify(&[0x00, 0x03, 0x03, 0x00, 0x10]),
+                slt_core::classifier::Verdict::Pass
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn bind_creates_listener_on_configured_address() {
+        let metrics = Arc::new(Metrics::default());
+        // Bind upstream first to reserve its port
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        // Keep upstream_listener alive until front_door binds
+        let _upstream = upstream_listener;
+        let front_door = TcpFrontDoor::bind(&config, metrics).await.unwrap();
+
+        // Verify listener is bound to localhost
+        let addr = front_door.listener().local_addr().unwrap();
+        assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[tokio::test]
+    async fn listener_returns_bound_socket() {
+        let metrics = Arc::new(Metrics::default());
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let _upstream = upstream_listener;
+        let front_door = TcpFrontDoor::bind(&config, metrics).await.unwrap();
+        let listener = front_door.listener();
+
+        let addr = listener.local_addr().unwrap();
+        assert!(!addr.ip().is_unspecified() || addr.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[tokio::test]
+    async fn run_exits_on_cancellation() {
+        let metrics = Arc::new(Metrics::default());
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let _upstream = upstream_listener;
+        let front_door = TcpFrontDoor::bind(&config, metrics).await.unwrap();
+        let cancel = CancellationToken::new();
+
+        let cancel_clone = cancel.clone();
+        let run_task = tokio::spawn(async move { front_door.run(cancel_clone, |_, _| {}).await });
+
+        cancel.cancel();
+
+        let result = timeout(Duration::from_millis(500), run_task).await;
+        assert!(result.is_ok(), "run should exit quickly on cancellation");
+        assert!(result.unwrap().is_ok(), "run should return Ok(())");
+    }
+
+    #[tokio::test]
+    async fn run_invokes_claim_handler_for_matching_client_hello() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let metrics = Arc::new(Metrics::default());
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let _upstream = upstream_listener;
+        let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let listen_addr = front_door.listener().local_addr().unwrap();
+
+        let claim_count = Arc::new(AtomicUsize::new(0));
+        let claim_count_clone = claim_count.clone();
+        let cancel_for_run = cancel.clone();
+        let cancel_for_handler = cancel.clone();
+
+        let run_task = tokio::spawn(async move {
+            front_door
+                .run(cancel_for_run, move |_, _| {
+                    claim_count_clone.fetch_add(1, Ordering::SeqCst);
+                    cancel_for_handler.cancel();
+                })
+                .await
+        });
+
+        let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+        let client_hello = generate_client_hello_tls_record(secret);
+        stream.write_all(&client_hello).await.unwrap();
+
+        let result = timeout(Duration::from_secs(2), run_task).await;
+        assert!(result.is_ok(), "run should exit after claim");
+        assert_eq!(
+            claim_count.load(Ordering::SeqCst),
+            1,
+            "claim handler should be called once"
+        );
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.tcp_accepted, 1);
+        assert_eq!(snapshot.claimed, 1);
+    }
+
+    #[tokio::test]
+    async fn run_proxies_to_upstream_for_non_matching_client_hello() {
+        let metrics = Arc::new(Metrics::default());
+        // Bind upstream first to reserve its port
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let listen_addr = front_door.listener().local_addr().unwrap();
+
+        let cancel_clone = cancel.clone();
+        let run_task = tokio::spawn(async move { front_door.run(cancel_clone, |_, _| {}).await });
+
+        // Accept on upstream
+        let upstream_task = tokio::spawn(async move {
+            let (mut upstream_stream, _) = upstream_listener.accept().await.unwrap();
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 1024];
+            let n = upstream_stream.read(&mut buf).await.unwrap();
+            upstream_stream.write_all(&buf[..n]).await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+        let wrong_secret = SharedSecret([0x99u8; 32]);
+        let client_hello = generate_client_hello_tls_record(wrong_secret);
+        stream.write_all(&client_hello).await.unwrap();
+
+        let upstream_result = timeout(Duration::from_secs(2), upstream_task).await;
+        assert!(
+            upstream_result.is_ok(),
+            "upstream should receive connection"
+        );
+
+        cancel.cancel();
+        let _ = timeout(Duration::from_millis(500), run_task).await;
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.tcp_accepted, 1);
+        assert_eq!(snapshot.passed, 1);
+    }
+
+    #[tokio::test]
+    async fn run_drops_connection_on_zero_byte_peek() {
+        let metrics = Arc::new(Metrics::default());
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let _upstream = upstream_listener;
+        let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let listen_addr = front_door.listener().local_addr().unwrap();
+
+        let cancel_clone = cancel.clone();
+        let run_task = tokio::spawn(async move { front_door.run(cancel_clone, |_, _| {}).await });
+
+        // Connect and immediately close without sending data
+        {
+            let _stream = TcpStream::connect(listen_addr).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        cancel.cancel();
+        let _ = timeout(Duration::from_millis(500), run_task).await;
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.tcp_accepted, 1);
+        assert_eq!(snapshot.dropped, 1);
+    }
+
+    #[tokio::test]
+    async fn run_handles_multiple_connections_concurrently() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let metrics = Arc::new(Metrics::default());
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let _upstream = upstream_listener;
+        let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let listen_addr = front_door.listener().local_addr().unwrap();
+
+        let claim_count = Arc::new(AtomicUsize::new(0));
+        let claim_count_clone = claim_count.clone();
+        let (tx, mut rx) = mpsc::channel::<()>(3);
+
+        let cancel_clone = cancel.clone();
+        let tx_clone = tx.clone();
+        let run_task = tokio::spawn(async move {
+            front_door
+                .run(cancel_clone, move |_, _| {
+                    claim_count_clone.fetch_add(1, Ordering::SeqCst);
+                    let _ = tx_clone.try_send(());
+                })
+                .await
+        });
+
+        let mut handles = vec![];
+        for _ in 0..3 {
+            let addr = listen_addr;
+            let secret = secret;
+            let handle = tokio::spawn(async move {
+                let mut stream = TcpStream::connect(addr).await.unwrap();
+                let client_hello = generate_client_hello_tls_record(secret);
+                stream.write_all(&client_hello).await.unwrap();
+            });
+            handles.push(handle);
+        }
+
+        for _ in 0..3 {
+            let result = timeout(Duration::from_secs(2), rx.recv()).await;
+            assert!(result.is_ok(), "should receive claim notification");
+        }
+
+        cancel.cancel();
+        let _ = timeout(Duration::from_millis(500), run_task).await;
+
+        assert_eq!(claim_count.load(Ordering::SeqCst), 3);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.tcp_accepted, 3);
+        assert_eq!(snapshot.claimed, 3);
+    }
+
+    /// Test that `Verdict::Incomplete` routes to upstream (line 97).
+    /// This covers the branch where classification returns `Incomplete`
+    /// after exhausting peek attempts.
+    #[tokio::test]
+    async fn run_routes_incomplete_verdict_to_upstream() {
+        let metrics = Arc::new(Metrics::default());
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let listen_addr = front_door.listener().local_addr().unwrap();
+
+        let cancel_clone = cancel.clone();
+        let run_task = tokio::spawn(async move { front_door.run(cancel_clone, |_, _| {}).await });
+
+        // Track if upstream received a connection
+        let upstream_received = Arc::new(AtomicUsize::new(0));
+        let upstream_received_clone = upstream_received.clone();
+        let upstream_task = tokio::spawn(async move {
+            // Accept on upstream with timeout
+            let accept_result = timeout(Duration::from_secs(2), upstream_listener.accept()).await;
+            if let Ok(Ok((mut upstream_stream, _))) = accept_result {
+                upstream_received_clone.fetch_add(1, Ordering::SeqCst);
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                if let Ok(n) = upstream_stream.read(&mut buf).await {
+                    // Echo back
+                    let _ = upstream_stream.write_all(&buf[..n]).await;
+                }
+            }
+        });
+
+        // Send partial TLS data that triggers Incomplete (less than 5 bytes)
+        let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+        // Send only 3 bytes - too small for TLS record header, classifier returns Incomplete
+        stream.write_all(&[0x16, 0x03, 0x01]).await.unwrap();
+        // Keep stream alive briefly then close
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(stream);
+
+        let upstream_result = timeout(Duration::from_secs(2), upstream_task).await;
+        assert!(
+            upstream_result.is_ok(),
+            "upstream should receive connection for Incomplete verdict"
+        );
+        assert_eq!(
+            upstream_received.load(Ordering::SeqCst),
+            1,
+            "upstream should have received exactly one connection"
+        );
+
+        cancel.cancel();
+        let _ = timeout(Duration::from_millis(500), run_task).await;
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.tcp_accepted, 1);
+        assert_eq!(
+            snapshot.passed, 1,
+            "Incomplete verdict should increment passed metric"
+        );
+    }
+
+    /// Test upstream connect failure path (lines 100, 121).
+    /// When upstream is unreachable, the proxy should handle the error gracefully.
+    #[tokio::test]
+    async fn run_handles_upstream_connect_failure() {
+        let metrics = Arc::new(Metrics::default());
+        // Use a non-routable address to trigger connect failure
+        // 10.255.255.1 is typically not routed
+        let non_routable_upstream: SocketAddr = "10.255.255.1:12345".parse().unwrap();
+        let config = test_config(non_routable_upstream);
+
+        let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let listen_addr = front_door.listener().local_addr().unwrap();
+
+        let cancel_clone = cancel.clone();
+        let (tx, mut rx) = mpsc::channel::<()>(1);
+        let tx_clone = tx.clone();
+        let run_task = tokio::spawn(async move {
+            front_door
+                .run(cancel_clone, move |_, _| {
+                    let _ = tx_clone.try_send(());
+                })
+                .await
+        });
+
+        // Send non-matching ClientHello to trigger upstream routing
+        let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+        let wrong_secret = SharedSecret([0x99u8; 32]);
+        let client_hello = generate_client_hello_tls_record(wrong_secret);
+        stream.write_all(&client_hello).await.unwrap();
+
+        // Wait for the connection attempt to complete (with timeout since connect will fail)
+        // The run loop should continue despite the failure
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify the front door is still running by sending another connection
+        let mut stream2 = TcpStream::connect(listen_addr).await.unwrap();
+        stream2.write_all(&client_hello).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        cancel.cancel();
+        let _ = timeout(Duration::from_millis(500), run_task).await;
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.tcp_accepted, 2);
+        assert_eq!(
+            snapshot.passed, 2,
+            "both connections should be passed to upstream"
+        );
+        // Verify claim handler was never called
+        assert!(
+            rx.try_recv().is_err(),
+            "claim handler should not be called for non-matching ClientHello"
+        );
+    }
+
+    /// Test upstream bidirectional copy failure path (line 123).
+    /// When upstream closes connection during proxy, error should be handled.
+    #[tokio::test]
+    async fn run_handles_upstream_copy_failure() {
+        let metrics = Arc::new(Metrics::default());
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let config = test_config(upstream_addr);
+
+        let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+        let cancel = CancellationToken::new();
+        let listen_addr = front_door.listener().local_addr().unwrap();
+
+        let cancel_clone = cancel.clone();
+        let run_task = tokio::spawn(async move { front_door.run(cancel_clone, |_, _| {}).await });
+
+        // Accept upstream connection and immediately close it
+        let upstream_task = tokio::spawn(async move {
+            let (upstream_stream, _) = timeout(Duration::from_secs(2), upstream_listener.accept())
+                .await
+                .expect("upstream should receive connection")
+                .expect("accept should succeed");
+            // Immediately drop to cause copy failure
+            drop(upstream_stream);
+        });
+
+        // Send non-matching ClientHello
+        let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+        let wrong_secret = SharedSecret([0x99u8; 32]);
+        let client_hello = generate_client_hello_tls_record(wrong_secret);
+        stream.write_all(&client_hello).await.unwrap();
+
+        // Wait for upstream to close
+        let upstream_result = timeout(Duration::from_secs(2), upstream_task).await;
+        assert!(upstream_result.is_ok(), "upstream task should complete");
+
+        // Give time for the proxy error to be handled
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        cancel.cancel();
+        let _ = timeout(Duration::from_millis(500), run_task).await;
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.tcp_accepted, 1);
+        assert_eq!(snapshot.passed, 1);
+    }
+
+    /// Test bind() error path when address is already in use (line 36).
+    #[tokio::test]
+    async fn bind_fails_when_address_in_use() {
+        let metrics = Arc::new(Metrics::default());
+
+        // Bind to a specific port first
+        let first_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound_addr = first_listener.local_addr().unwrap();
+
+        // Create config with the same address
+        let mut config = test_config("127.0.0.1:0".parse().unwrap());
+        config.network.listen_tcp = bound_addr;
+
+        // Keep first listener alive and try to bind to same address
+        let _first = first_listener;
+        let result = TcpFrontDoor::bind(&config, metrics).await;
+
+        assert!(
+            result.is_err(),
+            "bind should fail when address is already in use"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::AddrInUse,
+            "error should be AddrInUse"
+        );
+    }
+
+    /// Test that classify_stream correctly classifies complete ClientHello data.
+    /// This verifies the peek loop logic works correctly when full data is available.
+    #[tokio::test]
+    async fn classify_stream_classifies_complete_client_hello() {
+        let secret = SharedSecret([0x42u8; 32]);
+
+        // Create a listener for our test connection
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn a task that accepts connection and classifies it
+        let classify_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            TcpFrontDoor::classify_stream(&stream, secret).await
+        });
+
+        // Connect and send complete ClientHello
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let client_hello = generate_client_hello_tls_record(secret);
+        client.write_all(&client_hello).await.unwrap();
+        client.flush().await.unwrap();
+
+        // Classification should succeed with complete data
+        let result = tokio::select! {
+            result = classify_task => result,
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                panic!("classification timed out");
+            }
+        };
+
+        let verdict = result
+            .expect("task should not panic")
+            .expect("classification should not error");
+        assert!(
+            matches!(verdict, slt_core::classifier::Verdict::Claim),
+            "should claim valid ClientHello"
+        );
+
+        drop(client);
+    }
+
+    /// Test that exhausting PEEK_ATTEMPTS returns Incomplete (line 149-184).
+    /// When data never arrives to complete classification, it should return Incomplete.
+    #[tokio::test]
+    async fn classify_stream_returns_incomplete_after_exhausting_peek_attempts() {
+        let secret = SharedSecret([0x42u8; 32]);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let classify_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            TcpFrontDoor::classify_stream(&stream, secret).await
+        });
+
+        // Connect and send minimal data that triggers Incomplete
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        // Send just 4 bytes - too small for TLS record header (needs 5)
+        client.write_all(&[0x16, 0x03, 0x01, 0x00]).await.unwrap();
+
+        // Don't send more data - let peek attempts exhaust
+        // The loop will yield and retry but eventually return Incomplete
+        let result = timeout(Duration::from_secs(2), classify_task).await;
+        assert!(result.is_ok(), "classification should complete");
+        let verdict = result
+            .expect("classification should complete")
+            .expect("task should not panic")
+            .expect("classification should not error");
+        assert!(
+            matches!(verdict, slt_core::classifier::Verdict::Incomplete),
+            "should return Incomplete when peek attempts exhaust without complete data"
+        );
+    }
+}
