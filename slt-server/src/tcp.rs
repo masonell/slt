@@ -3,6 +3,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use slt_core::classifier::{Verdict, classify_tcp_client_hello};
 use slt_core::config::ServerConfig;
@@ -14,7 +15,8 @@ use tracing::{debug, error, info, trace, warn};
 use super::metrics::Metrics;
 
 const PEEK_LEN: usize = 16 * 1024;
-const PEEK_ATTEMPTS: usize = 4;
+const CLASSIFY_TIMEOUT: Duration = Duration::from_millis(250);
+const CLASSIFY_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 /// TCP acceptor and `ClientHello` classifier.
 #[derive(Debug)]
@@ -138,16 +140,40 @@ impl TcpFrontDoor {
         server_secret: SharedSecret,
     ) -> io::Result<Verdict> {
         let mut buf = vec![0u8; PEEK_LEN];
-        let mut last_len = 0usize;
+        let deadline = tokio::time::Instant::now() + CLASSIFY_TIMEOUT;
+        let mut attempts = 0usize;
 
         trace!(
-            max_attempts = PEEK_ATTEMPTS,
+            timeout_ms = CLASSIFY_TIMEOUT.as_millis(),
+            retry_delay_ms = CLASSIFY_RETRY_DELAY.as_millis(),
             buf_size = PEEK_LEN,
             "starting stream classification"
         );
 
-        for attempt in 0..PEEK_ATTEMPTS {
-            let n = stream.peek(&mut buf).await?;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                debug!(
+                    attempts = attempts,
+                    timeout_ms = CLASSIFY_TIMEOUT.as_millis(),
+                    "classification timed out, verdict incomplete"
+                );
+                return Ok(Verdict::Incomplete);
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let attempt = attempts;
+            attempts += 1;
+            let n = if let Ok(res) = tokio::time::timeout(remaining, stream.peek(&mut buf)).await {
+                res?
+            } else {
+                debug!(
+                    attempts = attempts,
+                    timeout_ms = CLASSIFY_TIMEOUT.as_millis(),
+                    "classification timed out waiting for stream data"
+                );
+                return Ok(Verdict::Incomplete);
+            };
             trace!(attempt = attempt, bytes_peeked = n, "peeked at stream");
 
             if n == 0 {
@@ -163,25 +189,19 @@ impl TcpFrontDoor {
                 return Ok(verdict);
             }
 
-            if n == last_len {
-                debug!(
-                    attempts = attempt + 1,
-                    final_bytes_peeked = n,
-                    "no new data available, classification incomplete"
-                );
-                break;
-            }
-            last_len = n;
             trace!(
                 attempt = attempt,
                 bytes_peeked = n,
-                "yielding for more data"
+                "classification incomplete, waiting for more data"
             );
-            tokio::task::yield_now().await;
-        }
 
-        debug!("exhausted peek attempts, verdict incomplete");
-        Ok(Verdict::Incomplete)
+            let wait = CLASSIFY_RETRY_DELAY
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            if wait.is_zero() {
+                continue;
+            }
+            tokio::time::sleep(wait).await;
+        }
     }
 }
 
@@ -519,9 +539,9 @@ mod tests {
         assert_eq!(snapshot.claimed, 3);
     }
 
-    /// Test that `Verdict::Incomplete` routes to upstream (line 97).
+    /// Test that `Verdict::Incomplete` routes to upstream.
     /// This covers the branch where classification returns `Incomplete`
-    /// after exhausting peek attempts.
+    /// after the classification timeout.
     #[tokio::test]
     async fn run_routes_incomplete_verdict_to_upstream() {
         let metrics = Arc::new(Metrics::default());
@@ -757,10 +777,10 @@ mod tests {
         drop(client);
     }
 
-    /// Test that exhausting PEEK_ATTEMPTS returns Incomplete (line 149-184).
+    /// Test that classification timeout returns Incomplete.
     /// When data never arrives to complete classification, it should return Incomplete.
     #[tokio::test]
-    async fn classify_stream_returns_incomplete_after_exhausting_peek_attempts() {
+    async fn classify_stream_returns_incomplete_after_classification_timeout() {
         let secret = SharedSecret([0x42u8; 32]);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -776,8 +796,7 @@ mod tests {
         // Send just 4 bytes - too small for TLS record header (needs 5)
         client.write_all(&[0x16, 0x03, 0x01, 0x00]).await.unwrap();
 
-        // Don't send more data - let peek attempts exhaust
-        // The loop will yield and retry but eventually return Incomplete
+        // Don't send more data - let classification timeout expire
         let result = timeout(Duration::from_secs(2), classify_task).await;
         assert!(result.is_ok(), "classification should complete");
         let verdict = result
@@ -786,7 +805,34 @@ mod tests {
             .expect("classification should not error");
         assert!(
             matches!(verdict, slt_core::classifier::Verdict::Incomplete),
-            "should return Incomplete when peek attempts exhaust without complete data"
+            "should return Incomplete when classification timeout expires without complete data"
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_stream_returns_incomplete_when_no_data_arrives() {
+        let secret = SharedSecret([0x42u8; 32]);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let classify_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            TcpFrontDoor::classify_stream(&stream, secret).await
+        });
+
+        // Connect but never send data.
+        let _client = TcpStream::connect(addr).await.unwrap();
+
+        let result = timeout(Duration::from_secs(2), classify_task).await;
+        assert!(result.is_ok(), "classification should complete");
+        let verdict = result
+            .expect("classification should complete")
+            .expect("task should not panic")
+            .expect("classification should not error");
+        assert!(
+            matches!(verdict, slt_core::classifier::Verdict::Incomplete),
+            "should return Incomplete when no bytes arrive before classification timeout"
         );
     }
 }
