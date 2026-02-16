@@ -1,4 +1,33 @@
-//! Client authentication helpers.
+//! Client authentication and session management.
+//!
+//! This module handles the authentication phase of client connections, from TLS
+//! handshake through successful authentication, and spawns client sessions.
+//!
+//! # Architecture
+//!
+//! The module is organized around two main components:
+//!
+//! - [`Authenticator`]: Simple allowlist-based client validation against server config
+//! - [`AuthHandlerBase`]: Handles TLS handshake and the AUTH protocol message exchange
+//! - [`SessionManager`]: Manages session creation and lifecycle resources
+//!
+//! # Protocol Messages
+//!
+//! During the auth phase, the following messages are handled:
+//! - `AUTH`: Contains client ID, assigned IP, challenge, and Ed25519 signature
+//! - `PING`: Responded with `PONG` (for keepalive during auth)
+//! - `CLOSE`: Ends the auth phase
+//! - Any other message: Responded with `AUTH_FAIL`
+//!
+//! # Error Handling
+//!
+//! Authentication failures are categorized into:
+//! - `AuthFailCode::UnknownClient`: Client ID not in allowlist
+//! - `AuthFailCode::Disabled`: Client exists but is disabled
+//! - `AuthFailCode::IpMismatch`: IP address doesn't match config
+//! - `AuthFailCode::ChallengeInvalid`: Challenge mismatch
+//! - `AuthFailCode::BadSignature`: Ed25519 signature verification failed
+//! - `AuthFailCode::Unknown`: Protocol error or unexpected message
 
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
@@ -102,6 +131,203 @@ where
         .ok_or_else(|| io::Error::other("tcp channel missing"))
 }
 
+/// Manages session creation and lifecycle.
+///
+/// Encapsulates all resources needed to spawn and manage client sessions.
+#[derive(Clone)]
+pub struct SessionManager<T: TunDeviceIo> {
+    registry: Arc<SessionRegistry>,
+    metrics: Arc<Metrics>,
+    tun: Arc<T>,
+    udp_socket: Arc<tokio::net::UdpSocket>,
+    limits: MessageLimits,
+    session_timeouts: SessionTimeouts,
+    session_queue_size: usize,
+}
+
+impl<T: TunDeviceIo> SessionManager<T> {
+    /// Creates a new session manager.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        registry: Arc<SessionRegistry>,
+        metrics: Arc<Metrics>,
+        tun: Arc<T>,
+        udp_socket: Arc<tokio::net::UdpSocket>,
+        limits: MessageLimits,
+        session_timeouts: SessionTimeouts,
+        session_queue_size: usize,
+    ) -> Self {
+        Self {
+            registry,
+            metrics,
+            tun,
+            udp_socket,
+            limits,
+            session_timeouts,
+            session_queue_size,
+        }
+    }
+
+    /// Returns a reference to the metrics.
+    #[must_use]
+    pub const fn metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
+    }
+
+    /// Returns the message limits.
+    #[must_use]
+    pub const fn limits(&self) -> MessageLimits {
+        self.limits
+    }
+
+    /// Validates that session queue size is non-zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` error if queue size is zero.
+    pub fn ensure_queue_size(&self) -> io::Result<()> {
+        if self.session_queue_size == 0 {
+            error!("session_queue_size must be non-zero");
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session_queue_size must be non-zero",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Spawns a new client session after successful authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if queue size is zero or channel allocation fails.
+    fn spawn_session(
+        &self,
+        client_id: ClientId,
+        assigned_ip: AssignedIp,
+        tcp_channel: SessionTcpChannel<TcpStream>,
+        tx: mpsc::Sender<SessionEvent>,
+        rx: mpsc::Receiver<SessionEvent>,
+    ) {
+        let (handle, old) = self
+            .registry
+            .register_session(client_id, assigned_ip, tx.clone());
+
+        if let Some(old) = old {
+            debug!(client_id = %client_id, session_id = %handle.session_id, replaced_session_id = %old.session_id, "replacing existing session");
+            tokio::spawn(async move {
+                let _ = old.tx.send(SessionEvent::Shutdown).await;
+            });
+        }
+
+        let session = ClientSessionBase::new(
+            handle.session_id,
+            client_id,
+            assigned_ip,
+            tcp_channel,
+            self.tun.clone(),
+            self.udp_socket.clone(),
+            self.registry.clone(),
+            self.metrics.clone(),
+            tx,
+            rx,
+            self.limits,
+            self.session_timeouts,
+        );
+
+        tokio::spawn(async move {
+            let _ = session.run().await;
+        });
+    }
+
+    /// Creates session channels and spawns the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if queue size is zero or tcp channel is missing.
+    pub fn create_session(
+        &self,
+        client_id: ClientId,
+        assigned_ip: AssignedIp,
+        tcp: &mut Option<SessionTcpChannel<TcpStream>>,
+    ) -> io::Result<()> {
+        self.ensure_queue_size()?;
+        let (tx, rx) = mpsc::channel(self.session_queue_size);
+
+        let tcp_channel = tcp
+            .take()
+            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+
+        self.spawn_session(client_id, assigned_ip, tcp_channel, tx, rx);
+        Ok(())
+    }
+
+    /// Test-only session spawning for generic streams.
+    #[cfg(test)]
+    fn spawn_session_test<S>(
+        &self,
+        client_id: ClientId,
+        assigned_ip: AssignedIp,
+        tcp_channel: TcpChannel<S, SessionKeyUpdater>,
+        tx: mpsc::Sender<SessionEvent>,
+        rx: mpsc::Receiver<SessionEvent>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        let (handle, old) = self
+            .registry
+            .register_session(client_id, assigned_ip, tx.clone());
+
+        if let Some(old) = old {
+            tokio::spawn(async move {
+                let _ = old.tx.send(SessionEvent::Shutdown).await;
+            });
+        }
+
+        let session = ClientSessionBase::new(
+            handle.session_id,
+            client_id,
+            assigned_ip,
+            tcp_channel,
+            self.tun.clone(),
+            self.udp_socket.clone(),
+            self.registry.clone(),
+            self.metrics.clone(),
+            tx,
+            rx,
+            self.limits,
+            self.session_timeouts,
+        );
+
+        tokio::spawn(async move {
+            let _ = session.run().await;
+        });
+    }
+
+    /// Test-only session creation for generic streams.
+    #[cfg(test)]
+    pub fn create_session_test<S>(
+        &self,
+        client_id: ClientId,
+        assigned_ip: AssignedIp,
+        tcp: &mut Option<TcpChannel<S, SessionKeyUpdater>>,
+    ) -> io::Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        self.ensure_queue_size()?;
+        let (tx, rx) = mpsc::channel(self.session_queue_size);
+
+        let tcp_channel = tcp
+            .take()
+            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
+
+        self.spawn_session_test(client_id, assigned_ip, tcp_channel, tx, rx);
+        Ok(())
+    }
+}
+
 /// Simple allowlist-based authenticator.
 #[derive(Debug, Clone)]
 pub struct Authenticator {
@@ -155,14 +381,8 @@ impl Authenticator {
 pub struct AuthHandlerBase<T: TunDeviceIo> {
     acceptor: SslAcceptor,
     authenticator: Authenticator,
-    registry: Arc<SessionRegistry>,
-    metrics: Arc<Metrics>,
-    tun: Arc<T>,
-    udp_socket: Arc<tokio::net::UdpSocket>,
-    limits: MessageLimits,
-    session_timeouts: SessionTimeouts,
+    sessions: SessionManager<T>,
     auth_timeout: std::time::Duration,
-    session_queue_size: usize,
 }
 
 /// Default auth handler using a real TUN device.
@@ -171,30 +391,17 @@ pub type AuthHandler = AuthHandlerBase<AsyncDevice>;
 impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// Build a new auth handler.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         acceptor: SslAcceptor,
         authenticator: Authenticator,
-        registry: Arc<SessionRegistry>,
-        metrics: Arc<Metrics>,
-        tun: Arc<T>,
-        udp_socket: Arc<tokio::net::UdpSocket>,
-        limits: MessageLimits,
-        session_timeouts: SessionTimeouts,
+        sessions: SessionManager<T>,
         auth_timeout: std::time::Duration,
-        session_queue_size: usize,
     ) -> Self {
         Self {
             acceptor,
             authenticator,
-            registry,
-            metrics,
-            tun,
-            udp_socket,
-            limits,
-            session_timeouts,
+            sessions,
             auth_timeout,
-            session_queue_size,
         }
     }
 
@@ -211,7 +418,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         let tls = self.tls_handshake(stream, peer_addr.as_ref()).await?;
         let mut tcp = Some(TcpChannel::with_key_updater(
             tls,
-            SessionKeyUpdater::new(self.metrics.clone()),
+            SessionKeyUpdater::new(self.sessions.metrics().clone()),
         ));
 
         let challenge = Self::generate_challenge(
@@ -309,7 +516,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
             // Process all available messages
             loop {
-                let msg_buf = match as_tcp_channel(tcp)?.try_pop_message(self.limits) {
+                let msg_buf = match as_tcp_channel(tcp)?.try_pop_message(self.sessions.limits()) {
                     Ok(Some(buf)) => buf,
                     Ok(None) => break,
                     Err(e) => {
@@ -335,7 +542,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// Records the auth result in metrics.
     fn record_result(&self, result: AuthPhaseResult) {
         if result.is_failure() {
-            self.metrics.inc_auth_failures();
+            self.sessions.metrics().inc_auth_failures();
         }
     }
 
@@ -368,7 +575,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
         match self.verify_auth(&auth, challenge) {
             Ok(assigned_ip) => {
-                self.metrics.inc_auth_successes();
+                self.sessions.metrics().inc_auth_successes();
                 info!(client_id = %auth.client_id, assigned_ip = %assigned_ip, "authentication successful");
 
                 let mut ok_buf = Vec::new();
@@ -376,11 +583,12 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 self.send_message(as_tcp_channel(tcp)?, Message::AuthOk { payload: &ok_buf })
                     .await?;
 
-                self.spawn_session(auth.client_id, assigned_ip, tcp)?;
+                self.sessions
+                    .create_session(auth.client_id, assigned_ip, tcp)?;
                 Ok(AuthStep::Done)
             }
             Err(code) => {
-                self.metrics.inc_auth_failures();
+                self.sessions.metrics().inc_auth_failures();
                 warn!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, code = ?code, "authentication failed");
                 self.send_auth_fail(as_tcp_channel(tcp)?, code).await?;
                 Ok(AuthStep::Done)
@@ -397,7 +605,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
         trace!(nonce = ping_in.nonce, "received ping during auth phase");
 
-        let mut pong_buf = Vec::new();
+        let mut pong_buf = Vec::with_capacity(8);
         PongPayload {
             nonce: ping_in.nonce,
         }
@@ -413,67 +621,11 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         message: Message<'_>,
         tcp: &mut Option<SessionTcpChannel<TcpStream>>,
     ) -> io::Result<AuthStep> {
-        self.metrics.inc_auth_failures();
+        self.sessions.metrics().inc_auth_failures();
         warn!(message = ?message, "received unexpected message during auth phase");
         self.send_auth_fail(as_tcp_channel(tcp)?, AuthFailCode::Unknown)
             .await?;
         Ok(AuthStep::Done)
-    }
-
-    /// Spawns a new client session after successful authentication.
-    fn spawn_session(
-        &self,
-        client_id: ClientId,
-        assigned_ip: AssignedIp,
-        tcp: &mut Option<SessionTcpChannel<TcpStream>>,
-    ) -> io::Result<()> {
-        self.ensure_session_queue_size()?;
-        let (tx, rx) = mpsc::channel(self.session_queue_size);
-        let (handle, old) = self
-            .registry
-            .register_session(client_id, assigned_ip, tx.clone());
-
-        if let Some(old) = old {
-            debug!(client_id = %client_id, session_id = %handle.session_id, replaced_session_id = %old.session_id, "replacing existing session");
-            tokio::spawn(async move {
-                let _ = old.tx.send(SessionEvent::Shutdown).await;
-            });
-        }
-
-        let tcp_channel = tcp
-            .take()
-            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-        let session = ClientSessionBase::new(
-            handle.session_id,
-            client_id,
-            assigned_ip,
-            tcp_channel,
-            self.tun.clone(),
-            self.udp_socket.clone(),
-            self.registry.clone(),
-            self.metrics.clone(),
-            tx,
-            rx,
-            self.limits,
-            self.session_timeouts,
-        );
-
-        tokio::spawn(async move {
-            let _ = session.run().await;
-        });
-
-        Ok(())
-    }
-
-    fn ensure_session_queue_size(&self) -> io::Result<()> {
-        if self.session_queue_size == 0 {
-            error!("session_queue_size must be non-zero");
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "session_queue_size must be non-zero",
-            ));
-        }
-        Ok(())
     }
 
     fn verify_auth(
@@ -504,6 +656,12 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             .await
     }
 
+    /// Test-only accessor to validate session queue size.
+    #[cfg(test)]
+    pub fn ensure_session_queue_size(&self) -> io::Result<()> {
+        self.sessions.ensure_queue_size()
+    }
+
     /// Test-only method to handle auth with a pre-established TLS stream.
     ///
     /// This bypasses the TLS accept step and uses the provided stream directly.
@@ -514,7 +672,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     {
         let mut tcp: Option<TcpChannel<S, SessionKeyUpdater>> = Some(TcpChannel::with_key_updater(
             tls,
-            SessionKeyUpdater::new(self.metrics.clone()),
+            SessionKeyUpdater::new(self.sessions.metrics().clone()),
         ));
 
         let challenge = {
@@ -565,11 +723,12 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             }
 
             loop {
-                let msg_buf = match as_tcp_channel_test(tcp)?.try_pop_message(self.limits) {
-                    Ok(Some(buf)) => buf,
-                    Ok(None) => break,
-                    Err(_) => return Ok(AuthPhaseResult::Failed(AuthFailCode::Unknown)),
-                };
+                let msg_buf =
+                    match as_tcp_channel_test(tcp)?.try_pop_message(self.sessions.limits()) {
+                        Ok(Some(buf)) => buf,
+                        Ok(None) => break,
+                        Err(_) => return Ok(AuthPhaseResult::Failed(AuthFailCode::Unknown)),
+                    };
 
                 match self
                     .handle_auth_message_test(msg_buf.message(), tcp, challenge)
@@ -599,7 +758,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
                 match self.verify_auth(&auth, challenge) {
                     Ok(assigned_ip) => {
-                        self.metrics.inc_auth_successes();
+                        self.sessions.metrics().inc_auth_successes();
 
                         // Send AuthOk
                         let mut ok_buf = Vec::new();
@@ -608,11 +767,12 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                             .write_message(Message::AuthOk { payload: &ok_buf })
                             .await?;
 
-                        self.spawn_session_test(auth.client_id, assigned_ip, tcp)?;
+                        self.sessions
+                            .create_session_test(auth.client_id, assigned_ip, tcp)?;
                         Ok(AuthStep::Done)
                     }
                     Err(code) => {
-                        self.metrics.inc_auth_failures();
+                        self.sessions.metrics().inc_auth_failures();
                         let payload = AuthFailPayload { code };
                         let mut buf = Vec::with_capacity(1);
                         payload.encode(&mut buf);
@@ -625,7 +785,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             }
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
-                let mut pong_buf = Vec::new();
+                let mut pong_buf = Vec::with_capacity(8);
                 PongPayload {
                     nonce: ping_in.nonce,
                 }
@@ -637,7 +797,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             }
             Message::Close { .. } => Ok(AuthStep::Done),
             _ => {
-                self.metrics.inc_auth_failures();
+                self.sessions.metrics().inc_auth_failures();
                 let payload = AuthFailPayload {
                     code: AuthFailCode::Unknown,
                 };
@@ -649,54 +809,6 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 Ok(AuthStep::Done)
             }
         }
-    }
-
-    /// Test-only session spawning for generic streams.
-    #[cfg(test)]
-    fn spawn_session_test<S>(
-        &self,
-        client_id: ClientId,
-        assigned_ip: AssignedIp,
-        tcp: &mut Option<TcpChannel<S, SessionKeyUpdater>>,
-    ) -> io::Result<()>
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
-    {
-        self.ensure_session_queue_size()?;
-        let (tx, rx) = mpsc::channel(self.session_queue_size);
-        let (handle, old) = self
-            .registry
-            .register_session(client_id, assigned_ip, tx.clone());
-
-        if let Some(old) = old {
-            tokio::spawn(async move {
-                let _ = old.tx.send(SessionEvent::Shutdown).await;
-            });
-        }
-
-        let tcp_channel = tcp
-            .take()
-            .ok_or_else(|| io::Error::other("tcp channel missing"))?;
-        let session = ClientSessionBase::new(
-            handle.session_id,
-            client_id,
-            assigned_ip,
-            tcp_channel,
-            self.tun.clone(),
-            self.udp_socket.clone(),
-            self.registry.clone(),
-            self.metrics.clone(),
-            tx,
-            rx,
-            self.limits,
-            self.session_timeouts,
-        );
-
-        tokio::spawn(async move {
-            let _ = session.run().await;
-        });
-
-        Ok(())
     }
 }
 

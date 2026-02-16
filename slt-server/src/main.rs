@@ -10,7 +10,7 @@ use slt_core::config::ServerConfig;
 use slt_core::packet::extract_dst_ipv4;
 use slt_core::proto::MessageLimits;
 use slt_core::types::TlsMaterial;
-use slt_server::auth::{AuthHandler, Authenticator};
+use slt_server::auth::{AuthHandler, Authenticator, SessionManager};
 use slt_server::metrics::Metrics;
 use slt_server::quic::QuicEndpoint;
 use slt_server::registry::SessionRegistry;
@@ -84,17 +84,20 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         idle_timeout: config.timing.idle_timeout,
     };
     let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
-    let auth_handler = Arc::new(AuthHandler::new(
-        acceptor,
-        authenticator,
+    let sessions = SessionManager::new(
         registry.clone(),
         metrics.clone(),
         tun.clone(),
         quic.socket().clone(),
         limits,
         session_timeouts,
-        config.timing.auth_timeout,
         config.session_queue_size,
+    );
+    let auth_handler = Arc::new(AuthHandler::new(
+        acceptor,
+        authenticator,
+        sessions,
+        config.timing.auth_timeout,
     ));
     let cancel = CancellationToken::new();
 

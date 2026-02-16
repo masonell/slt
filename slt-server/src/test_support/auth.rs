@@ -7,7 +7,7 @@ use std::time::Duration;
 use slt_core::proto::MessageLimits;
 use slt_core::types::{ClientId, ServerClient};
 
-use crate::auth::{AuthHandlerBase, Authenticator};
+use crate::auth::{AuthHandlerBase, Authenticator, SessionManager};
 use crate::metrics::Metrics;
 use crate::registry::SessionRegistry;
 use crate::sessions::SessionTimeouts;
@@ -96,18 +96,18 @@ impl TestAuthHandlerBuilder {
 
         let authenticator = Authenticator::new(self.clients);
 
-        let handler = AuthHandlerBase::new(
-            tls_acceptor(),
-            authenticator,
+        let sessions = SessionManager::new(
             registry.clone(),
             metrics.clone(),
             Arc::new(NullTun),
             Arc::new(udp_socket),
             MessageLimits::from_mtu(1500),
             self.timeouts,
-            self.auth_timeout,
             self.session_queue_size,
         );
+
+        let handler =
+            AuthHandlerBase::new(tls_acceptor(), authenticator, sessions, self.auth_timeout);
 
         (
             TestAuthHandler {
@@ -141,18 +141,18 @@ impl TestAuthHandlerBuilder {
 
         let authenticator = Authenticator::new(self.clients);
 
-        let handler = AuthHandlerBase::new(
-            tls_acceptor(),
-            authenticator,
+        let sessions = SessionManager::new(
             registry.clone(),
             metrics.clone(),
             Arc::new(NullTun),
             Arc::new(udp_socket),
             MessageLimits::from_mtu(1500),
             self.timeouts,
-            self.auth_timeout,
             self.session_queue_size,
         );
+
+        let handler =
+            AuthHandlerBase::new(tls_acceptor(), authenticator, sessions, self.auth_timeout);
 
         (
             TestAuthHandler {
