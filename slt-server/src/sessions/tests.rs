@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
 use super::*;
+use crate::quic::UdpClaim;
 use crate::test_support::{
     TestTun, TestUdpSocket, TlsDuplexStream, default_session_timeouts, tls_pair,
 };
