@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "boring"
-version = "5.0.0-alpha.2"
+version = "5.0.1"
 dependencies = [
  "bitflags",
  "boring-sys",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "boring-sys"
-version = "5.0.0-alpha.2"
+version = "5.0.1"
 dependencies = [
  "bindgen",
  "cmake",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "quiche"
-version = "0.24.8"
+version = "0.25.0"
 dependencies = [
  "boring",
  "cmake",
@@ -1570,9 +1570,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-boring"
-version = "5.0.0-alpha.1"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8366b0554ff26810c5a1b282cc6dc65c3f1f3c488f5e5aa310e92c1665defd0"
+checksum = "888f55b68689784b01b8625c9c1486080d8a790972355d45a1bef231b5f5aa83"
 dependencies = [
  "boring",
  "boring-sys",

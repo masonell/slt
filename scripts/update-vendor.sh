@@ -205,6 +205,66 @@ update_workspace_dep_version() {
     mv "$tmp_file" "$file"
 }
 
+update_workspace_dep_inline_table_version() {
+    local dep_key="$1"
+    local dep_version="$2"
+    local file="${ROOT_DIR}/Cargo.toml"
+    local tmp_file="${file}.tmp"
+
+    awk -v dep_key="$dep_key" -v dep_version="$dep_version" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s);
+            sub(/[[:space:]]+$/, "", s);
+            return s;
+        }
+
+        BEGIN {
+            in_workspace_deps = 0;
+            updated = 0;
+        }
+
+        /^\[workspace\.dependencies\]/ {
+            in_workspace_deps = 1;
+            print;
+            next;
+        }
+
+        /^\[/ && $0 !~ /^\[workspace\.dependencies\]/ {
+            in_workspace_deps = 0;
+        }
+
+        {
+            if (in_workspace_deps) {
+                line = $0;
+                stripped = line;
+                sub(/[[:space:]]*#.*/, "", stripped);
+                split(stripped, parts, "=");
+                lhs = trim(parts[1]);
+
+                if (lhs == dep_key) {
+                    updated_line = line;
+                    if (updated_line ~ /version[[:space:]]*=/) {
+                        gsub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" dep_version "\"", updated_line);
+                        print updated_line;
+                        updated = 1;
+                        next;
+                    }
+                }
+            }
+
+            print;
+        }
+
+        END {
+            if (!updated) {
+                exit 2;
+            }
+        }
+    ' "$file" > "$tmp_file" || die "failed to update inline table version for ${dep_key} in ${file}"
+
+    mv "$tmp_file" "$file"
+}
+
 update_quiche_boring_dep_version() {
     local dep_version="$1"
     local file="${ROOT_DIR}/vendor/quiche/Cargo.toml"
@@ -319,11 +379,12 @@ capture_patch_for_crate() {
 }
 
 run_sync() {
-    local boring_version boring_sys_version tokio_boring_version
+    local boring_version boring_sys_version tokio_boring_version quiche_version
 
     boring_version="$(manifest_get_required "versions" "boring")"
     boring_sys_version="$(manifest_get_required "versions" "boring-sys")"
     tokio_boring_version="$(manifest_get_required "versions" "tokio-boring")"
+    quiche_version="$(manifest_get_required "versions" "quiche")"
 
     for crate in "${CRATES[@]}"; do
         sync_crate "$crate"
@@ -332,6 +393,7 @@ run_sync() {
     update_workspace_dep_version "boring" "$boring_version"
     update_workspace_dep_version "boring-sys" "$boring_sys_version"
     update_workspace_dep_version "tokio-boring" "$tokio_boring_version"
+    update_workspace_dep_inline_table_version "quiche" "$quiche_version"
     update_quiche_boring_dep_version "$boring_version"
 
     log "Vendor sync complete."

@@ -7,9 +7,9 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-boring = "5.0.0-alpha.2"
-boring-sys = "5.0.0-alpha.2"
-tokio-boring = "5.0.0-alpha.1"
+boring = "5.0.1"
+boring-sys = "5.0.1"
+tokio-boring = "5.0.0"
 brotli = "8.0.2"
 clap = { version = "4.5.54", features = ["derive"] }
 ed25519-dalek = "2.1.1"
@@ -19,7 +19,7 @@ hex = "0.4.3"
 humantime-serde = "1.1.1"
 lru = "0.16.3"
 parking_lot = "0.12.5"
-quiche = { version = "0.24.8", features = ["boringssl-boring-crate"] }
+quiche = { version = "0.25.0", features = ["boringssl-boring-crate"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-util = "0.7.16"

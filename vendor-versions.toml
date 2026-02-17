@@ -1,8 +1,8 @@
 [versions]
-boring = "5.0.0-alpha.2"
-boring-sys = "5.0.0-alpha.2"
-tokio-boring = "5.0.0-alpha.1"
-quiche = "0.24.8"
+boring = "5.0.1"
+boring-sys = "5.0.1"
+tokio-boring = "5.0.0"
+quiche = "0.25.0"
 
 [patches]
 boring = "vendor-patches/boring.patch"

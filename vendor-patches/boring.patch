@@ -12,7 +12,7 @@ index 5087d10..c640127 100644
      }
  
 diff --git a/src/ssl/callbacks.rs b/src/ssl/callbacks.rs
-index f08409b..7868516 100644
+index 41c08c6..d798566 100644
 --- a/src/ssl/callbacks.rs
 +++ b/src/ssl/callbacks.rs
 @@ -387,6 +387,37 @@ where
@@ -54,10 +54,10 @@ index f08409b..7868516 100644
  where
      F: Fn(&mut SslRef) -> Result<bool, ErrorStack> + 'static + Sync + Send,
 diff --git a/src/ssl/mod.rs b/src/ssl/mod.rs
-index dd17a8a..48667c5 100644
+index b330ce9..42a1a57 100644
 --- a/src/ssl/mod.rs
 +++ b/src/ssl/mod.rs
-@@ -1646,6 +1646,28 @@ impl SslContextBuilder {
+@@ -1638,6 +1638,28 @@ impl SslContextBuilder {
          }
      }
  
