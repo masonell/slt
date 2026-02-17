@@ -43,6 +43,19 @@
 - Separate vendor updates from project changes when possible.
 - PRs should describe behavior changes, include relevant commands run, and link any issues.
 
+## Vendor Update Workflow
+- Source of truth:
+  - Versions and patch paths live in `vendor-versions.toml`.
+  - `scripts/update-vendor.sh sync` rebuilds `vendor/` from crates.io and applies `vendor-patches/*.patch`.
+- When to refresh patch queue:
+  - Refresh `vendor-patches/<crate>.patch` every time you change `vendor/<crate>/`, not only during version bumps.
+  - Typical trigger: editing files like `vendor/boring-sys/patches/*.patch` must be followed by `scripts/update-vendor.sh capture-patches`.
+- Recommended flows:
+  - Local vendor edit (no version bump): edit under `vendor/` -> run `scripts/update-vendor.sh capture-patches` -> run build/test/clippy -> commit vendor-related files.
+  - Version bump: edit `vendor-versions.toml` -> run `scripts/update-vendor.sh sync` -> resolve/verify in `vendor/` -> run `scripts/update-vendor.sh capture-patches` -> run build/test/clippy -> commit vendor-related files.
+- Commit hygiene:
+  - Keep vendor-related files (`vendor/`, `vendor-patches/`, `vendor-versions.toml`, and vendoring pin updates in `Cargo.toml`) separate from non-vendor project changes.
+
 ## Security & Configuration Notes
 - `ClientConfig`/`ServerConfig` live in `slt-core::config` and use serde; durations parse with `humantime-serde`.
 - Fixed-size keys/IDs are hex-encoded strings in config files via `slt-core/src/types/serde/` helpers.

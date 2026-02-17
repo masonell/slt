@@ -54,6 +54,15 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 - Run `cargo build`, `cargo test`, and `cargo clippy` before finalizing
 - Changes under `vendor/` must be in a separate commit
 
+## Vendor Update Workflow
+
+- `vendor-versions.toml` is the source of truth for vendored crate versions and patch file paths.
+- `scripts/update-vendor.sh sync` recreates `vendor/` from crates.io and reapplies `vendor-patches/*.patch`.
+- Refresh `vendor-patches/<crate>.patch` every time `vendor/<crate>/` changes, not just before version upgrades.
+- If you edit `vendor/boring-sys/patches/*.patch`, run `scripts/update-vendor.sh capture-patches` so `vendor-patches/boring-sys.patch` stays in sync.
+- Version bump flow: update `vendor-versions.toml` -> run `scripts/update-vendor.sh sync` -> resolve/verify vendor changes -> run `scripts/update-vendor.sh capture-patches`.
+- Keep vendor-related files (`vendor/`, `vendor-patches/`, `vendor-versions.toml`, and vendoring pin updates) in dedicated commits separate from regular project changes.
+
 ## Configuration
 
 - `ClientConfig`/`ServerConfig` use serde with `humantime-serde` for durations
