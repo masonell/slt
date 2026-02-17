@@ -7,32 +7,34 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-boring = "5.0.1"
-boring-sys = "5.0.1"
-tokio-boring = "5.0.0"
-brotli = "8.0.2"
-clap = { version = "4.5.54", features = ["derive"] }
-ed25519-dalek = "2.1.1"
-foreign-types = "0.5.0"
-fastrand = "2.3.0"
-hex = "0.4.3"
-humantime-serde = "1.1.1"
-lru = "0.16.3"
-parking_lot = "0.12.5"
-quiche = { version = "0.25.0", features = ["boringssl-boring-crate"] }
-serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.49.0", features = ["full"] }
-tokio-util = "0.7.16"
-toml = "0.9.8"
-tracing = { version = "0.1.40", features = ["max_level_trace", "release_max_level_info"] }
-tracing-error = "0.2.0"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
-tun-rs = { version = "2.7.8", features = ["async_tokio"] }
+brotli = "8.0"
+clap = { version = "4.5", features = ["derive"] }
+ed25519-dalek = "2.1"
+foreign-types = "0.5"
+fastrand = "2.3"
+hex = "0.4"
+humantime-serde = "1.1"
+lru = "0.16"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.49", features = ["full"] }
+tokio-util = "0.7"
+toml = "0.9"
+tracing = { version = "0.1", features = ["max_level_trace", "release_max_level_info"] }
+tracing-error = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tun-rs = { version = "2.7", features = ["async_tokio"] }
 thiserror = "2.0"
 anyhow = "1.0"
 num_enum = "0.7"
 
 slt-core = { path = "slt-core" }
+
+tokio-boring = "5.0.0"
+# Vendored crates; keep exact versions aligned with vendor-versions.toml.
+boring = "5.0.1"
+boring-sys = "5.0.1"
+quiche = { version = "0.25.0", features = ["boringssl-boring-crate"] }
 
 [patch.crates-io]
 boring = { path = "vendor/boring" }
