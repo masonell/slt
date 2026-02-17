@@ -54,7 +54,7 @@
 
 --- a/ssl/handshake_client.cc
 +++ b/ssl/handshake_client.cc
-@@ -233,6 +233,27 @@
+@@ -233,6 +233,33 @@
      return false;
    }
  
@@ -77,9 +77,14 @@
 +            client_hello.session_id_len)) {
 +      return false;
 +    }
++
++    // Keep the internal session_id in sync with the serialized ClientHello.
++    // TLS 1.3 validates that ServerHello echoes hs->session_id, so mutating
++    // only the wire bytes causes client-side DECODE_ERROR.
++    hs->session_id.CopyFrom(Span<const uint8_t>(client_hello.session_id,
++                                                client_hello.session_id_len));
 +  }
 +
    // Now that the length prefixes have been computed, fill in the placeholder
    // PSK binder.
    if (needs_psk_binder) {
-
