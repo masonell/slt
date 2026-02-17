@@ -327,8 +327,8 @@ fn test_mutable_store() {
     assert_eq!(1, ctx.cert_store().objects_len());
 
     let mut new_store = X509StoreBuilder::new().unwrap();
-    new_store.add_cert(cert).unwrap();
-    new_store.add_cert(cert2).unwrap();
+    new_store.add_cert(&cert).unwrap();
+    new_store.add_cert(&cert2).unwrap();
     let new_store = new_store.build();
     assert_eq!(2, new_store.objects_len());
 

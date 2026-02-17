@@ -11,9 +11,9 @@
 
 [package]
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.85"
 name = "boring"
-version = "5.0.0-alpha.2"
+version = "5.0.1"
 authors = [
     "Steven Fackler <sfackler@gmail.com>",
     "Ivan Nikulin <ifaaan@gmail.com>",
@@ -28,10 +28,11 @@ description = "BoringSSL bindings"
 documentation = "https://docs.rs/boring"
 readme = "README.md"
 keywords = [
-    "crypto",
     "tls",
     "ssl",
     "dtls",
+    "post-quantum",
+    "fips",
 ]
 categories = [
     "cryptography",
@@ -51,9 +52,16 @@ rustdoc-args = [
 ]
 
 [features]
+credential = []
+default = []
 fips = ["boring-sys/fips"]
 legacy-compat-deprecated = []
-rpk = ["boring-sys/rpk"]
+mlkem = []
+pq-experimental = []
+rpk = [
+    "credential",
+    "boring-sys/rpk",
+]
 underscore-wildcards = ["boring-sys/underscore-wildcards"]
 
 [lib]
@@ -72,7 +80,8 @@ path = "examples/mk_certs.rs"
 version = "2.9"
 
 [dependencies.boring-sys]
-version = "5.0.0-alpha.2"
+version = "5.0.1"
+default-features = false
 
 [dependencies.foreign-types]
 version = "0.5"

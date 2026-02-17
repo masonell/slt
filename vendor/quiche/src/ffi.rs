@@ -216,6 +216,13 @@ pub extern "C" fn quiche_config_discover_pmtu(config: &mut Config, v: bool) {
 }
 
 #[no_mangle]
+pub extern "C" fn quiche_config_set_pmtud_max_probes(
+    config: &mut Config, max_probes: u8,
+) {
+    config.set_pmtud_max_probes(max_probes);
+}
+
+#[no_mangle]
 pub extern "C" fn quiche_config_log_keys(config: &mut Config) {
     config.log_keys();
 }
@@ -621,19 +628,18 @@ pub extern "C" fn quiche_conn_new_with_tls(
         None
     };
 
+    let retry_cids = odcid.as_ref().map(|odcid| RetryConnectionIds {
+        original_destination_cid: odcid,
+        retry_source_cid: &scid,
+    });
+
     let local = std_addr_from_c(local, local_len);
     let peer = std_addr_from_c(peer, peer_len);
 
     let tls = unsafe { tls::Handshake::from_ptr(ssl) };
 
     match Connection::with_tls(
-        &scid,
-        odcid.as_ref(),
-        local,
-        peer,
-        config,
-        tls,
-        is_server,
+        &scid, retry_cids, local, peer, config, tls, is_server,
     ) {
         Ok(c) => Box::into_raw(Box::new(c)),
 

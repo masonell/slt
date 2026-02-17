@@ -108,14 +108,20 @@ fn get_apple_sdk_name(config: &Config) -> &'static str {
 }
 
 /// Returns an absolute path to the BoringSSL source.
-fn get_boringssl_source_path(config: &Config) -> &PathBuf {
-    if let Some(src_path) = &config.env.source_path {
-        return src_path;
-    }
-
+fn get_boringssl_source_path(config: &Config) -> &Path {
     static SOURCE_PATH: OnceLock<PathBuf> = OnceLock::new();
 
     SOURCE_PATH.get_or_init(|| {
+        if let Some(src_path) = &config.env.source_path {
+            if !src_path.exists() {
+                println!(
+                    "cargo:warning=boringssl source path doesn't exist: {}",
+                    src_path.display()
+                );
+            }
+            return src_path.into();
+        }
+
         let submodule_dir = "boringssl";
 
         let src_path = config.out_dir.join(submodule_dir);
@@ -130,12 +136,15 @@ fn get_boringssl_source_path(config: &Config) -> &PathBuf {
                     .args(["submodule", "update", "--init", "--recursive"])
                     .arg(&submodule_path),
             )
-            .unwrap();
+            .expect("git submodule update");
         }
 
         let _ = fs::remove_dir_all(&src_path);
         fs_extra::dir::copy(submodule_path, &config.out_dir, &Default::default())
-            .expect("out dir copy");
+            .inspect_err(|_| {
+                let _ = fs::remove_dir_all(&config.out_dir);
+            })
+            .expect("copying failed. Try running `cargo clean`");
 
         // NOTE: .git can be both file and dir, depening on whether it was copied from a submodule
         // or created by the patches code.
@@ -501,7 +510,15 @@ fn apply_patch(config: &Config, patch_name: &str) -> io::Result<()> {
 }
 
 fn run_command(command: &mut Command) -> io::Result<Output> {
-    let out = command.output()?;
+    let out = command.output().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "can't run {}: {e}\n{command:?} failed",
+                command.get_program().to_string_lossy(),
+            ),
+        )
+    })?;
 
     std::io::stderr().write_all(&out.stderr)?;
     std::io::stdout().write_all(&out.stdout)?;
@@ -519,13 +536,16 @@ fn run_command(command: &mut Command) -> io::Result<Output> {
 }
 
 fn built_boring_source_path(config: &Config) -> &PathBuf {
-    if let Some(path) = &config.env.path {
-        return path;
-    }
-
     static BUILD_SOURCE_PATH: OnceLock<PathBuf> = OnceLock::new();
 
     BUILD_SOURCE_PATH.get_or_init(|| {
+        if let Some(path) = &config.env.path {
+            if !path.exists() {
+                println!("cargo:warning=built path doesn't exist: {}", path.display());
+            }
+            return path.into();
+        }
+
         let mut cfg = get_boringssl_cmake_config(config);
 
         let num_jobs = std::env::var("NUM_JOBS").ok().or_else(|| {
@@ -555,7 +575,7 @@ fn get_cpp_runtime_lib(config: &Config) -> Option<String> {
     }
 
     match &*config.target_os {
-        "macos" | "ios" | "freebsd" | "android" => Some("c++".into()),
+        "macos" | "ios" | "freebsd" | "openbsd" | "android" => Some("c++".into()),
         _ if config.unix || config.target_env == "gnu" => Some("stdc++".into()),
         // TODO(rmehra): figure out how to do this for windows
         _ => None,
@@ -616,20 +636,33 @@ fn emit_link_directives(config: &Config) {
     }
 }
 
+fn check_include_path(path: PathBuf) -> Result<PathBuf, String> {
+    if path.join("openssl").join("x509v3.h").exists() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "Include path {} {}",
+            path.display(),
+            if !path.exists() {
+                "does not exist"
+            } else {
+                "does not have expected openssl/x509v3.h"
+            }
+        ))
+    }
+}
+
 fn generate_bindings(config: &Config) {
     let include_path = config.env.include_path.clone().unwrap_or_else(|| {
         if let Some(bssl_path) = &config.env.path {
-            return bssl_path.join("include");
+            return check_include_path(bssl_path.join("include"))
+                .expect("config has invalid include path");
         }
 
         let src_path = get_boringssl_source_path(config);
-        let candidate = src_path.join("include");
-
-        if candidate.exists() {
-            candidate
-        } else {
-            src_path.join("src").join("include")
-        }
+        check_include_path(src_path.join("include"))
+            .or_else(|_| check_include_path(src_path.join("src").join("include")))
+            .expect("can't find usable include path")
     });
 
     let target_rust_version =
@@ -674,7 +707,7 @@ fn generate_bindings(config: &Config) {
         }
     }
 
-    let headers = [
+    let must_have_headers = [
         "aes.h",
         "asn1_mac.h",
         "asn1t.h",
@@ -690,26 +723,39 @@ fn generate_bindings(config: &Config) {
         "err.h",
         "hkdf.h",
         "hpke.h",
+        "ossl_typ.h",
+        "pkcs12.h",
+        "poly1305.h",
+        "x509v3.h",
+    ];
+    let headers = [
         "hmac.h",
         "hrss.h",
         "md4.h",
         "md5.h",
+        "mlkem.h",
         "obj_mac.h",
         "objects.h",
         "opensslv.h",
-        "ossl_typ.h",
-        "pkcs12.h",
-        "poly1305.h",
         "rand.h",
         "rc4.h",
         "ripemd.h",
         "siphash.h",
         "srtp.h",
         "trust_token.h",
-        "x509v3.h",
     ];
-    for header in &headers {
-        builder = builder.header(include_path.join("openssl").join(header).to_str().unwrap());
+    for (i, header) in must_have_headers.into_iter().chain(headers).enumerate() {
+        let header_path = include_path.join("openssl").join(header);
+        if header_path.exists() {
+            builder = builder.header(header_path.to_str().unwrap());
+        } else {
+            let err = format!("'openssl/{header}' is missing from '{}'. The include path may be incorrect or contain an outdated version of OpenSSL/BoringSSL", include_path.display());
+            let required = i < must_have_headers.len();
+            println!(
+                "cargo::{}={err}",
+                if required { "error" } else { "warning" }
+            );
+        }
     }
 
     let bindings = builder.generate().expect("Unable to generate bindings");

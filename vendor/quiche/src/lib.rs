@@ -385,10 +385,7 @@ extern crate log;
 
 use std::cmp;
 
-use std::collections::HashSet;
 use std::collections::VecDeque;
-
-use std::convert::TryInto;
 
 use std::net::SocketAddr;
 
@@ -429,6 +426,7 @@ use crate::recovery::OnLossDetectionTimeoutOutcome;
 use crate::recovery::RecoveryOps;
 use crate::recovery::ReleaseDecision;
 
+use crate::stream::RecvAction;
 use crate::stream::StreamPriorityKey;
 
 /// The current QUIC wire version.
@@ -473,9 +471,6 @@ const DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN: usize = 3;
 // The DATAGRAM standard recommends either none or 65536 as maximum DATAGRAM
 // frames size. We enforce the recommendation for forward compatibility.
 const MAX_DGRAM_FRAME_SIZE: u64 = 65536;
-
-// Maximum length for GREASE transport parameter values.
-const MAX_GREASE_TP_LEN: usize = 16;
 
 // The length of the payload length field.
 const PAYLOAD_LENGTH_LEN: usize = 2;
@@ -583,6 +578,7 @@ pub struct Config {
     enable_relaxed_loss_threshold: bool,
 
     pmtud: bool,
+    pmtud_max_probes: u8,
 
     hystart: bool,
 
@@ -611,9 +607,8 @@ pub struct Config {
     initial_rtt: Duration,
 
     #[cfg(feature = "boringssl-boring-crate")]
-    tls_configure: Option<
-        Box<dyn Fn(&mut boring::ssl::SslRef) -> Result<()> + Send + Sync>,
-    >,
+    tls_configure:
+        Option<Box<dyn Fn(&mut boring::ssl::SslRef) -> Result<()> + Send + Sync>>,
 }
 
 // See https://quicwg.org/base-drafts/rfc9000.html#section-15
@@ -666,6 +661,7 @@ impl Config {
                 DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS,
             enable_relaxed_loss_threshold: false,
             pmtud: false,
+            pmtud_max_probes: pmtud::MAX_PROBES_DEFAULT,
             hystart: true,
             pacing: true,
             max_pacing_rate: None,
@@ -784,6 +780,15 @@ impl Config {
     /// The default value is `false`.
     pub fn discover_pmtu(&mut self, discover: bool) {
         self.pmtud = discover;
+    }
+
+    /// Configures the maximum number of PMTUD probe attempts before treating
+    /// a probe size as failed.
+    ///
+    /// Defaults to 3 per [RFC 8899 Section 5.1.2](https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2).
+    /// If 0 is passed, the default value is used.
+    pub fn set_pmtud_max_probes(&mut self, max_probes: u8) {
+        self.pmtud_max_probes = max_probes;
     }
 
     /// Configures whether to send GREASE values.
@@ -1527,8 +1532,9 @@ where
 ///
 /// The `scid` parameter represents the server's source connection ID, while
 /// the optional `odcid` parameter represents the original destination ID the
-/// client sent before a stateless retry (this is only required when using
-/// the [`retry()`] function).
+/// client sent before a Retry packet (this is only required when using the
+/// [`retry()`] function). See also the [`accept_with_retry()`] function for
+/// more advanced retry cases.
 ///
 /// [`retry()`]: fn.retry.html
 ///
@@ -1542,14 +1548,12 @@ where
 /// let conn = quiche::accept(&scid, None, local, peer, &mut config)?;
 /// # Ok::<(), quiche::Error>(())
 /// ```
-#[inline]
+#[inline(always)]
 pub fn accept(
     scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
     peer: SocketAddr, config: &mut Config,
 ) -> Result<Connection> {
-    let conn = Connection::new(scid, odcid, local, peer, config, true)?;
-
-    Ok(conn)
+    accept_with_buf_factory(scid, odcid, local, peer, config)
 }
 
 /// Creates a new server-side connection, with a custom buffer generation
@@ -1562,9 +1566,49 @@ pub fn accept_with_buf_factory<F: BufFactory>(
     scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
     peer: SocketAddr, config: &mut Config,
 ) -> Result<Connection<F>> {
-    let conn = Connection::new(scid, odcid, local, peer, config, true)?;
+    // For connections with `odcid` set, we historically used `retry_source_cid =
+    // scid`. Keep this behavior to preserve backwards compatibility.
+    // `accept_with_retry` allows the SCIDs to be specified separately.
+    let retry_cids = odcid.map(|odcid| RetryConnectionIds {
+        original_destination_cid: odcid,
+        retry_source_cid: scid,
+    });
 
-    Ok(conn)
+    Connection::new(scid, retry_cids, local, peer, config, true)
+}
+
+/// A wrapper for connection IDs used in [`accept_with_retry`].
+pub struct RetryConnectionIds<'a> {
+    /// The DCID of the first Initial packet received by the server, which
+    /// triggered the Retry packet.
+    pub original_destination_cid: &'a ConnectionId<'a>,
+    /// The SCID of the Retry packet sent by the server. This can be different
+    /// from the new connection's SCID.
+    pub retry_source_cid: &'a ConnectionId<'a>,
+}
+
+/// Creates a new server-side connection after the client responded to a Retry
+/// packet.
+///
+/// To generate a Retry packet in the first place, use the [`retry()`] function.
+///
+/// The `scid` parameter represents the server's source connection ID, which can
+/// be freshly generated after the application has successfully verified the
+/// Retry. `retry_cids` is used to tie the new connection to the Initial + Retry
+/// exchange that preceded the connection's creation.
+///
+/// The DCID of the client's Initial packet is inherently untrusted data. It is
+/// safe to use the DCID in the `retry_source_cid` field of the
+/// `RetryConnectionIds` provided to this function. However, using the Initial's
+/// DCID for the `scid` parameter carries risks. Applications are advised to
+/// implement their own DCID validation steps before using the DCID in that
+/// manner.
+#[inline]
+pub fn accept_with_retry<F: BufFactory>(
+    scid: &ConnectionId, retry_cids: RetryConnectionIds, local: SocketAddr,
+    peer: SocketAddr, config: &mut Config,
+) -> Result<Connection<F>> {
+    Connection::new(scid, Some(retry_cids), local, peer, config, true)
 }
 
 /// Creates a new client-side connection.
@@ -1802,20 +1846,24 @@ impl Default for QlogInfo {
 
 impl<F: BufFactory> Connection<F> {
     fn new(
-        scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
-        peer: SocketAddr, config: &mut Config, is_server: bool,
+        scid: &ConnectionId, retry_cids: Option<RetryConnectionIds>,
+        local: SocketAddr, peer: SocketAddr, config: &mut Config,
+        is_server: bool,
     ) -> Result<Connection<F>> {
         let mut tls = config.tls_ctx.new_handshake()?;
         #[cfg(feature = "boringssl-boring-crate")]
         if let Some(cb) = &config.tls_configure {
             cb(tls.ssl_mut())?;
         }
-        Connection::with_tls(scid, odcid, local, peer, config, tls, is_server)
+        Connection::with_tls(
+            scid, retry_cids, local, peer, config, tls, is_server,
+        )
     }
 
     fn with_tls(
-        scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
-        peer: SocketAddr, config: &Config, tls: tls::Handshake, is_server: bool,
+        scid: &ConnectionId, retry_cids: Option<RetryConnectionIds>,
+        local: SocketAddr, peer: SocketAddr, config: &Config,
+        tls: tls::Handshake, is_server: bool,
     ) -> Result<Connection<F>> {
         let max_rx_data = config.local_transport_params.initial_max_data;
 
@@ -1839,8 +1887,8 @@ impl<F: BufFactory> Connection<F> {
             Some(config),
         );
 
-        // If we did stateless retry assume the peer's address is verified.
-        path.verified_peer_address = odcid.is_some();
+        // If we sent a Retry assume the peer's address is verified.
+        path.verified_peer_address = retry_cids.is_some();
         // Assume clients validate the server's address implicitly.
         path.peer_verified_local_address = is_server;
 
@@ -2023,12 +2071,13 @@ impl<F: BufFactory> Connection<F> {
             max_amplification_factor: config.max_amplification_factor,
         };
 
-        if let Some(odcid) = odcid {
+        if let Some(retry_cids) = retry_cids {
             conn.local_transport_params
-                .original_destination_connection_id = Some(odcid.to_vec().into());
+                .original_destination_connection_id =
+                Some(retry_cids.original_destination_cid.to_vec().into());
 
             conn.local_transport_params.retry_source_connection_id =
-                Some(conn.ids.get_scid(0)?.cid.to_vec().into());
+                Some(retry_cids.retry_source_cid.to_vec().into());
 
             conn.did_retry = true;
         }
@@ -2448,11 +2497,11 @@ impl<F: BufFactory> Connection<F> {
     #[cfg(feature = "boringssl-boring-crate")]
     #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
     pub fn set_discover_pmtu_in_handshake(
-        ssl: &mut boring::ssl::SslRef, discover: bool,
+        ssl: &mut boring::ssl::SslRef, discover: bool, max_probes: u8,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
-        ex_data.pmtud = Some(discover);
+        ex_data.pmtud = Some((discover, max_probes));
 
         Ok(())
     }
@@ -5208,7 +5257,7 @@ impl<F: BufFactory> Connection<F> {
     /// is returned as a tuple, or [`Done`] if there is no data to read.
     ///
     /// Reading data from a stream may trigger queueing of control messages
-    /// (e.g. MAX_STREAM_DATA). [`send()`] should be called after reading.
+    /// (e.g. MAX_STREAM_DATA). [`send()`] should be called afterwards.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`send()`]: struct.Connection.html#method.send
@@ -5232,6 +5281,63 @@ impl<F: BufFactory> Connection<F> {
     pub fn stream_recv(
         &mut self, stream_id: u64, out: &mut [u8],
     ) -> Result<(usize, bool)> {
+        self.do_stream_recv(stream_id, RecvAction::Emit { out })
+    }
+
+    /// Discard contiguous data from a stream without copying.
+    ///
+    /// On success the amount of bytes discarded and a flag indicating the fin
+    /// state is returned as a tuple, or [`Done`] if there is no data to
+    /// discard.
+    ///
+    /// Discarding data from a stream may trigger queueing of control messages
+    /// (e.g. MAX_STREAM_DATA). [`send()`] should be called afterwards.
+    ///
+    /// [`Done`]: enum.Error.html#variant.Done
+    /// [`send()`]: struct.Connection.html#method.send
+    ///
+    /// ## Examples:
+    ///
+    /// ```no_run
+    /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+    /// # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
+    /// # let peer = "127.0.0.1:1234".parse().unwrap();
+    /// # let local = socket.local_addr().unwrap();
+    /// # let mut conn = quiche::accept(&scid, None, local, peer, &mut config)?;
+    /// # let stream_id = 0;
+    /// while let Ok((read, fin)) = conn.stream_discard(stream_id, 1) {
+    ///     println!("Discarded {} byte(s) on stream {}", read, stream_id);
+    /// }
+    /// # Ok::<(), quiche::Error>(())
+    /// ```
+    pub fn stream_discard(
+        &mut self, stream_id: u64, len: usize,
+    ) -> Result<(usize, bool)> {
+        self.do_stream_recv(stream_id, RecvAction::Discard { len })
+    }
+
+    // Reads or discards contiguous data from a stream.
+    //
+    // Passing an `action` of `StreamRecvAction::Emit` results in a read into
+    // the provided slice. It must be sized by the caller and will be populated
+    // up to its capacity.
+    //
+    // Passing an `action` of `StreamRecvAction::Discard` results in discard up
+    // to the indicated length.
+    //
+    // On success the amount of bytes read or discarded, and a flag indicating
+    // the fin state, is returned as a tuple, or [`Done`] if there is no data to
+    // read or discard.
+    //
+    // Reading or discarding data from a stream may trigger queueing of control
+    // messages (e.g. MAX_STREAM_DATA). [`send()`] should be called afterwards.
+    //
+    // [`Done`]: enum.Error.html#variant.Done
+    // [`send()`]: struct.Connection.html#method.send
+    fn do_stream_recv(
+        &mut self, stream_id: u64, action: RecvAction,
+    ) -> Result<(usize, bool)> {
         // We can't read on our own unidirectional streams.
         if !stream::is_bidi(stream_id) &&
             stream::is_local(stream_id, self.is_server)
@@ -5254,7 +5360,14 @@ impl<F: BufFactory> Connection<F> {
         #[cfg(feature = "qlog")]
         let offset = stream.recv.off_front();
 
-        let (read, fin) = match stream.recv.emit(out) {
+        #[cfg(feature = "qlog")]
+        let to = match action {
+            RecvAction::Emit { .. } => Some(DataRecipient::Application),
+
+            RecvAction::Discard { .. } => Some(DataRecipient::Dropped),
+        };
+
+        let (read, fin) = match stream.recv.emit_or_discard(action) {
             Ok(v) => v,
 
             Err(e) => {
@@ -5295,7 +5408,7 @@ impl<F: BufFactory> Connection<F> {
                 offset: Some(offset),
                 length: Some(read as u64),
                 from: Some(DataRecipient::Transport),
-                to: Some(DataRecipient::Application),
+                to,
                 ..Default::default()
             });
 
@@ -7417,9 +7530,14 @@ impl<F: BufFactory> Connection<F> {
             Ok(_) => (),
 
             Err(Error::Done) => {
-                // Apply in-handshake configuration from callbacks before any
-                // packet has been sent.
-                if self.sent_count == 0 {
+                // Apply in-handshake configuration from callbacks if the path's
+                // Recovery module can still be reinitilized.
+                if self
+                    .paths
+                    .get_active()
+                    .map(|p| p.can_reinit_recovery())
+                    .unwrap_or(false)
+                {
                     if ex_data.recovery_config != self.recovery_config {
                         if let Ok(path) = self.paths.get_active_mut() {
                             self.recovery_config = ex_data.recovery_config;
@@ -7431,10 +7549,11 @@ impl<F: BufFactory> Connection<F> {
                         self.tx_cap_factor = ex_data.tx_cap_factor;
                     }
 
-                    if let Some(discover) = ex_data.pmtud {
+                    if let Some((discover, max_probes)) = ex_data.pmtud {
                         self.paths.set_discover_pmtu_on_existing_paths(
                             discover,
                             self.recovery_config.max_send_udp_payload_size,
+                            max_probes,
                         );
                     }
 
@@ -8835,628 +8954,6 @@ impl std::fmt::Debug for Stats {
     }
 }
 
-/// QUIC Unknown Transport Parameter.
-///
-/// A QUIC transport parameter that is not specifically recognized
-/// by this implementation.
-#[derive(Clone, Debug, PartialEq)]
-pub struct UnknownTransportParameter<T> {
-    /// The ID of the unknown transport parameter.
-    pub id: u64,
-
-    /// Original data representing the value of the unknown transport parameter.
-    pub value: T,
-}
-
-impl<T> UnknownTransportParameter<T> {
-    /// Checks whether an unknown Transport Parameter's ID is in the reserved
-    /// space.
-    ///
-    /// See Section 18.1 in [RFC9000](https://datatracker.ietf.org/doc/html/rfc9000#name-reserved-transport-paramete).
-    pub fn is_reserved(&self) -> bool {
-        let n = (self.id - 27) / 31;
-        self.id == 31 * n + 27
-    }
-}
-
-#[cfg(feature = "qlog")]
-impl From<UnknownTransportParameter<Vec<u8>>>
-    for qlog::events::quic::UnknownTransportParameter
-{
-    fn from(value: UnknownTransportParameter<Vec<u8>>) -> Self {
-        Self {
-            id: value.id,
-            value: qlog::HexSlice::maybe_string(Some(value.value.as_slice()))
-                .unwrap_or_default(),
-        }
-    }
-}
-
-impl From<UnknownTransportParameter<&[u8]>>
-    for UnknownTransportParameter<Vec<u8>>
-{
-    // When an instance of an UnknownTransportParameter is actually
-    // stored in UnknownTransportParameters, then we make a copy
-    // of the bytes if the source is an instance of an UnknownTransportParameter
-    // whose value is not owned.
-    fn from(value: UnknownTransportParameter<&[u8]>) -> Self {
-        Self {
-            id: value.id,
-            value: value.value.to_vec(),
-        }
-    }
-}
-
-/// Track unknown transport parameters, up to a limit.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct UnknownTransportParameters {
-    /// The space remaining for storing unknown transport parameters.
-    pub capacity: usize,
-    /// The unknown transport parameters.
-    pub parameters: Vec<UnknownTransportParameter<Vec<u8>>>,
-}
-
-impl UnknownTransportParameters {
-    /// Pushes an unknown transport parameter into storage if there is space
-    /// remaining.
-    pub fn push(&mut self, new: UnknownTransportParameter<&[u8]>) -> Result<()> {
-        let new_unknown_tp_size = new.value.len() + size_of::<u64>();
-        if new_unknown_tp_size < self.capacity {
-            self.capacity -= new_unknown_tp_size;
-            self.parameters.push(new.into());
-            Ok(())
-        } else {
-            Err(octets::BufferTooShortError.into())
-        }
-    }
-}
-
-/// An Iterator over unknown transport parameters.
-pub struct UnknownTransportParameterIterator<'a> {
-    index: usize,
-    parameters: &'a Vec<UnknownTransportParameter<Vec<u8>>>,
-}
-
-impl<'a> IntoIterator for &'a UnknownTransportParameters {
-    type IntoIter = UnknownTransportParameterIterator<'a>;
-    type Item = &'a UnknownTransportParameter<Vec<u8>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        UnknownTransportParameterIterator {
-            index: 0,
-            parameters: &self.parameters,
-        }
-    }
-}
-
-impl<'a> Iterator for UnknownTransportParameterIterator<'a> {
-    type Item = &'a UnknownTransportParameter<Vec<u8>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = self.parameters.get(self.index);
-        self.index += 1;
-        result
-    }
-}
-
-/// QUIC Transport Parameters
-#[derive(Clone, Debug, PartialEq)]
-pub struct TransportParams {
-    /// Value of Destination CID field from first Initial packet sent by client
-    pub original_destination_connection_id: Option<ConnectionId<'static>>,
-    /// The maximum idle timeout.
-    pub max_idle_timeout: u64,
-    /// Token used for verifying stateless resets
-    pub stateless_reset_token: Option<u128>,
-    /// The maximum UDP payload size.
-    pub max_udp_payload_size: u64,
-    /// The initial flow control maximum data for the connection.
-    pub initial_max_data: u64,
-    /// The initial flow control maximum data for local bidirectional streams.
-    pub initial_max_stream_data_bidi_local: u64,
-    /// The initial flow control maximum data for remote bidirectional streams.
-    pub initial_max_stream_data_bidi_remote: u64,
-    /// The initial flow control maximum data for unidirectional streams.
-    pub initial_max_stream_data_uni: u64,
-    /// The initial maximum bidirectional streams.
-    pub initial_max_streams_bidi: u64,
-    /// The initial maximum unidirectional streams.
-    pub initial_max_streams_uni: u64,
-    /// The ACK delay exponent.
-    pub ack_delay_exponent: u64,
-    /// The max ACK delay.
-    pub max_ack_delay: u64,
-    /// Whether active migration is disabled.
-    pub disable_active_migration: bool,
-    /// The active connection ID limit.
-    pub active_conn_id_limit: u64,
-    /// The value that the endpoint included in the Source CID field of a Retry
-    /// Packet.
-    pub initial_source_connection_id: Option<ConnectionId<'static>>,
-    /// The value that the server included in the Source CID field of a Retry
-    /// Packet.
-    pub retry_source_connection_id: Option<ConnectionId<'static>>,
-    /// DATAGRAM frame extension parameter, if any.
-    pub max_datagram_frame_size: Option<u64>,
-    /// Google QUIC version transport parameter (non-standard).
-    pub google_quic_version: Option<[u8; 4]>,
-    /// Version information transport parameter (RFC 9368), raw bytes.
-    pub version_information: Option<Vec<u8>>,
-    /// Whether to inject a random GREASE transport parameter.
-    pub grease: bool,
-    /// Unknown peer transport parameters and values, if any.
-    pub unknown_params: Option<UnknownTransportParameters>,
-    // pub preferred_address: ...,
-}
-
-impl Default for TransportParams {
-    fn default() -> TransportParams {
-        TransportParams {
-            original_destination_connection_id: None,
-            max_idle_timeout: 0,
-            stateless_reset_token: None,
-            max_udp_payload_size: 65527,
-            initial_max_data: 0,
-            initial_max_stream_data_bidi_local: 0,
-            initial_max_stream_data_bidi_remote: 0,
-            initial_max_stream_data_uni: 0,
-            initial_max_streams_bidi: 0,
-            initial_max_streams_uni: 0,
-            ack_delay_exponent: 3,
-            max_ack_delay: 25,
-            disable_active_migration: false,
-            active_conn_id_limit: 2,
-            initial_source_connection_id: None,
-            retry_source_connection_id: None,
-            max_datagram_frame_size: None,
-            google_quic_version: None,
-            version_information: None,
-            grease: false,
-            unknown_params: Default::default(),
-        }
-    }
-}
-
-impl TransportParams {
-    fn decode(
-        buf: &[u8], is_server: bool, unknown_size: Option<usize>,
-    ) -> Result<TransportParams> {
-        let mut params = octets::Octets::with_slice(buf);
-        let mut seen_params = HashSet::new();
-
-        let mut tp = TransportParams::default();
-
-        if let Some(unknown_transport_param_tracking_size) = unknown_size {
-            tp.unknown_params = Some(UnknownTransportParameters {
-                capacity: unknown_transport_param_tracking_size,
-                parameters: vec![],
-            });
-        }
-
-        while params.cap() > 0 {
-            let id = params.get_varint()?;
-
-            if seen_params.contains(&id) {
-                return Err(Error::InvalidTransportParam);
-            }
-            seen_params.insert(id);
-
-            let mut val = params.get_bytes_with_varint_length()?;
-
-            match id {
-                0x0000 => {
-                    if is_server {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.original_destination_connection_id =
-                        Some(val.to_vec().into());
-                },
-
-                0x0001 => {
-                    tp.max_idle_timeout = val.get_varint()?;
-                },
-
-                0x0002 => {
-                    if is_server {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.stateless_reset_token = Some(u128::from_be_bytes(
-                        val.get_bytes(16)?
-                            .to_vec()
-                            .try_into()
-                            .map_err(|_| Error::BufferTooShort)?,
-                    ));
-                },
-
-                0x0003 => {
-                    tp.max_udp_payload_size = val.get_varint()?;
-
-                    if tp.max_udp_payload_size < 1200 {
-                        return Err(Error::InvalidTransportParam);
-                    }
-                },
-
-                0x0004 => {
-                    tp.initial_max_data = val.get_varint()?;
-                },
-
-                0x0005 => {
-                    tp.initial_max_stream_data_bidi_local = val.get_varint()?;
-                },
-
-                0x0006 => {
-                    tp.initial_max_stream_data_bidi_remote = val.get_varint()?;
-                },
-
-                0x0007 => {
-                    tp.initial_max_stream_data_uni = val.get_varint()?;
-                },
-
-                0x0008 => {
-                    let max = val.get_varint()?;
-
-                    if max > MAX_STREAM_ID {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.initial_max_streams_bidi = max;
-                },
-
-                0x0009 => {
-                    let max = val.get_varint()?;
-
-                    if max > MAX_STREAM_ID {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.initial_max_streams_uni = max;
-                },
-
-                0x000a => {
-                    let ack_delay_exponent = val.get_varint()?;
-
-                    if ack_delay_exponent > 20 {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.ack_delay_exponent = ack_delay_exponent;
-                },
-
-                0x000b => {
-                    let max_ack_delay = val.get_varint()?;
-
-                    if max_ack_delay >= 2_u64.pow(14) {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.max_ack_delay = max_ack_delay;
-                },
-
-                0x000c => {
-                    tp.disable_active_migration = true;
-                },
-
-                0x000d => {
-                    if is_server {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    // TODO: decode preferred_address
-                },
-
-                0x000e => {
-                    let limit = val.get_varint()?;
-
-                    if limit < 2 {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.active_conn_id_limit = limit;
-                },
-
-                0x000f => {
-                    tp.initial_source_connection_id = Some(val.to_vec().into());
-                },
-
-                0x00010 => {
-                    if is_server {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.retry_source_connection_id = Some(val.to_vec().into());
-                },
-
-                0x0020 => {
-                    tp.max_datagram_frame_size = Some(val.get_varint()?);
-                },
-
-                // Track unknown transport parameters specially.
-                unknown_tp_id => {
-                    if let Some(unknown_params) = &mut tp.unknown_params {
-                        // It is _not_ an error not to have space enough to track
-                        // an unknown parameter.
-                        let _ = unknown_params.push(UnknownTransportParameter {
-                            id: unknown_tp_id,
-                            value: val.buf(),
-                        });
-                    }
-                },
-            }
-        }
-
-        Ok(tp)
-    }
-
-    fn encode_param(
-        b: &mut octets::OctetsMut, ty: u64, len: usize,
-    ) -> Result<()> {
-        b.put_varint(ty)?;
-        b.put_varint(len as u64)?;
-
-        Ok(())
-    }
-
-    fn encode<'a>(
-        tp: &TransportParams, is_server: bool, out: &'a mut [u8],
-    ) -> Result<&'a mut [u8]> {
-        let mut b = octets::OctetsMut::with_slice(out);
-
-        if is_server {
-            if let Some(ref odcid) = tp.original_destination_connection_id {
-                TransportParams::encode_param(&mut b, 0x0000, odcid.len())?;
-                b.put_bytes(odcid)?;
-            }
-        };
-
-        if tp.max_idle_timeout != 0 {
-            assert!(tp.max_idle_timeout <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x0001,
-                octets::varint_len(tp.max_idle_timeout),
-            )?;
-            b.put_varint(tp.max_idle_timeout)?;
-        }
-
-        if is_server {
-            if let Some(ref token) = tp.stateless_reset_token {
-                TransportParams::encode_param(&mut b, 0x0002, 16)?;
-                b.put_bytes(&token.to_be_bytes())?;
-            }
-        }
-
-        if tp.max_udp_payload_size != 0 {
-            assert!(tp.max_udp_payload_size <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x0003,
-                octets::varint_len(tp.max_udp_payload_size),
-            )?;
-            b.put_varint(tp.max_udp_payload_size)?;
-        }
-
-        if tp.initial_max_data != 0 {
-            assert!(tp.initial_max_data <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x0004,
-                octets::varint_len(tp.initial_max_data),
-            )?;
-            b.put_varint(tp.initial_max_data)?;
-        }
-
-        if tp.initial_max_stream_data_bidi_local != 0 {
-            assert!(tp.initial_max_stream_data_bidi_local <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x0005,
-                octets::varint_len(tp.initial_max_stream_data_bidi_local),
-            )?;
-            b.put_varint(tp.initial_max_stream_data_bidi_local)?;
-        }
-
-        if tp.initial_max_stream_data_bidi_remote != 0 {
-            assert!(
-                tp.initial_max_stream_data_bidi_remote <= octets::MAX_VAR_INT
-            );
-            TransportParams::encode_param(
-                &mut b,
-                0x0006,
-                octets::varint_len(tp.initial_max_stream_data_bidi_remote),
-            )?;
-            b.put_varint(tp.initial_max_stream_data_bidi_remote)?;
-        }
-
-        if tp.initial_max_stream_data_uni != 0 {
-            assert!(tp.initial_max_stream_data_uni <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x0007,
-                octets::varint_len(tp.initial_max_stream_data_uni),
-            )?;
-            b.put_varint(tp.initial_max_stream_data_uni)?;
-        }
-
-        if tp.initial_max_streams_bidi != 0 {
-            assert!(tp.initial_max_streams_bidi <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x0008,
-                octets::varint_len(tp.initial_max_streams_bidi),
-            )?;
-            b.put_varint(tp.initial_max_streams_bidi)?;
-        }
-
-        if tp.initial_max_streams_uni != 0 {
-            assert!(tp.initial_max_streams_uni <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x0009,
-                octets::varint_len(tp.initial_max_streams_uni),
-            )?;
-            b.put_varint(tp.initial_max_streams_uni)?;
-        }
-
-        if tp.ack_delay_exponent != 0 {
-            assert!(tp.ack_delay_exponent <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x000a,
-                octets::varint_len(tp.ack_delay_exponent),
-            )?;
-            b.put_varint(tp.ack_delay_exponent)?;
-        }
-
-        if tp.max_ack_delay != 0 {
-            assert!(tp.max_ack_delay <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x000b,
-                octets::varint_len(tp.max_ack_delay),
-            )?;
-            b.put_varint(tp.max_ack_delay)?;
-        }
-
-        if tp.disable_active_migration {
-            TransportParams::encode_param(&mut b, 0x000c, 0)?;
-        }
-
-        if tp.grease {
-            let max_id = (1u64 << 62) - 31;
-            let mut grease_id = rand::rand_u64_uniform(max_id);
-            grease_id = (grease_id / 31) * 31 + 27;
-
-            let grease_len =
-                rand::rand_u64_uniform(MAX_GREASE_TP_LEN as u64) as usize;
-
-            TransportParams::encode_param(&mut b, grease_id, grease_len)?;
-            if grease_len > 0 {
-                let mut grease = [0u8; MAX_GREASE_TP_LEN];
-                rand::rand_bytes(&mut grease[..grease_len]);
-                b.put_bytes(&grease[..grease_len])?;
-            }
-        }
-
-        // TODO: encode preferred_address
-
-        if tp.active_conn_id_limit != 2 {
-            assert!(tp.active_conn_id_limit <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x000e,
-                octets::varint_len(tp.active_conn_id_limit),
-            )?;
-            b.put_varint(tp.active_conn_id_limit)?;
-        }
-
-        if let Some(scid) = &tp.initial_source_connection_id {
-            TransportParams::encode_param(&mut b, 0x000f, scid.len())?;
-            b.put_bytes(scid)?;
-        }
-
-        if is_server {
-            if let Some(scid) = &tp.retry_source_connection_id {
-                TransportParams::encode_param(&mut b, 0x0010, scid.len())?;
-                b.put_bytes(scid)?;
-            }
-        }
-
-        if let Some(max_datagram_frame_size) = tp.max_datagram_frame_size {
-            assert!(max_datagram_frame_size <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
-                &mut b,
-                0x0020,
-                octets::varint_len(max_datagram_frame_size),
-            )?;
-            b.put_varint(max_datagram_frame_size)?;
-        }
-
-        if let Some(google_quic_version) = tp.google_quic_version {
-            TransportParams::encode_param(&mut b, 0x4752, 4)?;
-            b.put_bytes(&google_quic_version)?;
-        }
-
-        if let Some(version_information) = &tp.version_information {
-            TransportParams::encode_param(
-                &mut b,
-                0x0011,
-                version_information.len(),
-            )?;
-            b.put_bytes(version_information)?;
-        }
-
-        let out_len = b.off();
-
-        Ok(&mut out[..out_len])
-    }
-
-    /// Creates a qlog event for connection transport parameters and TLS fields
-    #[cfg(feature = "qlog")]
-    pub fn to_qlog(
-        &self, owner: TransportOwner, cipher: Option<crypto::Algorithm>,
-    ) -> EventData {
-        let original_destination_connection_id = qlog::HexSlice::maybe_string(
-            self.original_destination_connection_id.as_ref(),
-        );
-
-        let stateless_reset_token = qlog::HexSlice::maybe_string(
-            self.stateless_reset_token.map(|s| s.to_be_bytes()).as_ref(),
-        );
-
-        let tls_cipher: Option<String> = cipher.map(|f| format!("{f:?}"));
-
-        EventData::TransportParametersSet(
-            qlog::events::quic::TransportParametersSet {
-                owner: Some(owner),
-                tls_cipher,
-                original_destination_connection_id,
-                stateless_reset_token,
-                disable_active_migration: Some(self.disable_active_migration),
-                max_idle_timeout: Some(self.max_idle_timeout),
-                max_udp_payload_size: Some(self.max_udp_payload_size as u32),
-                ack_delay_exponent: Some(self.ack_delay_exponent as u16),
-                max_ack_delay: Some(self.max_ack_delay as u16),
-                active_connection_id_limit: Some(
-                    self.active_conn_id_limit as u32,
-                ),
-
-                initial_max_data: Some(self.initial_max_data),
-                initial_max_stream_data_bidi_local: Some(
-                    self.initial_max_stream_data_bidi_local,
-                ),
-                initial_max_stream_data_bidi_remote: Some(
-                    self.initial_max_stream_data_bidi_remote,
-                ),
-                initial_max_stream_data_uni: Some(
-                    self.initial_max_stream_data_uni,
-                ),
-                initial_max_streams_bidi: Some(self.initial_max_streams_bidi),
-                initial_max_streams_uni: Some(self.initial_max_streams_uni),
-
-                unknown_parameters: self
-                    .unknown_params
-                    .as_ref()
-                    .map(|unknown_params| {
-                        unknown_params
-                            .into_iter()
-                            .cloned()
-                            .map(
-                                Into::<
-                                    qlog::events::quic::UnknownTransportParameter,
-                                >::into,
-                            )
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-
-                ..Default::default()
-            },
-        )
-    }
-}
-
 #[doc(hidden)]
 pub mod test_utils;
 
@@ -9478,6 +8975,11 @@ pub use crate::recovery::StartupExit;
 pub use crate::recovery::StartupExitReason;
 
 pub use crate::stream::StreamIter;
+
+pub use crate::transport_params::TransportParams;
+pub use crate::transport_params::UnknownTransportParameter;
+pub use crate::transport_params::UnknownTransportParameterIterator;
+pub use crate::transport_params::UnknownTransportParameters;
 
 pub use crate::range_buf::BufFactory;
 pub use crate::range_buf::BufSplit;
@@ -9506,3 +9008,4 @@ mod ranges;
 mod recovery;
 mod stream;
 mod tls;
+mod transport_params;

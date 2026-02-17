@@ -11,9 +11,9 @@
 
 [package]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.85"
 name = "boring-sys"
-version = "5.0.0-alpha.2"
+version = "5.0.1"
 authors = [
     "Alex Crichton <alex@alexcrichton.com>",
     "Steven Fackler <sfackler@gmail.com>",
@@ -55,6 +55,13 @@ autobenches = false
 description = "FFI bindings to BoringSSL"
 documentation = "https://docs.rs/boring-sys"
 readme = "README.md"
+keywords = [
+    "tls",
+    "boringssl",
+    "openssl",
+    "fips",
+    "ml-kem",
+]
 categories = [
     "cryptography",
     "external-ffi-bindings",
@@ -66,6 +73,7 @@ repository = "https://github.com/cloudflare/boring"
 features = [
     "rpk",
     "underscore-wildcards",
+    "mlkem",
 ]
 rustdoc-args = [
     "--cfg",
@@ -74,6 +82,7 @@ rustdoc-args = [
 
 [features]
 fips = []
+mlkem = []
 rpk = []
 underscore-wildcards = []
 

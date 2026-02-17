@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.85"
 name = "quiche"
-version = "0.24.8"
+version = "0.25.0"
 authors = ["Alessandro Ghedini <alessandro@ghedini.me>"]
 build = "src/build.rs"
 include = [
@@ -46,19 +46,19 @@ categories = ["network-programming"]
 license = "BSD-2-Clause"
 repository = "https://github.com/cloudflare/quiche"
 
-[package.metadata.release]
-tag-prefix = ""
-
 [package.metadata.docs.rs]
-no-default-features = true
 features = [
     "boringssl-boring-crate",
     "qlog",
 ]
+no-default-features = true
 rustdoc-args = [
     "--cfg",
     "docsrs",
 ]
+
+[package.metadata.release]
+tag-prefix = ""
 
 [features]
 boringssl-boring-crate = [
@@ -73,6 +73,10 @@ gcongestion = []
 internal = []
 openssl = ["pkg-config"]
 pkg-config-meta = []
+qlog = [
+    "dep:qlog",
+    "dep:serde_json",
+]
 
 [lib]
 name = "quiche"
@@ -108,7 +112,7 @@ name = "server"
 path = "examples/server.rs"
 
 [dependencies.boring]
-version = "5.0.0-alpha.2"
+version = "5.0.1"
 optional = true
 
 [dependencies.either]
@@ -141,7 +145,11 @@ version = "0.3.4"
 features = ["huffman_hpack"]
 
 [dependencies.qlog]
-version = "0.15.2"
+version = "0.16.0"
+optional = true
+
+[dependencies.serde_json]
+version = "1.0"
 optional = true
 
 [dependencies.sfv]
