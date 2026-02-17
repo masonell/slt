@@ -14,10 +14,10 @@ index 0fe1241..cb6f551 100644
          apply_patch(config, "rpk.patch")?;
 diff --git a/patches/client-hello-session-id.patch b/patches/client-hello-session-id.patch
 new file mode 100644
-index 0000000..4bcc339
+index 0000000..76136ee
 --- /dev/null
 +++ b/patches/client-hello-session-id.patch
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,90 @@
 +--- a/include/openssl/ssl.h
 ++++ b/include/openssl/ssl.h
 +@@ -5059,6 +5059,15 @@
@@ -74,7 +74,7 @@ index 0000000..4bcc339
 +
 +--- a/ssl/handshake_client.cc
 ++++ b/ssl/handshake_client.cc
-+@@ -233,6 +233,27 @@
++@@ -233,6 +233,33 @@
 +     return false;
 +   }
 + 
@@ -97,9 +97,14 @@ index 0000000..4bcc339
 ++            client_hello.session_id_len)) {
 ++      return false;
 ++    }
+++
+++    // Keep the internal session_id in sync with the serialized ClientHello.
+++    // TLS 1.3 validates that ServerHello echoes hs->session_id, so mutating
+++    // only the wire bytes causes client-side DECODE_ERROR.
+++    hs->session_id.CopyFrom(Span<const uint8_t>(client_hello.session_id,
+++                                                client_hello.session_id_len));
 ++  }
 ++
 +   // Now that the length prefixes have been computed, fill in the placeholder
 +   // PSK binder.
 +   if (needs_psk_binder) {
-+
