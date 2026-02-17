@@ -58,19 +58,28 @@ pub fn quic_client_chrome_config() -> quiche::Result<quiche::Config> {
     quic_config_from_ctx(tls_ctx)
 }
 
-/// Build a QUIC client config with CA trust anchors loaded.
+/// Build a QUIC client config with optional CA trust anchors.
 ///
-/// Like `quic_client_chrome_config()` but also configures CA verification
-/// from the provided TLS material. For inline PEM, certs are parsed and
-/// added directly to the cert store without writing to disk.
+/// If `tls_ca` is `Some`, configures custom CA verification from the provided
+/// TLS material. If `None`, uses the system's default CA store for verification.
+///
+/// For inline PEM, certs are parsed and added directly to the cert store
+/// without writing to disk.
 ///
 /// # Errors
 ///
 /// Returns an error if TLS context creation fails, CA loading fails,
 /// or if setting application protocols fails.
-pub fn quic_client_chrome_config_with_ca(tls_ca: &TlsMaterial) -> quiche::Result<quiche::Config> {
+pub fn quic_client_chrome_config_with_ca(
+    tls_ca: Option<&TlsMaterial>,
+) -> quiche::Result<quiche::Config> {
     let mut tls_ctx = quic_client_chrome_ctx_builder().map_err(|_| quiche::Error::TlsFail)?;
-    configure_ca_store(&mut tls_ctx, tls_ca).map_err(|_| quiche::Error::TlsFail)?;
+    match tls_ca {
+        Some(ca) => configure_ca_store(&mut tls_ctx, ca).map_err(|_| quiche::Error::TlsFail)?,
+        None => tls_ctx
+            .set_default_verify_paths()
+            .map_err(|_| quiche::Error::TlsFail)?,
+    }
     quic_config_from_ctx(tls_ctx)
 }
 

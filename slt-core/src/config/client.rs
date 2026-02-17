@@ -76,6 +76,7 @@ mod tests {
             },
             tls: ClientTlsConfig {
                 tls_ca: TlsMaterial::Pem(String::new()),
+                quic_ca: None,
             },
             identity: ClientIdentity {
                 client_id: ClientId([0u8; 16]),

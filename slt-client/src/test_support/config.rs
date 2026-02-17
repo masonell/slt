@@ -42,6 +42,7 @@ pub fn test_config_with_identity(
         },
         tls: ClientTlsConfig {
             tls_ca: TlsMaterial::Pem(String::new()),
+            quic_ca: None,
         },
         identity: ClientIdentity {
             client_id,

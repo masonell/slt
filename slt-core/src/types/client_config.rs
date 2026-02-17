@@ -37,8 +37,14 @@ impl ClientNetworkConfig {
 /// Client TLS configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientTlsConfig {
-    /// Certificate authority or pinned certificate for server verification.
+    /// Certificate authority for verifying SLT server certificate (TCP).
     pub tls_ca: TlsMaterial,
+    /// Optional CA for QUIC discovery. If `None`, uses system CA store.
+    ///
+    /// Set this when nginx uses a custom CA. For Let's Encrypt, leave as `None`
+    /// to use the system's built-in trust store.
+    #[serde(default)]
+    pub quic_ca: Option<TlsMaterial>,
 }
 
 /// Client identity configuration.

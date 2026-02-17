@@ -108,7 +108,7 @@ async fn discover_quic_ids_for_peer(
     let local = socket.local_addr()?;
 
     let mut quic_config =
-        quic_client_chrome_config_with_ca(&config.tls.tls_ca).map_err(map_quic_error)?;
+        quic_client_chrome_config_with_ca(config.tls.quic_ca.as_ref()).map_err(map_quic_error)?;
     quic_config.verify_peer(true);
 
     let scid_bytes = build_scid();

@@ -97,6 +97,7 @@ fn log_config(config: &ClientConfig) {
         port = config.network.port,
         ip = ?config.network.ip,
         tls_ca = tls_material_source(&config.tls.tls_ca),
+        quic_ca = tls_material_source_opt(config.tls.quic_ca.as_ref()),
         client_id = %config.identity.client_id,
         assigned_ipv4 = %config.identity.assigned_ipv4,
         tun_name = %config.tun.tun_name,
@@ -110,5 +111,12 @@ const fn tls_material_source(material: &TlsMaterial) -> &'static str {
     match material {
         TlsMaterial::Pem(_) => "pem",
         TlsMaterial::File { .. } => "file",
+    }
+}
+
+const fn tls_material_source_opt(material: Option<&TlsMaterial>) -> &'static str {
+    match material {
+        Some(m) => tls_material_source(m),
+        None => "system",
     }
 }
