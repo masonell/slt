@@ -112,7 +112,6 @@ async fn discover_quic_ids_for_peer(
     quic_config.verify_peer(true);
 
     let scid_bytes = build_scid();
-    let scid = Cid::new(&scid_bytes).map_err(map_cid_error)?;
     let scid_conn = quiche::ConnectionId::from_ref(&scid_bytes);
 
     let mut conn = quiche::connect(
@@ -127,27 +126,29 @@ async fn discover_quic_ids_for_peer(
     let mut recv_buf = vec![0u8; 65535];
     let mut out_buf = vec![0u8; QUIC_MAX_DATAGRAM];
     let deadline = Instant::now() + QUIC_HANDSHAKE_TIMEOUT;
+    let mut discovered_ids: Option<QuicIds> = None;
 
     loop {
         while let Ok((write, send_info)) = conn.send(&mut out_buf) {
             socket.send_to(&out_buf[..write], send_info.to).await?;
         }
 
-        if conn.is_established() {
+        if conn.is_established() && discovered_ids.is_none() {
             let dcid = Cid::new(conn.destination_id().as_ref()).map_err(map_cid_error)?;
-            return Ok(QuicIds {
+            let scid = Cid::new(conn.source_id().as_ref()).map_err(map_cid_error)?;
+            discovered_ids = Some(QuicIds {
                 dcid,
                 scid,
                 peer,
-                socket,
+                socket: socket.clone(),
             });
+            let _ = conn.close(true, 0x00, b"");
         }
 
         if conn.is_closed() {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "quic connection closed",
-            ));
+            return discovered_ids.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::ConnectionAborted, "quic connection closed")
+            });
         }
 
         let now = Instant::now();
