@@ -106,8 +106,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         let io = UdpIo::new(self.udp_socket.clone(), placeholder_peer);
         let udp = slt_core::crypto::udp_qsp::QuicQspSession::new(
             io,
-            register.scid,
             register.dcid,
+            register.scid,
             keys,
             register.pn_start,
             register.pn_start_rx,
