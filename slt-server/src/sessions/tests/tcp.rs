@@ -1,6 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
-use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
     CipherSuite, CloseCode, ClosePayload, Message, PingPayload, PongPayload, decode_message,
     encode_message,
@@ -10,8 +9,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
 use super::super::*;
-use super::common::{ipv4_packet, make_register_payload, read_message_bytes, spawn_session};
-use crate::quic::UdpClaim;
+use super::common::{
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
+    spawn_session,
+};
 
 #[tokio::test]
 async fn session_responds_to_tcp_ping() {
@@ -160,7 +161,7 @@ async fn session_drops_oversized_tun_packet() {
 
 #[tokio::test]
 async fn session_drops_tcp_data_when_udp_active() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
     // Register and activate UDP
@@ -185,30 +186,17 @@ async fn session_drops_tcp_data_when_udp_active() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 33333));
-    let udp_data = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 20), 8);
-    let mut udp_frame = Vec::new();
-    encode_message(Message::Data { packet: &udp_data }, &mut udp_frame).unwrap();
-    let udp_packet = keys
-        .protect(
-            register.client_to_server_cid.as_slice(),
-            0,
-            register.key_phase,
-            &udp_frame,
-        )
-        .unwrap();
-    tx.send(SessionEvent::Udp(UdpClaim {
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
         peer,
-        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-        payload: udp_packet,
-    }))
-    .await
-    .unwrap();
-    let _ = timeout(Duration::from_secs(1), tun_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+        0x1300,
+    )
+    .await;
 
     // Now send data via TCP - should be dropped since UDP is active
     let tcp_data = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 21), 8);

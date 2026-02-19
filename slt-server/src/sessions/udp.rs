@@ -22,8 +22,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     /// Handles the full UDP message pipeline:
     /// 1. Decrypts and validates the packet with UDP-QSP
     /// 2. Decodes the inner VPN message
-    /// 3. May switch to UDP transport if appropriate
-    /// 4. Dispatches the message to the appropriate handler
+    /// 3. Dispatches the message to the appropriate handler
     ///
     /// # Parameters
     ///
@@ -54,8 +53,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         let Some(message) = self.decode_udp_message(&opened)? else {
             return Ok(SessionControl::Continue);
         };
-
-        self.maybe_activate_udp(&message);
 
         self.dispatch_udp_message(message).await
     }
@@ -116,6 +113,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 );
                 self.registry.remove_cids_for_session(self.session_id);
                 self.udp_session = None;
+                self.reset_udp_upgrade_state();
                 self.set_active_transport(ActiveTransport::Tcp);
                 return None;
             }
@@ -184,38 +182,16 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         Ok(Some(message))
     }
 
-    /// Switches the session to UDP transport if the message type warrants it.
-    ///
-    /// Activates UDP-QSP for data-bearing messages (Ping, Pong, Data, Close,
-    /// `RegisterCid`) but not for authentication/handshake messages which shouldn't
-    /// arrive on UDP.
-    ///
-    /// # Parameters
-    ///
-    /// * `message` - The decoded message to evaluate
-    fn maybe_activate_udp(&mut self, message: &Message<'_>) {
-        let should_activate = matches!(
-            message,
-            Message::Ping { .. }
-                | Message::Pong { .. }
-                | Message::Data { .. }
-                | Message::Close { .. }
-                | Message::RegisterCid { .. }
-        );
-        if should_activate {
-            self.set_active_transport(ActiveTransport::UdpQsp);
-        }
-    }
-
     /// Dispatches a decoded UDP message to its appropriate handler.
     ///
     /// Routes the message based on type:
     /// - Ping: Responds with Pong
     /// - Pong: Logs and continues
     /// - Data: Forwards to TUN device if valid
+    /// - `UpgradeProbe`: Sends UDP probe ack and may trigger TCP switch commit
     /// - Close: Initiates session shutdown
     /// - `RegisterCid`: Handles CID registration
-    /// - Auth messages: Silently ignored (shouldn't arrive on UDP)
+    /// - Other control messages: Silently ignored
     ///
     /// # Parameters
     ///
@@ -250,6 +226,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 }
                 Ok(SessionControl::Continue)
             }
+            Message::UpgradeProbe { payload } => self.handle_upgrade_probe(payload).await,
             Message::Close { .. } => Ok(self.peer_close_control(false)),
             Message::RegisterCid { payload } => self.handle_register_cid(payload).await,
             Message::Auth { .. }
@@ -257,8 +234,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             | Message::AuthFail { .. }
             | Message::RegisterOk { .. }
             | Message::RegisterFail { .. }
-            // TODO(udp-upgrade-fsm): Handle upgrade control messages during Task 2.
-            | Message::UpgradeProbe { .. }
             | Message::UpgradeProbeAck { .. }
             | Message::UdpReady { .. }
             | Message::SwitchToUdp { .. }

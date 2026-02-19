@@ -11,8 +11,8 @@ use tokio::time::{Duration, timeout};
 
 use super::super::*;
 use super::common::{
-    ipv4_packet, make_register_payload, read_message_bytes, spawn_session,
-    spawn_session_with_timeouts,
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
+    spawn_session, spawn_session_with_timeouts,
 };
 use crate::quic::UdpClaim;
 use crate::test_support::default_session_timeouts;
@@ -109,25 +109,18 @@ async fn session_sends_udp_ping_on_schedule() {
 
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 33333));
-
-    let packet = ipv4_packet(Ipv4Addr::new(10, 0, 0, 9), Ipv4Addr::new(192, 0, 2, 4), 8);
-    let mut data_frame = Vec::new();
-    encode_message(Message::Data { packet: &packet }, &mut data_frame).unwrap();
-    let packet = keys
-        .protect(
-            register.client_to_server_cid.as_slice(),
-            0,
-            register.key_phase,
-            &data_frame,
-        )
-        .unwrap();
-    let claim = UdpClaim {
+    let mut server_expected_pn = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
         peer,
-        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-        payload: packet,
-    };
-    tx.send(SessionEvent::Udp(claim)).await.unwrap();
+        0x1400,
+    )
+    .await;
 
+    tokio::time::sleep(Duration::from_millis(250)).await;
     let packet = timeout(Duration::from_secs(1), udp_rx.recv())
         .await
         .unwrap()
@@ -136,7 +129,7 @@ async fn session_sends_udp_ping_on_schedule() {
         .open(
             register.client_to_server_cid.len(),
             &packet,
-            register.pn_start,
+            server_expected_pn,
         )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
@@ -145,7 +138,7 @@ async fn session_sends_udp_ping_on_schedule() {
         Message::Ping { payload } => PingPayload::decode(payload).unwrap().nonce,
         _ => panic!("expected verify ping"),
     };
-    let server_expected_pn = opened.pn + 1;
+    server_expected_pn = opened.pn + 1;
 
     let pong = PongPayload {
         nonce: verify_nonce,
@@ -163,7 +156,7 @@ async fn session_sends_udp_ping_on_schedule() {
     let packet = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            1,
+            register.pn_start_rx + 1,
             register.key_phase,
             &pong_frame,
         )
@@ -231,7 +224,7 @@ async fn session_cleans_registry_on_shutdown() {
 
 #[tokio::test]
 async fn session_continues_on_udp_after_tcp_close() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
     // Register UDP
@@ -256,9 +249,20 @@ async fn session_continues_on_udp_after_tcp_close() {
         Message::RegisterOk { .. }
     ));
 
-    // Activate UDP with a data packet
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 22222));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1401,
+    )
+    .await;
+
+    // Session should still handle UDP traffic.
     let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 10), 8);
     let mut data_frame = Vec::new();
     encode_message(
@@ -271,7 +275,7 @@ async fn session_continues_on_udp_after_tcp_close() {
     let udp_packet = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            0,
+            register.pn_start_rx + 1,
             register.key_phase,
             &data_frame,
         )
@@ -306,7 +310,7 @@ async fn session_continues_on_udp_after_tcp_close() {
     let udp_packet2 = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            1,
+            register.pn_start_rx + 2,
             register.key_phase,
             &data_frame2,
         )
@@ -332,10 +336,10 @@ async fn session_continues_on_udp_after_tcp_close() {
 
 #[tokio::test]
 async fn session_closes_via_udp_when_tcp_dead() {
-    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
-    // Register and activate UDP
+    // Register and complete upgrade commit.
     let dcid = Cid::from([0xC1; MAX_DCID_LEN]);
     let scid = Cid::from([0xC2; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
@@ -359,36 +363,16 @@ async fn session_closes_via_udp_when_tcp_dead() {
 
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 45678));
-
-    // Activate UDP with a data packet
-    let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 70), 8);
-    let mut data_frame = Vec::new();
-    encode_message(
-        Message::Data {
-            packet: &uplink_packet,
-        },
-        &mut data_frame,
-    )
-    .unwrap();
-    let udp_packet = keys
-        .protect(
-            register.client_to_server_cid.as_slice(),
-            0,
-            register.key_phase,
-            &data_frame,
-        )
-        .unwrap();
-    tx.send(SessionEvent::Udp(UdpClaim {
+    let server_expected_pn = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
         peer,
-        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-        payload: udp_packet,
-    }))
-    .await
-    .unwrap();
-    let _ = timeout(Duration::from_secs(1), tun_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+        0x1402,
+    )
+    .await;
 
     // Close TCP connection
     drop(client);
@@ -406,7 +390,7 @@ async fn session_closes_via_udp_when_tcp_dead() {
     let udp_ping = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            1,
+            register.pn_start_rx + 1,
             register.key_phase,
             &ping_frame,
         )
@@ -428,7 +412,7 @@ async fn session_closes_via_udp_when_tcp_dead() {
         .open(
             register.client_to_server_cid.len(),
             &packet,
-            register.pn_start,
+            server_expected_pn,
         )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();

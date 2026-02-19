@@ -7,7 +7,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
 use super::super::*;
-use super::common::{ipv4_packet, make_register_payload, read_message_bytes, spawn_session};
+use super::common::{
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
+    spawn_session,
+};
 use crate::quic::UdpClaim;
 
 #[tokio::test]
@@ -84,7 +87,7 @@ async fn session_drops_udp_message_with_trailing_data() {
 
 #[tokio::test]
 async fn session_drops_udp_replay_packet() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
     // Register and activate UDP
@@ -111,8 +114,18 @@ async fn session_drops_udp_replay_packet() {
 
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1500,
+    )
+    .await;
 
-    // Send first valid data packet (PN=0)
+    // Send first valid data packet (PN=1; PN=0 was upgrade probe)
     let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 40), 8);
     let mut data_frame = Vec::new();
     encode_message(
@@ -125,7 +138,7 @@ async fn session_drops_udp_replay_packet() {
     let udp_packet = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            0,
+            register.pn_start_rx + 1,
             register.key_phase,
             &data_frame,
         )
@@ -144,7 +157,7 @@ async fn session_drops_udp_replay_packet() {
         .unwrap();
     assert_eq!(received, uplink_packet);
 
-    // Replay the same packet (same PN=0) - should be dropped
+    // Replay the same packet (same PN=1) - should be dropped
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
         dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
@@ -165,7 +178,7 @@ async fn session_drops_udp_replay_packet() {
 
 #[tokio::test]
 async fn session_drops_udp_packet_with_bad_crypto() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
     // Register and activate UDP
@@ -192,8 +205,18 @@ async fn session_drops_udp_packet_with_bad_crypto() {
 
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 12346));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1501,
+    )
+    .await;
 
-    // Send a valid packet first to activate UDP
+    // Send a valid packet first.
     let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 41), 8);
     let mut data_frame = Vec::new();
     encode_message(
@@ -206,7 +229,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
     let udp_packet = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            0,
+            register.pn_start_rx + 1,
             register.key_phase,
             &data_frame,
         )
@@ -252,7 +275,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
     let udp_packet2 = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            1,
+            register.pn_start_rx + 2,
             register.key_phase,
             &data_frame2,
         )
@@ -277,7 +300,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
 
 #[tokio::test]
 async fn session_falls_back_to_tcp_after_udp_dead_channel() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, registry) =
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, registry) =
         spawn_session().await;
 
     // Register and activate UDP
@@ -305,8 +328,18 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
 
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 56789));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1502,
+    )
+    .await;
 
-    // Activate UDP with a data packet
+    // Send a data packet after upgrade commit.
     let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 80), 8);
     let mut data_frame = Vec::new();
     encode_message(
@@ -319,7 +352,7 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
     let udp_packet = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            0,
+            register.pn_start_rx + 1,
             register.key_phase,
             &data_frame,
         )

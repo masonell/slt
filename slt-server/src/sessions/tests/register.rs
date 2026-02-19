@@ -2,8 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    CipherSuite, Message, PingPayload, RegisterFailCode, RegisterFailPayload, decode_message,
-    encode_message,
+    CipherSuite, Message, RegisterFailCode, RegisterFailPayload, decode_message, encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
@@ -11,8 +10,10 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
 use super::super::*;
-use super::common::{ipv4_packet, make_register_payload, read_message_bytes, spawn_session};
-use crate::quic::UdpClaim;
+use super::common::{
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
+    spawn_session,
+};
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
@@ -68,55 +69,16 @@ async fn session_registers_udp_and_forwards_data() {
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 55555));
 
-    // Send a UDP PING to establish the peer address.
-    // Server switches to UDP after this first valid claim.
-    let probe_nonce = 0xA1B2_C3D4_E5F6_0708;
-    let probe = PingPayload { nonce: probe_nonce };
-    let mut probe_payload = Vec::new();
-    probe.encode(&mut probe_payload);
-    let mut probe_frame = Vec::new();
-    encode_message(
-        Message::Ping {
-            payload: &probe_payload,
-        },
-        &mut probe_frame,
-    )
-    .unwrap();
-    let packet = keys
-        .protect(
-            register.client_to_server_cid.as_slice(),
-            0,
-            register.key_phase,
-            &probe_frame,
-        )
-        .unwrap();
-    let claim = UdpClaim {
+    let server_expected_pn = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
         peer,
-        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-        payload: packet,
-    };
-    tx.send(SessionEvent::Udp(claim)).await.unwrap();
-
-    // Wait for PONG response (establishes peer and verifies UDP works)
-    let mut server_expected_pn = register.pn_start;
-    let packet = timeout(Duration::from_secs(1), udp_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let opened = keys
-        .open(
-            register.client_to_server_cid.len(),
-            &packet,
-            server_expected_pn,
-        )
-        .unwrap();
-    server_expected_pn = opened.pn + 1;
-    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
-    assert_eq!(consumed, opened.payload.len());
-    assert!(
-        matches!(message, Message::Pong { .. }),
-        "expected pong response"
-    );
+        0x71,
+    )
+    .await;
 
     // Now send a TUN packet and verify it's forwarded via UDP.
     let data_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 3), 12);
@@ -124,7 +86,7 @@ async fn session_registers_udp_and_forwards_data() {
         .await
         .unwrap();
 
-    let packet = timeout(Duration::from_millis(200), udp_rx.recv())
+    let packet = timeout(Duration::from_secs(1), udp_rx.recv())
         .await
         .unwrap()
         .unwrap();

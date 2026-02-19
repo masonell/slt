@@ -7,11 +7,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
 use super::super::*;
-use super::common::{ipv4_packet, make_register_payload, read_message_bytes, spawn_session};
+use super::common::{
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
+    spawn_session,
+};
 use crate::quic::UdpClaim;
 
 #[tokio::test]
-async fn session_switches_to_udp_after_first_valid_data_claim() {
+async fn session_switches_to_udp_after_switch_ack() {
     let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
@@ -38,7 +41,18 @@ async fn session_switches_to_udp_after_first_valid_data_claim() {
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 44444));
 
-    // First valid UDP claim is DATA; this should switch active transport to UDP.
+    let server_expected_pn = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1200,
+    )
+    .await;
+
+    // Valid UDP data should still forward to TUN after upgrade commit.
     let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 44), 12);
     let mut data_frame = Vec::new();
     encode_message(
@@ -51,7 +65,7 @@ async fn session_switches_to_udp_after_first_valid_data_claim() {
     let udp_packet = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            0,
+            register.pn_start_rx + 1,
             register.key_phase,
             &data_frame,
         )
@@ -82,14 +96,14 @@ async fn session_switches_to_udp_after_first_valid_data_claim() {
         .open(
             register.client_to_server_cid.len(),
             &packet,
-            register.pn_start,
+            server_expected_pn,
         )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
     assert_eq!(consumed, opened.payload.len());
     match message {
         Message::Data { packet } => assert_eq!(packet, downlink_packet.as_slice()),
-        _ => panic!("expected udp data after first valid udp claim"),
+        _ => panic!("expected udp data after switch commit"),
     }
 
     let _ = tx.send(SessionEvent::Shutdown).await;
@@ -98,10 +112,10 @@ async fn session_switches_to_udp_after_first_valid_data_claim() {
 
 #[tokio::test]
 async fn session_handles_udp_pong() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
-    // Register and activate UDP
+    // Register and complete upgrade commit.
     let dcid = Cid::from([0xA1; MAX_DCID_LEN]);
     let scid = Cid::from([0xA2; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
@@ -126,35 +140,16 @@ async fn session_handles_udp_pong() {
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 23456));
 
-    // Activate UDP with a data packet
-    let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 50), 8);
-    let mut data_frame = Vec::new();
-    encode_message(
-        Message::Data {
-            packet: &uplink_packet,
-        },
-        &mut data_frame,
-    )
-    .unwrap();
-    let udp_packet = keys
-        .protect(
-            register.client_to_server_cid.as_slice(),
-            0,
-            register.key_phase,
-            &data_frame,
-        )
-        .unwrap();
-    tx.send(SessionEvent::Udp(UdpClaim {
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
         peer,
-        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-        payload: udp_packet,
-    }))
-    .await
-    .unwrap();
-    let _ = timeout(Duration::from_secs(1), tun_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+        0x1201,
+    )
+    .await;
 
     // Send UDP PONG - should be handled without error
     let pong_nonce = 0x1234_5678_9ABC_DEF0u64;
@@ -170,7 +165,7 @@ async fn session_handles_udp_pong() {
     let udp_pong = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            1,
+            register.pn_start_rx + 1,
             register.key_phase,
             &pong_frame,
         )
@@ -199,7 +194,7 @@ async fn session_handles_udp_pong() {
     let udp_packet2 = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            2,
+            register.pn_start_rx + 2,
             register.key_phase,
             &data_frame2,
         )
@@ -224,10 +219,10 @@ async fn session_handles_udp_pong() {
 
 #[tokio::test]
 async fn session_ignores_udp_control_messages() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
-    // Register and activate UDP
+    // Register and complete upgrade commit.
     let dcid = Cid::from([0xB1; MAX_DCID_LEN]);
     let scid = Cid::from([0xB2; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
@@ -252,35 +247,16 @@ async fn session_ignores_udp_control_messages() {
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 34567));
 
-    // Activate UDP with a data packet
-    let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 60), 8);
-    let mut data_frame = Vec::new();
-    encode_message(
-        Message::Data {
-            packet: &uplink_packet,
-        },
-        &mut data_frame,
-    )
-    .unwrap();
-    let udp_packet = keys
-        .protect(
-            register.client_to_server_cid.as_slice(),
-            0,
-            register.key_phase,
-            &data_frame,
-        )
-        .unwrap();
-    tx.send(SessionEvent::Udp(UdpClaim {
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
         peer,
-        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-        payload: udp_packet,
-    }))
-    .await
-    .unwrap();
-    let _ = timeout(Duration::from_secs(1), tun_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
+        0x1202,
+    )
+    .await;
 
     // Send various control messages via UDP that should be ignored
     let control_messages = [
@@ -289,6 +265,10 @@ async fn session_ignores_udp_control_messages() {
         Message::AuthFail { payload: &[] },
         Message::RegisterOk { payload: &[] },
         Message::RegisterFail { payload: &[] },
+        Message::UpgradeProbeAck { payload: &[] },
+        Message::UdpReady { payload: &[] },
+        Message::SwitchToUdp { payload: &[] },
+        Message::SwitchAck { payload: &[] },
     ];
 
     for (i, msg) in control_messages.into_iter().enumerate() {
@@ -297,7 +277,7 @@ async fn session_ignores_udp_control_messages() {
         let udp_ctrl = keys
             .protect(
                 register.client_to_server_cid.as_slice(),
-                (i + 1) as u64,
+                register.pn_start_rx + 1 + i as u64,
                 register.key_phase,
                 &ctrl_frame,
             )
@@ -330,7 +310,7 @@ async fn session_ignores_udp_control_messages() {
     let udp_packet2 = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            6,
+            register.pn_start_rx + 1 + control_messages.len() as u64,
             register.key_phase,
             &data_frame2,
         )

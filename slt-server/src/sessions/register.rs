@@ -44,7 +44,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     /// - Sends `RegisterFail` with `InvalidCid` if the payload is malformed
     /// - Sends `RegisterFail` with `InvalidKeys` if key derivation fails
     /// - Sends `RegisterFail` with `InvalidCid` if the DCID prefix collides
-    /// - Does NOT switch to UDP transport until the first valid UDP packet arrives
+    /// - Resets upgrade-tracking state and waits for explicit upgrade commit
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_register_cid(
         &mut self,
@@ -129,8 +129,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         );
 
         self.udp_session = Some(udp);
-        // Do not switch transport until the first valid UDP claim arrives.
-        // This ensures the session's peer address is set before we send any data.
+        self.reset_udp_upgrade_state();
+        // Keep TCP as the active transport until explicit switch commit.
 
         debug!(
             session_id = self.session_id,

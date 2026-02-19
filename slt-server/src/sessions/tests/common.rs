@@ -1,17 +1,21 @@
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, MessageLimits, RegisterCidPayload,
-    decode_message,
+    AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, MessageLimits, RegisterCidPayload,
+    SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
+    UpgradeProbePayload, decode_message, encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::Cid;
-use tokio::io::{AsyncReadExt, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
 
 use super::super::*;
+use crate::quic::UdpClaim;
 use crate::test_support::{
     TestTun, TestUdpSocket, TlsDuplexStream, default_session_timeouts, tls_pair,
 };
@@ -124,4 +128,117 @@ pub(super) fn make_register_payload(
         pn_start_rx: 0,
         key_phase: false,
     }
+}
+
+pub(super) async fn complete_udp_upgrade_handshake(
+    client: &mut TlsDuplexStream,
+    tx: &SessionTx,
+    udp_rx: &mut mpsc::Receiver<Vec<u8>>,
+    limits: MessageLimits,
+    register: &RegisterCidPayload,
+    peer: SocketAddr,
+    upgrade_id: u64,
+) -> u64 {
+    let keys = UdpQspKeys::from_register(register).unwrap();
+    let probe_nonce = 0xDEAD_BEEF_CAFE_1234;
+    let probe = UpgradeProbePayload {
+        upgrade_id,
+        nonce: probe_nonce,
+    };
+    let mut probe_payload = Vec::with_capacity(16);
+    probe.encode(&mut probe_payload);
+    let mut probe_frame = Vec::new();
+    encode_message(
+        Message::UpgradeProbe {
+            payload: &probe_payload,
+        },
+        &mut probe_frame,
+    )
+    .unwrap();
+    let probe_packet = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx,
+            register.key_phase,
+            &probe_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer,
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: probe_packet,
+    }))
+    .await
+    .unwrap();
+
+    let ack_packet = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let opened = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &ack_packet,
+            register.pn_start,
+        )
+        .unwrap();
+    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+    assert_eq!(consumed, opened.payload.len());
+    match message {
+        Message::UpgradeProbeAck { payload } => {
+            let ack = UpgradeProbeAckPayload::decode(payload).unwrap();
+            assert_eq!(ack.upgrade_id, upgrade_id);
+            assert_eq!(ack.nonce, probe_nonce);
+        }
+        _ => panic!("expected upgrade probe ack"),
+    }
+    let next_server_pn = opened.pn + 1;
+
+    let ready = UdpReadyPayload { upgrade_id };
+    let mut ready_payload = Vec::with_capacity(8);
+    ready.encode(&mut ready_payload);
+    let mut ready_frame = Vec::new();
+    encode_message(
+        Message::UdpReady {
+            payload: &ready_payload,
+        },
+        &mut ready_frame,
+    )
+    .unwrap();
+    client.write_all(&ready_frame).await.unwrap();
+
+    let mut switch_received = false;
+    for _ in 0..8 {
+        let buf = timeout(Duration::from_secs(1), read_message_bytes(client, limits))
+            .await
+            .unwrap()
+            .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::SwitchToUdp { payload } => {
+                let switch = SwitchToUdpPayload::decode(payload).unwrap();
+                assert_eq!(switch.upgrade_id, upgrade_id);
+                switch_received = true;
+                break;
+            }
+            Message::Ping { .. } | Message::Pong { .. } => {}
+            _ => panic!("expected switch_to_udp"),
+        }
+    }
+    assert!(switch_received, "did not receive switch_to_udp");
+
+    let switch_ack = SwitchAckPayload { upgrade_id };
+    let mut switch_ack_payload = Vec::with_capacity(8);
+    switch_ack.encode(&mut switch_ack_payload);
+    let mut switch_ack_frame = Vec::new();
+    encode_message(
+        Message::SwitchAck {
+            payload: &switch_ack_payload,
+        },
+        &mut switch_ack_frame,
+    )
+    .unwrap();
+    client.write_all(&switch_ack_frame).await.unwrap();
+
+    next_server_pn
 }

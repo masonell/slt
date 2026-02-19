@@ -6,6 +6,7 @@ mod tcp;
 mod types;
 mod udp;
 mod udp_io;
+mod upgrade;
 
 use std::io;
 use std::net::SocketAddr;
@@ -34,6 +35,14 @@ use super::registry::SessionRegistry;
 use super::router::PacketRouter;
 use super::{AssignedIp, ClientId};
 use crate::tun::TunDeviceIo;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct UdpUpgradeState {
+    upgrade_id: Option<u64>,
+    probe_seen: bool,
+    ready_seen: bool,
+    switch_to_udp_sent: bool,
+}
 
 /// Core session structure for an authenticated VPN client.
 ///
@@ -77,6 +86,7 @@ pub struct ClientSessionBase<
     ///
     /// In both cases, the peer has already been set on the session.
     udp_session: Option<QuicQspSession<UdpIo<U>>>,
+    udp_upgrade: UdpUpgradeState,
     rx: SessionRx,
     limits: MessageLimits,
     timeouts: SessionTimeouts,
@@ -129,6 +139,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             tun,
             udp_socket,
             udp_session: None,
+            udp_upgrade: UdpUpgradeState::default(),
             rx,
             limits,
             timeouts,
