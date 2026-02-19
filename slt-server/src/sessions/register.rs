@@ -113,9 +113,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         // Create the UDP session with a placeholder peer address. The actual peer
         // is set by `handle_udp_claim` when the first UDP packet arrives.
         // This is safe because:
-        // 1. We don't switch `active_transport` to UDP until after the first valid UDP claim
+        // 1. We keep `active_transport` on TCP until `SwitchAck` commits the upgrade
         // 2. `send_udp_message` is only called when `active_transport == UdpQsp`
-        // 3. Therefore, we never send to this placeholder address
+        // 3. Therefore, we never send to this placeholder address pre-commit
         let placeholder_peer = SocketAddr::from(([0, 0, 0, 0], 0));
         let io = UdpIo::new(self.udp_socket.clone(), placeholder_peer);
         let udp = slt_core::crypto::udp_qsp::QuicQspSession::new(

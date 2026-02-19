@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, MessageLimits, RegisterCidPayload,
-    SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
-    UpgradeProbePayload, decode_message, encode_message,
+    AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, MessageLimits, PingPayload,
+    PongPayload, RegisterCidPayload, SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload,
+    UpgradeProbeAckPayload, UpgradeProbePayload, decode_message, encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::Cid;
@@ -239,6 +239,42 @@ pub(super) async fn complete_udp_upgrade_handshake(
     )
     .unwrap();
     client.write_all(&switch_ack_frame).await.unwrap();
+
+    // Barrier: force server to process `SwitchAck` before returning.
+    let ping_nonce = 0xA11C_E000_0000_0001u64;
+    let ping = PingPayload { nonce: ping_nonce };
+    let mut ping_payload = Vec::with_capacity(8);
+    ping.encode(&mut ping_payload);
+    let mut ping_frame = Vec::new();
+    encode_message(
+        Message::Ping {
+            payload: &ping_payload,
+        },
+        &mut ping_frame,
+    )
+    .unwrap();
+    client.write_all(&ping_frame).await.unwrap();
+
+    let mut pong_received = false;
+    for _ in 0..8 {
+        let buf = timeout(Duration::from_secs(1), read_message_bytes(client, limits))
+            .await
+            .unwrap()
+            .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::Pong { payload } => {
+                let pong = PongPayload::decode(payload).unwrap();
+                if pong.nonce == ping_nonce {
+                    pong_received = true;
+                    break;
+                }
+            }
+            Message::Ping { .. } | Message::SwitchToUdp { .. } => {}
+            _ => {}
+        }
+    }
+    assert!(pong_received, "did not observe post-switch pong barrier");
 
     next_server_pn
 }

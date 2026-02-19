@@ -6,3 +6,4 @@ mod register;
 mod tcp;
 mod udp_errors;
 mod udp_flow;
+mod upgrade_regressions;

@@ -36,8 +36,10 @@
 - Routes traffic bidirectionally between client and TUN
 - Maintains ping/pong for liveness
 - Owns activity timer with timeout (self-destructs on expiry)
-- Owns active transport state and verify-before-switch (UDP-QSP PING/PONG)
-- Handles `REGISTER_CID` and updates `cid_map` (with explicit ack before UDP-QSP is accepted)
+- Owns active transport state and explicit TCP-committed UDP upgrade FSM:
+  - UDP `UpgradeProbe`/`UpgradeProbeAck` path validation
+  - TCP `UdpReady`/`SwitchToUdp`/`SwitchAck` commit
+- Handles `REGISTER_CID` and updates `cid_map` (CID registration is separate from transport commit)
 - Has channel sender for TUN → client traffic
 - Has channel receiver for client → TUN traffic
 - Drops outbound packets when per-client queue is full (do not block TUN reader)

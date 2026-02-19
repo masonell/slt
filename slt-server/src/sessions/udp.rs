@@ -221,6 +221,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 Ok(SessionControl::Continue)
             }
             Message::Data { packet } => {
+                if self.active_transport != ActiveTransport::UdpQsp {
+                    trace!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        "UDP data dropped: not active transport"
+                    );
+                    return Ok(SessionControl::Continue);
+                }
                 if self.should_forward_packet_to_tun(packet) {
                     self.tun.send(packet).await?;
                 }

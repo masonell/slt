@@ -75,6 +75,11 @@ PING          0x07  both          PingPayload
 PONG          0x08  both          PongPayload
 CLOSE         0x09  both          ClosePayload
 DATA          0x0a  both          raw IP packet
+UPGRADE_PROBE 0x0b  C -> S (UDP)  UpgradeProbePayload
+UPGRADE_PROBE_ACK 0x0c  S -> C (UDP)  UpgradeProbeAckPayload
+UDP_READY     0x0d  C -> S (TCP)  UdpReadyPayload
+SWITCH_TO_UDP 0x0e  S -> C (TCP)  SwitchToUdpPayload
+SWITCH_ACK    0x0f  C -> S (TCP)  SwitchAckPayload
 ```
 
 ### 3.3 State rules (TCP)
@@ -86,6 +91,10 @@ Before authentication completes:
 After `AUTH_OK`:
 - `DATA` may be sent on TCP (until UDP-QSP becomes active).
 - `REGISTER_CID` may be sent to enable UDP-QSP.
+- UDP upgrade commit control on TCP uses:
+  - `UDP_READY` (client -> server)
+  - `SWITCH_TO_UDP` (server -> client)
+  - `SWITCH_ACK` (client -> server)
 
 ### 3.4 Payload schemas
 
@@ -209,6 +218,21 @@ nonce: u64 (big-endian)
 nonce on receipt: transport security (TLS on TCP, AEAD on UDP-QSP) prevents
 injection, and a late PONG with a stale nonce still proves liveness.
 
+#### UPGRADE_PROBE / UPGRADE_PROBE_ACK payload (16 bytes)
+
+```
+upgrade_id: u64 (big-endian)
+nonce:      u64 (big-endian)
+```
+
+`UPGRADE_PROBE_ACK` MUST echo both `upgrade_id` and `nonce` from the probe.
+
+#### UDP_READY / SWITCH_TO_UDP / SWITCH_ACK payload (8 bytes)
+
+```
+upgrade_id: u64 (big-endian)
+```
+
 #### CLOSE payload (1 byte)
 
 `CloseCode` values:
@@ -293,11 +317,12 @@ Receivers MUST ignore any trailing bytes after decoding the first framed message
 Each UDP datagram carries exactly one framed message using the same
 `TYPE + LEN + PAYLOAD` format as TCP.
 
-Allowed message types on UDP-QSP: `DATA`, `PING`, `PONG`, and `CLOSE`.
+Allowed message types on UDP-QSP: `DATA`, `PING`, `PONG`, `CLOSE`,
+`UPGRADE_PROBE`, and `UPGRADE_PROBE_ACK`.
 
 `AUTH`, `AUTH_OK`, and `AUTH_FAIL` are TCP-only.
-`REGISTER_CID`, `REGISTER_OK`, and `REGISTER_FAIL` are control-plane messages
-on TCP.
+`REGISTER_CID`, `REGISTER_OK`, `REGISTER_FAIL`, `UDP_READY`, `SWITCH_TO_UDP`,
+and `SWITCH_ACK` are control-plane messages on TCP.
 
 ### 4.6 Packet number reconstruction
 
@@ -399,20 +424,22 @@ On `AUTH_OK`, the session is authenticated and TCP data is permitted.
    - UDP-QSP keys
    - `pn_start` and `key_phase`
 3) Server validates, inserts CID into `cid_map`, and replies `REGISTER_OK`.
-4) Both sides switch to UDP-QSP as the active data path immediately.
+4) Client starts UDP probing with `UPGRADE_PROBE(upgrade_id, nonce)` until an
+   `UPGRADE_PROBE_ACK` is received.
+5) After probe acknowledgment, client sends TCP `UDP_READY(upgrade_id)`.
+6) Server sends TCP `SWITCH_TO_UDP(upgrade_id)` only after both conditions are true:
+   - a valid UDP probe was observed
+   - matching `UDP_READY` was observed on TCP
+7) Client commits by sending TCP `SWITCH_ACK(upgrade_id)`.
+8) Both sides treat UDP-QSP as active only after `SWITCH_ACK` is processed.
 
-The server MUST NOT accept UDP-QSP packets for a CID until it has replied
-`REGISTER_OK` for that CID.
-
-UDP connectivity was already proven during the QUIC handshake, so no additional
-verification is needed. Periodic key updates use the key-phase algorithm in
-Section 4.8. `REGISTER_CID` remains a TCP control-plane message. CID rotation is
-deferred.
+The server MUST NOT treat UDP-QSP as active before `SWITCH_ACK` commit. Control
+messages remain split by transport: probes on UDP, commit on TCP.
 
 ### 5.3 Active transport and fallback
 
 - Only one active data path per `client_id` at a time.
-- Registration and key-management control remain on TCP.
+- Registration and switch-commit control remain on TCP (except UDP probes).
 - `CLOSE` on UDP-QSP is best-effort; if dropped, idle timeout closes the session.
 - If UDP-QSP fails (idle timeout), the server MAY fall back to TCP if still connected.
 - A new authenticated session for the same `client_id` takes over and replaces any
