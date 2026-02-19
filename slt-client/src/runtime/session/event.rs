@@ -54,6 +54,11 @@ pub enum SessionExit {
     ///
     /// Runtime action: reconnect (transient network issue).
     ConnectionError,
+
+    /// UDP upgrade timed out while `require_udp` policy is enabled.
+    ///
+    /// Runtime action: fatal exit (required transport unavailable).
+    UdpUpgradeRequired,
 }
 
 /// Events polled by the session event loop.
@@ -79,6 +84,8 @@ pub(super) enum SessionEvent {
     RegisterTimeout,
     /// QUIC discovery task completed.
     DiscoveryResult(Option<quic::QuicIds>),
+    /// UDP upgrade timer expired (probe retry/deadline/cooldown).
+    UdpUpgradeTick,
 }
 
 /// Control flow decision after handling an event.
@@ -146,6 +153,14 @@ mod tests {
         #[test]
         fn connection_error_is_connection_error() {
             assert_eq!(SessionExit::ConnectionError, SessionExit::ConnectionError);
+        }
+
+        #[test]
+        fn udp_upgrade_required_is_udp_upgrade_required() {
+            assert_eq!(
+                SessionExit::UdpUpgradeRequired,
+                SessionExit::UdpUpgradeRequired
+            );
         }
 
         #[test]

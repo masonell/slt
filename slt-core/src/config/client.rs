@@ -21,6 +21,9 @@ pub struct ClientConfig {
     /// Enable QUIC DCID discovery and UDP-QSP upgrade.
     #[serde(default)]
     pub enable_upgrade: bool,
+    /// Require UDP upgrade success; if upgrade times out, fail the session.
+    #[serde(default)]
+    pub require_udp: bool,
     /// Timing configuration.
     #[serde(default)]
     pub timing: ClientTimingConfig,
@@ -89,6 +92,7 @@ mod tests {
                 tun_mtu: 1280,
             },
             enable_upgrade: false,
+            require_udp: false,
             timing: ClientTimingConfig {
                 ping_min: Duration::from_secs(10),
                 ping_max: Duration::from_secs(20),

@@ -3,15 +3,20 @@
 use std::io;
 use std::time::Instant;
 
-use slt_core::proto::{RegisterFailPayload, RegisterOkPayload};
+use slt_core::proto::{
+    Message, RegisterFailPayload, RegisterOkPayload, SwitchAckPayload, SwitchToUdpPayload,
+    UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
+};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
-use super::{ClientSession, SessionControl, UdpState};
-use crate::runtime::session::state::{ActiveTransport, PendingUdpQspRegistration};
+use super::{ClientSession, SessionControl, SessionExit, UdpState};
+use crate::runtime::session::state::{PendingUdpQspRegistration, UdpUpgradeState};
 use crate::runtime::{ReconnectBackoff, register};
 use crate::transport::quic_discovery as quic;
 use crate::transport::udp_qsp::UdpQspTransport;
+
+const MAX_UPGRADE_PROBES: u32 = 8;
 
 impl ClientSession<'_> {
     /// Spawns a QUIC discovery task.
@@ -87,6 +92,11 @@ impl ClientSession<'_> {
     /// Transitions to `NeedDiscovery` state (if not already) and sets the
     /// reconnect deadline using exponential backoff with jitter.
     pub(super) fn schedule_discovery_retry(&mut self) {
+        self.udp_upgrade = if self.config.enable_upgrade {
+            UdpUpgradeState::Idle
+        } else {
+            UdpUpgradeState::Disabled
+        };
         let UdpState::NeedDiscovery {
             backoff,
             reconnect_at,
@@ -129,6 +139,35 @@ impl ClientSession<'_> {
         *reconnect_at = Instant::now() + delay;
         *registration = None;
         debug!(delay_ms = delay.as_millis(), "scheduled udp registration");
+    }
+
+    fn start_udp_upgrade_attempt(&mut self, now: Instant) {
+        if matches!(self.udp_upgrade, UdpUpgradeState::Disabled) {
+            return;
+        }
+        if !matches!(self.udp_state, UdpState::Active(_)) {
+            self.udp_upgrade = UdpUpgradeState::Idle;
+            return;
+        }
+        if self.active_transport != crate::runtime::session::state::ActiveTransport::Tcp {
+            return;
+        }
+
+        let upgrade_id = fastrand::u64(..);
+        self.udp_upgrade = UdpUpgradeState::Upgrading {
+            upgrade_id,
+            deadline: now + self.config.timing.register_timeout,
+            attempts: 0,
+            next_probe_at: now,
+            last_probe_nonce: 0,
+            probe_acked: false,
+            ready_sent: false,
+            probe_backoff: ReconnectBackoff::new(
+                self.config.timing.reconnect_min,
+                self.config.timing.reconnect_max,
+            ),
+        };
+        info!(upgrade_id, "starting udp upgrade attempt");
     }
 
     /// Handles `REGISTER_OK` received on TCP transport.
@@ -183,9 +222,8 @@ impl ClientSession<'_> {
             session,
             self.metrics.clone(),
         )));
-        self.active_transport = ActiveTransport::UdpQsp;
         self.last_udp_rx = Instant::now();
-        self.metrics.inc_transport_tcp_to_udp();
+        self.start_udp_upgrade_attempt(Instant::now());
         Ok(SessionControl::Continue)
     }
 
@@ -215,6 +253,246 @@ impl ClientSession<'_> {
         warn!(code = ?fail.code, "register_cid rejected; scheduling retry");
         self.metrics.inc_udp_register_failure();
         self.schedule_registration_retry();
+        Ok(SessionControl::Continue)
+    }
+
+    pub(super) async fn handle_udp_upgrade_tick(&mut self) -> io::Result<SessionControl> {
+        let now = Instant::now();
+        match &self.udp_upgrade {
+            UdpUpgradeState::Disabled | UdpUpgradeState::Idle => Ok(SessionControl::Continue),
+            UdpUpgradeState::TcpOnlyBlockedUdp { retry_at } => {
+                if now < *retry_at {
+                    return Ok(SessionControl::Continue);
+                }
+                self.start_udp_upgrade_attempt(now);
+                Ok(SessionControl::Continue)
+            }
+            UdpUpgradeState::Upgrading {
+                deadline,
+                attempts,
+                next_probe_at,
+                probe_acked,
+                ready_sent,
+                ..
+            } => {
+                if now >= *deadline {
+                    let reason = if *probe_acked && *ready_sent {
+                        "switch_to_udp_timeout"
+                    } else {
+                        "probe_timeout"
+                    };
+                    return Ok(self.handle_udp_upgrade_timeout(reason));
+                }
+
+                if *probe_acked || now < *next_probe_at {
+                    return Ok(SessionControl::Continue);
+                }
+
+                if *attempts >= MAX_UPGRADE_PROBES {
+                    return Ok(self.handle_udp_upgrade_timeout("max_probes"));
+                }
+
+                self.send_upgrade_probe(now).await?;
+                Ok(SessionControl::Continue)
+            }
+        }
+    }
+
+    async fn send_upgrade_probe(&mut self, now: Instant) -> io::Result<()> {
+        let (upgrade_id, nonce, attempts) = {
+            let UdpUpgradeState::Upgrading {
+                upgrade_id,
+                attempts,
+                next_probe_at,
+                last_probe_nonce,
+                probe_backoff,
+                probe_acked,
+                ..
+            } = &mut self.udp_upgrade
+            else {
+                return Ok(());
+            };
+            if *probe_acked || *attempts >= MAX_UPGRADE_PROBES {
+                return Ok(());
+            }
+
+            let nonce = fastrand::u64(..);
+            *attempts = attempts.saturating_add(1);
+            *last_probe_nonce = nonce;
+            *next_probe_at = now + probe_backoff.next_delay();
+            (*upgrade_id, nonce, *attempts)
+        };
+
+        let probe = UpgradeProbePayload { upgrade_id, nonce };
+        let mut buf = Vec::with_capacity(16);
+        probe.encode(&mut buf);
+        match self
+            .write_udp_message(Message::UpgradeProbe { payload: &buf })
+            .await
+        {
+            Ok(()) => {
+                debug!(upgrade_id, attempts, "sent udp upgrade probe");
+                Ok(())
+            }
+            Err(err) => {
+                if !self.handle_udp_error(&err) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "both transports dead",
+                    ));
+                }
+                warn!(error = %err, "failed to send udp upgrade probe; retry via rediscovery");
+                Ok(())
+            }
+        }
+    }
+
+    fn handle_udp_upgrade_timeout(&mut self, reason: &'static str) -> SessionControl {
+        let upgrade_id = match self.udp_upgrade {
+            UdpUpgradeState::Upgrading { upgrade_id, .. } => Some(upgrade_id),
+            _ => None,
+        };
+
+        if self.config.require_udp {
+            warn!(
+                reason,
+                upgrade_id = ?upgrade_id,
+                "udp upgrade timed out with require_udp=true"
+            );
+            return SessionControl::Close(SessionExit::UdpUpgradeRequired);
+        }
+
+        let delay = self.udp_upgrade_backoff.next_delay();
+        self.udp_upgrade = UdpUpgradeState::TcpOnlyBlockedUdp {
+            retry_at: Instant::now() + delay,
+        };
+        warn!(
+            reason,
+            upgrade_id = ?upgrade_id,
+            retry_in_ms = delay.as_millis(),
+            "udp upgrade timed out; staying on tcp until cooldown expires"
+        );
+        SessionControl::Continue
+    }
+
+    pub(super) async fn handle_upgrade_probe_ack(
+        &mut self,
+        payload: &[u8],
+    ) -> io::Result<SessionControl> {
+        let ack =
+            UpgradeProbeAckPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+        let should_send_ready = if let UdpUpgradeState::Upgrading {
+            upgrade_id,
+            probe_acked,
+            ready_sent,
+            last_probe_nonce,
+            ..
+        } = &mut self.udp_upgrade
+        {
+            if ack.upgrade_id != *upgrade_id {
+                debug!(
+                    expected_upgrade_id = *upgrade_id,
+                    received_upgrade_id = ack.upgrade_id,
+                    "ignoring upgrade_probe_ack with mismatched upgrade_id"
+                );
+                return Ok(SessionControl::Continue);
+            }
+
+            if ack.nonce != *last_probe_nonce {
+                trace!(
+                    expected_nonce = *last_probe_nonce,
+                    received_nonce = ack.nonce,
+                    "received stale udp upgrade probe ack nonce"
+                );
+            }
+            *probe_acked = true;
+            !*ready_sent
+        } else {
+            trace!(
+                upgrade_id = ack.upgrade_id,
+                "ignoring udp upgrade probe ack without active upgrade"
+            );
+            return Ok(SessionControl::Continue);
+        };
+
+        if !should_send_ready {
+            return Ok(SessionControl::Continue);
+        }
+
+        let ready = UdpReadyPayload {
+            upgrade_id: ack.upgrade_id,
+        };
+        let mut buf = Vec::with_capacity(8);
+        ready.encode(&mut buf);
+        self.tcp
+            .write_message(Message::UdpReady { payload: &buf })
+            .await?;
+
+        if let UdpUpgradeState::Upgrading { ready_sent, .. } = &mut self.udp_upgrade {
+            *ready_sent = true;
+        }
+        info!(
+            upgrade_id = ack.upgrade_id,
+            "udp path validated; sent udp_ready"
+        );
+        Ok(SessionControl::Continue)
+    }
+
+    pub(super) async fn handle_switch_to_udp(
+        &mut self,
+        payload: &[u8],
+    ) -> io::Result<SessionControl> {
+        let switch = SwitchToUdpPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+
+        if let UdpUpgradeState::Upgrading {
+            upgrade_id,
+            probe_acked,
+            ready_sent,
+            ..
+        } = &self.udp_upgrade
+        {
+            if switch.upgrade_id != *upgrade_id {
+                debug!(
+                    expected_upgrade_id = *upgrade_id,
+                    received_upgrade_id = switch.upgrade_id,
+                    "ignoring switch_to_udp with mismatched upgrade_id"
+                );
+                return Ok(SessionControl::Continue);
+            }
+            if !*probe_acked || !*ready_sent {
+                debug!(
+                    upgrade_id = switch.upgrade_id,
+                    probe_acked = *probe_acked,
+                    ready_sent = *ready_sent,
+                    "ignoring switch_to_udp before upgrade readiness"
+                );
+                return Ok(SessionControl::Continue);
+            }
+        } else {
+            trace!(
+                upgrade_id = switch.upgrade_id,
+                "ignoring switch_to_udp without active upgrade"
+            );
+            return Ok(SessionControl::Continue);
+        }
+
+        let ack = SwitchAckPayload {
+            upgrade_id: switch.upgrade_id,
+        };
+        let mut buf = Vec::with_capacity(8);
+        ack.encode(&mut buf);
+        self.tcp
+            .write_message(Message::SwitchAck { payload: &buf })
+            .await?;
+
+        if self.active_transport != crate::runtime::session::state::ActiveTransport::UdpQsp {
+            self.metrics.inc_transport_tcp_to_udp();
+            self.active_transport = crate::runtime::session::state::ActiveTransport::UdpQsp;
+        }
+        self.last_udp_rx = Instant::now();
+        self.udp_upgrade = UdpUpgradeState::Idle;
+        self.udp_upgrade_backoff.reset();
+        info!(upgrade_id = switch.upgrade_id, "udp upgrade committed");
         Ok(SessionControl::Continue)
     }
 }

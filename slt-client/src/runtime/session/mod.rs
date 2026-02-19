@@ -5,7 +5,7 @@
 //! - `event`: Event and control enums
 //! - `tcp`: TCP message handlers
 //! - `udp`: UDP message handlers
-//! - `upgrade`: Discovery and registration logic
+//! - `upgrade`: Discovery, registration, and UDP upgrade FSM
 //! - `lifecycle`: Ping/pong, shutdown, write helpers
 
 mod event;
@@ -24,7 +24,7 @@ pub(super) use event::SessionExit;
 use event::{SessionControl, SessionEvent};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{CloseCode, Message, MessageLimits};
-use state::{ActiveTransport, UdpState};
+use state::{ActiveTransport, UdpState, UdpUpgradeState};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -51,6 +51,8 @@ pub(super) struct ClientSession<'a> {
     last_tcp_rx: Instant,
     last_udp_rx: Instant,
     udp_state: UdpState,
+    udp_upgrade: UdpUpgradeState,
+    udp_upgrade_backoff: ReconnectBackoff,
     discovery_task: Option<JoinHandle<Option<quic::QuicIds>>>,
     metrics: Arc<Metrics>,
     /// Whether the TCP connection is still usable. Set to false when TCP closes
@@ -85,6 +87,11 @@ impl<'a> ClientSession<'a> {
         } else {
             UdpState::Disabled
         };
+        let udp_upgrade = if config.enable_upgrade {
+            UdpUpgradeState::Idle
+        } else {
+            UdpUpgradeState::Disabled
+        };
 
         Self {
             config,
@@ -97,6 +104,11 @@ impl<'a> ClientSession<'a> {
             last_tcp_rx: now,
             last_udp_rx: now,
             udp_state,
+            udp_upgrade,
+            udp_upgrade_backoff: ReconnectBackoff::new(
+                config.timing.reconnect_min,
+                config.timing.reconnect_max,
+            ),
             discovery_task: None,
             metrics,
             tcp_alive: true,
@@ -179,6 +191,8 @@ impl<'a> ClientSession<'a> {
         let udp_enabled = self.udp_state.as_active().is_some();
         let has_discovery_task = self.discovery_task.is_some();
         let has_register_timeout = register_deadline.is_some();
+        let udp_upgrade_timer_at = self.udp_upgrade.timer_at();
+        let has_udp_upgrade_timer = udp_upgrade_timer_at.is_some();
 
         tokio::select! {
             () = self.cancel.cancelled() => Ok(SessionEvent::Shutdown),
@@ -213,6 +227,14 @@ impl<'a> ClientSession<'a> {
                 task.await.unwrap_or(None)
             }, if has_discovery_task => {
                 Ok(SessionEvent::DiscoveryResult(result))
+            }
+            () = async {
+                match udp_upgrade_timer_at {
+                    Some(at) => time::sleep_until(at.into()).await,
+                    None => std::future::pending().await,
+                }
+            }, if has_udp_upgrade_timer => {
+                Ok(SessionEvent::UdpUpgradeTick)
             }
         }
     }
@@ -365,6 +387,7 @@ impl<'a> ClientSession<'a> {
                 }
                 Ok(SessionControl::Continue)
             }
+            SessionEvent::UdpUpgradeTick => self.handle_udp_upgrade_tick().await,
         }
     }
 

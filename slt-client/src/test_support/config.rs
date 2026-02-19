@@ -55,6 +55,7 @@ pub fn test_config_with_identity(
             tun_mtu: 1280,
         },
         enable_upgrade: false,
+        require_udp: false,
         timing: default_timing(),
     }
 }

@@ -3,7 +3,7 @@
 use std::io;
 
 use slt_core::proto::{ClosePayload, Message, PingPayload, PongPayload};
-use tracing::{debug, info, trace};
+use tracing::{info, trace};
 
 use super::{ClientSession, SessionControl, SessionExit};
 use crate::runtime::session::state::ActiveTransport;
@@ -55,10 +55,8 @@ impl ClientSession<'_> {
             Message::RegisterOk { payload } => self.handle_register_ok(payload),
             Message::RegisterFail { payload } => self.handle_register_fail(payload),
             Message::Data { packet } => {
-                if self.active_transport != ActiveTransport::Tcp {
-                    debug!("tcp data received while udp-qsp is active; switching to tcp");
+                if self.active_transport == ActiveTransport::UdpQsp {
                     self.metrics.inc_transport_udp_to_tcp_server();
-                    self.active_transport = ActiveTransport::Tcp;
                 }
                 if self
                     .tun_channels
@@ -74,10 +72,8 @@ impl ClientSession<'_> {
             }
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload).map_err(wire::map_payload_error)?;
-                if self.active_transport != ActiveTransport::Tcp {
-                    debug!("tcp ping received while udp-qsp is active; switching to tcp");
+                if self.active_transport == ActiveTransport::UdpQsp {
                     self.metrics.inc_transport_udp_to_tcp_server();
-                    self.active_transport = ActiveTransport::Tcp;
                 }
                 let pong_out = PongPayload {
                     nonce: ping_in.nonce,
@@ -100,15 +96,14 @@ impl ClientSession<'_> {
                 self.metrics.inc_disconnect_close();
                 Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
             }
+            Message::SwitchToUdp { payload } => self.handle_switch_to_udp(payload).await,
             Message::RegisterCid { .. }
             | Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. }
-            // TODO(udp-upgrade-fsm): Handle upgrade control messages during Task 3.
             | Message::UpgradeProbe { .. }
             | Message::UpgradeProbeAck { .. }
             | Message::UdpReady { .. }
-            | Message::SwitchToUdp { .. }
             | Message::SwitchAck { .. } => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected control message on established session",

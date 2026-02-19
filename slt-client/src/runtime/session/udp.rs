@@ -52,9 +52,8 @@ impl ClientSession<'_> {
             }
             Message::Data { packet } => {
                 if self.active_transport != ActiveTransport::UdpQsp {
-                    self.metrics.inc_transport_tcp_to_udp();
-                    self.active_transport = ActiveTransport::UdpQsp;
-                    info!("udp-qsp data received; switching to udp");
+                    trace!("dropping udp data while tcp is active");
+                    return Ok(SessionControl::Continue);
                 }
                 if self
                     .tun_channels
@@ -74,13 +73,12 @@ impl ClientSession<'_> {
                 self.metrics.inc_disconnect_close();
                 Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
             }
+            Message::UpgradeProbeAck { payload } => self.handle_upgrade_probe_ack(payload).await,
             Message::RegisterCid { .. }
             | Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. }
-            // TODO(udp-upgrade-fsm): Handle upgrade control messages during Task 3.
             | Message::UpgradeProbe { .. }
-            | Message::UpgradeProbeAck { .. }
             | Message::UdpReady { .. }
             | Message::SwitchToUdp { .. }
             | Message::SwitchAck { .. } => Err(io::Error::new(
@@ -217,19 +215,11 @@ mod tests {
     mod transport_switching {
         use super::super::ActiveTransport;
 
-        /// Verify that UDP DATA switches active transport to UdpQsp.
-        /// This tests the core logic without requiring a full session.
+        /// Verify UDP active-transport identity comparisons.
         #[test]
-        fn udp_data_switches_active_transport_to_udp_qsp() {
-            // Before: TCP is active
-            let before = ActiveTransport::Tcp;
-            assert_ne!(before, ActiveTransport::UdpQsp);
-
-            // After receiving DATA on UDP, should switch to UdpQsp
-            // (this is the logic in handle_udp_message)
-            let after = ActiveTransport::UdpQsp;
-            assert_eq!(after, ActiveTransport::UdpQsp);
-            assert_ne!(before, after);
+        fn udp_qsp_active_transport_value_is_distinct() {
+            assert_eq!(ActiveTransport::UdpQsp, ActiveTransport::UdpQsp);
+            assert_ne!(ActiveTransport::UdpQsp, ActiveTransport::Tcp);
         }
 
         /// Verify transport comparison logic.
@@ -240,16 +230,11 @@ mod tests {
             assert_eq!(ActiveTransport::UdpQsp, ActiveTransport::UdpQsp);
         }
 
-        /// Verify the switch condition: only switch when not already on UDP.
+        /// Verify explicit transport values remain stable.
         #[test]
-        fn switch_only_when_not_already_udp() {
-            // If already on UDP, no switch needed
-            let already_udp = ActiveTransport::UdpQsp;
-            assert_eq!(already_udp, ActiveTransport::UdpQsp);
-
-            // If on TCP, switch is needed
-            let on_tcp = ActiveTransport::Tcp;
-            assert_ne!(on_tcp, ActiveTransport::UdpQsp);
+        fn explicit_transport_values_are_stable() {
+            assert_eq!(ActiveTransport::Tcp, ActiveTransport::Tcp);
+            assert_eq!(ActiveTransport::UdpQsp, ActiveTransport::UdpQsp);
         }
     }
 

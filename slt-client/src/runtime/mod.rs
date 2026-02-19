@@ -161,6 +161,13 @@ fn handle_session_exit(exit: session::SessionExit, cancel: &CancellationToken) -
                 "permission denied",
             ))
         }
+        session::SessionExit::UdpUpgradeRequired => {
+            warn!(reason = ?exit, "required udp upgrade failed; exiting");
+            SessionAction::Fatal(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "required udp upgrade failed",
+            ))
+        }
         session::SessionExit::TcpClosed
         | session::SessionExit::IdleTimeout
         | session::SessionExit::RemoteClose(_)

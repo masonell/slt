@@ -97,6 +97,60 @@ impl UdpState {
     }
 }
 
+/// Client-side UDP upgrade handshake state.
+pub(super) enum UdpUpgradeState {
+    /// Upgrade disabled by configuration.
+    Disabled,
+    /// UDP transport is available, no upgrade attempt in flight.
+    Idle,
+    /// Upgrade attempt in progress.
+    Upgrading {
+        /// Attempt identifier shared across probe/ack/ready/switch.
+        upgrade_id: u64,
+        /// Hard deadline for this attempt.
+        deadline: Instant,
+        /// Number of probes sent in this attempt.
+        attempts: u32,
+        /// Next probe send deadline.
+        next_probe_at: Instant,
+        /// Last probe nonce sent.
+        last_probe_nonce: u64,
+        /// Whether a valid `UpgradeProbeAck` has been observed.
+        probe_acked: bool,
+        /// Whether `UdpReady` has been sent on TCP.
+        ready_sent: bool,
+        /// Probe retransmit backoff.
+        probe_backoff: ReconnectBackoff,
+    },
+    /// Upgrade is temporarily blocked after timeout/failure.
+    TcpOnlyBlockedUdp {
+        /// Earliest time to start another upgrade attempt.
+        retry_at: Instant,
+    },
+}
+
+impl UdpUpgradeState {
+    /// Return the next timer deadline this state needs, if any.
+    pub(super) fn timer_at(&self) -> Option<Instant> {
+        match self {
+            Self::Disabled | Self::Idle => None,
+            Self::Upgrading {
+                deadline,
+                next_probe_at,
+                probe_acked,
+                ..
+            } => {
+                if *probe_acked {
+                    Some(*deadline)
+                } else {
+                    Some((*next_probe_at).min(*deadline))
+                }
+            }
+            Self::TcpOnlyBlockedUdp { retry_at } => Some(*retry_at),
+        }
+    }
+}
+
 /// Currently active transport for data flow.
 ///
 /// The session uses exactly one transport at a time for sending data.

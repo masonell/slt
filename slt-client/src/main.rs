@@ -103,6 +103,7 @@ fn log_config(config: &ClientConfig) {
         tun_name = %config.tun.tun_name,
         tun_mtu = config.tun.tun_mtu,
         enable_upgrade = config.enable_upgrade,
+        require_udp = config.require_udp,
         "client config loaded (secrets redacted)"
     );
 }
