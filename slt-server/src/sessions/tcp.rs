@@ -61,7 +61,13 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             | Message::AuthOk { .. }
             | Message::AuthFail { .. }
             | Message::RegisterOk { .. }
-            | Message::RegisterFail { .. } => Err(io::Error::new(
+            | Message::RegisterFail { .. }
+            // TODO(udp-upgrade-fsm): Handle upgrade control messages during Task 2.
+            | Message::UpgradeProbe { .. }
+            | Message::UpgradeProbeAck { .. }
+            | Message::UdpReady { .. }
+            | Message::SwitchToUdp { .. }
+            | Message::SwitchAck { .. } => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected control message on established session",
             )),

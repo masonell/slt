@@ -19,7 +19,8 @@ pub use payloads::{
     AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, CLOSE_PAYLOAD_LEN, CipherSuite,
     CloseCode, ClosePayload, HP_KEY_LEN, MAX_CONTROL_FRAME_LEN, PING_PAYLOAD_LEN, PayloadError,
     PingPayload, PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload,
-    RegisterOkPayload,
+    RegisterOkPayload, SwitchAckPayload, SwitchToUdpPayload, UPGRADE_ID_PAYLOAD_LEN,
+    UPGRADE_PROBE_PAYLOAD_LEN, UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
 };
 /// Message type identifiers.
 pub use types::MessageType;

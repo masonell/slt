@@ -103,7 +103,13 @@ impl ClientSession<'_> {
             Message::RegisterCid { .. }
             | Message::Auth { .. }
             | Message::AuthOk { .. }
-            | Message::AuthFail { .. } => Err(io::Error::new(
+            | Message::AuthFail { .. }
+            // TODO(udp-upgrade-fsm): Handle upgrade control messages during Task 3.
+            | Message::UpgradeProbe { .. }
+            | Message::UpgradeProbeAck { .. }
+            | Message::UdpReady { .. }
+            | Message::SwitchToUdp { .. }
+            | Message::SwitchAck { .. } => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected control message on established session",
             )),

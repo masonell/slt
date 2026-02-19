@@ -25,6 +25,16 @@ pub enum Message<'a> {
     Close { payload: &'a [u8] },
     /// Tunnel data (raw IP packet).
     Data { packet: &'a [u8] },
+    /// UDP path validation probe during upgrade.
+    UpgradeProbe { payload: &'a [u8] },
+    /// UDP path validation probe acknowledgement.
+    UpgradeProbeAck { payload: &'a [u8] },
+    /// Client indicates UDP path is validated.
+    UdpReady { payload: &'a [u8] },
+    /// Server commits transport switch to UDP.
+    SwitchToUdp { payload: &'a [u8] },
+    /// Client acknowledges server's switch commit.
+    SwitchAck { payload: &'a [u8] },
 }
 
 impl<'a> Message<'a> {
@@ -42,6 +52,11 @@ impl<'a> Message<'a> {
             Message::Pong { .. } => MessageType::Pong,
             Message::Close { .. } => MessageType::Close,
             Message::Data { .. } => MessageType::Data,
+            Message::UpgradeProbe { .. } => MessageType::UpgradeProbe,
+            Message::UpgradeProbeAck { .. } => MessageType::UpgradeProbeAck,
+            Message::UdpReady { .. } => MessageType::UdpReady,
+            Message::SwitchToUdp { .. } => MessageType::SwitchToUdp,
+            Message::SwitchAck { .. } => MessageType::SwitchAck,
         }
     }
 
@@ -58,7 +73,12 @@ impl<'a> Message<'a> {
             | Message::RegisterFail { payload }
             | Message::Ping { payload }
             | Message::Pong { payload }
-            | Message::Close { payload } => payload,
+            | Message::Close { payload }
+            | Message::UpgradeProbe { payload }
+            | Message::UpgradeProbeAck { payload }
+            | Message::UdpReady { payload }
+            | Message::SwitchToUdp { payload }
+            | Message::SwitchAck { payload } => payload,
         }
     }
 }
@@ -95,6 +115,21 @@ impl<'a> From<Frame<'a>> for Message<'a> {
             },
             MessageType::Data => Message::Data {
                 packet: frame.payload,
+            },
+            MessageType::UpgradeProbe => Message::UpgradeProbe {
+                payload: frame.payload,
+            },
+            MessageType::UpgradeProbeAck => Message::UpgradeProbeAck {
+                payload: frame.payload,
+            },
+            MessageType::UdpReady => Message::UdpReady {
+                payload: frame.payload,
+            },
+            MessageType::SwitchToUdp => Message::SwitchToUdp {
+                payload: frame.payload,
+            },
+            MessageType::SwitchAck => Message::SwitchAck {
+                payload: frame.payload,
             },
         }
     }
@@ -261,6 +296,41 @@ mod tests {
     fn close_roundtrip() {
         roundtrip(Message::Close {
             payload: b"close_payload",
+        });
+    }
+
+    #[test]
+    fn upgrade_probe_roundtrip() {
+        roundtrip(Message::UpgradeProbe {
+            payload: b"upgrade_probe_payload",
+        });
+    }
+
+    #[test]
+    fn upgrade_probe_ack_roundtrip() {
+        roundtrip(Message::UpgradeProbeAck {
+            payload: b"upgrade_probe_ack_payload",
+        });
+    }
+
+    #[test]
+    fn udp_ready_roundtrip() {
+        roundtrip(Message::UdpReady {
+            payload: b"udp_ready_payload",
+        });
+    }
+
+    #[test]
+    fn switch_to_udp_roundtrip() {
+        roundtrip(Message::SwitchToUdp {
+            payload: b"switch_to_udp_payload",
+        });
+    }
+
+    #[test]
+    fn switch_ack_roundtrip() {
+        roundtrip(Message::SwitchAck {
+            payload: b"switch_ack_payload",
         });
     }
 

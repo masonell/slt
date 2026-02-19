@@ -24,4 +24,14 @@ pub enum MessageType {
     Close = 0x09,
     /// Tunnel data (raw IP packet).
     Data = 0x0a,
+    /// UDP path validation probe during upgrade.
+    UpgradeProbe = 0x0b,
+    /// UDP path validation probe acknowledgement.
+    UpgradeProbeAck = 0x0c,
+    /// Client indicates UDP path is validated.
+    UdpReady = 0x0d,
+    /// Server commits transport switch to UDP.
+    SwitchToUdp = 0x0e,
+    /// Client acknowledges server's switch commit.
+    SwitchAck = 0x0f,
 }
