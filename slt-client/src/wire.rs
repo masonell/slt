@@ -149,17 +149,17 @@ mod tests {
 
         #[test]
         fn maps_invalid_dcid_len() {
-            let err = map_payload_error(PayloadError::InvalidDcidLen(5));
+            let err = map_payload_error(PayloadError::InvalidClientToServerCidLen(5));
             assert_io_error(&err, io::ErrorKind::InvalidData, "payload error: ");
-            assert!(err.to_string().contains("InvalidDcidLen"));
+            assert!(err.to_string().contains("InvalidClientToServerCidLen"));
             assert!(err.to_string().contains("5"));
         }
 
         #[test]
         fn maps_invalid_scid_len() {
-            let err = map_payload_error(PayloadError::InvalidScidLen(9));
+            let err = map_payload_error(PayloadError::InvalidServerToClientCidLen(9));
             assert_io_error(&err, io::ErrorKind::InvalidData, "payload error: ");
-            assert!(err.to_string().contains("InvalidScidLen"));
+            assert!(err.to_string().contains("InvalidServerToClientCidLen"));
         }
 
         #[test]

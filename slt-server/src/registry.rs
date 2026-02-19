@@ -299,7 +299,7 @@ impl Default for SessionRegistry {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use slt_core::types::QUIC_DCID_PREFIX_LEN;
+    use slt_core::types::MAX_DCID_LEN;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -319,7 +319,7 @@ mod tests {
         let (handle, old) = registry.register_session(client_id, ip_old, make_tx());
         assert!(old.is_none());
 
-        let prefix = CidPrefix::from([0xAA; QUIC_DCID_PREFIX_LEN]);
+        let prefix = CidPrefix::from([0xAA; MAX_DCID_LEN]);
         registry
             .insert_cid(handle.session_id, prefix, make_tx())
             .unwrap();
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn registry_rejects_cid_collisions() {
         let registry = SessionRegistry::new();
-        let prefix = CidPrefix::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+        let prefix = CidPrefix::from([0xBB; MAX_DCID_LEN]);
 
         registry.insert_cid(1, prefix, make_tx()).unwrap();
         assert!(matches!(
@@ -348,8 +348,8 @@ mod tests {
     #[test]
     fn registry_keeps_selected_cids() {
         let registry = SessionRegistry::new();
-        let keep = CidPrefix::from([0xCC; QUIC_DCID_PREFIX_LEN]);
-        let drop = CidPrefix::from([0xDD; QUIC_DCID_PREFIX_LEN]);
+        let keep = CidPrefix::from([0xCC; MAX_DCID_LEN]);
+        let drop = CidPrefix::from([0xDD; MAX_DCID_LEN]);
 
         registry.insert_cid(42, keep, make_tx()).unwrap();
         registry.insert_cid(42, drop, make_tx()).unwrap();

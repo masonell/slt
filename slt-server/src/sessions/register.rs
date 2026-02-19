@@ -76,15 +76,29 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             return Ok(SessionControl::Continue);
         };
 
+        let Some(dcid_prefix) = register.client_to_server_cid.prefix().ok() else {
+            warn!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                active_transport = ?self.active_transport,
+                cid_len = register.client_to_server_cid.len(),
+                reason = "cid_too_short_for_prefix",
+                "register_cid rejected"
+            );
+            self.send_register_fail(RegisterFailCode::InvalidCid)
+                .await?;
+            return Ok(SessionControl::Continue);
+        };
+
         if let Err(CidInsertError::PrefixCollision(_)) =
             self.registry
-                .insert_cid(self.session_id, register.dcid.prefix(), self.tx.clone())
+                .insert_cid(self.session_id, dcid_prefix, self.tx.clone())
         {
             warn!(
                 session_id = self.session_id,
                 client_id = %self.client_id,
                 active_transport = ?self.active_transport,
-                dcid_prefix = ?register.dcid.prefix(),
+                dcid_prefix = ?dcid_prefix,
                 reason = "prefix_collision",
                 "register_cid rejected"
             );
@@ -94,7 +108,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         }
 
         self.registry
-            .remove_cids_for_session_except(self.session_id, register.dcid.prefix());
+            .remove_cids_for_session_except(self.session_id, dcid_prefix);
 
         // Create the UDP session with a placeholder peer address. The actual peer
         // is set by `handle_udp_claim` when the first UDP packet arrives.
@@ -106,8 +120,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         let io = UdpIo::new(self.udp_socket.clone(), placeholder_peer);
         let udp = slt_core::crypto::udp_qsp::QuicQspSession::new(
             io,
-            register.dcid,
-            register.scid,
+            register.client_to_server_cid,
+            register.server_to_client_cid,
             keys,
             register.pn_start,
             register.pn_start_rx,
@@ -122,13 +136,13 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             session_id = self.session_id,
             client_id = %self.client_id,
             active_transport = ?self.active_transport,
-            dcid_prefix = ?register.dcid.prefix(),
-            scid = ?register.scid,
+            dcid_prefix = ?dcid_prefix,
+            scid = ?register.server_to_client_cid,
             "register_cid accepted"
         );
 
         let ok = RegisterOkPayload {
-            dcid: register.dcid,
+            client_to_server_cid: register.client_to_server_cid,
         };
         let mut ok_buf = Vec::new();
         ok.encode(&mut ok_buf).map_err(map_payload_error)?;

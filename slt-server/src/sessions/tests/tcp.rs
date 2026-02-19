@@ -5,7 +5,7 @@ use slt_core::proto::{
     CipherSuite, CloseCode, ClosePayload, Message, PingPayload, PongPayload, decode_message,
     encode_message,
 };
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
@@ -164,8 +164,8 @@ async fn session_drops_tcp_data_when_udp_active() {
         spawn_session().await;
 
     // Register and activate UDP
-    let dcid = Cid::from([0x71; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0x72; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0x71; MAX_DCID_LEN]);
+    let scid = Cid::from([0x72; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -191,11 +191,16 @@ async fn session_drops_tcp_data_when_udp_active() {
     let mut udp_frame = Vec::new();
     encode_message(Message::Data { packet: &udp_data }, &mut udp_frame).unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &udp_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &udp_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await

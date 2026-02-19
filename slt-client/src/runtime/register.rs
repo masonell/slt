@@ -52,8 +52,8 @@ pub(super) fn prepare_udp_qsp_registration(
     let key_phase = false;
 
     let payload = RegisterCidPayload {
-        dcid: ids.dcid,
-        scid: ids.scid,
+        client_to_server_cid: ids.dcid,
+        server_to_client_cid: ids.scid,
         cipher,
         hp_tx: hp_s2c,
         hp_rx: hp_c2s,
@@ -132,7 +132,7 @@ fn random_array<const N: usize>() -> io::Result<[u8; N]> {
 #[cfg(test)]
 mod tests {
     use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
-    use slt_core::types::QUIC_DCID_PREFIX_LEN;
+    use slt_core::types::MAX_DCID_LEN;
 
     use super::*;
     use crate::test_support::mock_quic_ids;
@@ -160,8 +160,8 @@ mod tests {
         let decoded = decoded.unwrap();
 
         // CIDs should match what we passed in
-        assert_eq!(decoded.dcid, ids.dcid);
-        assert_eq!(decoded.scid, ids.scid);
+        assert_eq!(decoded.client_to_server_cid, ids.dcid);
+        assert_eq!(decoded.server_to_client_cid, ids.scid);
 
         // Cipher should be AES-128-GCM (the only cipher currently used)
         assert_eq!(decoded.cipher, CipherSuite::Aes128Gcm);
@@ -174,13 +174,13 @@ mod tests {
         let payload = &prepared.payload_buf;
 
         // Verify minimum payload length
-        // Structure: dcid_len(1) + dcid(8) + scid_len(1) + scid(8) + cipher(1) +
+        // Structure: c2s_cid_len(1) + c2s_cid(20) + s2c_cid_len(1) + s2c_cid(var) + cipher(1) +
         //            hp_tx(16) + hp_rx(16) + aead_tx(16) + aead_rx(16) +
         //            iv_tx(12) + iv_rx(12) + pn_start(8) + pn_start_rx(8) + key_phase(1)
         let expected_min_len = 1
-            + QUIC_DCID_PREFIX_LEN
+            + MAX_DCID_LEN
             + 1
-            + QUIC_DCID_PREFIX_LEN
+            + 0 // s2c can be empty
             + 1
             + HP_KEY_LEN * 2
             + AEAD_KEY_LEN * 2
@@ -190,27 +190,26 @@ mod tests {
             + 1;
         assert!(payload.len() >= expected_min_len);
 
-        // Verify DCID length prefix
-        let dcid_len = payload[0] as usize;
-        assert_eq!(dcid_len, QUIC_DCID_PREFIX_LEN);
+        // Verify client_to_server_cid length prefix (must be MAX_DCID_LEN)
+        let c2s_cid_len = payload[0] as usize;
+        assert_eq!(c2s_cid_len, MAX_DCID_LEN);
 
-        // Verify DCID bytes
-        assert_eq!(&payload[1..1 + dcid_len], ids.dcid.as_slice());
+        // Verify client_to_server_cid bytes
+        assert_eq!(&payload[1..1 + c2s_cid_len], ids.dcid.as_slice());
 
-        // Verify SCID length prefix
-        let scid_len_offset = 1 + dcid_len;
-        let scid_len = payload[scid_len_offset] as usize;
-        assert_eq!(scid_len, QUIC_DCID_PREFIX_LEN);
+        // Verify server_to_client_cid length prefix
+        let s2c_cid_len_offset = 1 + c2s_cid_len;
+        let s2c_cid_len = payload[s2c_cid_len_offset] as usize;
 
-        // Verify SCID bytes
-        let scid_offset = scid_len_offset + 1;
+        // Verify server_to_client_cid bytes
+        let s2c_cid_offset = s2c_cid_len_offset + 1;
         assert_eq!(
-            &payload[scid_offset..scid_offset + scid_len],
+            &payload[s2c_cid_offset..s2c_cid_offset + s2c_cid_len],
             ids.scid.as_slice()
         );
 
         // Verify cipher byte (AES-128-GCM = 0x01)
-        let cipher_offset = scid_offset + scid_len;
+        let cipher_offset = s2c_cid_offset + s2c_cid_len;
         assert_eq!(payload[cipher_offset], u8::from(CipherSuite::Aes128Gcm));
     }
 

@@ -160,10 +160,10 @@ impl ClientSession<'_> {
             };
 
             let ok = RegisterOkPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
-            if ok.dcid != quic_ids.dcid {
+            if ok.client_to_server_cid != quic_ids.dcid {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "register_ok dcid mismatch",
+                    "register_ok client_to_server_cid mismatch",
                 ));
             }
 
@@ -300,19 +300,21 @@ mod tests {
 
     mod register_ok_payload_decode {
         use slt_core::proto::RegisterOkPayload;
-        use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+        use slt_core::types::{Cid, MAX_DCID_LEN};
 
         use super::*;
 
         #[test]
         fn valid_payload_decodes() {
-            let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-            let payload = RegisterOkPayload { dcid: dcid.clone() };
+            let c2s_cid = Cid::from([0xAA; MAX_DCID_LEN]);
+            let payload = RegisterOkPayload {
+                client_to_server_cid: c2s_cid.clone(),
+            };
             let mut buf = Vec::new();
             payload.encode(&mut buf).unwrap();
 
             let decoded = RegisterOkPayload::decode(&buf).unwrap();
-            assert_eq!(decoded.dcid, dcid);
+            assert_eq!(decoded.client_to_server_cid, c2s_cid);
         }
 
         #[test]
@@ -323,7 +325,7 @@ mod tests {
 
         #[test]
         fn truncated_payload_fails() {
-            // Only 4 bytes, need 8 for dcid
+            // Only 4 bytes, need 20 for cid
             let result = RegisterOkPayload::decode(&[0x01, 0x02, 0x03, 0x04]);
             assert!(result.is_err());
         }
@@ -338,12 +340,15 @@ mod tests {
         }
     }
 
-    mod dcid_mismatch_error {
+    mod cid_mismatch_error {
         use super::*;
 
         #[test]
-        fn dcid_mismatch_is_invalid_data() {
-            let err = io::Error::new(io::ErrorKind::InvalidData, "register_ok dcid mismatch");
+        fn cid_mismatch_is_invalid_data() {
+            let err = io::Error::new(
+                io::ErrorKind::InvalidData,
+                "register_ok client_to_server_cid mismatch",
+            );
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         }
     }

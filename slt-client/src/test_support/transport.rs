@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use slt_core::crypto::udp_qsp::SessionIo;
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -55,8 +55,8 @@ impl SessionIo for ChanIo {
 /// Create a mock `QuicIds` for testing without real network peers.
 ///
 /// Uses:
-/// - DCID: `[0xAA; 8]`
-/// - SCID: `[0xBB; 8]`
+/// - DCID: `[0xAA; 20]` (must be exactly MAX_DCID_LEN)
+/// - SCID: `[]` (empty, matching Chrome behavior)
 /// - Peer: `127.0.0.1:443`
 /// - Socket: Bound to `127.0.0.1:0` (OS-assigned port)
 pub async fn mock_quic_ids() -> QuicIds {
@@ -65,8 +65,8 @@ pub async fn mock_quic_ids() -> QuicIds {
             .await
             .expect("failed to bind test socket"),
     );
-    let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xAA; MAX_DCID_LEN]);
+    let scid = Cid::new(&[]).expect("empty CID is valid");
     let peer: SocketAddr = "127.0.0.1:443".parse().expect("valid addr");
     QuicIds {
         dcid,

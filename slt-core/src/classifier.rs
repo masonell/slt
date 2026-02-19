@@ -421,7 +421,7 @@ mod tests {
         buf.push(0xC0); // long header + fixed bit + Initial type
         buf.extend_from_slice(&quiche::PROTOCOL_VERSION.to_be_bytes());
         #[allow(clippy::cast_possible_truncation)]
-        let dcid_len = QUIC_DCID_PREFIX_LEN as u8; // QUIC_DCID_PREFIX_LEN = 8, fits in u8
+        let dcid_len = QUIC_DCID_PREFIX_LEN as u8; // QUIC_DCID_PREFIX_LEN = 20, fits in u8
         buf.push(dcid_len);
         buf.extend_from_slice(&[0x11; QUIC_DCID_PREFIX_LEN]);
         buf.push(dcid_len);

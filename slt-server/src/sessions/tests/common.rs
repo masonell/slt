@@ -106,13 +106,13 @@ pub(super) fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, payload_len: usize) -> V
 }
 
 pub(super) fn make_register_payload(
-    dcid: Cid,
-    scid: Cid,
+    client_to_server_cid: Cid,
+    server_to_client_cid: Cid,
     cipher: CipherSuite,
 ) -> RegisterCidPayload {
     RegisterCidPayload {
-        dcid,
-        scid,
+        client_to_server_cid,
+        server_to_client_cid,
         cipher,
         hp_tx: [0x11; HP_KEY_LEN],
         hp_rx: [0x11; HP_KEY_LEN],

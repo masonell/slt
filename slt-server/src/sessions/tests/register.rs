@@ -5,7 +5,7 @@ use slt_core::proto::{
     CipherSuite, Message, PingPayload, RegisterFailCode, RegisterFailPayload, decode_message,
     encode_message,
 };
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
@@ -20,8 +20,8 @@ async fn session_registers_udp_and_forwards_data() {
     let (join, mut client, tx, _tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
-    let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xAA; MAX_DCID_LEN]);
+    let scid = Cid::from([0xBB; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
 
     let mut reg_buf = Vec::new();
@@ -84,7 +84,7 @@ async fn session_registers_udp_and_forwards_data() {
     .unwrap();
     let packet = keys
         .protect(
-            register.dcid.as_slice(),
+            register.client_to_server_cid.as_slice(),
             0,
             register.key_phase,
             &probe_frame,
@@ -92,7 +92,7 @@ async fn session_registers_udp_and_forwards_data() {
         .unwrap();
     let claim = UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: packet,
     };
     tx.send(SessionEvent::Udp(claim)).await.unwrap();
@@ -104,7 +104,11 @@ async fn session_registers_udp_and_forwards_data() {
         .unwrap()
         .unwrap();
     let opened = keys
-        .open(register.dcid.len(), &packet, server_expected_pn)
+        .open(
+            register.client_to_server_cid.len(),
+            &packet,
+            server_expected_pn,
+        )
         .unwrap();
     server_expected_pn = opened.pn + 1;
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
@@ -125,7 +129,11 @@ async fn session_registers_udp_and_forwards_data() {
         .unwrap()
         .unwrap();
     let opened = keys
-        .open(register.dcid.len(), &packet, server_expected_pn)
+        .open(
+            register.client_to_server_cid.len(),
+            &packet,
+            server_expected_pn,
+        )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
     assert_eq!(consumed, opened.payload.len());
@@ -174,8 +182,8 @@ async fn session_register_rejects_invalid_keys() {
     let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
-    let dcid = Cid::from([0xAB; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xBC; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xAB; MAX_DCID_LEN]);
+    let scid = Cid::from([0xBC; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::ChaCha20Poly1305);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -208,10 +216,12 @@ async fn session_register_rejects_prefix_collision() {
     let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, registry) =
         spawn_session().await;
 
-    let dcid = Cid::from([0xCD; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xDE; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xCD; MAX_DCID_LEN]);
+    let scid = Cid::from([0xDE; MAX_DCID_LEN]);
     let (dummy_tx, _dummy_rx) = mpsc::channel(1);
-    registry.insert_cid(999, dcid.prefix(), dummy_tx).unwrap();
+    registry
+        .insert_cid(999, dcid.prefix().unwrap(), dummy_tx)
+        .unwrap();
 
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();

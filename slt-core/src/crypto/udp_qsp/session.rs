@@ -634,14 +634,14 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let dcid = Cid::from([0xAB; 8]);
+        let dcid = Cid::from([0xAB; 20]);
         let packet = keys.protect(dcid.as_slice(), 7, false, b"hello").unwrap();
 
         let io = TestIo {
             packet: packet.clone(),
             sent: Vec::new(),
         };
-        let mut session = QuicQspSession::new(io, Cid::from([0xCD; 8]), dcid, keys, 0, 7, false);
+        let mut session = QuicQspSession::new(io, Cid::from([0xCD; 20]), dcid, keys, 0, 7, false);
         let mut buf = vec![0u8; 1500];
 
         let opened = session.recv(&mut buf).await.unwrap();
@@ -681,8 +681,8 @@ mod tests {
 
         let mut session = QuicQspSession::new(
             TestIo,
-            Cid::from([0xCD; 8]),
-            Cid::from([0xAB; 8]),
+            Cid::from([0xCD; 20]),
+            Cid::from([0xAB; 20]),
             keys,
             u64::MAX,
             0,
@@ -725,11 +725,11 @@ mod tests {
         .unwrap();
 
         let pn = u64::from(u32::MAX) + 7;
-        let dcid = Cid::from([0xAB; 8]);
+        let dcid = Cid::from([0xAB; 20]);
         let packet = keys.protect(dcid.as_slice(), pn, false, b"hello").unwrap();
 
         let io = TestIo { packet };
-        let mut session = QuicQspSession::new(io, Cid::from([0xCD; 8]), dcid, keys, 0, pn, false);
+        let mut session = QuicQspSession::new(io, Cid::from([0xCD; 20]), dcid, keys, 0, pn, false);
         let mut buf = vec![0u8; 1500];
 
         let opened = session.recv(&mut buf).await.unwrap();
@@ -770,8 +770,8 @@ mod tests {
         )
         .unwrap();
 
-        let client_scid = Cid::from([0xA1; 8]);
-        let server_scid = Cid::from([0xB2; 8]);
+        let client_scid = Cid::from([0xA1; 20]);
+        let server_scid = Cid::from([0xB2; 20]);
         let pn = u64::from(u32::MAX) + 17;
 
         let mut client = QuicQspSession::new(
@@ -855,8 +855,8 @@ mod tests {
         )
         .unwrap();
 
-        let client_scid = Cid::from([0xA1; 8]);
-        let server_scid = Cid::from([0xB2; 8]);
+        let client_scid = Cid::from([0xA1; 20]);
+        let server_scid = Cid::from([0xB2; 20]);
 
         let mut client = QuicQspSession::new(
             ChanIo {
@@ -933,8 +933,8 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let dcid = Cid::from([0xAB; 8]);
-        let scid = Cid::from([0xCD; 8]);
+        let dcid = Cid::from([0xAB; 20]);
+        let scid = Cid::from([0xCD; 20]);
         let limits = MessageLimits::new(2048, 2048);
 
         let mut sender = QuicQspSession::new(
@@ -1007,8 +1007,8 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let dcid = Cid::from([0xAB; 8]);
-        let scid = Cid::from([0xCD; 8]);
+        let dcid = Cid::from([0xAB; 20]);
+        let scid = Cid::from([0xCD; 20]);
         let limits = MessageLimits::new(2048, 2048);
 
         let mut sender = QuicQspSession::new(
@@ -1094,8 +1094,8 @@ mod tests {
 
         let mut receiver = QuicQspSession::new(
             TestIo,
-            Cid::from([0xCD; 8]),
-            Cid::from([0xAB; 8]),
+            Cid::from([0xCD; 20]),
+            Cid::from([0xAB; 20]),
             keys_a,
             0,
             100,
@@ -1268,8 +1268,8 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let dcid = Cid::from([0xAB; 8]);
-        let scid = Cid::from([0xCD; 8]);
+        let dcid = Cid::from([0xAB; 20]);
+        let scid = Cid::from([0xCD; 20]);
 
         let mut sender = QuicQspSession::new(
             CaptureIo { sent: Vec::new() },
@@ -1339,8 +1339,8 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let dcid = Cid::from([0xAB; 8]);
-        let scid = Cid::from([0xCD; 8]);
+        let dcid = Cid::from([0xAB; 20]);
+        let scid = Cid::from([0xCD; 20]);
 
         let mut sender = QuicQspSession::new(
             CaptureIo { sent: Vec::new() },
@@ -1426,8 +1426,8 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let dcid = Cid::from([0xAB; 8]);
-        let scid = Cid::from([0xCD; 8]);
+        let dcid = Cid::from([0xAB; 20]);
+        let scid = Cid::from([0xCD; 20]);
 
         let mut sender = QuicQspSession::new(
             CaptureIo { sent: Vec::new() },
@@ -1511,8 +1511,8 @@ mod tests {
 
         let mut receiver = QuicQspSession::new(
             TestIo,
-            Cid::from([0xCD; 8]),
-            Cid::from([0xAB; 8]),
+            Cid::from([0xCD; 20]),
+            Cid::from([0xAB; 20]),
             keys_a,
             0,
             100,
@@ -1571,8 +1571,8 @@ mod tests {
 
         let mut receiver = QuicQspSession::new(
             TestIo,
-            Cid::from([0xCD; 8]),
-            Cid::from([0xAB; 8]),
+            Cid::from([0xCD; 20]),
+            Cid::from([0xAB; 20]),
             keys.clone(),
             0,
             100,
@@ -1640,8 +1640,8 @@ mod tests {
 
         let mut receiver = QuicQspSession::new(
             TestIo,
-            Cid::from([0xCD; 8]),
-            Cid::from([0xAB; 8]),
+            Cid::from([0xCD; 20]),
+            Cid::from([0xAB; 20]),
             keys_a,
             0,
             100,

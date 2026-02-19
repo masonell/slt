@@ -37,6 +37,9 @@ pub enum QspCryptoError {
     /// Crypto operation failed.
     #[error("crypto operation failed")]
     CryptoFail,
+    /// CID is invalid for the operation.
+    #[error("invalid CID")]
+    InvalidCid,
 }
 
 #[cfg(test)]

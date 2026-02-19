@@ -15,7 +15,7 @@ mod tests {
         RegisterFailCode, RegisterFailPayload, RegisterOkPayload,
     };
     use slt_core::transport::tcp::TcpChannel;
-    use slt_core::types::QUIC_DCID_PREFIX_LEN;
+    use slt_core::types::MAX_DCID_LEN;
     use tokio::io::DuplexStream;
     use tokio_boring::SslStream;
 
@@ -270,11 +270,11 @@ mod tests {
             let mut server = MockTlsServer::new(server);
 
             // Client sends REGISTER_CID
-            let dcid = slt_core::types::Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-            let scid = slt_core::types::Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+            let dcid = slt_core::types::Cid::from([0xAA; MAX_DCID_LEN]);
+            let scid = slt_core::types::Cid::from([0xBB; MAX_DCID_LEN]);
             let register = slt_core::proto::RegisterCidPayload {
-                dcid: dcid.clone(),
-                scid: scid.clone(),
+                client_to_server_cid: dcid.clone(),
+                server_to_client_cid: scid.clone(),
                 cipher: slt_core::proto::CipherSuite::Aes128Gcm,
                 hp_tx: [0x01; 16],
                 hp_rx: [0x02; 16],
@@ -310,7 +310,7 @@ mod tests {
             match msg_buf.message() {
                 Message::RegisterOk { payload } => {
                     let ok = RegisterOkPayload::decode(payload).unwrap();
-                    assert_eq!(ok.dcid, dcid);
+                    assert_eq!(ok.client_to_server_cid, dcid);
                 }
                 _ => panic!("expected REGISTER_OK, got {:?}", msg_buf.message()),
             }
@@ -323,11 +323,11 @@ mod tests {
             let mut server = MockTlsServer::new(server);
 
             // Client sends REGISTER_CID
-            let dcid = slt_core::types::Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-            let scid = slt_core::types::Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+            let dcid = slt_core::types::Cid::from([0xAA; MAX_DCID_LEN]);
+            let scid = slt_core::types::Cid::from([0xBB; MAX_DCID_LEN]);
             let register = slt_core::proto::RegisterCidPayload {
-                dcid: dcid.clone(),
-                scid,
+                client_to_server_cid: dcid.clone(),
+                server_to_client_cid: scid,
                 cipher: slt_core::proto::CipherSuite::Aes128Gcm,
                 hp_tx: [0x01; 16],
                 hp_rx: [0x02; 16],
@@ -400,14 +400,16 @@ mod tests {
         /// Test REGISTER_OK payload roundtrip.
         #[tokio::test]
         async fn register_ok_payload_roundtrip() {
-            let dcid = slt_core::types::Cid::from([0xCD; QUIC_DCID_PREFIX_LEN]);
-            let payload = RegisterOkPayload { dcid: dcid.clone() };
+            let dcid = slt_core::types::Cid::from([0xCD; MAX_DCID_LEN]);
+            let payload = RegisterOkPayload {
+                client_to_server_cid: dcid.clone(),
+            };
 
             let mut buf = Vec::new();
             payload.encode(&mut buf).unwrap();
 
             let decoded = RegisterOkPayload::decode(&buf).unwrap();
-            assert_eq!(decoded.dcid, dcid);
+            assert_eq!(decoded.client_to_server_cid, dcid);
         }
 
         /// Test REGISTER_FAIL payload roundtrip.

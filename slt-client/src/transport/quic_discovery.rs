@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use slt_core::config::ClientConfig;
 use slt_core::crypto::quic_client_chrome_config_with_ca;
 use slt_core::types::cid::CidError;
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::net::{UdpSocket, lookup_host};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -18,9 +18,9 @@ const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// QUIC connection IDs needed for UDP-QSP registration.
 #[derive(Debug, Clone)]
 pub struct QuicIds {
-    /// Destination connection ID for client->server packets.
+    /// Destination connection ID for client->server packets (must be 20 bytes).
     pub dcid: Cid,
-    /// Destination connection ID for server->client packets.
+    /// Destination connection ID for server->client packets (can be 0..=20 bytes).
     pub scid: Cid,
     /// Peer address used for QUIC discovery.
     pub peer: SocketAddr,
@@ -111,8 +111,8 @@ async fn discover_quic_ids_for_peer(
         quic_client_chrome_config_with_ca(config.tls.quic_ca.as_ref()).map_err(map_quic_error)?;
     quic_config.verify_peer(true);
 
-    let scid_bytes = build_scid();
-    let scid_conn = quiche::ConnectionId::from_ref(&scid_bytes);
+    // Use empty SCID (Chrome behavior)
+    let scid_conn = quiche::ConnectionId::from_ref(&[]);
 
     let mut conn = quiche::connect(
         Some(config.network.hostname.as_str()),
@@ -134,7 +134,16 @@ async fn discover_quic_ids_for_peer(
         }
 
         if conn.is_established() && discovered_ids.is_none() {
-            let dcid = Cid::new(conn.destination_id().as_ref()).map_err(map_cid_error)?;
+            // Pad DCID to MAX_DCID_LEN if shorter (nginx should use 20 bytes already)
+            let dcid_bytes = conn.destination_id().to_vec();
+            let dcid = if dcid_bytes.len() < MAX_DCID_LEN {
+                let mut padded = [0u8; MAX_DCID_LEN];
+                padded[..dcid_bytes.len()].copy_from_slice(&dcid_bytes);
+                fill_random(&mut padded[dcid_bytes.len()..]);
+                Cid::new(&padded).map_err(map_cid_error)?
+            } else {
+                Cid::new(&dcid_bytes).map_err(map_cid_error)?
+            };
             let scid = Cid::new(conn.source_id().as_ref()).map_err(map_cid_error)?;
             discovered_ids = Some(QuicIds {
                 dcid,
@@ -188,12 +197,6 @@ async fn discover_quic_ids_for_peer(
             }
         }
     }
-}
-
-fn build_scid() -> [u8; QUIC_DCID_PREFIX_LEN] {
-    let mut bytes = [0u8; QUIC_DCID_PREFIX_LEN];
-    fill_random(&mut bytes);
-    bytes
 }
 
 fn fill_random(buf: &mut [u8]) {

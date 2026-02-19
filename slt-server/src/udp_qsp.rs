@@ -12,6 +12,8 @@ use tracing::{debug, error, trace, warn};
 pub struct CidEntry {
     /// Opaque handle linking this CID to a connection/session.
     pub conn_handle: u64,
+    /// Pre-computed prefix for the DCID (used for classification).
+    dcid_prefix: CidPrefix,
     /// Destination connection ID for client->server packets.
     pub dcid: Cid,
     /// Destination connection ID for server->client packets.
@@ -29,8 +31,9 @@ impl CidEntry {
     ///
     /// # Errors
     ///
-    /// Returns an error if key extraction from the payload fails (see
-    /// `UdpQspKeys::from_register`).
+    /// Returns an error if:
+    /// - Key extraction from the payload fails (see `UdpQspKeys::from_register`)
+    /// - The `client_to_server_cid` is too short for prefix extraction
     pub fn from_register(
         conn_handle: u64,
         payload: &RegisterCidPayload,
@@ -39,23 +42,32 @@ impl CidEntry {
     ) -> Result<Self, QspCryptoError> {
         debug!(
             conn_handle,
-            dcid = ?payload.dcid,
-            scid = ?payload.scid,
+            dcid = ?payload.client_to_server_cid,
+            scid = ?payload.server_to_client_cid,
             pn_start,
             key_phase,
             cipher = ?payload.cipher,
             "installing UDP-QSP keys"
         );
         let keys = UdpQspKeys::from_register(payload)?;
+        let dcid_prefix = payload.client_to_server_cid.prefix().map_err(|e| {
+            error!(
+                conn_handle,
+                error = %e,
+                "failed to extract DCID prefix"
+            );
+            QspCryptoError::InvalidCid
+        })?;
         trace!(
             conn_handle,
-            dcid_prefix = ?payload.dcid.prefix(),
+            dcid_prefix = ?dcid_prefix,
             "UDP-QSP keys installed successfully"
         );
         Ok(Self {
             conn_handle,
-            dcid: payload.dcid,
-            scid: payload.scid,
+            dcid_prefix,
+            dcid: payload.client_to_server_cid,
+            scid: payload.server_to_client_cid,
             keys,
             next_pn: pn_start,
             key_phase,
@@ -155,8 +167,8 @@ impl CidEntry {
 
     /// Return the prefix used to classify the CID.
     #[must_use]
-    pub fn prefix(&self) -> CidPrefix {
-        self.dcid.prefix()
+    pub const fn prefix(&self) -> CidPrefix {
+        self.dcid_prefix
     }
 }
 
@@ -238,17 +250,16 @@ impl CidMap {
 #[cfg(test)]
 mod tests {
     use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
-    use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+    use slt_core::types::{Cid, MAX_DCID_LEN};
 
     use super::*;
 
-    #[test]
-    fn cid_map_insert_lookup_remove() {
-        let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-        let payload = RegisterCidPayload {
-            dcid,
-            scid,
+    fn make_test_payload() -> RegisterCidPayload {
+        let c2s_cid = Cid::from([0xAA; MAX_DCID_LEN]);
+        let s2c_cid = Cid::new(&[]).unwrap(); // Empty SCID
+        RegisterCidPayload {
+            client_to_server_cid: c2s_cid,
+            server_to_client_cid: s2c_cid,
             cipher: CipherSuite::Aes128Gcm,
             hp_tx: [0x01; HP_KEY_LEN],
             hp_rx: [0x02; HP_KEY_LEN],
@@ -259,74 +270,52 @@ mod tests {
             pn_start: 0,
             pn_start_rx: 0,
             key_phase: false,
-        };
+        }
+    }
 
+    #[test]
+    fn cid_map_insert_lookup_remove() {
+        let payload = make_test_payload();
         let entry = CidEntry::from_register(7, &payload, 0, false).unwrap();
         let mut map = CidMap::new();
         assert!(map.is_empty());
         map.insert(entry).unwrap();
         assert_eq!(map.len(), 1);
-        assert!(map.get(dcid.prefix()).is_some());
-        map.remove(dcid.prefix());
+        assert!(
+            map.get(payload.client_to_server_cid.prefix().unwrap())
+                .is_some()
+        );
+        map.remove(payload.client_to_server_cid.prefix().unwrap());
         assert!(map.is_empty());
     }
 
     #[test]
     fn cid_map_rejects_prefix_collision() {
-        let dcid = Cid::from([0xAB; QUIC_DCID_PREFIX_LEN]);
-        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-        let payload = RegisterCidPayload {
-            dcid,
-            scid,
-            cipher: CipherSuite::Aes128Gcm,
-            hp_tx: [0x01; HP_KEY_LEN],
-            hp_rx: [0x02; HP_KEY_LEN],
-            aead_tx: [0x03; AEAD_KEY_LEN],
-            aead_rx: [0x04; AEAD_KEY_LEN],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
-            pn_start: 0,
-            pn_start_rx: 0,
-            key_phase: false,
-        };
+        let payload = make_test_payload();
 
-        let mut longer = vec![0xAB; QUIC_DCID_PREFIX_LEN + 1];
-        longer[QUIC_DCID_PREFIX_LEN] = 0xCD;
-        let dcid_long = Cid::new(&longer).unwrap();
-        let payload_long = RegisterCidPayload {
-            dcid: dcid_long,
+        // Create a different payload with the same prefix
+        let c2s_cid = Cid::from([0xAA; MAX_DCID_LEN]); // Same prefix
+        let s2c_cid = Cid::new(&[]).unwrap();
+        let payload_collision = RegisterCidPayload {
+            client_to_server_cid: c2s_cid,
+            server_to_client_cid: s2c_cid,
             ..payload
         };
 
         let entry = CidEntry::from_register(7, &payload, 0, false).unwrap();
-        let entry_long = CidEntry::from_register(8, &payload_long, 0, false).unwrap();
+        let entry_collision = CidEntry::from_register(8, &payload_collision, 0, false).unwrap();
 
         let mut map = CidMap::new();
         map.insert(entry).unwrap();
         assert!(matches!(
-            map.insert(entry_long),
-            Err(CidMapError::PrefixCollision(prefix)) if prefix == dcid.prefix()
+            map.insert(entry_collision),
+            Err(CidMapError::PrefixCollision(prefix)) if prefix == payload.client_to_server_cid.prefix().unwrap()
         ));
     }
 
     #[test]
     fn cid_map_reports_duplicate_registration() {
-        let dcid = Cid::from([0xAB; QUIC_DCID_PREFIX_LEN]);
-        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-        let payload = RegisterCidPayload {
-            dcid,
-            scid,
-            cipher: CipherSuite::Aes128Gcm,
-            hp_tx: [0x01; HP_KEY_LEN],
-            hp_rx: [0x02; HP_KEY_LEN],
-            aead_tx: [0x03; AEAD_KEY_LEN],
-            aead_rx: [0x04; AEAD_KEY_LEN],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
-            pn_start: 0,
-            pn_start_rx: 0,
-            key_phase: false,
-        };
+        let payload = make_test_payload();
 
         let entry = CidEntry::from_register(7, &payload, 0, false).unwrap();
         let entry_dup = entry.clone();
@@ -335,29 +324,13 @@ mod tests {
         map.insert(entry).unwrap();
         assert!(matches!(
             map.insert(entry_dup),
-            Err(CidMapError::AlreadyRegistered(prefix)) if prefix == dcid.prefix()
+            Err(CidMapError::AlreadyRegistered(prefix)) if prefix == payload.client_to_server_cid.prefix().unwrap()
         ));
     }
 
     #[test]
     fn cid_entry_accepts_large_pn_start() {
-        let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-        let payload = RegisterCidPayload {
-            dcid,
-            scid,
-            cipher: CipherSuite::Aes128Gcm,
-            hp_tx: [0x01; HP_KEY_LEN],
-            hp_rx: [0x02; HP_KEY_LEN],
-            aead_tx: [0x03; AEAD_KEY_LEN],
-            aead_rx: [0x04; AEAD_KEY_LEN],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
-            pn_start: 0,
-            pn_start_rx: 0,
-            key_phase: false,
-        };
-
+        let payload = make_test_payload();
         let pn_start = u64::from(u32::MAX) + 1;
         let entry = CidEntry::from_register(7, &payload, pn_start, false).unwrap();
         assert_eq!(entry.next_pn, pn_start);
@@ -365,23 +338,7 @@ mod tests {
 
     #[test]
     fn cid_entry_rejects_pn_wrap() {
-        let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-        let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
-        let payload = RegisterCidPayload {
-            dcid,
-            scid,
-            cipher: CipherSuite::Aes128Gcm,
-            hp_tx: [0x01; HP_KEY_LEN],
-            hp_rx: [0x02; HP_KEY_LEN],
-            aead_tx: [0x03; AEAD_KEY_LEN],
-            aead_rx: [0x04; AEAD_KEY_LEN],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
-            pn_start: 0,
-            pn_start_rx: 0,
-            key_phase: false,
-        };
-
+        let payload = make_test_payload();
         let mut entry = CidEntry::from_register(7, &payload, u64::MAX, false).unwrap();
         assert_eq!(
             entry.protect(&[0xAA; 4]),

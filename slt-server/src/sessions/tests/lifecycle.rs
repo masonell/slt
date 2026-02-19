@@ -5,7 +5,7 @@ use slt_core::proto::{
     CipherSuite, CloseCode, ClosePayload, Message, PingPayload, PongPayload, decode_message,
     encode_message,
 };
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
@@ -88,8 +88,8 @@ async fn session_sends_udp_ping_on_schedule() {
     let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
         spawn_session_with_timeouts(timeouts).await;
 
-    let dcid = Cid::from([0x41; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0x42; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0x41; MAX_DCID_LEN]);
+    let scid = Cid::from([0x42; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -114,11 +114,16 @@ async fn session_sends_udp_ping_on_schedule() {
     let mut data_frame = Vec::new();
     encode_message(Message::Data { packet: &packet }, &mut data_frame).unwrap();
     let packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     let claim = UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: packet,
     };
     tx.send(SessionEvent::Udp(claim)).await.unwrap();
@@ -128,7 +133,11 @@ async fn session_sends_udp_ping_on_schedule() {
         .unwrap()
         .unwrap();
     let opened = keys
-        .open(register.dcid.len(), &packet, register.pn_start)
+        .open(
+            register.client_to_server_cid.len(),
+            &packet,
+            register.pn_start,
+        )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
     assert_eq!(consumed, opened.payload.len());
@@ -152,11 +161,16 @@ async fn session_sends_udp_ping_on_schedule() {
     )
     .unwrap();
     let packet = keys
-        .protect(register.dcid.as_slice(), 1, register.key_phase, &pong_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            1,
+            register.key_phase,
+            &pong_frame,
+        )
         .unwrap();
     let claim = UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: packet,
     };
     tx.send(SessionEvent::Udp(claim)).await.unwrap();
@@ -168,7 +182,11 @@ async fn session_sends_udp_ping_on_schedule() {
         .unwrap()
         .unwrap();
     let opened = keys
-        .open(register.dcid.len(), &packet, server_expected_pn)
+        .open(
+            register.client_to_server_cid.len(),
+            &packet,
+            server_expected_pn,
+        )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
     assert_eq!(consumed, opened.payload.len());
@@ -183,8 +201,8 @@ async fn session_cleans_registry_on_shutdown() {
     let (join, mut client, tx, _tun_rx, _udp_rx, limits, assigned, registry) =
         spawn_session().await;
 
-    let dcid = Cid::from([0x51; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0x52; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0x51; MAX_DCID_LEN]);
+    let scid = Cid::from([0x52; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -201,14 +219,14 @@ async fn session_cleans_registry_on_shutdown() {
     .unwrap();
     let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
     assert!(matches!(message, Message::RegisterOk { .. }));
-    assert!(registry.has_cid(register.dcid.prefix()));
+    assert!(registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
     assert!(registry.lookup_ip(assigned.addr()).is_some());
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
 
     assert!(registry.lookup_ip(assigned.addr()).is_none());
-    assert!(!registry.has_cid(register.dcid.prefix()));
+    assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 }
 
 #[tokio::test]
@@ -217,8 +235,8 @@ async fn session_continues_on_udp_after_tcp_close() {
         spawn_session().await;
 
     // Register UDP
-    let dcid = Cid::from([0x61; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0x62; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0x61; MAX_DCID_LEN]);
+    let scid = Cid::from([0x62; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -251,11 +269,16 @@ async fn session_continues_on_udp_after_tcp_close() {
     )
     .unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await
@@ -282,7 +305,7 @@ async fn session_continues_on_udp_after_tcp_close() {
     .unwrap();
     let udp_packet2 = keys
         .protect(
-            register.dcid.as_slice(),
+            register.client_to_server_cid.as_slice(),
             1,
             register.key_phase,
             &data_frame2,
@@ -290,7 +313,7 @@ async fn session_continues_on_udp_after_tcp_close() {
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet2,
     }))
     .await
@@ -313,8 +336,8 @@ async fn session_closes_via_udp_when_tcp_dead() {
         spawn_session().await;
 
     // Register and activate UDP
-    let dcid = Cid::from([0xC1; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xC2; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xC1; MAX_DCID_LEN]);
+    let scid = Cid::from([0xC2; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -348,11 +371,16 @@ async fn session_closes_via_udp_when_tcp_dead() {
     )
     .unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await
@@ -376,11 +404,16 @@ async fn session_closes_via_udp_when_tcp_dead() {
     let mut ping_frame = Vec::new();
     encode_message(Message::Ping { payload: &ping_buf }, &mut ping_frame).unwrap();
     let udp_ping = keys
-        .protect(register.dcid.as_slice(), 1, register.key_phase, &ping_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            1,
+            register.key_phase,
+            &ping_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_ping,
     }))
     .await
@@ -392,7 +425,11 @@ async fn session_closes_via_udp_when_tcp_dead() {
         .unwrap()
         .unwrap();
     let opened = keys
-        .open(register.dcid.len(), &packet, register.pn_start)
+        .open(
+            register.client_to_server_cid.len(),
+            &packet,
+            register.pn_start,
+        )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
     assert_eq!(consumed, opened.payload.len());

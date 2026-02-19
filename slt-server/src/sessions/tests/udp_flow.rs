@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{CipherSuite, Message, decode_message, encode_message};
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
@@ -15,8 +15,8 @@ async fn session_switches_to_udp_after_first_valid_data_claim() {
     let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
-    let dcid = Cid::from([0xCC; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xDD; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xCC; MAX_DCID_LEN]);
+    let scid = Cid::from([0xDD; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
 
     let mut reg_buf = Vec::new();
@@ -49,11 +49,16 @@ async fn session_switches_to_udp_after_first_valid_data_claim() {
     )
     .unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     let claim = UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     };
     tx.send(SessionEvent::Udp(claim)).await.unwrap();
@@ -74,7 +79,11 @@ async fn session_switches_to_udp_after_first_valid_data_claim() {
         .unwrap()
         .unwrap();
     let opened = keys
-        .open(register.dcid.len(), &packet, register.pn_start)
+        .open(
+            register.client_to_server_cid.len(),
+            &packet,
+            register.pn_start,
+        )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
     assert_eq!(consumed, opened.payload.len());
@@ -93,8 +102,8 @@ async fn session_handles_udp_pong() {
         spawn_session().await;
 
     // Register and activate UDP
-    let dcid = Cid::from([0xA1; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xA2; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xA1; MAX_DCID_LEN]);
+    let scid = Cid::from([0xA2; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -128,11 +137,16 @@ async fn session_handles_udp_pong() {
     )
     .unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await
@@ -154,11 +168,16 @@ async fn session_handles_udp_pong() {
     )
     .unwrap();
     let udp_pong = keys
-        .protect(register.dcid.as_slice(), 1, register.key_phase, &pong_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            1,
+            register.key_phase,
+            &pong_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_pong,
     }))
     .await
@@ -179,7 +198,7 @@ async fn session_handles_udp_pong() {
     .unwrap();
     let udp_packet2 = keys
         .protect(
-            register.dcid.as_slice(),
+            register.client_to_server_cid.as_slice(),
             2,
             register.key_phase,
             &data_frame2,
@@ -187,7 +206,7 @@ async fn session_handles_udp_pong() {
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet2,
     }))
     .await
@@ -209,8 +228,8 @@ async fn session_ignores_udp_control_messages() {
         spawn_session().await;
 
     // Register and activate UDP
-    let dcid = Cid::from([0xB1; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xB2; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xB1; MAX_DCID_LEN]);
+    let scid = Cid::from([0xB2; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -244,11 +263,16 @@ async fn session_ignores_udp_control_messages() {
     )
     .unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await
@@ -272,7 +296,7 @@ async fn session_ignores_udp_control_messages() {
         encode_message(msg, &mut ctrl_frame).unwrap();
         let udp_ctrl = keys
             .protect(
-                register.dcid.as_slice(),
+                register.client_to_server_cid.as_slice(),
                 (i + 1) as u64,
                 register.key_phase,
                 &ctrl_frame,
@@ -280,7 +304,7 @@ async fn session_ignores_udp_control_messages() {
             .unwrap();
         tx.send(SessionEvent::Udp(UdpClaim {
             peer,
-            dcid_prefix: register.dcid.prefix(),
+            dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
             payload: udp_ctrl,
         }))
         .await
@@ -305,7 +329,7 @@ async fn session_ignores_udp_control_messages() {
     .unwrap();
     let udp_packet2 = keys
         .protect(
-            register.dcid.as_slice(),
+            register.client_to_server_cid.as_slice(),
             6,
             register.key_phase,
             &data_frame2,
@@ -313,7 +337,7 @@ async fn session_ignores_udp_control_messages() {
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet2,
     }))
     .await

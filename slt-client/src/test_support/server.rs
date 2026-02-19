@@ -252,8 +252,10 @@ impl MockTlsServer {
         let register =
             slt_core::proto::RegisterCidPayload::decode(payload).map_err(map_payload_error)?;
 
-        let dcid = register.dcid;
-        let ok_payload = RegisterOkPayload { dcid };
+        let dcid = register.client_to_server_cid;
+        let ok_payload = RegisterOkPayload {
+            client_to_server_cid: dcid,
+        };
         let mut ok_buf = Vec::new();
         ok_payload.encode(&mut ok_buf).unwrap();
         self.write_message(Message::RegisterOk { payload: &ok_buf })

@@ -338,7 +338,7 @@ mod tests {
 
         use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
         use slt_core::proto::CipherSuite;
-        use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+        use slt_core::types::{Cid, MAX_DCID_LEN};
         use tokio::net::UdpSocket;
 
         use super::*;
@@ -352,8 +352,8 @@ mod tests {
                 let peer: std::net::SocketAddr = "127.0.0.1:443".parse().unwrap();
                 let io = crate::transport::udp_qsp::ClientUdpIo::new(socket, peer);
 
-                let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-                let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+                let dcid = Cid::from([0xAA; MAX_DCID_LEN]);
+                let scid = Cid::from([0xBB; MAX_DCID_LEN]);
 
                 let keys = UdpQspKeys::new(
                     CipherSuite::Aes128Gcm,
@@ -410,7 +410,7 @@ mod tests {
 
         use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
         use slt_core::proto::CipherSuite;
-        use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+        use slt_core::types::{Cid, MAX_DCID_LEN};
         use tokio::net::UdpSocket;
 
         use super::*;
@@ -472,8 +472,8 @@ mod tests {
                 let peer: std::net::SocketAddr = "127.0.0.1:443".parse().unwrap();
                 let io = crate::transport::udp_qsp::ClientUdpIo::new(socket, peer);
 
-                let dcid = Cid::from([0xAA; QUIC_DCID_PREFIX_LEN]);
-                let scid = Cid::from([0xBB; QUIC_DCID_PREFIX_LEN]);
+                let dcid = Cid::from([0xAA; MAX_DCID_LEN]);
+                let scid = Cid::from([0xBB; MAX_DCID_LEN]);
 
                 let keys = UdpQspKeys::new(
                     CipherSuite::Aes128Gcm,

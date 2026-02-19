@@ -261,8 +261,8 @@ mod tests {
         send_pn: u64,
         recv_expected_pn: u64,
     ) -> QuicQspSession<ChanIo> {
-        let scid = Cid::from([0xA1; 8]);
-        let dcid = Cid::from([0xB2; 8]);
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
         QuicQspSession::new(
             io,
             scid,
@@ -288,8 +288,8 @@ mod tests {
         let (c2s_tx, c2s_rx) = mpsc::channel::<Vec<u8>>(8);
         let (s2c_tx, s2c_rx) = mpsc::channel::<Vec<u8>>(8);
 
-        let scid = Cid::from([0xA1; 8]);
-        let dcid = Cid::from([0xB2; 8]);
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
 
         let client_io = ChanIo {
             tx: c2s_tx,
@@ -333,8 +333,8 @@ mod tests {
             rx: s2c_rx,
         };
 
-        let scid = Cid::from([0xA1; 8]);
-        let dcid = Cid::from([0xB2; 8]);
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
 
         let mut server_session =
             QuicQspSession::new(server_io, dcid, scid, make_server_keys(), 0, 0, false);
@@ -364,8 +364,8 @@ mod tests {
         let (c2s_tx, c2s_rx) = mpsc::channel::<Vec<u8>>(8);
         let (s2c_tx, s2c_rx) = mpsc::channel::<Vec<u8>>(8);
 
-        let scid = Cid::from([0xA1; 8]);
-        let dcid = Cid::from([0xB2; 8]);
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
 
         // Client transport
         let client_io = ChanIo {
@@ -469,8 +469,8 @@ mod tests {
         let (c2s_tx, c2s_rx) = mpsc::channel::<Vec<u8>>(8);
         let (s2c_tx, s2c_rx) = mpsc::channel::<Vec<u8>>(8);
 
-        let scid = Cid::from([0xA1; 8]);
-        let dcid = Cid::from([0xB2; 8]);
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
 
         let client_io = ChanIo {
             tx: c2s_tx,
@@ -556,8 +556,8 @@ mod tests {
         let (c2s_tx, c2s_rx) = mpsc::channel::<Vec<u8>>(8);
         let (s2c_tx, s2c_rx) = mpsc::channel::<Vec<u8>>(8);
 
-        let scid = Cid::from([0xA1; 8]);
-        let dcid = Cid::from([0xB2; 8]);
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
 
         let client_io = ChanIo {
             tx: c2s_tx,
@@ -867,8 +867,8 @@ mod real_socket_tests {
         let client_addr = client_socket.local_addr().unwrap();
         let server_addr = server_socket.local_addr().unwrap();
 
-        let scid = Cid::from([0xA1; 8]);
-        let dcid = Cid::from([0xB2; 8]);
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
 
         let client_io = ClientUdpIo::new(client_socket, server_addr);
         let client_session = QuicQspSession::new(

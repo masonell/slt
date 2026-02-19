@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{CipherSuite, Message, decode_message, encode_message};
-use slt_core::types::{Cid, QUIC_DCID_PREFIX_LEN};
+use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
@@ -16,8 +16,8 @@ async fn session_drops_udp_message_with_trailing_data() {
         spawn_session().await;
 
     // Register UDP
-    let dcid = Cid::from([0x81; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0x82; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0x81; MAX_DCID_LEN]);
+    let scid = Cid::from([0x82; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -53,11 +53,16 @@ async fn session_drops_udp_message_with_trailing_data() {
     data_frame.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // trailing garbage
 
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await
@@ -83,8 +88,8 @@ async fn session_drops_udp_replay_packet() {
         spawn_session().await;
 
     // Register and activate UDP
-    let dcid = Cid::from([0x91; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0x92; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0x91; MAX_DCID_LEN]);
+    let scid = Cid::from([0x92; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -118,11 +123,16 @@ async fn session_drops_udp_replay_packet() {
     )
     .unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet.clone(),
     }))
     .await
@@ -137,7 +147,7 @@ async fn session_drops_udp_replay_packet() {
     // Replay the same packet (same PN=0) - should be dropped
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await
@@ -159,8 +169,8 @@ async fn session_drops_udp_packet_with_bad_crypto() {
         spawn_session().await;
 
     // Register and activate UDP
-    let dcid = Cid::from([0x93; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0x94; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0x93; MAX_DCID_LEN]);
+    let scid = Cid::from([0x94; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -194,11 +204,16 @@ async fn session_drops_udp_packet_with_bad_crypto() {
     )
     .unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await
@@ -212,7 +227,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
     let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: garbage,
     }))
     .await
@@ -236,7 +251,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
     .unwrap();
     let udp_packet2 = keys
         .protect(
-            register.dcid.as_slice(),
+            register.client_to_server_cid.as_slice(),
             1,
             register.key_phase,
             &data_frame2,
@@ -244,7 +259,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet2,
     }))
     .await
@@ -266,8 +281,8 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
         spawn_session().await;
 
     // Register and activate UDP
-    let dcid = Cid::from([0xD1; QUIC_DCID_PREFIX_LEN]);
-    let scid = Cid::from([0xD2; QUIC_DCID_PREFIX_LEN]);
+    let dcid = Cid::from([0xD1; MAX_DCID_LEN]);
+    let scid = Cid::from([0xD2; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
     let mut reg_buf = Vec::new();
     register.encode(&mut reg_buf).unwrap();
@@ -286,7 +301,7 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
         decode_message(&buf, limits).unwrap().unwrap().0,
         Message::RegisterOk { .. }
     ));
-    assert!(registry.has_cid(register.dcid.prefix()));
+    assert!(registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 56789));
@@ -302,11 +317,16 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
     )
     .unwrap();
     let udp_packet = keys
-        .protect(register.dcid.as_slice(), 0, register.key_phase, &data_frame)
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            0,
+            register.key_phase,
+            &data_frame,
+        )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
-        dcid_prefix: register.dcid.prefix(),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
         payload: udp_packet,
     }))
     .await
@@ -322,7 +342,7 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
         let garbage = vec![0xBA; 32];
         tx.send(SessionEvent::Udp(UdpClaim {
             peer,
-            dcid_prefix: register.dcid.prefix(),
+            dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
             payload: garbage,
         }))
         .await
@@ -333,7 +353,7 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // CID should be removed and session should fall back to TCP
-    assert!(!registry.has_cid(register.dcid.prefix()));
+    assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 
     // Session should still accept TCP data
     let tcp_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 81), 8);

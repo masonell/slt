@@ -90,7 +90,7 @@ After `AUTH_OK`:
 ### 3.4 Payload schemas
 
 Constants:
-- `QUIC_DCID_PREFIX_LEN = 8` (classifier prefix length for UDP-QSP)
+- `QUIC_DCID_PREFIX_LEN = 20` (classifier prefix length for UDP-QSP)
 - `MAX_DCID_LEN = 20`
 - `AUTH_CHALLENGE_LEN = 32`
 - `AUTH_SIGNATURE_LEN = 64`
@@ -145,10 +145,10 @@ Empty payload (length 0).
 
 ```
 offset size field
-0      1    dcid_len (`QUIC_DCID_PREFIX_LEN`..=`MAX_DCID_LEN`)
-1      N    dcid
-1+N    1    scid_len (`QUIC_DCID_PREFIX_LEN`..=`MAX_DCID_LEN`)
-2+N    M    scid
+0      1    client_to_server_cid_len (must be exactly `MAX_DCID_LEN`)
+1      N    client_to_server_cid
+1+N    1    server_to_client_cid_len (`0`..=`MAX_DCID_LEN`)
+2+N    M    server_to_client_cid
 ...    1    cipher
 ...    16   hp_tx
 ...    16   hp_rx
@@ -161,11 +161,11 @@ offset size field
 ...    1    key_phase (0 or 1)
 ```
 
-Total length = `108 + dcid_len + scid_len` bytes.
+Total length = `109 + client_to_server_cid_len + server_to_client_cid_len` bytes.
 
 Server requirements:
-- `dcid_len` MUST be within `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
-- `scid_len` MUST be within `QUIC_DCID_PREFIX_LEN..=MAX_DCID_LEN`.
+- `client_to_server_cid_len` MUST be exactly `MAX_DCID_LEN` (20 bytes).
+- `server_to_client_cid_len` MUST be within `0..=MAX_DCID_LEN`.
 - The server MUST reject `REGISTER_CID` if another active connection already
   uses the same `QUIC_DCID_PREFIX_LEN`-byte prefix. Retransmits or
   re-registrations for the same connection MAY replace the existing entry.
@@ -174,7 +174,8 @@ Key direction:
 - For a client->server `REGISTER_CID`, `*_tx` are the keys the server uses to send
   packets to the client, and `*_rx` are the keys the server uses to open packets
   from the client. The client uses the opposite directions.
-- `dcid` is used for client->server packets; `scid` is used for server->client packets.
+- `client_to_server_cid` is used for client->server packets.
+- `server_to_client_cid` is used for server->client packets.
 - `pn_start` is the initial packet number for server->client traffic.
 - `pn_start_rx` is the initial packet number expected from the client.
 
@@ -185,8 +186,8 @@ Cipher suites:
 #### REGISTER_OK payload
 
 ```
-0: dcid_len (`QUIC_DCID_PREFIX_LEN`..=`MAX_DCID_LEN`)
-1..: dcid
+0: client_to_server_cid_len (must be exactly `MAX_DCID_LEN`)
+1..: client_to_server_cid
 ```
 
 #### REGISTER_FAIL payload (1 byte)
