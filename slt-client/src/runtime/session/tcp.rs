@@ -3,11 +3,29 @@
 use std::io;
 
 use slt_core::proto::{ClosePayload, Message, PingPayload, PongPayload};
-use tracing::{info, trace};
+use tracing::{debug, info, trace};
 
 use super::{ClientSession, SessionControl, SessionExit};
+use crate::metrics::Metrics;
 use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
+
+fn switch_to_tcp_on_server_traffic(
+    active_transport: &mut ActiveTransport,
+    metrics: &Metrics,
+    signal: &'static str,
+) {
+    if *active_transport != ActiveTransport::UdpQsp {
+        return;
+    }
+
+    debug!(
+        signal,
+        "received tcp traffic while udp-qsp is active; switching to tcp"
+    );
+    metrics.inc_transport_udp_to_tcp_server();
+    *active_transport = ActiveTransport::Tcp;
+}
 
 impl ClientSession<'_> {
     /// Processes buffered TCP data and dispatches messages.
@@ -55,9 +73,11 @@ impl ClientSession<'_> {
             Message::RegisterOk { payload } => self.handle_register_ok(payload),
             Message::RegisterFail { payload } => self.handle_register_fail(payload),
             Message::Data { packet } => {
-                if self.active_transport == ActiveTransport::UdpQsp {
-                    self.metrics.inc_transport_udp_to_tcp_server();
-                }
+                switch_to_tcp_on_server_traffic(
+                    &mut self.active_transport,
+                    self.metrics.as_ref(),
+                    "data",
+                );
                 if self
                     .tun_channels
                     .to_tun_tx
@@ -72,9 +92,11 @@ impl ClientSession<'_> {
             }
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload).map_err(wire::map_payload_error)?;
-                if self.active_transport == ActiveTransport::UdpQsp {
-                    self.metrics.inc_transport_udp_to_tcp_server();
-                }
+                switch_to_tcp_on_server_traffic(
+                    &mut self.active_transport,
+                    self.metrics.as_ref(),
+                    "ping",
+                );
                 let pong_out = PongPayload {
                     nonce: ping_in.nonce,
                 };
@@ -197,6 +219,36 @@ mod tests {
             "unexpected control message on established session",
         );
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    mod server_initiated_fallback {
+        use super::*;
+
+        #[test]
+        fn tcp_server_traffic_switches_udp_to_tcp_once() {
+            let metrics = Metrics::default();
+            let mut active_transport = ActiveTransport::UdpQsp;
+
+            switch_to_tcp_on_server_traffic(&mut active_transport, &metrics, "data");
+            switch_to_tcp_on_server_traffic(&mut active_transport, &metrics, "data");
+
+            assert_eq!(active_transport, ActiveTransport::Tcp);
+            let snapshot = metrics.snapshot();
+            assert_eq!(snapshot.transport_udp_to_tcp_server, 1);
+            assert_eq!(snapshot.transport_udp_to_tcp, 0);
+        }
+
+        #[test]
+        fn tcp_server_traffic_does_not_increment_when_already_on_tcp() {
+            let metrics = Metrics::default();
+            let mut active_transport = ActiveTransport::Tcp;
+
+            switch_to_tcp_on_server_traffic(&mut active_transport, &metrics, "ping");
+
+            assert_eq!(active_transport, ActiveTransport::Tcp);
+            let snapshot = metrics.snapshot();
+            assert_eq!(snapshot.transport_udp_to_tcp_server, 0);
+        }
     }
 
     mod classify_error {

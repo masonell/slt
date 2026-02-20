@@ -23,6 +23,21 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         match self.udp_upgrade.upgrade_id {
             Some(existing) if existing == upgrade_id => true,
             Some(existing) => {
+                if source == "upgrade_probe" {
+                    warn!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        previous_upgrade_id = existing,
+                        received_upgrade_id = upgrade_id,
+                        probe_seen = self.udp_upgrade.probe_seen,
+                        ready_seen = self.udp_upgrade.ready_seen,
+                        switch_to_udp_sent = self.udp_upgrade.switch_to_udp_sent,
+                        "observed new udp upgrade probe id; resetting stale upgrade attempt"
+                    );
+                    self.reset_udp_upgrade_state();
+                    self.udp_upgrade.upgrade_id = Some(upgrade_id);
+                    return true;
+                }
                 warn!(
                     session_id = self.session_id,
                     client_id = %self.client_id,
