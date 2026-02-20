@@ -77,8 +77,9 @@ impl ClientSession<'_> {
     ///
     /// If the session is in `Pending` state without an in-flight registration,
     /// prepares and sends `REGISTER_CID` over TCP, then stores the prepared
-    /// state with a deadline. If preparation or sending fails, schedules a retry.
-    pub(super) async fn attempt_udp_registration(&mut self) {
+    /// state with a deadline. If preparation or sending fails, retries unless
+    /// `require_udp` is enabled, in which case the session closes.
+    pub(super) async fn attempt_udp_registration(&mut self) -> SessionControl {
         let quic_ids = match &mut self.udp_state {
             UdpState::Pending {
                 quic_ids,
@@ -86,11 +87,11 @@ impl ClientSession<'_> {
                 ..
             } => {
                 if registration.is_some() {
-                    return;
+                    return SessionControl::Continue;
                 }
                 quic_ids.clone()
             }
-            _ => return,
+            _ => return SessionControl::Continue,
         };
 
         match register::start_udp_qsp_registration(&mut self.tcp, &quic_ids).await {
@@ -102,10 +103,15 @@ impl ClientSession<'_> {
                 }
             }
             Err(err) => {
-                warn!(error = %err, "register_cid failed; scheduling retry");
+                warn!(error = %err, "register_cid failed");
+                if self.config.require_udp {
+                    warn!("register_cid failed with require_udp=true");
+                    return SessionControl::Close(SessionExit::UdpUpgradeRequired);
+                }
                 self.schedule_registration_retry();
             }
         }
+        SessionControl::Continue
     }
 
     /// Schedules a QUIC discovery retry with backoff.
@@ -271,10 +277,68 @@ impl ClientSession<'_> {
         }
 
         let fail = RegisterFailPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
-        warn!(code = ?fail.code, "register_cid rejected; scheduling retry");
+        warn!(code = ?fail.code, "register_cid rejected");
         self.metrics.inc_udp_register_failure();
+        if self.config.require_udp {
+            warn!(code = ?fail.code, "register_cid rejected with require_udp=true");
+            return Ok(SessionControl::Close(SessionExit::UdpUpgradeRequired));
+        }
         self.schedule_registration_retry();
         Ok(SessionControl::Continue)
+    }
+
+    /// Handles registration timeout for in-flight `REGISTER_CID`.
+    ///
+    /// If registration is in flight, retries unless `require_udp` is enabled,
+    /// in which case the session closes.
+    pub(super) fn handle_registration_timeout(&mut self) -> SessionControl {
+        if !matches!(
+            &self.udp_state,
+            UdpState::Pending {
+                registration: Some(_),
+                ..
+            }
+        ) {
+            return SessionControl::Continue;
+        }
+
+        warn!("register_cid timed out");
+        if self.config.require_udp {
+            warn!("register_cid timed out with require_udp=true");
+            return SessionControl::Close(SessionExit::UdpUpgradeRequired);
+        }
+        self.schedule_registration_retry();
+        SessionControl::Continue
+    }
+
+    /// Handles completion of QUIC discovery.
+    ///
+    /// Installs discovered IDs on success. On failure, retries discovery unless
+    /// `require_udp` is enabled, in which case the session closes.
+    pub(super) fn handle_discovery_result(
+        &mut self,
+        maybe_ids: Option<quic::QuicIds>,
+    ) -> SessionControl {
+        if let Some(ids) = maybe_ids {
+            self.udp_state = UdpState::Pending {
+                quic_ids: ids,
+                backoff: ReconnectBackoff::new(
+                    self.config.timing.reconnect_min,
+                    self.config.timing.reconnect_max,
+                ),
+                reconnect_at: Instant::now(),
+                registration: None,
+            };
+            return SessionControl::Continue;
+        }
+
+        self.metrics.inc_udp_discovery_failure();
+        if self.config.require_udp {
+            warn!("quic dcid discovery failed with require_udp=true");
+            return SessionControl::Close(SessionExit::UdpUpgradeRequired);
+        }
+        self.schedule_discovery_retry();
+        SessionControl::Continue
     }
 
     pub(super) async fn handle_udp_upgrade_tick(&mut self) -> io::Result<SessionControl> {

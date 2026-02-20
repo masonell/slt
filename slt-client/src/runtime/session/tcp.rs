@@ -14,9 +14,9 @@ fn switch_to_tcp_on_server_traffic(
     active_transport: &mut ActiveTransport,
     metrics: &Metrics,
     signal: &'static str,
-) {
+) -> bool {
     if *active_transport != ActiveTransport::UdpQsp {
-        return;
+        return false;
     }
 
     debug!(
@@ -25,6 +25,7 @@ fn switch_to_tcp_on_server_traffic(
     );
     metrics.inc_transport_udp_to_tcp_server();
     *active_transport = ActiveTransport::Tcp;
+    true
 }
 
 impl ClientSession<'_> {
@@ -73,11 +74,14 @@ impl ClientSession<'_> {
             Message::RegisterOk { payload } => self.handle_register_ok(payload),
             Message::RegisterFail { payload } => self.handle_register_fail(payload),
             Message::Data { packet } => {
-                switch_to_tcp_on_server_traffic(
+                if switch_to_tcp_on_server_traffic(
                     &mut self.active_transport,
                     self.metrics.as_ref(),
                     "data",
-                );
+                ) {
+                    self.note_tcp_activity();
+                    self.schedule_discovery_retry();
+                }
                 if self
                     .tun_channels
                     .to_tun_tx
@@ -92,11 +96,14 @@ impl ClientSession<'_> {
             }
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload).map_err(wire::map_payload_error)?;
-                switch_to_tcp_on_server_traffic(
+                if switch_to_tcp_on_server_traffic(
                     &mut self.active_transport,
                     self.metrics.as_ref(),
                     "ping",
-                );
+                ) {
+                    self.note_tcp_activity();
+                    self.schedule_discovery_retry();
+                }
                 let pong_out = PongPayload {
                     nonce: ping_in.nonce,
                 };
@@ -232,8 +239,16 @@ mod tests {
             let metrics = Metrics::default();
             let mut active_transport = ActiveTransport::UdpQsp;
 
-            switch_to_tcp_on_server_traffic(&mut active_transport, &metrics, "data");
-            switch_to_tcp_on_server_traffic(&mut active_transport, &metrics, "data");
+            assert!(switch_to_tcp_on_server_traffic(
+                &mut active_transport,
+                &metrics,
+                "data"
+            ));
+            assert!(!switch_to_tcp_on_server_traffic(
+                &mut active_transport,
+                &metrics,
+                "data"
+            ));
 
             assert_eq!(active_transport, ActiveTransport::Tcp);
             let snapshot = metrics.snapshot();
@@ -246,7 +261,11 @@ mod tests {
             let metrics = Metrics::default();
             let mut active_transport = ActiveTransport::Tcp;
 
-            switch_to_tcp_on_server_traffic(&mut active_transport, &metrics, "ping");
+            assert!(!switch_to_tcp_on_server_traffic(
+                &mut active_transport,
+                &metrics,
+                "ping"
+            ));
 
             assert_eq!(active_transport, ActiveTransport::Tcp);
             let snapshot = metrics.snapshot();

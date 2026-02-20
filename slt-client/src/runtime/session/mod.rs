@@ -351,42 +351,16 @@ impl<'a> ClientSession<'a> {
                     }
                     UdpState::Pending { .. } => {
                         debug!("udp reconnect tick; attempting registration");
-                        self.attempt_udp_registration().await;
+                        return Ok(self.attempt_udp_registration().await);
                     }
                     _ => {}
                 }
                 Ok(SessionControl::Continue)
             }
-            SessionEvent::RegisterTimeout => {
-                if matches!(
-                    &self.udp_state,
-                    UdpState::Pending {
-                        registration: Some(_),
-                        ..
-                    }
-                ) {
-                    warn!("register_cid timed out; scheduling retry");
-                    self.schedule_registration_retry();
-                }
-                Ok(SessionControl::Continue)
-            }
+            SessionEvent::RegisterTimeout => Ok(self.handle_registration_timeout()),
             SessionEvent::DiscoveryResult(maybe_ids) => {
                 self.discovery_task = None; // Clear the completed task
-                if let Some(ids) = maybe_ids {
-                    self.udp_state = UdpState::Pending {
-                        quic_ids: ids,
-                        backoff: ReconnectBackoff::new(
-                            self.config.timing.reconnect_min,
-                            self.config.timing.reconnect_max,
-                        ),
-                        reconnect_at: Instant::now(),
-                        registration: None,
-                    };
-                } else {
-                    self.metrics.inc_udp_discovery_failure();
-                    self.schedule_discovery_retry();
-                }
-                Ok(SessionControl::Continue)
+                Ok(self.handle_discovery_result(maybe_ids))
             }
             SessionEvent::UdpUpgradeTick => self.handle_udp_upgrade_tick().await,
         }
