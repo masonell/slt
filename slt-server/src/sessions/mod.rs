@@ -8,6 +8,7 @@ mod udp;
 mod udp_io;
 mod upgrade;
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,12 +37,13 @@ use super::router::PacketRouter;
 use super::{AssignedIp, ClientId};
 use crate::tun::TunDeviceIo;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct UdpUpgradeState {
     upgrade_id: Option<u64>,
     probe_seen: bool,
     ready_seen: bool,
     switch_to_udp_sent: bool,
+    stale_upgrade_ids: VecDeque<u64>,
 }
 
 /// Core session structure for an authenticated VPN client.

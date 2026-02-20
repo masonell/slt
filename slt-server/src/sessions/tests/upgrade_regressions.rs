@@ -755,3 +755,231 @@ async fn session_allows_new_upgrade_id_after_uncommitted_switch() {
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
 }
+
+#[tokio::test]
+async fn session_ignores_delayed_probe_for_superseded_upgrade_id() {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, assigned, _registry) =
+        spawn_session().await;
+
+    let dcid = Cid::from([0xEB; MAX_DCID_LEN]);
+    let scid = Cid::from([0xEC; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut reg_buf = Vec::new();
+    register.encode(&mut reg_buf).unwrap();
+    write_tcp_message(&mut client, Message::RegisterCid { payload: &reg_buf }).await;
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let peer = SocketAddr::from(([127, 0, 0, 1], 58321));
+
+    let first_upgrade_id = 0xD100;
+    let first_probe_nonce = 0xCCCC_0001u64;
+    let first_probe = UpgradeProbePayload {
+        upgrade_id: first_upgrade_id,
+        nonce: first_probe_nonce,
+    };
+    let mut first_probe_payload = Vec::new();
+    first_probe.encode(&mut first_probe_payload);
+    send_udp_message(
+        &tx,
+        &keys,
+        &register,
+        peer,
+        register.pn_start_rx,
+        Message::UpgradeProbe {
+            payload: &first_probe_payload,
+        },
+    )
+    .await;
+
+    let ack_packet_1 = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ack_opened_1 = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &ack_packet_1,
+            register.pn_start,
+        )
+        .unwrap();
+    match decode_single_message(&ack_opened_1.payload, limits) {
+        Message::UpgradeProbeAck { payload } => {
+            let ack = UpgradeProbeAckPayload::decode(payload).unwrap();
+            assert_eq!(ack.upgrade_id, first_upgrade_id);
+            assert_eq!(ack.nonce, first_probe_nonce);
+        }
+        _ => panic!("expected upgrade_probe_ack for first attempt"),
+    }
+
+    let ready_first = UdpReadyPayload {
+        upgrade_id: first_upgrade_id,
+    };
+    let mut ready_first_payload = Vec::new();
+    ready_first.encode(&mut ready_first_payload);
+    write_tcp_message(
+        &mut client,
+        Message::UdpReady {
+            payload: &ready_first_payload,
+        },
+    )
+    .await;
+
+    let switch_first = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    match decode_message(&switch_first, limits).unwrap().unwrap().0 {
+        Message::SwitchToUdp { payload } => {
+            let switch = SwitchToUdpPayload::decode(payload).unwrap();
+            assert_eq!(switch.upgrade_id, first_upgrade_id);
+        }
+        _ => panic!("expected first switch_to_udp"),
+    }
+
+    let second_upgrade_id = 0xD101;
+    let second_probe_nonce = 0xDDDD_0002u64;
+    let second_probe = UpgradeProbePayload {
+        upgrade_id: second_upgrade_id,
+        nonce: second_probe_nonce,
+    };
+    let mut second_probe_payload = Vec::new();
+    second_probe.encode(&mut second_probe_payload);
+    send_udp_message(
+        &tx,
+        &keys,
+        &register,
+        peer,
+        register.pn_start_rx + 1,
+        Message::UpgradeProbe {
+            payload: &second_probe_payload,
+        },
+    )
+    .await;
+
+    let ack_packet_2 = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ack_opened_2 = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &ack_packet_2,
+            ack_opened_1.pn + 1,
+        )
+        .unwrap();
+    match decode_single_message(&ack_opened_2.payload, limits) {
+        Message::UpgradeProbeAck { payload } => {
+            let ack = UpgradeProbeAckPayload::decode(payload).unwrap();
+            assert_eq!(ack.upgrade_id, second_upgrade_id);
+            assert_eq!(ack.nonce, second_probe_nonce);
+        }
+        _ => panic!("expected upgrade_probe_ack for second attempt"),
+    }
+
+    let ready_second = UdpReadyPayload {
+        upgrade_id: second_upgrade_id,
+    };
+    let mut ready_second_payload = Vec::new();
+    ready_second.encode(&mut ready_second_payload);
+    write_tcp_message(
+        &mut client,
+        Message::UdpReady {
+            payload: &ready_second_payload,
+        },
+    )
+    .await;
+
+    let switch_second = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    match decode_message(&switch_second, limits).unwrap().unwrap().0 {
+        Message::SwitchToUdp { payload } => {
+            let switch = SwitchToUdpPayload::decode(payload).unwrap();
+            assert_eq!(switch.upgrade_id, second_upgrade_id);
+        }
+        _ => panic!("expected second switch_to_udp"),
+    }
+
+    // Delayed probe from a superseded attempt must not overwrite the active attempt.
+    let delayed_probe = UpgradeProbePayload {
+        upgrade_id: first_upgrade_id,
+        nonce: 0xEEEE_0003,
+    };
+    let mut delayed_probe_payload = Vec::new();
+    delayed_probe.encode(&mut delayed_probe_payload);
+    send_udp_message(
+        &tx,
+        &keys,
+        &register,
+        peer,
+        register.pn_start_rx + 2,
+        Message::UpgradeProbe {
+            payload: &delayed_probe_payload,
+        },
+    )
+    .await;
+
+    assert!(
+        timeout(Duration::from_millis(250), udp_rx.recv())
+            .await
+            .is_err(),
+        "delayed superseded probe unexpectedly produced an ack"
+    );
+
+    let switch_ack = SwitchAckPayload {
+        upgrade_id: second_upgrade_id,
+    };
+    let mut switch_ack_payload = Vec::new();
+    switch_ack.encode(&mut switch_ack_payload);
+    write_tcp_message(
+        &mut client,
+        Message::SwitchAck {
+            payload: &switch_ack_payload,
+        },
+    )
+    .await;
+    wait_for_switch_commit_barrier(&mut client, limits).await;
+
+    let udp_expected_pn = ack_opened_2.pn + 1;
+    let downlink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 205), 12);
+    tx.send(SessionEvent::TunPacket(downlink_packet.clone()))
+        .await
+        .unwrap();
+    let packet = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let opened = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &packet,
+            udp_expected_pn,
+        )
+        .unwrap();
+    match decode_single_message(&opened.payload, limits) {
+        Message::Data { packet } => assert_eq!(packet, downlink_packet.as_slice()),
+        _ => panic!("expected udp data after second upgrade commit"),
+    }
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    let _ = join.await.unwrap();
+}

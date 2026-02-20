@@ -12,6 +12,8 @@ use tracing::{debug, info, warn};
 use super::{ClientSessionBase, SessionControl, UdpSocketIo, map_payload_error};
 use crate::tun::TunDeviceIo;
 
+const MAX_STALE_UPGRADE_IDS: usize = 16;
+
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
     ClientSessionBase<T, S, U>
 {
@@ -19,7 +21,34 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         self.udp_upgrade = super::UdpUpgradeState::default();
     }
 
+    const fn reset_udp_upgrade_attempt_preserving_history(&mut self) {
+        self.udp_upgrade.upgrade_id = None;
+        self.udp_upgrade.probe_seen = false;
+        self.udp_upgrade.ready_seen = false;
+        self.udp_upgrade.switch_to_udp_sent = false;
+    }
+
+    fn remember_stale_upgrade_id(&mut self, upgrade_id: u64) {
+        if self.udp_upgrade.stale_upgrade_ids.contains(&upgrade_id) {
+            return;
+        }
+        if self.udp_upgrade.stale_upgrade_ids.len() >= MAX_STALE_UPGRADE_IDS {
+            let _ = self.udp_upgrade.stale_upgrade_ids.pop_front();
+        }
+        self.udp_upgrade.stale_upgrade_ids.push_back(upgrade_id);
+    }
+
     fn note_upgrade_id(&mut self, upgrade_id: u64, source: &'static str) -> bool {
+        if source == "upgrade_probe" && self.udp_upgrade.stale_upgrade_ids.contains(&upgrade_id) {
+            debug!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                upgrade_id,
+                "ignoring stale udp upgrade probe id from superseded attempt"
+            );
+            return false;
+        }
+
         match self.udp_upgrade.upgrade_id {
             Some(existing) if existing == upgrade_id => true,
             Some(existing) => {
@@ -32,9 +61,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                         probe_seen = self.udp_upgrade.probe_seen,
                         ready_seen = self.udp_upgrade.ready_seen,
                         switch_to_udp_sent = self.udp_upgrade.switch_to_udp_sent,
-                        "observed new udp upgrade probe id; resetting stale upgrade attempt"
+                        "observed new udp upgrade probe id; superseding current upgrade attempt"
                     );
-                    self.reset_udp_upgrade_state();
+                    self.remember_stale_upgrade_id(existing);
+                    self.reset_udp_upgrade_attempt_preserving_history();
                     self.udp_upgrade.upgrade_id = Some(upgrade_id);
                     return true;
                 }
@@ -127,7 +157,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             upgrade_id = ack.upgrade_id,
             "udp upgrade committed"
         );
-        self.reset_udp_upgrade_state();
+        self.remember_stale_upgrade_id(ack.upgrade_id);
+        self.reset_udp_upgrade_attempt_preserving_history();
         Ok(SessionControl::Continue)
     }
 

@@ -438,6 +438,10 @@ On `AUTH_OK`, the session is authenticated and TCP data is permitted.
 9) Client commits local data transport to UDP-QSP only after receiving the matching
    barrier `PONG`.
 
+During the transition between `SWITCH_ACK` and barrier confirmation, either side
+MAY temporarily drop `DATA` received on the inactive transport. This switchover
+window should be kept short.
+
 The server MUST NOT treat UDP-QSP as active before `SWITCH_ACK` commit. Control
 messages remain split by transport: probes on UDP, commit on TCP.
 
