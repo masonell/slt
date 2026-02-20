@@ -65,6 +65,9 @@ pub enum ConfigError {
     /// UDP NAT max entries is zero.
     #[error("udp_nat_max_entries must be greater than zero")]
     ZeroUdpNatMaxEntries,
+    /// `require_udp` cannot be enabled when UDP upgrade is disabled.
+    #[error("require_udp=true requires enable_upgrade=true")]
+    RequireUdpNeedsUpgrade,
     /// A timeout field is zero.
     #[error("{field} must be greater than zero")]
     ZeroTimeout {
@@ -186,6 +189,14 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("udp_nat_max_entries"));
         assert!(msg.contains("greater than zero"));
+    }
+
+    #[test]
+    fn config_error_require_udp_needs_upgrade_display() {
+        let err = ConfigError::RequireUdpNeedsUpgrade;
+        let msg = err.to_string();
+        assert!(msg.contains("require_udp=true"));
+        assert!(msg.contains("enable_upgrade=true"));
     }
 
     #[test]

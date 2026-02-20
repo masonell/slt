@@ -4,19 +4,40 @@ use std::io;
 use std::time::Instant;
 
 use slt_core::proto::{
-    Message, RegisterFailPayload, RegisterOkPayload, SwitchAckPayload, SwitchToUdpPayload,
-    UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
+    Message, PingPayload, RegisterFailPayload, RegisterOkPayload, SwitchAckPayload,
+    SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
 };
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
 use super::{ClientSession, SessionControl, SessionExit, UdpState};
-use crate::runtime::session::state::{PendingUdpQspRegistration, UdpUpgradeState};
+use crate::runtime::session::state::{ActiveTransport, PendingUdpQspRegistration, UdpUpgradeState};
 use crate::runtime::{ReconnectBackoff, register};
 use crate::transport::quic_discovery as quic;
 use crate::transport::udp_qsp::UdpQspTransport;
 
 const MAX_UPGRADE_PROBES: u32 = 8;
+
+const fn upgrade_id_from_active_upgrade_state(state: &UdpUpgradeState) -> Option<u64> {
+    match state {
+        UdpUpgradeState::Upgrading { upgrade_id, .. }
+        | UdpUpgradeState::AwaitingSwitchCommit { upgrade_id, .. } => Some(*upgrade_id),
+        UdpUpgradeState::Disabled
+        | UdpUpgradeState::Idle
+        | UdpUpgradeState::TcpOnlyBlockedUdp { .. } => None,
+    }
+}
+
+const fn barrier_upgrade_id_for_nonce(state: &UdpUpgradeState, nonce: u64) -> Option<u64> {
+    match state {
+        UdpUpgradeState::AwaitingSwitchCommit {
+            upgrade_id,
+            barrier_nonce,
+            ..
+        } if *barrier_nonce == nonce => Some(*upgrade_id),
+        _ => None,
+    }
+}
 
 impl ClientSession<'_> {
     /// Spawns a QUIC discovery task.
@@ -92,7 +113,7 @@ impl ClientSession<'_> {
     /// Transitions to `NeedDiscovery` state (if not already) and sets the
     /// reconnect deadline using exponential backoff with jitter.
     pub(super) fn schedule_discovery_retry(&mut self) {
-        self.udp_upgrade = if self.config.enable_upgrade {
+        self.udp_upgrade = if self.config.enable_upgrade || self.config.require_udp {
             UdpUpgradeState::Idle
         } else {
             UdpUpgradeState::Disabled
@@ -295,6 +316,12 @@ impl ClientSession<'_> {
                 self.send_upgrade_probe(now).await?;
                 Ok(SessionControl::Continue)
             }
+            UdpUpgradeState::AwaitingSwitchCommit { deadline, .. } => {
+                if now >= *deadline {
+                    return Ok(self.handle_udp_upgrade_timeout("switch_commit_timeout"));
+                }
+                Ok(SessionControl::Continue)
+            }
         }
     }
 
@@ -348,10 +375,7 @@ impl ClientSession<'_> {
     }
 
     fn handle_udp_upgrade_timeout(&mut self, reason: &'static str) -> SessionControl {
-        let upgrade_id = match self.udp_upgrade {
-            UdpUpgradeState::Upgrading { upgrade_id, .. } => Some(upgrade_id),
-            _ => None,
-        };
+        let upgrade_id = upgrade_id_from_active_upgrade_state(&self.udp_upgrade);
 
         if self.config.require_udp {
             warn!(
@@ -444,10 +468,11 @@ impl ClientSession<'_> {
     ) -> io::Result<SessionControl> {
         let switch = SwitchToUdpPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
 
-        if let UdpUpgradeState::Upgrading {
+        let deadline = if let UdpUpgradeState::Upgrading {
             upgrade_id,
             probe_acked,
             ready_sent,
+            deadline,
             ..
         } = &self.udp_upgrade
         {
@@ -468,32 +493,64 @@ impl ClientSession<'_> {
                 );
                 return Ok(SessionControl::Continue);
             }
+            *deadline
         } else {
             trace!(
                 upgrade_id = switch.upgrade_id,
                 "ignoring switch_to_udp without active upgrade"
             );
             return Ok(SessionControl::Continue);
-        }
+        };
 
         let ack = SwitchAckPayload {
             upgrade_id: switch.upgrade_id,
         };
-        let mut buf = Vec::with_capacity(8);
-        ack.encode(&mut buf);
+        let mut switch_ack_buf = Vec::with_capacity(8);
+        ack.encode(&mut switch_ack_buf);
         self.tcp
-            .write_message(Message::SwitchAck { payload: &buf })
+            .write_message(Message::SwitchAck {
+                payload: &switch_ack_buf,
+            })
             .await?;
 
-        if self.active_transport != crate::runtime::session::state::ActiveTransport::UdpQsp {
+        let barrier_nonce = fastrand::u64(..);
+        let barrier_ping = PingPayload {
+            nonce: barrier_nonce,
+        };
+        let mut barrier_ping_buf = Vec::with_capacity(8);
+        barrier_ping.encode(&mut barrier_ping_buf);
+        self.tcp
+            .write_message(Message::Ping {
+                payload: &barrier_ping_buf,
+            })
+            .await?;
+
+        self.udp_upgrade = UdpUpgradeState::AwaitingSwitchCommit {
+            upgrade_id: switch.upgrade_id,
+            barrier_nonce,
+            deadline,
+        };
+        info!(
+            upgrade_id = switch.upgrade_id,
+            barrier_nonce, "sent switch_ack; awaiting tcp barrier pong before udp commit"
+        );
+        Ok(SessionControl::Continue)
+    }
+
+    pub(super) fn maybe_commit_udp_upgrade_on_barrier_pong(&mut self, nonce: u64) -> bool {
+        let Some(upgrade_id) = barrier_upgrade_id_for_nonce(&self.udp_upgrade, nonce) else {
+            return false;
+        };
+
+        if self.active_transport != ActiveTransport::UdpQsp {
             self.metrics.inc_transport_tcp_to_udp();
-            self.active_transport = crate::runtime::session::state::ActiveTransport::UdpQsp;
+            self.active_transport = ActiveTransport::UdpQsp;
         }
         self.last_udp_rx = Instant::now();
         self.udp_upgrade = UdpUpgradeState::Idle;
         self.udp_upgrade_backoff.reset();
-        info!(upgrade_id = switch.upgrade_id, "udp upgrade committed");
-        Ok(SessionControl::Continue)
+        info!(upgrade_id, "udp upgrade committed");
+        true
     }
 }
 
@@ -503,6 +560,33 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    mod upgrade_state_helpers {
+        use std::time::Instant;
+
+        use super::*;
+
+        #[test]
+        fn active_upgrade_id_includes_waiting_commit_state() {
+            let waiting = UdpUpgradeState::AwaitingSwitchCommit {
+                upgrade_id: 0xAA,
+                barrier_nonce: 0xBB,
+                deadline: Instant::now(),
+            };
+            assert_eq!(upgrade_id_from_active_upgrade_state(&waiting), Some(0xAA));
+        }
+
+        #[test]
+        fn barrier_nonce_must_match_to_commit() {
+            let waiting = UdpUpgradeState::AwaitingSwitchCommit {
+                upgrade_id: 11,
+                barrier_nonce: 22,
+                deadline: Instant::now(),
+            };
+            assert_eq!(barrier_upgrade_id_for_nonce(&waiting, 22), Some(11));
+            assert_eq!(barrier_upgrade_id_for_nonce(&waiting, 23), None);
+        }
+    }
 
     mod register_fail_payload_decode {
         use slt_core::proto::{RegisterFailCode, RegisterFailPayload};

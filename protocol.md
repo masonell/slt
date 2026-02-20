@@ -215,8 +215,11 @@ nonce: u64 (big-endian)
 ```
 
 `PONG` MUST echo the received `PING` nonce. Clients need not validate the
-nonce on receipt: transport security (TLS on TCP, AEAD on UDP-QSP) prevents
-injection, and a late PONG with a stale nonce still proves liveness.
+nonce on receipt for ordinary keepalive traffic: transport security (TLS on
+TCP, AEAD on UDP-QSP) prevents injection, and a late PONG with a stale nonce
+still proves liveness. Exception: when PING/PONG is used as a switch-commit
+barrier in Section 5.2, the client MUST validate the barrier nonce before
+committing local data transport to UDP-QSP.
 
 #### UPGRADE_PROBE / UPGRADE_PROBE_ACK payload (16 bytes)
 
@@ -430,8 +433,10 @@ On `AUTH_OK`, the session is authenticated and TCP data is permitted.
 6) Server sends TCP `SWITCH_TO_UDP(upgrade_id)` only after both conditions are true:
    - a valid UDP probe was observed
    - matching `UDP_READY` was observed on TCP
-7) Client commits by sending TCP `SWITCH_ACK(upgrade_id)`.
-8) Both sides treat UDP-QSP as active only after `SWITCH_ACK` is processed.
+7) Client sends TCP `SWITCH_ACK(upgrade_id)`, then sends a TCP `PING(barrier_nonce)`.
+8) Server processes `SWITCH_ACK` and commits to UDP-QSP, then answers `PONG(barrier_nonce)`.
+9) Client commits local data transport to UDP-QSP only after receiving the matching
+   barrier `PONG`.
 
 The server MUST NOT treat UDP-QSP as active before `SWITCH_ACK` commit. Control
 messages remain split by transport: probes on UDP, commit on TCP.

@@ -109,6 +109,9 @@ impl ClientSession<'_> {
             }
             Message::Pong { payload } => {
                 let pong_in = PongPayload::decode(payload).map_err(wire::map_payload_error)?;
+                if self.maybe_commit_udp_upgrade_on_barrier_pong(pong_in.nonce) {
+                    return Ok(SessionControl::Continue);
+                }
                 trace!(nonce = pong_in.nonce, "received pong");
                 Ok(SessionControl::Continue)
             }

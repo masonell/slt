@@ -122,6 +122,15 @@ pub(super) enum UdpUpgradeState {
         /// Probe retransmit backoff.
         probe_backoff: ReconnectBackoff,
     },
+    /// Switch was acknowledged on TCP; wait for commit barrier pong.
+    AwaitingSwitchCommit {
+        /// Attempt identifier shared across probe/ack/ready/switch.
+        upgrade_id: u64,
+        /// Nonce used for the TCP ping/pong commit barrier.
+        barrier_nonce: u64,
+        /// Hard deadline for this attempt.
+        deadline: Instant,
+    },
     /// Upgrade is temporarily blocked after timeout/failure.
     TcpOnlyBlockedUdp {
         /// Earliest time to start another upgrade attempt.
@@ -146,6 +155,7 @@ impl UdpUpgradeState {
                     Some((*next_probe_at).min(*deadline))
                 }
             }
+            Self::AwaitingSwitchCommit { deadline, .. } => Some(*deadline),
             Self::TcpOnlyBlockedUdp { retry_at } => Some(*retry_at),
         }
     }
@@ -191,6 +201,42 @@ mod tests {
             let tcp = ActiveTransport::Tcp;
             let _tcp_copy: ActiveTransport = tcp;
             assert!(format!("{tcp:?}").contains("Tcp"));
+        }
+    }
+
+    mod udp_upgrade_state {
+        use std::time::{Duration, Instant};
+
+        use super::*;
+
+        #[test]
+        fn awaiting_switch_commit_timer_uses_deadline() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let state = UdpUpgradeState::AwaitingSwitchCommit {
+                upgrade_id: 7,
+                barrier_nonce: 9,
+                deadline,
+            };
+            assert_eq!(state.timer_at(), Some(deadline));
+        }
+
+        #[test]
+        fn upgrading_with_probe_acked_uses_deadline() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let state = UdpUpgradeState::Upgrading {
+                upgrade_id: 7,
+                deadline,
+                attempts: 2,
+                next_probe_at: Instant::now() + Duration::from_secs(1),
+                last_probe_nonce: 11,
+                probe_acked: true,
+                ready_sent: true,
+                probe_backoff: ReconnectBackoff::new(
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                ),
+            };
+            assert_eq!(state.timer_at(), Some(deadline));
         }
     }
 

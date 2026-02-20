@@ -40,12 +40,16 @@ impl ClientConfig {
     /// - `InvalidTunMtu` if `tun_mtu` is out of range
     /// - `InvalidPingInterval` if `ping_min` > `ping_max`
     /// - `InvalidReconnectInterval` if `reconnect_min` > `reconnect_max`
+    /// - `RequireUdpNeedsUpgrade` if `require_udp` is true but `enable_upgrade` is false
     /// - `ZeroTimeout` if any timeout is zero
     /// - `TimeoutTooLarge` if any timeout exceeds 1 hour
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.network.validate()?;
         self.tun.validate()?;
         self.timing.validate()?;
+        if self.require_udp && !self.enable_upgrade {
+            return Err(ConfigError::RequireUdpNeedsUpgrade);
+        }
         Ok(())
     }
 
@@ -143,5 +147,14 @@ mod tests {
         config.timing.reconnect_max = Duration::from_millis(100);
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::InvalidReconnectInterval { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_require_udp_without_upgrade() {
+        let mut config = test_config();
+        config.enable_upgrade = false;
+        config.require_udp = true;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::RequireUdpNeedsUpgrade));
     }
 }

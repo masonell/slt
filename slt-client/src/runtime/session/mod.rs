@@ -65,7 +65,7 @@ impl<'a> ClientSession<'a> {
     ///
     /// Initializes the session with the given TCP transport, configuration,
     /// TUN channels, and cancellation token. UDP state is initialized based
-    /// on the `enable_upgrade` configuration option.
+    /// on the effective upgrade policy (`enable_upgrade || require_udp`).
     pub(super) fn new(
         config: &'a ClientConfig,
         tcp: TcpSession,
@@ -75,8 +75,9 @@ impl<'a> ClientSession<'a> {
     ) -> Self {
         let now = Instant::now();
         let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
+        let upgrade_enabled = config.enable_upgrade || config.require_udp;
 
-        let udp_state = if config.enable_upgrade {
+        let udp_state = if upgrade_enabled {
             UdpState::NeedDiscovery {
                 backoff: ReconnectBackoff::new(
                     config.timing.reconnect_min,
@@ -87,7 +88,7 @@ impl<'a> ClientSession<'a> {
         } else {
             UdpState::Disabled
         };
-        let udp_upgrade = if config.enable_upgrade {
+        let udp_upgrade = if upgrade_enabled {
             UdpUpgradeState::Idle
         } else {
             UdpUpgradeState::Disabled
