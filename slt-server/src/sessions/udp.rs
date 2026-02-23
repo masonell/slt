@@ -166,8 +166,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
 
     /// Decodes a VPN message from the decrypted UDP payload.
     ///
-    /// Parses the message and validates that no trailing data remains
-    /// (which would indicate malformed or padded input).
+    /// Parses the first message and ignores trailing bytes.
+    ///
+    /// UDP-QSP payloads may carry trailing bytes after the first frame
+    /// (for example, padding added to satisfy header-protection sampling rules).
+    /// Per protocol, receivers decode the first frame and ignore the rest.
     ///
     /// # Parameters
     ///
@@ -177,15 +180,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     ///
     /// * `Ok(Some(message))` - A valid message was decoded
     /// * `Ok(None)` - The payload was empty or incomplete
-    /// * `Err(io::Error)` - The message was malformed or had trailing data
+    /// * `Err(io::Error)` - The message was malformed
     fn decode_udp_message<'a>(&self, payload: &'a [u8]) -> io::Result<Option<Message<'a>>> {
         let decoded = decode_message(payload, self.limits).map_err(map_message_error)?;
-        let Some((message, consumed)) = decoded else {
+        let Some((message, _consumed)) = decoded else {
             return Ok(None);
         };
-        if consumed != payload.len() {
-            return Ok(None);
-        }
         Ok(Some(message))
     }
 

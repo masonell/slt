@@ -14,8 +14,8 @@ use super::common::{
 use crate::quic::UdpClaim;
 
 #[tokio::test]
-async fn session_drops_udp_message_with_trailing_data() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, limits, assigned, _registry) =
+async fn session_ignores_trailing_data_after_udp_message() {
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
     // Register UDP
@@ -42,6 +42,16 @@ async fn session_drops_udp_message_with_trailing_data() {
 
     let keys = UdpQspKeys::from_register(&register).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 44444));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1801,
+    )
+    .await;
 
     // Create a valid data frame then append garbage
     let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 30), 8);
@@ -58,7 +68,7 @@ async fn session_drops_udp_message_with_trailing_data() {
     let udp_packet = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            0,
+            register.pn_start_rx + 1,
             register.key_phase,
             &data_frame,
         )
@@ -71,11 +81,12 @@ async fn session_drops_udp_message_with_trailing_data() {
     .await
     .unwrap();
 
-    // Should NOT forward to TUN (dropped due to trailing data)
-    match timeout(Duration::from_millis(200), tun_rx.recv()).await {
-        Ok(Some(_)) => panic!("UDP message with trailing data should be dropped"),
-        Ok(None) | Err(_) => {}
-    }
+    // Should forward the decoded DATA payload and ignore trailing bytes.
+    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, uplink_packet);
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
