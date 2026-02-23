@@ -2,9 +2,10 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::mem::MaybeUninit;
 
 use boring::hash::hmac_sha256;
-use boring::symm::{Cipher, Crypter, Mode};
+use boring_sys as ffi;
 
 use super::packet::{
     OpenedPacket, OpenedPacketRef, apply_header_protection, build_header, hp_sample_range,
@@ -16,32 +17,61 @@ use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterC
 
 #[derive(Clone, Copy)]
 struct CipherConfig {
-    aead: Cipher,
-    hp: Cipher,
+    aead: AeadKind,
+}
+
+#[derive(Clone, Copy)]
+enum AeadKind {
+    Aes128Gcm,
+}
+
+impl AeadKind {
+    #[inline]
+    fn as_ptr(self) -> *const ffi::EVP_AEAD {
+        match self {
+            Self::Aes128Gcm => unsafe {
+                // SAFETY: BoringSSL returns a process-global algorithm descriptor.
+                ffi::EVP_aead_aes_128_gcm()
+            },
+        }
+    }
 }
 
 impl CipherConfig {
-    fn for_suite(cipher: CipherSuite) -> Result<Self, QspCryptoError> {
+    const fn for_suite(cipher: CipherSuite) -> Result<Self, QspCryptoError> {
         match cipher {
             CipherSuite::Aes128Gcm => Ok(Self {
-                aead: Cipher::aes_128_gcm(),
-                hp: Cipher::aes_128_ecb(),
+                aead: AeadKind::Aes128Gcm,
             }),
             CipherSuite::ChaCha20Poly1305 => Err(QspCryptoError::UnsupportedCipher),
         }
     }
 }
 
-#[derive(Clone)]
 struct HeaderProtectionKey {
     key: [u8; HP_KEY_LEN],
-    cipher: Cipher,
+    encrypt_key: ffi::AES_KEY,
 }
 
 impl HeaderProtectionKey {
-    #[inline]
-    const fn new(key: [u8; HP_KEY_LEN], cipher: Cipher) -> Self {
-        Self { key, cipher }
+    fn new(key: [u8; HP_KEY_LEN]) -> Result<Self, QspCryptoError> {
+        let mut encrypt_key = MaybeUninit::<ffi::AES_KEY>::zeroed();
+        let key_bits = u32::try_from(HP_KEY_LEN * 8).map_err(|_| QspCryptoError::CryptoFail)?;
+        let rc = unsafe {
+            // SAFETY: `key` is exactly 128 bits and `encrypt_key` points to valid writable memory.
+            ffi::AES_set_encrypt_key(key.as_ptr(), key_bits, encrypt_key.as_mut_ptr())
+        };
+        if rc != 0 {
+            return Err(QspCryptoError::CryptoFail);
+        }
+
+        Ok(Self {
+            key,
+            encrypt_key: unsafe {
+                // SAFETY: `AES_set_encrypt_key` returned success and initialized the key schedule.
+                encrypt_key.assume_init()
+            },
+        })
     }
 
     fn mask(&self, sample: &[u8]) -> Result<[u8; HP_MASK_LEN], QspCryptoError> {
@@ -49,21 +79,14 @@ impl HeaderProtectionKey {
             return Err(QspCryptoError::PacketTooShort);
         }
 
-        let mut crypter = Crypter::new(self.cipher, Mode::Encrypt, &self.key, None)
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-        crypter.pad(false);
-
-        let mut out = [0u8; 32];
-        let count = crypter
-            .update(sample, &mut out)
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-        let rest = crypter
-            .finalize(&mut out[count..])
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-
-        let total = count + rest;
-        if total < HP_SAMPLE_LEN {
-            return Err(QspCryptoError::CryptoFail);
+        let mut out = [0u8; HP_SAMPLE_LEN];
+        unsafe {
+            // SAFETY: input and output are each 16-byte blocks and key schedule is initialized.
+            ffi::AES_encrypt(
+                sample.as_ptr(),
+                out.as_mut_ptr(),
+                &raw const self.encrypt_key,
+            );
         }
 
         let mut mask = [0u8; HP_MASK_LEN];
@@ -72,22 +95,27 @@ impl HeaderProtectionKey {
     }
 }
 
-#[derive(Clone)]
+impl Clone for HeaderProtectionKey {
+    fn clone(&self) -> Self {
+        Self::new(self.key).expect("HP key material must remain a valid AES-128 key")
+    }
+}
+
 struct PacketKey {
     key: [u8; AEAD_KEY_LEN],
     iv: [u8; AEAD_IV_LEN],
-    cipher: Cipher,
+    aead: AeadKind,
+    ctx: AeadContext,
 }
 
 impl PacketKey {
-    #[inline]
-    const fn new(key: [u8; AEAD_KEY_LEN], iv: [u8; AEAD_IV_LEN], cipher: Cipher) -> Self {
-        Self { key, iv, cipher }
-    }
-
-    #[inline]
-    fn block_size(&self) -> usize {
-        self.cipher.block_size()
+    fn new(
+        key: [u8; AEAD_KEY_LEN],
+        iv: [u8; AEAD_IV_LEN],
+        aead: AeadKind,
+    ) -> Result<Self, QspCryptoError> {
+        let ctx = AeadContext::new(aead, &key)?;
+        Ok(Self { key, iv, aead, ctx })
     }
 
     fn seal_into(
@@ -98,34 +126,17 @@ impl PacketKey {
         out: &mut Vec<u8>,
     ) -> Result<(), QspCryptoError> {
         let nonce = make_nonce(&self.iv, pn);
-        let mut crypter = Crypter::new(self.cipher, Mode::Encrypt, &self.key, Some(&nonce))
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-
-        {
-            let ad = &out[..ad_len];
-            crypter
-                .aad_update(ad)
-                .map_err(|_| QspCryptoError::CryptoFail)?;
-        }
-
         let start = out.len();
-        let block_size = self.cipher.block_size();
-        out.resize(start + plaintext.len() + block_size, 0);
-
-        let count = crypter
-            .update(plaintext, &mut out[start..])
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-        let rest = crypter
-            .finalize(&mut out[start + count..])
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-
-        out.truncate(start + count + rest);
-
-        let mut tag = [0u8; AEAD_TAG_LEN];
-        crypter
-            .get_tag(&mut tag)
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-        out.extend_from_slice(&tag);
+        let max_out_len = plaintext.len() + AEAD_TAG_LEN;
+        out.resize(start + max_out_len, 0);
+        let (ad_and_prefix, ciphertext_out) = out.split_at_mut(start);
+        let produced = self.ctx.seal(
+            &nonce,
+            &ad_and_prefix[..ad_len],
+            plaintext,
+            &mut ciphertext_out[..max_out_len],
+        )?;
+        out.truncate(start + produced);
 
         Ok(())
     }
@@ -141,33 +152,20 @@ impl PacketKey {
             return Err(QspCryptoError::PacketTooShort);
         }
 
-        let (ct, tag) = ciphertext.split_at(ciphertext.len() - AEAD_TAG_LEN);
+        let ct = ciphertext;
         let nonce = make_nonce(&self.iv, pn);
-        let mut crypter = Crypter::new(self.cipher, Mode::Decrypt, &self.key, Some(&nonce))
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-
-        crypter
-            .aad_update(ad)
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-
-        let block_size = self.cipher.block_size();
         out.clear();
-        out.resize(ct.len() + block_size, 0);
-
-        let count = crypter
-            .update(ct, &mut out[..])
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-
-        crypter
-            .set_tag(tag)
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-
-        let rest = crypter
-            .finalize(&mut out[count..])
-            .map_err(|_| QspCryptoError::CryptoFail)?;
-
-        out.truncate(count + rest);
+        out.resize(ct.len(), 0);
+        let produced = self.ctx.open(&nonce, ad, ct, out)?;
+        out.truncate(produced);
         Ok(())
+    }
+}
+
+impl Clone for PacketKey {
+    fn clone(&self) -> Self {
+        Self::new(self.key, self.iv, self.aead)
+            .expect("AEAD key material must remain valid for cloned PacketKey")
     }
 }
 
@@ -175,6 +173,104 @@ impl PacketKey {
 struct DirectionKeys {
     hp: HeaderProtectionKey,
     aead: PacketKey,
+}
+
+struct AeadContext {
+    raw: *mut ffi::EVP_AEAD_CTX,
+}
+
+// SAFETY: `AeadContext` owns an `EVP_AEAD_CTX` pointer with stable allocation
+// and no thread affinity. We never alias mutable Rust references to the same
+// object, and BoringSSL's seal/open APIs take `const EVP_AEAD_CTX*`.
+unsafe impl Send for AeadContext {}
+// SAFETY: Operations use immutable pointers and are safe to call from shared
+// references for stateless AEADs such as AES-128-GCM.
+unsafe impl Sync for AeadContext {}
+
+impl AeadContext {
+    fn new(aead: AeadKind, key: &[u8; AEAD_KEY_LEN]) -> Result<Self, QspCryptoError> {
+        let aead_ptr = aead.as_ptr();
+        if aead_ptr.is_null() {
+            return Err(QspCryptoError::CryptoFail);
+        }
+
+        let raw = unsafe {
+            // SAFETY: The AEAD algorithm pointer is valid and key buffer lives for this call.
+            ffi::EVP_AEAD_CTX_new(aead_ptr, key.as_ptr(), key.len(), AEAD_TAG_LEN)
+        };
+        if raw.is_null() {
+            return Err(QspCryptoError::CryptoFail);
+        }
+
+        Ok(Self { raw })
+    }
+
+    fn seal(
+        &self,
+        nonce: &[u8; AEAD_IV_LEN],
+        ad: &[u8],
+        plaintext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, QspCryptoError> {
+        let mut out_len = 0usize;
+        let ok = unsafe {
+            // SAFETY: `self.raw` is a live AEAD context and all pointers are valid for their lengths.
+            ffi::EVP_AEAD_CTX_seal(
+                self.raw,
+                out.as_mut_ptr(),
+                &raw mut out_len,
+                out.len(),
+                nonce.as_ptr(),
+                nonce.len(),
+                plaintext.as_ptr(),
+                plaintext.len(),
+                ad.as_ptr(),
+                ad.len(),
+            )
+        };
+        if ok != 1 {
+            return Err(QspCryptoError::CryptoFail);
+        }
+        Ok(out_len)
+    }
+
+    fn open(
+        &self,
+        nonce: &[u8; AEAD_IV_LEN],
+        ad: &[u8],
+        ciphertext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, QspCryptoError> {
+        let mut out_len = 0usize;
+        let ok = unsafe {
+            // SAFETY: `self.raw` is a live AEAD context and all pointers are valid for their lengths.
+            ffi::EVP_AEAD_CTX_open(
+                self.raw,
+                out.as_mut_ptr(),
+                &raw mut out_len,
+                out.len(),
+                nonce.as_ptr(),
+                nonce.len(),
+                ciphertext.as_ptr(),
+                ciphertext.len(),
+                ad.as_ptr(),
+                ad.len(),
+            )
+        };
+        if ok != 1 {
+            return Err(QspCryptoError::CryptoFail);
+        }
+        Ok(out_len)
+    }
+}
+
+impl Drop for AeadContext {
+    fn drop(&mut self) {
+        unsafe {
+            // SAFETY: `raw` comes from `EVP_AEAD_CTX_new` and may be null only if construction failed.
+            ffi::EVP_AEAD_CTX_free(self.raw);
+        }
+    }
 }
 
 const KEY_UPDATE_CONTEXT: &[u8] = b"slt-udp-qsp/key-update-v1";
@@ -221,12 +317,12 @@ impl UdpQspKeys {
         Ok(Self {
             cipher,
             tx: DirectionKeys {
-                hp: HeaderProtectionKey::new(hp_tx, config.hp),
-                aead: PacketKey::new(aead_tx, iv_tx, config.aead),
+                hp: HeaderProtectionKey::new(hp_tx)?,
+                aead: PacketKey::new(aead_tx, iv_tx, config.aead)?,
             },
             rx: DirectionKeys {
-                hp: HeaderProtectionKey::new(hp_rx, config.hp),
-                aead: PacketKey::new(aead_rx, iv_rx, config.aead),
+                hp: HeaderProtectionKey::new(hp_rx)?,
+                aead: PacketKey::new(aead_rx, iv_rx, config.aead)?,
             },
         })
     }
@@ -311,7 +407,7 @@ impl UdpQspKeys {
         let pad_len = min_cipher_len.saturating_sub(plaintext.len() + AEAD_TAG_LEN);
         let padded_len = plaintext.len() + pad_len;
         let target_len = header_len + padded_len + AEAD_TAG_LEN;
-        let needed_capacity = target_len + self.tx.aead.block_size();
+        let needed_capacity = target_len;
         if out.capacity() < needed_capacity {
             out.reserve_exact(needed_capacity - out.capacity());
         }
@@ -407,7 +503,7 @@ impl UdpQspKeys {
 
         let pn = reconstruct_packet_number(parsed.pn, expected_pn, parsed.pn_len);
         let plaintext_len = packet.len() - parsed.header.len() - AEAD_TAG_LEN;
-        let needed_capacity = plaintext_len + rx.aead.block_size();
+        let needed_capacity = plaintext_len;
         if out.capacity() < needed_capacity {
             out.reserve_exact(needed_capacity - out.capacity());
         }
@@ -453,15 +549,12 @@ fn derive_direction_keys(
     let prk = hkdf_extract_sha256(&current.aead.iv, &extract_input)?;
 
     Ok(DirectionKeys {
-        hp: HeaderProtectionKey::new(
-            hkdf_expand_sha256::<HP_KEY_LEN>(&prk, KEY_UPDATE_HP_INFO)?,
-            config.hp,
-        ),
+        hp: HeaderProtectionKey::new(hkdf_expand_sha256::<HP_KEY_LEN>(&prk, KEY_UPDATE_HP_INFO)?)?,
         aead: PacketKey::new(
             hkdf_expand_sha256::<AEAD_KEY_LEN>(&prk, KEY_UPDATE_AEAD_INFO)?,
             hkdf_expand_sha256::<AEAD_IV_LEN>(&prk, KEY_UPDATE_IV_INFO)?,
             config.aead,
-        ),
+        )?,
     })
 }
 
