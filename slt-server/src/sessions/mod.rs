@@ -93,6 +93,7 @@ pub struct ClientSessionBase<
     limits: MessageLimits,
     timeouts: SessionTimeouts,
     udp_write_buf: Vec<u8>,
+    udp_opened_payload_buf: Vec<u8>,
     /// Whether the TCP connection is still usable. Set to false when TCP closes
     /// while UDP-QSP is active, allowing the session to continue on UDP alone.
     tcp_alive: bool,
@@ -146,6 +147,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             limits,
             timeouts,
             udp_write_buf: Vec::new(),
+            udp_opened_payload_buf: Vec::new(),
             tcp_alive: true,
         }
     }

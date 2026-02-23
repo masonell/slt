@@ -44,17 +44,20 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             "UDP claim received"
         );
 
-        let Some(opened) = self.open_udp_packet(&claim.payload) else {
-            return Ok(SessionControl::Continue);
+        let mut opened = std::mem::take(&mut self.udp_opened_payload_buf);
+        let control = if self.open_udp_packet(&claim.payload, &mut opened).is_none() {
+            Ok(SessionControl::Continue)
+        } else {
+            self.update_udp_peer(peer);
+            match self.decode_udp_message(&opened) {
+                Ok(Some(message)) => self.dispatch_udp_message(message).await,
+                Ok(None) => Ok(SessionControl::Continue),
+                Err(err) => Err(err),
+            }
         };
+        self.udp_opened_payload_buf = opened;
 
-        self.update_udp_peer(peer);
-
-        let Some(message) = self.decode_udp_message(&opened)? else {
-            return Ok(SessionControl::Continue);
-        };
-
-        self.dispatch_udp_message(message).await
+        control
     }
 
     /// Decrypts and validates a UDP-QSP packet.
@@ -66,10 +69,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     /// # Parameters
     ///
     /// * `payload` - The encrypted UDP-QSP packet bytes
+    /// * `out` - Reused output buffer for decrypted payload bytes
     ///
     /// # Returns
     ///
-    /// * `Some(payload)` - The decrypted plaintext payload on success
+    /// * `Some(())` - The decrypted plaintext payload was written to `out`
     /// * `None` - If the packet should be dropped (with appropriate metrics logged)
     ///
     /// # Behavior
@@ -78,12 +82,15 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     ///   and falls back to TCP transport
     /// - On replay/old/crypto errors: logs and returns None
     /// - Tracks RX key phase transitions for metrics
-    fn open_udp_packet(&mut self, payload: &[u8]) -> Option<Vec<u8>> {
+    fn open_udp_packet(&mut self, payload: &[u8], out: &mut Vec<u8>) -> Option<()> {
+        out.clear();
         let session = self.udp_session.as_mut()?;
         let rx_phase_before = session.rx_key_phase();
 
-        let payload_vec = match session.open_packet(payload) {
-            Ok(opened) => opened.payload.to_vec(),
+        match session.open_packet(payload) {
+            Ok(opened) => {
+                out.extend_from_slice(opened.payload);
+            }
             Err(QspSessionError::Replay) => {
                 self.metrics.inc_udp_qsp_decrypt_fail_replay();
                 trace!(
@@ -139,7 +146,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                 );
                 return None;
             }
-        };
+        }
 
         // Check for key phase transition after the match to avoid borrow conflicts.
         if let Some(session) = self.udp_session.as_ref()
@@ -154,7 +161,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             );
         }
 
-        Some(payload_vec)
+        Some(())
     }
 
     /// Decodes a VPN message from the decrypted UDP payload.
