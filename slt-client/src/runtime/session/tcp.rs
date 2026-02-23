@@ -2,7 +2,9 @@
 
 use std::io;
 
-use slt_core::proto::{ClosePayload, Message, PingPayload, PongPayload};
+use slt_core::proto::{
+    ClosePayload, Message, MessageType, OwnedMessageBuf, PingPayload, PongPayload,
+};
 use tracing::{debug, info, trace};
 
 use super::{ClientSession, SessionControl, SessionExit};
@@ -51,7 +53,7 @@ impl ClientSession<'_> {
                 return Ok(SessionControl::Continue);
             };
 
-            if let SessionControl::Close(exit) = self.handle_tcp_message(msg_buf.message()).await? {
+            if let SessionControl::Close(exit) = self.handle_tcp_message(msg_buf).await? {
                 return Ok(SessionControl::Close(exit));
             }
         }
@@ -69,31 +71,27 @@ impl ClientSession<'_> {
     /// - Payload decoding fails
     /// - An unexpected control message is received (e.g., AUTH on established session)
     /// - TUN channel send fails
-    async fn handle_tcp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
-        match message {
+    async fn handle_tcp_message(&mut self, msg_buf: OwnedMessageBuf) -> io::Result<SessionControl> {
+        if msg_buf.message().ty() == MessageType::Data {
+            if switch_to_tcp_on_server_traffic(
+                &mut self.active_transport,
+                self.metrics.as_ref(),
+                "data",
+            ) {
+                self.note_tcp_activity();
+                self.schedule_discovery_retry();
+            }
+            if self.tun_channels.to_tun_tx.send(msg_buf).await.is_err() {
+                self.metrics.inc_disconnect_close();
+                return Ok(SessionControl::Close(SessionExit::TunClosed));
+            }
+            return Ok(SessionControl::Continue);
+        }
+
+        match msg_buf.message() {
             Message::RegisterOk { payload } => self.handle_register_ok(payload),
             Message::RegisterFail { payload } => self.handle_register_fail(payload),
-            Message::Data { packet } => {
-                if switch_to_tcp_on_server_traffic(
-                    &mut self.active_transport,
-                    self.metrics.as_ref(),
-                    "data",
-                ) {
-                    self.note_tcp_activity();
-                    self.schedule_discovery_retry();
-                }
-                if self
-                    .tun_channels
-                    .to_tun_tx
-                    .send(packet.to_vec())
-                    .await
-                    .is_err()
-                {
-                    self.metrics.inc_disconnect_close();
-                    return Ok(SessionControl::Close(SessionExit::TunClosed));
-                }
-                Ok(SessionControl::Continue)
-            }
+            Message::Data { .. } => unreachable!("data handled by fast-path above"),
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload).map_err(wire::map_payload_error)?;
                 if switch_to_tcp_on_server_traffic(

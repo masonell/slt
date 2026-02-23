@@ -2,7 +2,9 @@
 
 use std::io;
 
-use slt_core::proto::{ClosePayload, Message, PingPayload, PongPayload};
+use slt_core::proto::{
+    ClosePayload, Message, MessageType, OwnedMessageBuf, PingPayload, PongPayload,
+};
 use tracing::{info, trace, warn};
 
 use super::{ClientSession, SessionControl, SessionExit};
@@ -24,9 +26,21 @@ impl ClientSession<'_> {
     /// - TUN channel send fails
     pub(super) async fn handle_udp_message(
         &mut self,
-        message: Message<'_>,
+        msg_buf: OwnedMessageBuf,
     ) -> io::Result<SessionControl> {
-        match message {
+        if msg_buf.message().ty() == MessageType::Data {
+            if self.active_transport != ActiveTransport::UdpQsp {
+                trace!("dropping udp data while tcp is active");
+                return Ok(SessionControl::Continue);
+            }
+            if self.tun_channels.to_tun_tx.send(msg_buf).await.is_err() {
+                self.metrics.inc_disconnect_close();
+                return Ok(SessionControl::Close(SessionExit::TunClosed));
+            }
+            return Ok(SessionControl::Continue);
+        }
+
+        match msg_buf.message() {
             Message::RegisterOk { .. } => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected register_ok on udp-qsp transport",
@@ -50,23 +64,7 @@ impl ClientSession<'_> {
                 trace!(nonce = pong_in.nonce, "received udp pong");
                 Ok(SessionControl::Continue)
             }
-            Message::Data { packet } => {
-                if self.active_transport != ActiveTransport::UdpQsp {
-                    trace!("dropping udp data while tcp is active");
-                    return Ok(SessionControl::Continue);
-                }
-                if self
-                    .tun_channels
-                    .to_tun_tx
-                    .send(packet.to_vec())
-                    .await
-                    .is_err()
-                {
-                    self.metrics.inc_disconnect_close();
-                    return Ok(SessionControl::Close(SessionExit::TunClosed));
-                }
-                Ok(SessionControl::Continue)
-            }
+            Message::Data { .. } => unreachable!("data handled by fast-path above"),
             Message::Close { payload } => {
                 let close = ClosePayload::decode(payload).map_err(wire::map_payload_error)?;
                 info!(code = ?close.code, "received udp close");

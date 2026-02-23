@@ -427,33 +427,43 @@ async fn run_tun_reader(
     cancel: CancellationToken,
     mtu: u16,
 ) -> io::Result<()> {
-    let mut buf = vec![0u8; mtu as usize];
+    let mtu = mtu as usize;
+    let mut packet = vec![0u8; mtu];
     loop {
         let n = tokio::select! {
             () = cancel.cancelled() => return Ok(()),
-            res = tun.recv(&mut buf) => res?,
+            res = tun.recv(&mut packet) => res?,
         };
 
         if n == 0 {
             continue;
         }
 
-        let packet = &buf[..n];
-        let Some(dst_ip) = extract_dst_ipv4(packet) else {
+        packet.truncate(n);
+        let Some(dst_ip) = extract_dst_ipv4(&packet) else {
             debug!(len = n, "tun packet missing IPv4 dst");
+            packet.resize(mtu, 0);
             continue;
         };
         trace!(len = n, dst_ip = %dst_ip, "tun packet received");
         if let Some(tx) = registry.lookup_ip(dst_ip) {
-            if tx
-                .try_send(SessionEvent::TunPacket(packet.to_vec()))
-                .is_err()
-            {
-                metrics.inc_tun_queue_overflow_drops();
-                debug!(dst_ip = %dst_ip, "tun packet dropped (session queue full)");
+            match tx.try_send(SessionEvent::TunPacket(packet)) {
+                Ok(()) => {
+                    packet = vec![0u8; mtu];
+                }
+                Err(err) => {
+                    metrics.inc_tun_queue_overflow_drops();
+                    debug!(dst_ip = %dst_ip, "tun packet dropped (session queue full)");
+                    let SessionEvent::TunPacket(inner) = err.into_inner() else {
+                        unreachable!("only TunPacket is sent from this site");
+                    };
+                    packet = inner;
+                    packet.resize(mtu, 0);
+                }
             }
         } else {
             debug!(dst_ip = %dst_ip, "tun packet dropped (no session)");
+            packet.resize(mtu, 0);
         }
     }
 }

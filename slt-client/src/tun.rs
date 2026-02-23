@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use slt_core::config::ClientConfig;
 use slt_core::packet::extract_src_ipv4;
+use slt_core::proto::{Message, OwnedMessageBuf};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -22,8 +23,8 @@ pub struct TunHandles {
 pub struct TunChannels {
     /// Receives packets from TUN destined for the session.
     pub to_session_rx: mpsc::Receiver<Vec<u8>>,
-    /// Sends packets from the session to TUN.
-    pub to_tun_tx: mpsc::Sender<Vec<u8>>,
+    /// Sends owned DATA frames from the session to TUN.
+    pub to_tun_tx: mpsc::Sender<OwnedMessageBuf>,
 }
 
 impl TunHandles {
@@ -121,7 +122,7 @@ fn spawn_tun_reader(
 
 fn spawn_tun_writer(
     tun: Arc<AsyncDevice>,
-    rx: mpsc::Receiver<Vec<u8>>,
+    rx: mpsc::Receiver<OwnedMessageBuf>,
     cancel: CancellationToken,
 ) -> JoinHandle<io::Result<()>> {
     tokio::spawn(async move { run_tun_writer(tun, rx, cancel).await })
@@ -134,20 +135,22 @@ async fn run_tun_reader(
     cancel: CancellationToken,
     mtu: u16,
 ) -> io::Result<()> {
-    let mut buf = vec![0u8; mtu as usize];
+    let mtu = mtu as usize;
+    let mut packet = vec![0u8; mtu];
     loop {
         let n = tokio::select! {
             () = cancel.cancelled() => return Ok(()),
-            res = tun.recv(&mut buf) => res?,
+            res = tun.recv(&mut packet) => res?,
         };
 
         if n == 0 {
             continue;
         }
 
-        let packet = &buf[..n];
-        let Some(src_ip) = extract_src_ipv4(packet) else {
+        packet.truncate(n);
+        let Some(src_ip) = extract_src_ipv4(&packet) else {
             debug!(len = n, "tun packet missing IPv4 src");
+            packet.resize(mtu, 0);
             continue;
         };
         trace!(len = n, src_ip = %src_ip, "tun packet received");
@@ -157,28 +160,35 @@ async fn run_tun_reader(
                 assigned_ip = %assigned_ipv4,
                 "dropping tun packet due to source IP mismatch"
             );
+            packet.resize(mtu, 0);
             continue;
         }
 
-        if tx.send(packet.to_vec()).await.is_err() {
+        if tx.send(packet).await.is_err() {
             debug!(len = n, "tun queue closed, exiting reader");
             return Ok(());
         }
+        packet = vec![0u8; mtu];
     }
 }
 
 async fn run_tun_writer(
     tun: Arc<AsyncDevice>,
-    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut rx: mpsc::Receiver<OwnedMessageBuf>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     loop {
-        let packet = tokio::select! {
+        let frame = tokio::select! {
             () = cancel.cancelled() => return Ok(()),
             maybe = rx.recv() => match maybe {
-                Some(packet) => packet,
+                Some(frame) => frame,
                 None => return Ok(()),
             },
+        };
+
+        let Message::Data { packet } = frame.message() else {
+            debug!("dropping non-data frame in tun writer");
+            continue;
         };
 
         if packet.is_empty() {
@@ -188,7 +198,7 @@ async fn run_tun_writer(
         // TUN writes are atomic: the kernel either accepts the entire packet or
         // fails with an error. Partial writes should never occur; if they do,
         // something is very wrong and worth investigating.
-        let written = tun.send(&packet).await?;
+        let written = tun.send(packet).await?;
         if written != packet.len() {
             warn!(
                 written,

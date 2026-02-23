@@ -134,11 +134,11 @@ impl QuicEndpoint {
     /// Returns an error if receiving from the UDP socket fails.
     pub async fn run(&self, cancel: CancellationToken) -> io::Result<()> {
         debug!("Starting QUIC endpoint accept loop");
-        let mut buf = vec![0u8; QUIC_BUF_LEN];
         let mut state = QuicNatState::new(self.max_lru_entries);
         let mut sweep = tokio::time::interval(self.idle_timeout);
 
         loop {
+            let mut payload = vec![0u8; QUIC_BUF_LEN];
             let (len, peer) = tokio::select! {
                 () = cancel.cancelled() => {
                     debug!("QUIC endpoint accept loop cancelled");
@@ -152,11 +152,12 @@ impl QuicEndpoint {
                     state.sweep_idle(self.idle_timeout);
                     continue;
                 }
-                res = self.socket.recv_from(&mut buf) => res?,
+                res = self.socket.recv_from(&mut payload) => res?,
             };
+            payload.truncate(len);
             trace!(peer = %peer, len = len, "Received UDP datagram");
             self.metrics.inc_udp_accepted();
-            self.handle_datagram(&mut state, cancel.clone(), peer, &buf[..len])
+            self.handle_datagram(&mut state, cancel.clone(), peer, payload)
                 .await?;
         }
     }
@@ -176,9 +177,9 @@ impl QuicEndpoint {
         state: &mut QuicNatState,
         cancel: CancellationToken,
         peer: SocketAddr,
-        payload: &[u8],
+        payload: Vec<u8>,
     ) -> io::Result<()> {
-        let verdict = classify_quic_datagram(payload);
+        let verdict = classify_quic_datagram(&payload);
         trace!(peer = %peer, verdict = ?verdict, payload_len = payload.len(), "QUIC datagram verdict");
 
         match verdict {
@@ -193,7 +194,7 @@ impl QuicEndpoint {
                 let upstream_socket = state
                     .get_or_create_upstream(self.socket.clone(), self.nginx_upstream, peer, cancel)
                     .await?;
-                match upstream_socket.send(payload).await {
+                match upstream_socket.send(&payload).await {
                     Ok(sent) => {
                         trace!(peer = %peer, sent = sent, "Sent datagram to upstream");
                     }
@@ -215,7 +216,7 @@ impl QuicEndpoint {
                     match tx.try_send(SessionEvent::Udp(UdpClaim {
                         peer,
                         dcid_prefix,
-                        payload: payload.to_vec(),
+                        payload,
                     })) {
                         Ok(()) => {
                             trace!(peer = %peer, dcid_prefix = ?dcid_prefix, "Sent claimed datagram to session");
@@ -240,7 +241,7 @@ impl QuicEndpoint {
                             cancel,
                         )
                         .await?;
-                    match upstream_socket.send(payload).await {
+                    match upstream_socket.send(&payload).await {
                         Ok(sent) => {
                             trace!(peer = %peer, sent = sent, dcid_prefix = ?dcid_prefix, "Sent datagram to upstream");
                         }
@@ -692,7 +693,7 @@ mod tests {
 
         let before = endpoint.metrics.snapshot().dropped;
         let result = endpoint
-            .handle_datagram(&mut state, cancel, peer, &payload)
+            .handle_datagram(&mut state, cancel, peer, payload)
             .await;
         assert!(result.is_ok());
         let after = endpoint.metrics.snapshot().dropped;
@@ -725,7 +726,7 @@ mod tests {
 
         let before = endpoint.metrics.snapshot().passed;
         let result = endpoint
-            .handle_datagram(&mut state, cancel.clone(), peer, &payload)
+            .handle_datagram(&mut state, cancel.clone(), peer, payload.clone())
             .await;
         assert!(result.is_ok());
 
@@ -778,7 +779,7 @@ mod tests {
 
         let before = metrics.snapshot();
         let result = endpoint
-            .handle_datagram(&mut state, cancel, peer, &payload)
+            .handle_datagram(&mut state, cancel, peer, payload)
             .await;
         assert!(result.is_ok());
         let after = metrics.snapshot();
@@ -818,7 +819,7 @@ mod tests {
 
         let before = endpoint.metrics.snapshot().claimed;
         let result = endpoint
-            .handle_datagram(&mut state, cancel, peer, &payload)
+            .handle_datagram(&mut state, cancel, peer, payload)
             .await;
         assert!(result.is_ok());
 
@@ -867,7 +868,7 @@ mod tests {
 
         let before = endpoint.metrics.snapshot().passed;
         let result = endpoint
-            .handle_datagram(&mut state, cancel.clone(), peer, &payload)
+            .handle_datagram(&mut state, cancel.clone(), peer, payload.clone())
             .await;
         assert!(result.is_ok());
 
@@ -921,7 +922,7 @@ mod tests {
 
         let before = metrics.snapshot();
         let result = endpoint
-            .handle_datagram(&mut state, cancel, peer, &payload)
+            .handle_datagram(&mut state, cancel, peer, payload)
             .await;
         assert!(result.is_ok());
         let after = metrics.snapshot();
@@ -962,7 +963,7 @@ mod tests {
 
         // Should not error even when channel is closed (try_send fails gracefully)
         let result = endpoint
-            .handle_datagram(&mut state, cancel, peer, &payload)
+            .handle_datagram(&mut state, cancel, peer, payload)
             .await;
         assert!(result.is_ok());
 

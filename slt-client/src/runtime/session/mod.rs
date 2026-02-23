@@ -287,7 +287,7 @@ impl<'a> ClientSession<'a> {
             }
             SessionEvent::UdpResult(udp_res) => match udp_res {
                 Ok(msg_buf) => {
-                    let result = self.handle_udp_message(msg_buf.message()).await;
+                    let result = self.handle_udp_message(msg_buf).await;
                     let control = match result {
                         Ok(control) => control,
                         Err(err) => {
