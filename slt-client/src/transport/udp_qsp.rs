@@ -121,20 +121,31 @@ impl<I: SessionIo> UdpQspTransport<I> {
         limits: slt_core::proto::MessageLimits,
     ) -> io::Result<slt_core::proto::OwnedMessageBuf> {
         let rx_phase_before = self.session.rx_key_phase();
-        let opened = match self.session.recv(&mut self.packet_buf).await {
-            Ok(opened) => opened,
-            Err(err) => {
-                self.handle_recv_error(err)?;
-                return Err(io::Error::new(
+        let decode_result = {
+            let opened = match self.session.recv(&mut self.packet_buf).await {
+                Ok(opened) => opened,
+                Err(err) => {
+                    self.handle_recv_error(err)?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "recv error handled",
+                    ));
+                }
+            };
+
+            match slt_core::proto::decode_message(opened.payload, limits) {
+                Ok(Some((message, consumed))) => {
+                    // Per protocol.md Section 4.4: receivers MUST ignore any trailing bytes
+                    // after decoding the first framed message (may be padding for HP sample).
+                    Ok((message.ty(), opened.payload[..consumed].to_vec()))
+                }
+                Ok(None) => Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "recv error handled",
-                ));
+                    "udp-qsp message incomplete",
+                )),
+                Err(err) => Err(crate::wire::map_message_error(err)),
             }
         };
-
-        // Copy payload before checking session state (opened holds a reference to session)
-        let payload = opened.payload.to_vec();
-
         // Check for key phase transition by comparing session state before/after recv
         let rx_phase_after = self.session.rx_key_phase();
         if rx_phase_after != rx_phase_before {
@@ -144,20 +155,8 @@ impl<I: SessionIo> UdpQspTransport<I> {
                 "UDP-QSP RX key phase transitioned"
             );
         }
-
-        let Some((message, consumed)) = slt_core::proto::decode_message(&payload, limits)
-            .map_err(crate::wire::map_message_error)?
-        else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "udp-qsp message incomplete",
-            ));
-        };
-        // Per protocol.md Section 4.4: receivers MUST ignore any trailing bytes
-        // after decoding the first framed message (may be padding for HP sample).
-
-        let frame = payload[..consumed].to_vec();
-        Ok(slt_core::proto::OwnedMessageBuf::new(message.ty(), frame))
+        let (message_ty, frame) = decode_result?;
+        Ok(slt_core::proto::OwnedMessageBuf::new(message_ty, frame))
     }
 
     /// Handle a UDP-QSP receive error and update metrics.
