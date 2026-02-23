@@ -25,7 +25,7 @@ mod test_support;
 mod test_integration;
 
 #[derive(Parser, Debug)]
-#[command(about = "Run the SLT client.")]
+#[command(about = "Run the SLT client.", version)]
 struct Args {
     /// Path to the client configuration file (TOML).
     #[arg(long, value_name = "PATH")]

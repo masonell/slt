@@ -30,7 +30,7 @@ use tun_rs::DeviceBuilder;
 ///
 /// Parsed using `clap` from command-line invocation.
 #[derive(Parser, Debug)]
-#[command(about = "Run the SLT server front door.")]
+#[command(about = "Run the SLT server front door.", version)]
 struct Args {
     /// Path to the server configuration file (TOML).
     #[arg(long, value_name = "PATH")]
