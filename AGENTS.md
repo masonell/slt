@@ -22,6 +22,9 @@
 - Keep shared protocol/config/crypto logic in `slt-core`; keep runtime/orchestration logic in `slt-client` and `slt-server`.
 - Prefer small, focused modules and descriptive names (`configure_client_chrome_ssl`, `message_limits_from_mtu`).
 - Public library APIs (`pub`) should include doc comments and clear error behavior.
+- **anyhow usage** (for application code like `slt-cli`):
+  - Use `.context()` and `.with_context()` to add error context, not `map_err(|e| anyhow!(...))`.
+  - Use `bail!` macro for early error returns, not `return Err(anyhow!(...))`.
 
 ## Testing Guidelines
 - Tests live alongside code using `#[cfg(test)]`.

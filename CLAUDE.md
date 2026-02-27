@@ -45,6 +45,10 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 - Descriptive names (e.g., `configure_client_chrome_ssl`, `quic_client_chrome_config`)
 - Tests colocated with code using `#[cfg(test)]`
 - Favor real protocol artifacts in tests over mock data
+- **anyhow usage** (for application code like `slt-cli`):
+  - Use `.context()` and `.with_context()` to add error context
+  - Use `bail!` for early returns with an error
+  - Avoid `map_err(|e| anyhow!(...))` - prefer `with_context`
 
 ## Commit Guidelines
 
