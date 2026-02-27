@@ -9,6 +9,13 @@ use clap::Parser;
 use slt_core::config::ServerConfig;
 use slt_core::packet::extract_dst_ipv4;
 use slt_core::proto::MessageLimits;
+#[cfg(not(target_os = "linux"))]
+use slt_core::transport::tun::tun_mtu_to_usize;
+use slt_core::transport::tun::{
+    DEFAULT_TUN_CHANNEL_SIZE, build_async_tun_device, tun_offload_enabled,
+};
+#[cfg(target_os = "linux")]
+use slt_core::transport::tun::{LinuxRecvBatch, LinuxSendBatch};
 use slt_core::types::TlsMaterial;
 use slt_server::auth::{AuthHandlerBase, Authenticator, SessionManager};
 use slt_server::metrics::Metrics;
@@ -26,10 +33,6 @@ use tracing_error::ErrorLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tun_rs::DeviceBuilder;
-
-/// TUN channel size for batched writes.
-const TUN_CHANNEL_SIZE: usize = 256;
 
 /// Command-line arguments for the SLT server.
 ///
@@ -70,31 +73,6 @@ fn init_tracing() {
         .with(ErrorLayer::default())
         .init();
 }
-
-/// Creates TUN device with GRO/GSO offload on Linux.
-fn create_tun_device(config: &ServerConfig) -> io::Result<Arc<tun_rs::AsyncDevice>> {
-    // Build TUN device with GRO/GSO offload on Linux
-    #[cfg(target_os = "linux")]
-    {
-        let device = DeviceBuilder::new()
-            .name(&config.tun.tun_name)
-            .mtu(config.tun.tun_mtu)
-            .offload(true)
-            .build_async()?;
-        info!("TUN device created with GRO/GSO offload enabled");
-        Ok(Arc::new(device))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let device = DeviceBuilder::new()
-            .name(&config.tun.tun_name)
-            .mtu(config.tun.tun_mtu)
-            .build_async()?;
-        Ok(Arc::new(device))
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error::Error>> {
     debug!("server runtime: initializing components");
@@ -105,10 +83,16 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     let quic = QuicEndpoint::bind(&config, registry.clone(), metrics.clone()).await?;
     let acceptor = build_tls_acceptor(&config)?;
     let authenticator = Authenticator::from_config(&config);
-    let tun = create_tun_device(&config)?;
+    let tun = Arc::new(build_async_tun_device(
+        &config.tun.tun_name,
+        config.tun.tun_mtu,
+    )?);
+    if tun_offload_enabled() {
+        info!("TUN device created with GRO/GSO offload enabled");
+    }
 
     // Channel for batched TUN writes
-    let (tun_tx, tun_rx) = mpsc::channel(TUN_CHANNEL_SIZE);
+    let (tun_tx, tun_rx) = mpsc::channel(DEFAULT_TUN_CHANNEL_SIZE);
     let tun_sender = Arc::new(TunSender::new(tun_tx));
 
     let session_timeouts = SessionTimeouts {
@@ -150,90 +134,54 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     );
     let mut metrics_task = spawn_metrics_task(metrics, cancel.clone());
 
-    let shutdown_result = tokio::select! {
-        res = &mut tcp_task => {
-            info!(reason = "tcp_task_failure", "graceful shutdown initiated");
+    let trigger = tokio::select! {
+        res = &mut tcp_task => ShutdownTrigger::WorkerFailed { task: "tcp", result: res },
+        res = &mut udp_task => ShutdownTrigger::WorkerFailed { task: "udp", result: res },
+        res = &mut tun_reader_task => ShutdownTrigger::WorkerFailed { task: "tun_reader", result: res },
+        res = &mut tun_writer_task => ShutdownTrigger::WorkerFailed { task: "tun_writer", result: res },
+        res = &mut metrics_task => ShutdownTrigger::WorkerFailed { task: "metrics", result: res },
+        () = cancel.cancelled() => ShutdownTrigger::Cancelled,
+    };
+
+    let shutdown_result = match trigger {
+        ShutdownTrigger::WorkerFailed { task, result } => {
+            info!(
+                reason = task_failure_reason(task),
+                "graceful shutdown initiated"
+            );
             cancel.cancel();
-            let udp_res = udp_task.await;
-            let tun_reader_res = tun_reader_task.await;
-            let tun_writer_res = tun_writer_task.await;
-            let metrics_res = metrics_task.await;
-            let mut shutdown_result = classify_task_result("tcp", res);
-            merge_task_result(&mut shutdown_result, "udp", udp_res);
-            merge_task_result(&mut shutdown_result, "tun_reader", tun_reader_res);
-            merge_task_result(&mut shutdown_result, "tun_writer", tun_writer_res);
-            merge_task_result(&mut shutdown_result, "metrics", metrics_res);
+
+            let mut shutdown_result = classify_task_result(task, result);
+            if task != "tcp" {
+                merge_task_result(&mut shutdown_result, "tcp", tcp_task.await);
+            }
+            if task != "udp" {
+                merge_task_result(&mut shutdown_result, "udp", udp_task.await);
+            }
+            if task != "tun_reader" {
+                merge_task_result(&mut shutdown_result, "tun_reader", tun_reader_task.await);
+            }
+            if task != "tun_writer" {
+                merge_task_result(&mut shutdown_result, "tun_writer", tun_writer_task.await);
+            }
+            if task != "metrics" {
+                merge_task_result(&mut shutdown_result, "metrics", metrics_task.await);
+            }
             shutdown_result
         }
-        res = &mut udp_task => {
-            info!(reason = "udp_task_failure", "graceful shutdown initiated");
-            cancel.cancel();
-            let tcp_res = tcp_task.await;
-            let tun_reader_res = tun_reader_task.await;
-            let tun_writer_res = tun_writer_task.await;
-            let metrics_res = metrics_task.await;
-            let mut shutdown_result = classify_task_result("udp", res);
-            merge_task_result(&mut shutdown_result, "tcp", tcp_res);
-            merge_task_result(&mut shutdown_result, "tun_reader", tun_reader_res);
-            merge_task_result(&mut shutdown_result, "tun_writer", tun_writer_res);
-            merge_task_result(&mut shutdown_result, "metrics", metrics_res);
-            shutdown_result
-        }
-        res = &mut tun_reader_task => {
-            info!(reason = "tun_reader_task_failure", "graceful shutdown initiated");
-            cancel.cancel();
-            let tcp_res = tcp_task.await;
-            let udp_res = udp_task.await;
-            let tun_writer_res = tun_writer_task.await;
-            let metrics_res = metrics_task.await;
-            let mut shutdown_result = classify_task_result("tun_reader", res);
-            merge_task_result(&mut shutdown_result, "tcp", tcp_res);
-            merge_task_result(&mut shutdown_result, "udp", udp_res);
-            merge_task_result(&mut shutdown_result, "tun_writer", tun_writer_res);
-            merge_task_result(&mut shutdown_result, "metrics", metrics_res);
-            shutdown_result
-        }
-        res = &mut tun_writer_task => {
-            info!(reason = "tun_writer_task_failure", "graceful shutdown initiated");
-            cancel.cancel();
-            let tcp_res = tcp_task.await;
-            let udp_res = udp_task.await;
-            let tun_reader_res = tun_reader_task.await;
-            let metrics_res = metrics_task.await;
-            let mut shutdown_result = classify_task_result("tun_writer", res);
-            merge_task_result(&mut shutdown_result, "tcp", tcp_res);
-            merge_task_result(&mut shutdown_result, "udp", udp_res);
-            merge_task_result(&mut shutdown_result, "tun_reader", tun_reader_res);
-            merge_task_result(&mut shutdown_result, "metrics", metrics_res);
-            shutdown_result
-        }
-        res = &mut metrics_task => {
-            info!(reason = "metrics_task_failure", "graceful shutdown initiated");
-            cancel.cancel();
-            let tcp_res = tcp_task.await;
-            let udp_res = udp_task.await;
-            let tun_reader_res = tun_reader_task.await;
-            let tun_writer_res = tun_writer_task.await;
-            let mut shutdown_result = classify_task_result("metrics", res);
-            merge_task_result(&mut shutdown_result, "tcp", tcp_res);
-            merge_task_result(&mut shutdown_result, "udp", udp_res);
-            merge_task_result(&mut shutdown_result, "tun_reader", tun_reader_res);
-            merge_task_result(&mut shutdown_result, "tun_writer", tun_writer_res);
-            shutdown_result
-        }
-        () = cancel.cancelled() => {
+        ShutdownTrigger::Cancelled => {
             info!(reason = "ctrl_c", "graceful shutdown initiated");
-            let _ = tcp_task.await;
-            let _ = udp_task.await;
-            let _ = tun_reader_task.await;
-            let _ = tun_writer_task.await;
-            let _ = metrics_task.await;
+            join_ignoring_result(tcp_task).await;
+            join_ignoring_result(udp_task).await;
+            join_ignoring_result(tun_reader_task).await;
+            join_ignoring_result(tun_writer_task).await;
+            join_ignoring_result(metrics_task).await;
             Ok(())
         }
     };
 
     info!("server shutdown complete");
-    shutdown_result
+    shutdown_result.map_err(|err| Box::new(err) as Box<dyn std::error::Error>)
 }
 
 /// Spawns a task that listens for Ctrl+C and triggers graceful shutdown.
@@ -283,25 +231,44 @@ fn spawn_tcp_task<T: TunDeviceIo>(
     })
 }
 
+enum ShutdownTrigger {
+    WorkerFailed {
+        task: &'static str,
+        result: Result<io::Result<()>, tokio::task::JoinError>,
+    },
+    Cancelled,
+}
+
+fn task_failure_reason(task: &'static str) -> &'static str {
+    match task {
+        "tcp" => "tcp_task_failure",
+        "udp" => "udp_task_failure",
+        "tun_reader" => "tun_reader_task_failure",
+        "tun_writer" => "tun_writer_task_failure",
+        "metrics" => "metrics_task_failure",
+        _ => "worker_task_failure",
+    }
+}
+
 fn classify_task_result(
     task: &'static str,
     res: Result<io::Result<()>, tokio::task::JoinError>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> io::Result<()> {
     match res {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => {
             error!(task, error = %err, "worker task failed");
-            Err(Box::new(err))
+            Err(err)
         }
         Err(err) => {
             error!(task, error = %err, "worker task failed");
-            Err(Box::new(err))
+            Err(io::Error::other(err))
         }
     }
 }
 
 fn merge_task_result(
-    shutdown_result: &mut Result<(), Box<dyn std::error::Error>>,
+    shutdown_result: &mut io::Result<()>,
     task: &'static str,
     res: Result<io::Result<()>, tokio::task::JoinError>,
 ) {
@@ -309,6 +276,10 @@ fn merge_task_result(
     if shutdown_result.is_ok() {
         *shutdown_result = task_result;
     }
+}
+
+async fn join_ignoring_result(handle: tokio::task::JoinHandle<io::Result<()>>) {
+    let _ = handle.await;
 }
 
 /// Spawns the UDP front door listener task.
@@ -515,29 +486,13 @@ async fn run_tun_reader(
     cancel: CancellationToken,
     mtu: u16,
 ) -> io::Result<()> {
-    use tun_rs::{IDEAL_BATCH_SIZE, VIRTIO_NET_HDR_LEN};
-
-    let mtu = mtu as usize;
-    if mtu == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "tun mtu must be greater than zero",
-        ));
-    }
-
-    let min_split_buffers = (65535 / mtu) + 1;
-    let split_buffer_count = IDEAL_BATCH_SIZE.max(min_split_buffers);
-
-    // Buffer for raw GRO data (virtio header + max packet)
-    let mut original_buffer = vec![0u8; VIRTIO_NET_HDR_LEN + 65535];
-    // Buffers for split packets
-    let mut bufs: Vec<Vec<u8>> = (0..split_buffer_count).map(|_| vec![0u8; mtu]).collect();
-    let mut sizes = vec![0usize; split_buffer_count];
+    let mut recv_batch = LinuxRecvBatch::new(mtu)?;
 
     loop {
+        let (original_buffer, bufs, sizes) = recv_batch.recv_args();
         let count = tokio::select! {
             () = cancel.cancelled() => return Ok(()),
-            res = tun.recv_multiple(&mut original_buffer, &mut bufs, &mut sizes, 0) => res?,
+            res = tun.recv_multiple(original_buffer, bufs, sizes, 0) => res?,
         };
 
         if count == 0 {
@@ -545,12 +500,12 @@ async fn run_tun_reader(
         }
 
         for i in 0..count {
-            let size = sizes[i];
+            let size = recv_batch.packet_len(i);
             if size == 0 {
                 continue;
             }
 
-            let packet = &bufs[i][..size];
+            let packet = recv_batch.packet(i);
             let Some(dst_ip) = extract_dst_ipv4(packet) else {
                 debug!(len = size, "tun packet missing IPv4 dst");
                 continue;
@@ -580,7 +535,7 @@ async fn run_tun_reader(
     cancel: CancellationToken,
     mtu: u16,
 ) -> io::Result<()> {
-    let mtu = mtu as usize;
+    let mtu = tun_mtu_to_usize(mtu)?;
     let mut packet = vec![0u8; mtu];
     loop {
         let n = tokio::select! {
@@ -641,15 +596,14 @@ async fn run_tun_writer(
     mut rx: mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
-    use tun_rs::{GROTable, IDEAL_BATCH_SIZE, VIRTIO_NET_HDR_LEN};
+    use tun_rs::GROTable;
 
     let mut gro_table = GROTable::new();
-    // Buffers with headroom for virtio header
-    let mut bufs: Vec<Vec<u8>> = (0..IDEAL_BATCH_SIZE)
-        .map(|_| vec![0u8; VIRTIO_NET_HDR_LEN + 65535])
-        .collect();
+    let mut send_batch = LinuxSendBatch::new();
 
     loop {
+        send_batch.clear();
+
         // Wait for first packet
         let first = tokio::select! {
             () = cancel.cancelled() => return Ok(()),
@@ -659,67 +613,61 @@ async fn run_tun_writer(
             },
         };
 
-        let mut count = 0;
-        let offset = VIRTIO_NET_HDR_LEN;
-        let max = bufs[count].capacity().saturating_sub(offset);
-        if first.len() > max {
+        if let Err(err) = send_batch.push_packet(&first) {
             debug!(
-                len = first.len(),
-                max, "tun write packet too large, dropping"
+                len = err.len,
+                max = err.max,
+                "tun write packet too large, dropping"
             );
             continue;
         }
-        let first_len = offset + first.len();
-        if bufs[count].len() != first_len {
-            bufs[count].resize(first_len, 0);
-        }
-        let mut payload_bytes = first.len();
-        bufs[count][offset..first_len].copy_from_slice(&first);
-        count += 1;
 
         // Drain any additional packets
-        while count < IDEAL_BATCH_SIZE {
+        while !send_batch.is_full() {
             match rx.try_recv() {
                 Ok(pkt) => {
-                    let max = bufs[count].capacity().saturating_sub(offset);
-                    if pkt.len() > max {
-                        debug!(len = pkt.len(), max, "tun write packet too large, dropping");
-                        continue;
+                    if let Err(err) = send_batch.push_packet(&pkt) {
+                        debug!(
+                            len = err.len,
+                            max = err.max,
+                            "tun write packet too large, dropping"
+                        );
                     }
-                    let packet_len = offset + pkt.len();
-                    if bufs[count].len() != packet_len {
-                        bufs[count].resize(packet_len, 0);
-                    }
-                    payload_bytes += pkt.len();
-                    bufs[count][offset..packet_len].copy_from_slice(&pkt);
-                    count += 1;
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
             }
         }
 
+        let header_offset = send_batch.header_offset();
+        let payload_bytes = send_batch.payload_bytes();
+        let input_packets = send_batch.packet_count();
+
         // Send batch with GSO
         let written = match tun
-            .send_multiple(&mut gro_table, &mut bufs[..count], offset)
+            .send_multiple(
+                &mut gro_table,
+                send_batch.queued_buffers_mut(),
+                header_offset,
+            )
             .await
         {
             Ok(bytes) => bytes,
             Err(err) => {
-                warn!(error = %err, count, "tun send_multiple error");
+                warn!(error = %err, count = input_packets, "tun send_multiple error");
                 return Err(err);
             }
         };
 
         let virtio_overhead_bytes = written.saturating_sub(payload_bytes);
         let estimated_output_packets = (virtio_overhead_bytes > 0
-            && virtio_overhead_bytes % VIRTIO_NET_HDR_LEN == 0)
-            .then_some(virtio_overhead_bytes / VIRTIO_NET_HDR_LEN);
+            && virtio_overhead_bytes % header_offset == 0)
+            .then_some(virtio_overhead_bytes / header_offset);
         let estimated_coalesced_packets =
-            estimated_output_packets.map(|output| count.saturating_sub(output));
+            estimated_output_packets.map(|output| input_packets.saturating_sub(output));
 
         trace!(
-            input_packets = count,
+            input_packets,
             input_payload_bytes = payload_bytes,
             written_bytes = written,
             virtio_overhead_bytes,

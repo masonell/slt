@@ -1401,6 +1401,7 @@ dependencies = [
  "tokio-boring",
  "toml",
  "tracing",
+ "tun-rs",
 ]
 
 [[package]]

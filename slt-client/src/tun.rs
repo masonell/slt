@@ -5,13 +5,16 @@ use std::sync::Arc;
 use slt_core::config::ClientConfig;
 use slt_core::packet::extract_src_ipv4;
 use slt_core::proto::{Message, OwnedMessageBuf};
+#[cfg(not(target_os = "linux"))]
+use slt_core::transport::tun::tun_mtu_to_usize;
+use slt_core::transport::tun::{DEFAULT_TUN_CHANNEL_SIZE, build_async_tun_device};
+#[cfg(target_os = "linux")]
+use slt_core::transport::tun::{LinuxRecvBatch, LinuxSendBatch};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
-use tun_rs::{AsyncDevice, DeviceBuilder};
-
-const TUN_QUEUE_SIZE: usize = 256;
+use tun_rs::AsyncDevice;
 
 /// TUN task handles for shutdown coordination.
 pub struct TunHandles {
@@ -64,25 +67,10 @@ pub fn create(
     config: &ClientConfig,
     cancel: CancellationToken,
 ) -> io::Result<(TunHandles, TunChannels)> {
-    // Build TUN device with GRO/GSO offload on Linux
-    #[cfg(target_os = "linux")]
-    let tun = {
-        let device = DeviceBuilder::new()
-            .name(&config.tun.tun_name)
-            .mtu(config.tun.tun_mtu)
-            .offload(true)
-            .build_async()?;
-        Arc::new(device)
-    };
-
-    #[cfg(not(target_os = "linux"))]
-    let tun = {
-        let device = DeviceBuilder::new()
-            .name(&config.tun.tun_name)
-            .mtu(config.tun.tun_mtu)
-            .build_async()?;
-        Arc::new(device)
-    };
+    let tun = Arc::new(build_async_tun_device(
+        &config.tun.tun_name,
+        config.tun.tun_mtu,
+    )?);
 
     let (handles, channels) = spawn(
         tun,
@@ -103,8 +91,8 @@ fn spawn(
     cancel: CancellationToken,
     mtu: u16,
 ) -> (TunHandles, TunChannels) {
-    let (to_session_tx, to_session_rx) = mpsc::channel(TUN_QUEUE_SIZE);
-    let (to_tun_tx, to_tun_rx) = mpsc::channel(TUN_QUEUE_SIZE);
+    let (to_session_tx, to_session_rx) = mpsc::channel(DEFAULT_TUN_CHANNEL_SIZE);
+    let (to_tun_tx, to_tun_rx) = mpsc::channel(DEFAULT_TUN_CHANNEL_SIZE);
 
     let reader = spawn_tun_reader(
         tun.clone(),
@@ -154,29 +142,13 @@ async fn run_tun_reader(
     cancel: CancellationToken,
     mtu: u16,
 ) -> io::Result<()> {
-    use tun_rs::{IDEAL_BATCH_SIZE, VIRTIO_NET_HDR_LEN};
-
-    let mtu = mtu as usize;
-    if mtu == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "tun mtu must be greater than zero",
-        ));
-    }
-
-    let min_split_buffers = (65535 / mtu) + 1;
-    let split_buffer_count = IDEAL_BATCH_SIZE.max(min_split_buffers);
-
-    // Buffer for raw GRO data (virtio header + max packet)
-    let mut original_buffer = vec![0u8; VIRTIO_NET_HDR_LEN + 65535];
-    // Buffers for split packets
-    let mut bufs: Vec<Vec<u8>> = (0..split_buffer_count).map(|_| vec![0u8; mtu]).collect();
-    let mut sizes = vec![0usize; split_buffer_count];
+    let mut recv_batch = LinuxRecvBatch::new(mtu)?;
 
     loop {
+        let (original_buffer, bufs, sizes) = recv_batch.recv_args();
         let count = tokio::select! {
             () = cancel.cancelled() => return Ok(()),
-            res = tun.recv_multiple(&mut original_buffer, &mut bufs, &mut sizes, 0) => res?,
+            res = tun.recv_multiple(original_buffer, bufs, sizes, 0) => res?,
         };
 
         if count == 0 {
@@ -184,12 +156,12 @@ async fn run_tun_reader(
         }
 
         for i in 0..count {
-            let size = sizes[i];
+            let size = recv_batch.packet_len(i);
             if size == 0 {
                 continue;
             }
 
-            let packet = &bufs[i][..size];
+            let packet = recv_batch.packet(i);
             let Some(src_ip) = extract_src_ipv4(packet) else {
                 debug!(len = size, "tun packet missing IPv4 src");
                 continue;
@@ -221,7 +193,7 @@ async fn run_tun_reader(
     cancel: CancellationToken,
     mtu: u16,
 ) -> io::Result<()> {
-    let mtu = mtu as usize;
+    let mtu = tun_mtu_to_usize(mtu)?;
     let mut packet = vec![0u8; mtu];
     loop {
         let n = tokio::select! {
@@ -268,15 +240,14 @@ async fn run_tun_writer(
     mut rx: mpsc::Receiver<OwnedMessageBuf>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
-    use tun_rs::{GROTable, IDEAL_BATCH_SIZE, VIRTIO_NET_HDR_LEN};
+    use tun_rs::GROTable;
 
     let mut gro_table = GROTable::new();
-    // Buffers with headroom for virtio header
-    let mut bufs: Vec<Vec<u8>> = (0..IDEAL_BATCH_SIZE)
-        .map(|_| vec![0u8; VIRTIO_NET_HDR_LEN + 65535])
-        .collect();
+    let mut send_batch = LinuxSendBatch::new();
 
     loop {
+        send_batch.clear();
+
         // Wait for first packet
         let first = tokio::select! {
             () = cancel.cancelled() => return Ok(()),
@@ -295,26 +266,17 @@ async fn run_tun_writer(
             continue;
         }
 
-        let mut count = 0;
-        let offset = VIRTIO_NET_HDR_LEN;
-        let max = bufs[count].capacity().saturating_sub(offset);
-        if packet.len() > max {
+        if let Err(err) = send_batch.push_packet(packet) {
             debug!(
-                len = packet.len(),
-                max, "tun write packet too large, dropping"
+                len = err.len,
+                max = err.max,
+                "tun write packet too large, dropping"
             );
             continue;
         }
-        let first_len = offset + packet.len();
-        if bufs[count].len() != first_len {
-            bufs[count].resize(first_len, 0);
-        }
-        let mut payload_bytes = packet.len();
-        bufs[count][offset..first_len].copy_from_slice(packet);
-        count += 1;
 
         // Drain any additional packets
-        while count < IDEAL_BATCH_SIZE {
+        while !send_batch.is_full() {
             match rx.try_recv() {
                 Ok(frame) => {
                     let Message::Data { packet } = frame.message() else {
@@ -324,48 +286,48 @@ async fn run_tun_writer(
                     if packet.is_empty() {
                         continue;
                     }
-                    let max = bufs[count].capacity().saturating_sub(offset);
-                    if packet.len() > max {
+                    if let Err(err) = send_batch.push_packet(packet) {
                         debug!(
-                            len = packet.len(),
-                            max, "tun write packet too large, dropping"
+                            len = err.len,
+                            max = err.max,
+                            "tun write packet too large, dropping"
                         );
-                        continue;
                     }
-                    let packet_len = offset + packet.len();
-                    if bufs[count].len() != packet_len {
-                        bufs[count].resize(packet_len, 0);
-                    }
-                    payload_bytes += packet.len();
-                    bufs[count][offset..packet_len].copy_from_slice(packet);
-                    count += 1;
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => return Ok(()),
             }
         }
 
+        let header_offset = send_batch.header_offset();
+        let payload_bytes = send_batch.payload_bytes();
+        let input_packets = send_batch.packet_count();
+
         // Send batch with GSO
         let written = match tun
-            .send_multiple(&mut gro_table, &mut bufs[..count], offset)
+            .send_multiple(
+                &mut gro_table,
+                send_batch.queued_buffers_mut(),
+                header_offset,
+            )
             .await
         {
             Ok(bytes) => bytes,
             Err(err) => {
-                warn!(error = %err, count, "tun send_multiple error");
+                warn!(error = %err, count = input_packets, "tun send_multiple error");
                 return Err(err);
             }
         };
 
         let virtio_overhead_bytes = written.saturating_sub(payload_bytes);
         let estimated_output_packets = (virtio_overhead_bytes > 0
-            && virtio_overhead_bytes % VIRTIO_NET_HDR_LEN == 0)
-            .then_some(virtio_overhead_bytes / VIRTIO_NET_HDR_LEN);
+            && virtio_overhead_bytes % header_offset == 0)
+            .then_some(virtio_overhead_bytes / header_offset);
         let estimated_coalesced_packets =
-            estimated_output_packets.map(|output| count.saturating_sub(output));
+            estimated_output_packets.map(|output| input_packets.saturating_sub(output));
 
         trace!(
-            input_packets = count,
+            input_packets,
             input_payload_bytes = payload_bytes,
             written_bytes = written,
             virtio_overhead_bytes,
