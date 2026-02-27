@@ -1,9 +1,12 @@
 //! SLT VPN configuration CLI.
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod config_io;
+mod validate;
 
 /// SLT VPN configuration management tool.
 #[derive(Parser)]
@@ -173,7 +176,8 @@ fn run(cli: Cli) -> Result<()> {
             todo!("generate-keys")
         }
         Commands::Validate { config } => {
-            todo!("validate: {config}")
+            let path = PathBuf::from(&config);
+            validate::validate(&path, !cli.quiet)
         }
     }
 }
