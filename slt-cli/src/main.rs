@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod config_io;
+mod generate_keys;
 mod validate;
 
 /// SLT VPN configuration management tool.
@@ -173,7 +174,8 @@ fn run(cli: Cli) -> Result<()> {
             todo!("generate-certs")
         }
         Commands::GenerateKeys => {
-            todo!("generate-keys")
+            generate_keys::generate_keys();
+            Ok(())
         }
         Commands::Validate { config } => {
             let path = PathBuf::from(&config);

@@ -8,10 +8,13 @@ name = "slt"
 path = "src/main.rs"
 
 [dependencies]
-clap = { workspace = true }
-slt-core = { workspace = true }
 anyhow = { workspace = true }
+clap = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
+slt-core = { workspace = true }
 toml = { workspace = true }
 
 [lints]
