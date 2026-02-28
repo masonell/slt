@@ -28,6 +28,8 @@ tun-rs = { version = "2.7", features = ["async_tokio"] }
 thiserror = "2.0"
 anyhow = "1.0"
 num_enum = "0.7"
+rcgen = "0.13"
+time = "0.3"
 
 slt-core = { path = "slt-core" }
 

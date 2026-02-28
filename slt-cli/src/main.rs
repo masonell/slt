@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod config_io;
+mod generate_certs;
 mod generate_keys;
 mod validate;
 
@@ -123,7 +124,7 @@ enum Commands {
 
         /// Server domain name.
         #[arg(long, value_name = "DOMAIN")]
-        domain: Option<String>,
+        domain: String,
     },
 
     /// Generate Ed25519 keypair.
@@ -170,8 +171,9 @@ fn run(cli: Cli) -> Result<()> {
         Commands::RemoveClient { .. } => {
             todo!("remove-client")
         }
-        Commands::GenerateCerts { .. } => {
-            todo!("generate-certs")
+        Commands::GenerateCerts { config_dir, domain } => {
+            let config_path = PathBuf::from(&config_dir);
+            generate_certs::generate_certs(&config_path, &domain, cli.quiet)
         }
         Commands::GenerateKeys => {
             generate_keys::generate_keys();
