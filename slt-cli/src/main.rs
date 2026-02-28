@@ -8,6 +8,8 @@ use clap::{Parser, Subcommand};
 mod config_io;
 mod generate_certs;
 mod generate_keys;
+mod init;
+mod show_server;
 mod validate;
 
 /// SLT VPN configuration management tool.
@@ -147,14 +149,23 @@ fn main() {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Init { .. } => {
-            todo!("init")
+        Commands::Init {
+            config_dir,
+            domain,
+            inline_certs,
+        } => {
+            let config_path = PathBuf::from(&config_dir);
+            init::init(&config_path, &domain, inline_certs, cli.quiet)
         }
         Commands::CheckServer { .. } => {
             todo!("check-server")
         }
-        Commands::ShowServer { .. } => {
-            todo!("show-server")
+        Commands::ShowServer {
+            config,
+            reveal_secrets,
+        } => {
+            let config_path = PathBuf::from(&config);
+            show_server::show_server(&config_path, reveal_secrets)
         }
         Commands::AddClient { .. } => {
             todo!("add-client")

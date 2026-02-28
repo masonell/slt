@@ -1,7 +1,5 @@
 //! Configuration file I/O utilities.
 
-#![allow(dead_code)] // Functions will be used in subsequent phases
-
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -37,6 +35,7 @@ pub fn save_server_config(path: &Path, config: &ServerConfig) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the file cannot be read, parsed, or validated.
+#[allow(dead_code)] // Will be used in Phase 4
 pub fn load_client_config(path: &Path) -> Result<ClientConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read client config from {}", path.display()))?;
@@ -50,6 +49,7 @@ pub fn load_client_config(path: &Path) -> Result<ClientConfig> {
 /// # Errors
 ///
 /// Returns an error if the config cannot be serialized or written.
+#[allow(dead_code)] // Will be used in Phase 4
 pub fn save_client_config(path: &Path, config: &ClientConfig) -> Result<()> {
     let contents = toml::to_string_pretty(config).context("failed to serialize client config")?;
 

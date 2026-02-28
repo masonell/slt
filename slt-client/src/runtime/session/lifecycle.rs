@@ -273,10 +273,10 @@ mod tests {
         fn default_timing_values_are_reasonable() {
             let config = ClientTimingConfig::default();
 
-            // Default: ping_min=10s, ping_max=30s, idle_timeout=60s
+            // Default: ping_min=10s, ping_max=30s, idle_timeout=5m
             assert_eq!(config.ping_min, Duration::from_secs(10));
             assert_eq!(config.ping_max, Duration::from_secs(30));
-            assert_eq!(config.idle_timeout, Duration::from_secs(60));
+            assert_eq!(config.idle_timeout, Duration::from_secs(300));
 
             // ping_min should not exceed ping_max
             assert!(config.ping_min <= config.ping_max);
