@@ -10,6 +10,7 @@ use boring::ssl::{
     CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef,
 };
 use boring::x509::X509;
+use boring::x509::verify::X509VerifyFlags;
 use boring_sys as ffi;
 use brotli::enc::BrotliEncoderParams;
 use foreign_types::ForeignTypeRef;
@@ -83,10 +84,15 @@ pub fn quic_client_chrome_config_with_ca(
     quic_config_from_ctx(tls_ctx)
 }
 
-/// Configure a `BoringSSL` context builder to trust the provided CA material.
+/// Configure a `BoringSSL` context builder to trust the provided certificate material.
 ///
 /// For file paths, uses `BoringSSL`'s built-in loading. For inline PEM, parses
 /// certificates and adds them directly to the cert store without writing to disk.
+///
+/// This function sets the `PARTIAL_CHAIN` flag, allowing any certificate in the
+/// trust store to be used as a trust anchor, not just root CAs. This enables
+/// certificate pinning where a specific server certificate (rather than a CA)
+/// is trusted directly.
 ///
 /// # Errors
 ///
@@ -104,7 +110,11 @@ pub fn configure_ca_store(
             }
             Ok(())
         }
-    }
+    }?;
+    // Allow trusting non-CA certs (e.g., server cert directly via pinning)
+    ctx.cert_store_mut()
+        .set_flags(X509VerifyFlags::PARTIAL_CHAIN);
+    Ok(())
 }
 
 fn quic_config_from_ctx(tls_ctx: SslContextBuilder) -> quiche::Result<quiche::Config> {

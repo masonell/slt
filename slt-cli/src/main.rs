@@ -5,10 +5,18 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod add_client;
+mod cert;
+mod client_config;
+mod client_id;
 mod config_io;
 mod generate_certs;
 mod generate_keys;
 mod init;
+mod list_clients;
+mod remove_client;
+mod show_client;
+mod show_client_config;
 mod show_server;
 mod validate;
 
@@ -76,9 +84,13 @@ enum Commands {
         #[arg(long, value_name = "DIR")]
         output_dir: String,
 
-        /// Assigned IPv4 address (auto-assigned if not specified).
+        /// Server domain name for client config (extracted from cert if not provided).
+        #[arg(long, value_name = "DOMAIN")]
+        domain: Option<String>,
+
+        /// Assigned IPv4 address for the client's TUN interface.
         #[arg(long, value_name = "IP")]
-        ip: Option<String>,
+        ip: String,
     },
 
     /// List all clients.
@@ -106,6 +118,10 @@ enum Commands {
         /// Path to server config file.
         #[arg(long, value_name = "FILE")]
         config: String,
+
+        /// Server domain name (extracted from cert if not provided).
+        #[arg(long, value_name = "DOMAIN")]
+        domain: Option<String>,
     },
 
     /// Remove a client.
@@ -167,20 +183,46 @@ fn run(cli: Cli) -> Result<()> {
             let config_path = PathBuf::from(&config);
             show_server::show_server(&config_path, reveal_secrets)
         }
-        Commands::AddClient { .. } => {
-            todo!("add-client")
+        Commands::AddClient {
+            config,
+            output_dir,
+            domain,
+            ip,
+        } => {
+            let config_path = PathBuf::from(&config);
+            let output_path = PathBuf::from(&output_dir);
+            add_client::add_client(
+                &config_path,
+                &output_path,
+                domain.as_deref(),
+                &ip,
+                cli.quiet,
+            )
         }
-        Commands::ListClients { .. } => {
-            todo!("list-clients")
+        Commands::ListClients { config } => {
+            let config_path = PathBuf::from(&config);
+            list_clients::list_clients(&config_path, cli.quiet)
         }
-        Commands::ShowClient { .. } => {
-            todo!("show-client")
+        Commands::ShowClient { client_id, config } => {
+            let config_path = PathBuf::from(&config);
+            show_client::show_client(&config_path, &client_id, cli.quiet)
         }
-        Commands::ShowClientConfig { .. } => {
-            todo!("show-client-config")
+        Commands::ShowClientConfig {
+            client_id,
+            config,
+            domain,
+        } => {
+            let config_path = PathBuf::from(&config);
+            show_client_config::show_client_config(
+                &config_path,
+                &client_id,
+                domain.as_deref(),
+                cli.quiet,
+            )
         }
-        Commands::RemoveClient { .. } => {
-            todo!("remove-client")
+        Commands::RemoveClient { client_id, config } => {
+            let config_path = PathBuf::from(&config);
+            remove_client::remove_client(&config_path, &client_id, cli.quiet)
         }
         Commands::GenerateCerts { config_dir, domain } => {
             let config_path = PathBuf::from(&config_dir);
