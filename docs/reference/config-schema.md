@@ -232,6 +232,14 @@ Binary fields encoded as lowercase hexadecimal. `0x` prefix is optional; case-in
 | `PubKeyEd25519` | 32 | 64 | `"1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"` |
 | `PrivKeyEd25519` | 32 | 64 | `"3132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f50"` |
 
+**Private keys also accept file references:**
+
+```toml
+privkey_ed25519 = { file = "/etc/slt/client.key" }
+```
+
+The file can contain either raw 32 bytes or hex-encoded text (with optional trailing newline).
+
 ### IP Address
 
 IPv4 dotted-decimal notation:
