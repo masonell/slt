@@ -13,7 +13,10 @@
 - `vendor/` includes patched dependencies (`boring`, `boring-sys`, `quiche`).
 - `scripts/` holds local capture helpers (e.g., `scripts/chrome-*.sh`).
 - `local/` is an ignored scratch directory for temporary files and temporary docs.
-- Protocol/design references live in `spec.txt` and `protocol.md`; crate-specific architecture notes are in `client-structure.md` and `server-structure.md`.
+- Protocol/design references are in `docs/`:
+  - `docs/protocol/` for wire format, messages, UDP-QSP, connection flow
+  - `docs/architecture/` for system design, traffic classification, transport security
+  - `docs/reference/` for quick reference sheets (config schema, message types)
 - Project status: early-stage development. Prefer clear, correct changes over compatibility preservation; breaking changes are acceptable unless a task explicitly requires compatibility.
 
 ## Coding Style & Naming Conventions
