@@ -15,7 +15,7 @@ SLT is a VPN implementation that multiplexes VPN traffic with standard web traff
 
 **UDP-QSP**: QUIC-shaped packet protection for VPN data. Uses QUIC short headers with AES-128-GCM AEAD. No actual QUIC handshake - just the wire format.
 
-**Frame Format**: All VPN messages use `TYPE(1) + LEN(4) + PAYLOAD` framing. See `protocol.md` for message types and payload schemas.
+**Frame Format**: All VPN messages use `TYPE(1) + LEN(4) + PAYLOAD` framing. See `docs/protocol/wire-format.md` for message types and `docs/protocol/messages.md` for payload schemas.
 
 **Connection Flow**:
 ```
@@ -74,7 +74,11 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 
 ## Reference Documentation
 
-- `protocol.md`: Authoritative VPN wire protocol specification
-- `client-structure.md`: Client architecture and module responsibilities
-- `server-structure.md`: Server architecture and component interactions
-- `spec.txt`: Comprehensive protocol/design reference
+Documentation is in `docs/`:
+
+- `docs/README.md`: Documentation index
+- `docs/user-guide/`: Installation, quick-start, configuration
+- `docs/architecture/`: System design, traffic classification, transport security
+- `docs/protocol/`: Wire format, messages, UDP-QSP, connection flow, key update
+- `docs/deployment/`: Server/client setup, nginx integration
+- `docs/reference/`: Config schema, message types quick reference
