@@ -120,7 +120,7 @@ impl AuthPayload {
     /// # Errors
     ///
     /// Returns `PayloadError::LengthMismatch` if the payload length is not
-    /// exactly `AUTH_PAYLOAD_LEN` (241 bytes).
+    /// exactly `AUTH_PAYLOAD_LEN` (116 bytes).
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != AUTH_PAYLOAD_LEN {
             return Err(PayloadError::LengthMismatch {
