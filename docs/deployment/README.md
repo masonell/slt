@@ -1,6 +1,6 @@
 # SLT Deployment Guide
 
-This section covers deploying SLT in production environments. It assumes you have already installed SLT (see [prerequisites](#prerequisites)).
+This section covers deploying SLT in production environments. It assumes you have already installed SLT (see [Installation](../user-guide/installation.md)).
 
 ## Documentation
 

@@ -2,6 +2,8 @@
 
 This guide covers the OS-level configuration required to run an SLT VPN server. It assumes you have already installed the SLT binaries (see [Installation](../user-guide/installation.md)).
 
+For detailed nginx configuration, see [nginx Integration](nginx-integration.md). For client setup, see [Client Setup](client-setup.md).
+
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)
@@ -117,8 +119,8 @@ server_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 [network]
 listen_tcp = "0.0.0.0:443"
 listen_udp = "0.0.0.0:443"
-nginx_tcp_upstream = "127.0.0.1:8443"
-nginx_udp_upstream = "127.0.0.1:8443"
+nginx_tcp_upstream = "127.0.0.1:8080"
+nginx_udp_upstream = "127.0.0.1:8080"
 
 [tls]
 tls_cert = { file = "/etc/slt/server.crt" }
@@ -256,8 +258,8 @@ nginx should listen on:
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 127.0.0.1:8443/tcp | HTTPS | TLS and HTTP/2 |
-| 127.0.0.1:8443/udp | HTTP/3 | QUIC |
+| 127.0.0.1:8080/tcp | HTTPS | TLS and HTTP/2 |
+| 127.0.0.1:8080/udp | HTTP/3 | QUIC |
 
 ### nginx Configuration Example
 
@@ -265,8 +267,8 @@ nginx should listen on:
 # /etc/nginx/nginx.conf or /etc/nginx/sites-available/default
 
 server {
-    listen 127.0.0.1:8443 ssl http2;
-    listen 127.0.0.1:8443 quic reuseport;
+    listen 127.0.0.1:8080 ssl http2;
+    listen 127.0.0.1:8080 quic reuseport;
 
     server_name vpn.example.com;
 
@@ -328,10 +330,10 @@ sudo systemctl start nginx
 
 ```bash
 # Check TCP listener
-ss -tlnp | grep 8443
+ss -tlnp | grep 8080
 
 # Check UDP listener
-ss -ulnp | grep 8443
+ss -ulnp | grep 8080
 ```
 
 ---
@@ -456,7 +458,7 @@ EOF
 
 The nftables configuration above provides basic firewall rules. Key points:
 
-1. **Block internal ports** - Ports 8443 (nginx internal) must not be accessible from the internet
+1. **Block internal ports** - Ports 8080 (nginx internal) must not be accessible from the internet
 2. **Allow only necessary public ports** - 80/tcp, 443/tcp, 443/udp
 3. **Restrict SSH** - Consider changing the default SSH port or using key-only authentication
 
@@ -581,7 +583,7 @@ sudo ss -tlnp | grep :443
 sudo ss -ulnp | grep :443
 
 # Ensure nginx is NOT listening on public 443
-# nginx should only listen on 127.0.0.1:8443
+# nginx should only listen on 127.0.0.1:8080
 ```
 
 ### Client Cannot Connect

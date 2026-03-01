@@ -2,6 +2,8 @@
 
 This guide covers nginx configuration for traffic passthrough in an SLT deployment. SLT and nginx coexist on the same server, with SLT handling VPN traffic and forwarding non-VPN traffic to nginx.
 
+For complete server setup including NAT and firewall rules, see [Server Setup](server-setup.md).
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -24,16 +26,16 @@ SLT acts as a traffic multiplexer that owns the public-facing ports and routes t
                     |    SLT Server     |
                     |                   |
   443/tcp --------> |  TCP Classifier   | --CLAIM--> VPN TCP Handler
-                    |                   | --PASS---> TCP Passthrough --> 127.0.0.1:8443/tcp
+                    |                   | --PASS---> TCP Passthrough --> 127.0.0.1:8080/tcp
                     |                   |
   443/udp --------> |  UDP Classifier   | --CLAIM--> VPN UDP-QSP Handler
-                    |                   | --PASS---> NAT Forwarder -----> 127.0.0.1:8443/udp
+                    |                   | --PASS---> NAT Forwarder -----> 127.0.0.1:8080/udp
                     +-------------------+
                               |
                               v
                     +-------------------+
                     |      nginx        |
-                    | 127.0.0.1:8443    |
+                    | 127.0.0.1:8080    |
                     +-------------------+
 ```
 
@@ -47,8 +49,8 @@ SLT acts as a traffic multiplexer that owns the public-facing ports and routes t
 
 | Internal Port | Service | Purpose |
 |---------------|---------|---------|
-| 127.0.0.1:8443/tcp | nginx | TLS termination, HTTP/1.1 and HTTP/2 |
-| 127.0.0.1:8443/udp | nginx | HTTP/3 (QUIC) |
+| 127.0.0.1:8080/tcp | nginx | TLS termination, HTTP/1.1 and HTTP/2 |
+| 127.0.0.1:8080/udp | nginx | HTTP/3 (QUIC) |
 
 **Important**: nginx must NOT listen on public 443. Only SLT binds to public 443/tcp and 443/udp.
 
@@ -60,8 +62,8 @@ SLT acts as a traffic multiplexer that owns the public-facing ports and routes t
 
 nginx needs to:
 
-1. Listen on `127.0.0.1:8443` for HTTPS (TCP)
-2. Listen on `127.0.0.1:8443` for HTTP/3 (UDP/QUIC)
+1. Listen on `127.0.0.1:8080` for HTTPS (TCP)
+2. Listen on `127.0.0.1:8080` for HTTP/3 (UDP/QUIC)
 3. Use the same TLS certificate as SLT
 4. Advertise HTTP/3 availability via Alt-Svc header
 
@@ -71,7 +73,7 @@ Configure nginx to listen on the internal port for TCP traffic:
 
 ```nginx
 server {
-    listen 127.0.0.1:8443 ssl http2;
+    listen 127.0.0.1:8080 ssl http2;
     server_name vpn.example.com;
 
     # TLS certificate (same as used by SLT)
@@ -97,10 +99,10 @@ For HTTP/3 support, nginx 1.25+ with QUIC module is required:
 ```nginx
 server {
     # HTTP/3 over QUIC
-    listen 127.0.0.1:8443 quic reuseport;
+    listen 127.0.0.1:8080 quic reuseport;
 
     # HTTP/2 fallback
-    listen 127.0.0.1:8443 ssl http2;
+    listen 127.0.0.1:8080 ssl http2;
 
     server_name vpn.example.com;
 
@@ -143,7 +145,7 @@ When a regular HTTPS client connects to port 443/tcp:
 2. **SLT** accepts the connection and reads the TLS ClientHello
 3. **SLT classifier** inspects `legacy_session_id` for VPN token
 4. If no VPN token found (**PASS**):
-   - SLT opens a connection to `127.0.0.1:8443`
+   - SLT opens a connection to `127.0.0.1:8080`
    - SLT forwards all bytes bidirectionally (pure passthrough)
    - TLS is terminated by nginx, not SLT
 5. **nginx** handles the HTTPS request normally
@@ -153,7 +155,7 @@ When a regular HTTPS client connects to port 443/tcp:
 Client                    SLT                      nginx
   |                        |                         |
   |---- TLS ClientHello -->|                         |
-  |                        |--- connect 127.0.0.1:8443 -->|
+  |                        |--- connect 127.0.0.1:8080 -->|
   |                        |---- forward bytes ----->|
   |                        |<--- response bytes -----|
   |<--- TLS response ------|                         |
@@ -168,7 +170,7 @@ When a regular HTTP/3 client sends QUIC packets to port 443/udp:
 3. **SLT classifier** checks if it's a long header (QUIC handshake)
 4. Long headers are always **PASS** (forwarded to nginx)
 5. SLT's NAT forwarder:
-   - Creates or reuses a UDP socket to `127.0.0.1:8443`
+   - Creates or reuses a UDP socket to `127.0.0.1:8080`
    - Maps `client_ip:client_port` to a local socket
    - Forwards the datagram to nginx
 6. **nginx** handles the QUIC handshake and HTTP/3 request
@@ -179,7 +181,7 @@ Client                    SLT                      nginx
   |                        |                         |
   |-- QUIC Initial (public:443) -->|                |
   |                        |-- NAT translate -->     |
-  |                        |-- forward to 127.0.0.1:8443 -->|
+  |                        |-- forward to 127.0.0.1:8080 -->|
   |                        |                         |
   |                        |<-- QUIC response -------|
   |<-- NAT translate -------|                        |
@@ -251,14 +253,14 @@ http {
     }
 
     # ===========================================
-    # MAIN HTTPS SERVER (Internal Port 8443)
+    # MAIN HTTPS SERVER (Internal Port 8080)
     # ===========================================
     server {
         # HTTP/3 over QUIC (UDP)
-        listen 127.0.0.1:8443 quic reuseport;
+        listen 127.0.0.1:8080 quic reuseport;
 
         # HTTP/2 and HTTP/1.1 (TCP)
-        listen 127.0.0.1:8443 ssl http2;
+        listen 127.0.0.1:8080 ssl http2;
 
         server_name vpn.example.com www.vpn.example.com;
 
@@ -267,7 +269,7 @@ http {
         ssl_certificate_key /etc/letsencrypt/live/vpn.example.com/privkey.pem;
 
         # Advertise HTTP/3 on public port 443
-        # This tells browsers to use H3 on port 443 (not 8443)
+        # This tells browsers to use H3 on port 443 (not 8080)
         add_header Alt-Svc 'h3=":443"; ma=86400' always;
 
         # Security headers
@@ -330,7 +332,7 @@ http {
 
     # Example: Serve different content on another domain
     # server {
-    #     listen 127.0.0.1:8443 ssl http2;
+    #     listen 127.0.0.1:8080 ssl http2;
     #     server_name another.example.com;
     #
     #     ssl_certificate /etc/letsencrypt/live/another.example.com/fullchain.pem;
@@ -347,7 +349,7 @@ http {
 
 1. **reuseport**: Required for QUIC when using multiple worker processes
 2. **always** in `add_header`: Ensures header is added even for error responses
-3. **127.0.0.1 binding**: Critical - nginx must NOT listen on public interfaces for 8443
+3. **127.0.0.1 binding**: Critical - nginx must NOT listen on public interfaces for 8080
 
 ---
 
@@ -362,12 +364,12 @@ Alt-Svc: h3=":443"; ma=86400
 ```
 
 This means:
-- **h3=":443"**: HTTP/3 is available on port 443 (the public port, not nginx's 8443)
+- **h3=":443"**: HTTP/3 is available on port 443 (the public port, not nginx's 8080)
 - **ma=86400**: Max-age of 86400 seconds (24 hours) - how long to cache this information
 
-### Why Port 443, Not 8443?
+### Why Port 443, Not 8080?
 
-Although nginx listens on 8443, the SLT wrapper exposes HTTP/3 on the public port 443. Clients connect to `:443`, and SLT forwards the traffic to nginx's `:8443`. The Alt-Svc header advertises the public-facing port.
+Although nginx listens on 8080, the SLT wrapper exposes HTTP/3 on the public port 443. Clients connect to `:443`, and SLT forwards the traffic to nginx's `:8080`. The Alt-Svc header advertises the public-facing port.
 
 ### Browser Behavior
 
@@ -447,7 +449,7 @@ nginx -v
 nginx -V 2>&1 | grep -i quic
 
 # Verify UDP listener exists
-ss -ulnp | grep 8443
+ss -ulnp | grep 8080
 
 # Test HTTP/3 with curl (curl 8.0+)
 curl --http3 -I https://vpn.example.com
@@ -465,9 +467,9 @@ curl --http3 -I https://vpn.example.com
 
 **Diagnosis**:
 ```bash
-# Check what's listening on 8443
-sudo ss -tlnp | grep 8443
-sudo ss -ulnp | grep 8443
+# Check what's listening on 8080
+sudo ss -tlnp | grep 8080
+sudo ss -ulnp | grep 8080
 
 # Check if SLT is already using public 443
 sudo ss -tlnp | grep :443
@@ -475,8 +477,8 @@ sudo ss -ulnp | grep :443
 ```
 
 **Resolution**:
-- Ensure nginx only binds to `127.0.0.1:8443`, not `0.0.0.0:8443`
-- Ensure SLT is not trying to bind to 8443
+- Ensure nginx only binds to `127.0.0.1:8080`, not `0.0.0.0:8080`
+- Ensure SLT is not trying to bind to 8080
 - Kill any stray processes using the ports
 
 ### How to Test nginx Directly
@@ -487,38 +489,38 @@ To isolate nginx issues from SLT issues, test nginx directly on its internal por
 
 ```bash
 # Direct connection to nginx (bypass SLT)
-curl -k --resolve vpn.example.com:8443:127.0.0.1 https://vpn.example.com:8443/
+curl -k --resolve vpn.example.com:8080:127.0.0.1 https://vpn.example.com:8080/
 
 # With verbose output
-curl -vk --resolve vpn.example.com:8443:127.0.0.1 https://vpn.example.com:8443/
+curl -vk --resolve vpn.example.com:8080:127.0.0.1 https://vpn.example.com:8080/
 
 # Check headers
-curl -I -k --resolve vpn.example.com:8443:127.0.0.1 https://vpn.example.com:8443/
+curl -I -k --resolve vpn.example.com:8080:127.0.0.1 https://vpn.example.com:8080/
 ```
 
 #### Test UDP/HTTP/3
 
 ```bash
 # Direct HTTP/3 to nginx (requires curl 8.0+ with HTTP/3 support)
-curl --http3 --resolve vpn.example.com:8443:127.0.0.1 https://vpn.example.com:8443/
+curl --http3 --resolve vpn.example.com:8080:127.0.0.1 https://vpn.example.com:8080/
 
 # Or using a browser with quiche/QUIC support pointing to:
-# https://127.0.0.1:8443/ (will show certificate warning)
+# https://127.0.0.1:8080/ (will show certificate warning)
 ```
 
 ### Port Binding Issues
 
-#### nginx Cannot Bind to 8443
+#### nginx Cannot Bind to 8080
 
 ```bash
 # Check if port is already in use
-sudo lsof -i :8443
-sudo fuser 8443/tcp
-sudo fuser 8443/udp
+sudo lsof -i :8080
+sudo fuser 8080/tcp
+sudo fuser 8080/udp
 
 # Find the process
-sudo ss -tlnp | grep 8443
-sudo ss -ulnp | grep 8443
+sudo ss -tlnp | grep 8080
+sudo ss -ulnp | grep 8080
 ```
 
 #### SLT Cannot Bind to 443
@@ -528,7 +530,7 @@ sudo ss -ulnp | grep 8443
 sudo ss -tlnp | grep ':443'
 sudo ss -ulnp | grep ':443'
 
-# If nginx is on 443, fix nginx config to use 127.0.0.1:8443 only
+# If nginx is on 443, fix nginx config to use 127.0.0.1:8080 only
 ```
 
 ### Certificate Issues
@@ -543,7 +545,7 @@ openssl rsa -noout -modulus -in /etc/slt/server.key | openssl md5
 # MD5 hashes should match
 
 # Test TLS connection to nginx directly
-openssl s_client -connect 127.0.0.1:8443 -servername vpn.example.com
+openssl s_client -connect 127.0.0.1:8080 -servername vpn.example.com
 ```
 
 ### Debug Logging
@@ -592,7 +594,7 @@ Check if SLT is properly forwarding to nginx:
 sudo journalctl -u slt-server -f | grep -i "pass\|forward\|nginx"
 
 # Monitor connections in real-time
-sudo watch -n 1 'ss -tn state established "( dport = :8443 or sport = :8443 )"'
+sudo watch -n 1 'ss -tn state established "( dport = :8080 or sport = :8080 )"'
 
 # Check nginx access log for requests
 sudo tail -f /var/log/nginx/access.log
@@ -602,8 +604,8 @@ sudo tail -f /var/log/nginx/access.log
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `bind() to 0.0.0.0:443 failed` | Port already in use | SLT owns 443; nginx should bind to 127.0.0.1:8443 |
+| `bind() to 0.0.0.0:443 failed` | Port already in use | SLT owns 443; nginx should bind to 127.0.0.1:8080 |
 | `no "ssl_certificate" defined` | Missing TLS config | Add ssl_certificate directives |
 | `quic module not compiled in` | Old nginx or missing module | Install nginx with QUIC support |
-| `connection refused` to 8443 | nginx not running | Start nginx: `sudo systemctl start nginx` |
+| `connection refused` to 8080 | nginx not running | Start nginx: `sudo systemctl start nginx` |
 | `Alt-Svc` header missing | Not configured | Add add_header Alt-Svc directive |

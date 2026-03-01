@@ -2,6 +2,8 @@
 
 This guide covers setting up an SLT VPN client. It assumes you have already installed the SLT binaries (see [Installation](../user-guide/installation.md)) and received a client configuration file from your server administrator.
 
+For server setup instructions, see [Server Setup](server-setup.md).
+
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)
