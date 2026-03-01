@@ -187,6 +187,7 @@ privkey_ed25519 = "..."
 tun_name = "tun0"
 tun_mtu = 1280
 
+# Transport options (top-level fields)
 enable_upgrade = true
 require_udp = false
 
@@ -278,6 +279,7 @@ privkey_ed25519 = { file = "/etc/slt/client.key" }
 tun_name = "tun0"
 tun_mtu = 1280
 
+# Transport options (top-level fields)
 enable_upgrade = true
 require_udp = false
 

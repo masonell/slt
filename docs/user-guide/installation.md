@@ -114,9 +114,15 @@ sudo cp target/release/slt /usr/local/bin/slt
 Check that the binaries work:
 
 ```bash
+# If running from build directory
 ./target/release/client --help
 ./target/release/server --help
 ./target/release/slt --help
+
+# Or if installed to ~/.cargo/bin or /usr/local/bin
+slt-client --help
+slt-server --help
+slt --help
 ```
 
 ## Troubleshooting

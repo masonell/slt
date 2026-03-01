@@ -29,6 +29,13 @@ Replace `vpn.example.com` with your actual domain name. This command creates:
 - `/etc/slt/server.pem` - Server certificate
 - `/etc/slt/server-key.pem` - Server private key (restricted permissions)
 
+By default, certificates are referenced by file path. Use `--inline-certs` to embed certificates directly in the config file:
+
+```bash
+# Embed certificates in config (useful for single-file deployment)
+sudo slt init --config-dir /etc/slt --domain vpn.example.com --inline-certs
+```
+
 ## Step 2: Add a Client
 
 Add a client configuration to the server. This generates client credentials and outputs a client config file.
@@ -57,11 +64,11 @@ Added client: a1b2c3d4e5f67890a1b2c3d4e5f67890
 Transfer the client configuration file to your client machine. Use a secure method like SCP:
 
 ```bash
-# On the server, display the client config (for transfer)
+# On the server, display the client config (for manual transfer)
 sudo cat /etc/slt/clients/client-a1b2c3d4e5f67890a1b2c3d4e5f67890.toml
 
-# Or copy directly with SCP
-scp sudo cat /etc/slt/clients/client-a1b2c3d4e5f67890a1b2c3d4e5f67890.toml user@client-machine:~/client.toml
+# Or copy directly with SCP (run from your client machine)
+scp user@server-machine:/etc/slt/clients/client-a1b2c3d4e5f67890a1b2c3d4e5f67890.toml ~/slt-client.toml
 ```
 
 On the client machine, save this file securely (e.g., `~/slt-client.toml`).
@@ -72,13 +79,13 @@ Start the SLT server on your server machine:
 
 ```bash
 # Run with sudo (required for TUN interface)
-sudo server --config /etc/slt/server.toml
+sudo slt-server --config /etc/slt/server.toml
 ```
 
 You should see log output indicating the server is running:
 
 ```
-INFO server starting: listen_tcp=0.0.0.0:443 listen_udp=0.0.0.0:443 tun_name="tun0" tun_mtu=1406
+INFO server starting: listen_tcp=0.0.0.0:443 listen_udp=0.0.0.0:443 tun_name="tun0" tun_mtu=1280
 ```
 
 The server is now listening on port 443 for both TCP and UDP connections.
@@ -89,13 +96,13 @@ On your client machine, start the SLT client:
 
 ```bash
 # Run with sudo (required for TUN interface)
-sudo client --config ~/slt-client.toml
+sudo slt-client --config ~/slt-client.toml
 ```
 
 You should see log output indicating a successful connection:
 
 ```
-INFO client starting: hostname="vpn.example.com" port=443 tun_name="tun0" tun_mtu=1406
+INFO client starting: hostname="vpn.example.com" port=443 tun_name="tun0" tun_mtu=1280
 INFO session established: client_id=a1b2c3d4e5f67890a1b2c3d4e5f67890
 ```
 
@@ -143,13 +150,13 @@ tls_key = { file = "server-key.pem" }  # Server private key
 
 [tun]
 tun_name = "tun0"   # TUN interface name
-tun_mtu = 1406      # Maximum transmission unit
+tun_mtu = 1406      # MTU (init uses 1406, default is 1280)
 
 [timing]
 ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
-idle_timeout = "60s"
+idle_timeout = "5m"
 
 # Client entries are added by `slt add-client`
 [[clients]]
@@ -181,10 +188,15 @@ privkey_ed25519 = "hex-encoded-32-byte-private-key"
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1406
+tun_mtu = 1280
 
+# Transport options (top-level)
 enable_upgrade = true   # Enable UDP-QSP upgrade
 require_udp = false     # Don't fail if UDP upgrade fails
+
+[timing]
+ping_min = "10s"
+ping_max = "30s"
 ```
 
 ## Common Issues
@@ -195,8 +207,8 @@ If you get permission errors creating the TUN interface:
 
 ```bash
 # Grant CAP_NET_ADMIN capability
-sudo setcap cap_net_admin+ep /usr/local/bin/client
-sudo setcap cap_net_admin+ep /usr/local/bin/server
+sudo setcap cap_net_admin+ep /usr/local/bin/slt-client
+sudo setcap cap_net_admin+ep /usr/local/bin/slt-server
 ```
 
 ### Connection Timeout
@@ -240,6 +252,14 @@ slt generate-keys
 # Output:
 # privkey: <hex-encoded-private-key>
 # pubkey:  <hex-encoded-public-key>
+```
+
+### Validate Configuration
+
+```bash
+# Validate a server or client config file
+slt validate /etc/slt/server.toml
+slt validate ~/slt-client.toml
 ```
 
 Then manually create the server and client TOML files using the structures shown above.
