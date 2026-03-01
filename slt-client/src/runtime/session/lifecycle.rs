@@ -221,11 +221,17 @@ mod tests {
 
             // Run multiple times to verify jitter is within bounds
             for _ in 0..100 {
-                let next_ping = compute_next_ping(ping_min, ping_max);
+                // Capture now BEFORE compute_next_ping so that min_deadline is
+                // guaranteed to be <= the internal Instant::now() used by
+                // compute_next_ping.
                 let now = Instant::now();
+                let next_ping = compute_next_ping(ping_min, ping_max);
 
                 let min_deadline = now + ping_min;
-                let max_deadline = now + ping_max + Duration::from_millis(1);
+                // Allow 50ms tolerance for timing variations during test execution.
+                // The internal Instant::now() in compute_next_ping may be later than
+                // our captured `now`, so next_ping could be slightly over ping_max.
+                let max_deadline = now + ping_max + Duration::from_millis(50);
 
                 assert!(
                     next_ping >= min_deadline && next_ping <= max_deadline,
