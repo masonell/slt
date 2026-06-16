@@ -2,11 +2,12 @@
 
 ## Architecture Overview
 
-SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on ports 80/443. It consists of 4 crates:
+SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on ports 80/443. It consists of 5 crates:
 
 - **slt-core**: Protocol definitions, crypto primitives, configuration types, packet parsing
 - **slt-server**: VPN server with TCP/UDP front doors, client authentication, session management, TUN integration
 - **slt-client**: VPN client with connection establishment, authentication, transport switching (TCP ↔ UDP-QSP)
+- **slt-cli**: WireGuard-style management CLI (`slt` binary) for project init, key/cert generation, client management, and config validation
 - **slt-tools**: CLI utilities for generating TLS/QUIC ClientHello packets
 
 ### Key Protocol Concepts
@@ -23,7 +24,7 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 ```
 
 ## Project Structure & Module Organization
-- Workspace root (`Cargo.toml`) defines four crates: `slt-core`, `slt-client`, `slt-server`, and `slt-tools`.
+- Workspace root (`Cargo.toml`) defines five crates: `slt-core`, `slt-client`, `slt-server`, `slt-cli`, and `slt-tools`.
 - `slt-core/src/` contains shared protocol and crypto primitives.
     - `crypto/` includes TLS/ClientHello helpers plus UDP-QSP packet/session crypto.
     - `config/` defines `ClientConfig` and `ServerConfig` with parsing/validation.
@@ -31,6 +32,7 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
     - `classifier.rs` implements TCP ClientHello classification.
 - `slt-client/src/` is the `client` binary (runtime loop, auth flow, transport switching, TUN I/O, metrics).
 - `slt-server/src/` provides the `server` binary plus server library modules (`auth`, `sessions`, `quic`, `tcp`, `tun`, `registry`, `router`, `udp_qsp`, `metrics`).
+- `slt-cli/src/` is the `slt` management binary (project init, key/cert generation, client add/remove/list/show, config validation).
 - `slt-tools/src/bin/` contains helper CLIs (`tcp_client_hello`, `quic_client_hello`).
 - `vendor/` includes patched dependencies (`boring`, `boring-sys`, `quiche`).
 - `scripts/` holds local capture helpers (e.g., `scripts/chrome-*.sh`).

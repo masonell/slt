@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Workspace root (`Cargo.toml`) defines four crates: `slt-core`, `slt-client`, `slt-server`, and `slt-tools`.
+- Workspace root (`Cargo.toml`) defines five crates: `slt-core`, `slt-client`, `slt-server`, `slt-cli`, and `slt-tools`.
 - `slt-core/src/` contains shared protocol and crypto primitives.
   - `crypto/` includes TLS/ClientHello helpers plus UDP-QSP packet/session crypto.
   - `config/` defines `ClientConfig` and `ServerConfig` with parsing/validation.
@@ -9,6 +9,7 @@
   - `classifier.rs` implements TCP ClientHello classification.
 - `slt-client/src/` is the `client` binary (runtime loop, auth flow, transport switching, TUN I/O, metrics).
 - `slt-server/src/` provides the `server` binary plus server library modules (`auth`, `sessions`, `quic`, `tcp`, `tun`, `registry`, `router`, `udp_qsp`, `metrics`).
+- `slt-cli/src/` is the `slt` management binary (project init, key/cert generation, client add/remove/list/show, config validation).
 - `slt-tools/src/bin/` contains helper CLIs (`tcp_client_hello`, `quic_client_hello`).
 - `vendor/` includes patched dependencies (`boring`, `boring-sys`, `quiche`).
 - `scripts/` holds local capture helpers (e.g., `scripts/chrome-*.sh`).
