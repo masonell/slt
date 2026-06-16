@@ -1,7 +1,7 @@
 //! Test support utilities for slt-core.
 //!
 //! Only compiled in test builds. Provides:
-//! - ClientHello generation helpers (`client_hello`)
+//! - `ClientHello` generation helpers (`client_hello`)
 
 mod client_hello;
 

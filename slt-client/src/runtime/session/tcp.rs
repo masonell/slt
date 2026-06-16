@@ -276,7 +276,7 @@ mod tests {
 
         use super::super::super::ClientSession;
 
-        /// Test that InvalidData maps to ProtocolError.
+        /// Test that `InvalidData` maps to `ProtocolError`.
         #[test]
         fn invalid_data_maps_to_protocol_error() {
             let err = io::Error::new(io::ErrorKind::InvalidData, "test");
@@ -284,7 +284,7 @@ mod tests {
             assert_eq!(exit, super::SessionExit::ProtocolError);
         }
 
-        /// Test that InvalidInput maps to ProtocolError.
+        /// Test that `InvalidInput` maps to `ProtocolError`.
         #[test]
         fn invalid_input_maps_to_protocol_error() {
             let err = io::Error::new(io::ErrorKind::InvalidInput, "test");
@@ -292,7 +292,7 @@ mod tests {
             assert_eq!(exit, super::SessionExit::ProtocolError);
         }
 
-        /// Test that PermissionDenied maps to PermissionDenied.
+        /// Test that `PermissionDenied` maps to `PermissionDenied`.
         #[test]
         fn permission_denied_maps_to_permission_denied() {
             let err = io::Error::new(io::ErrorKind::PermissionDenied, "test");
@@ -300,7 +300,7 @@ mod tests {
             assert_eq!(exit, super::SessionExit::PermissionDenied);
         }
 
-        /// Test that ConnectionReset maps to ConnectionError.
+        /// Test that `ConnectionReset` maps to `ConnectionError`.
         #[test]
         fn connection_reset_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::ConnectionReset, "test");
@@ -308,7 +308,7 @@ mod tests {
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
-        /// Test that BrokenPipe maps to ConnectionError.
+        /// Test that `BrokenPipe` maps to `ConnectionError`.
         #[test]
         fn broken_pipe_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::BrokenPipe, "test");
@@ -316,7 +316,7 @@ mod tests {
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
-        /// Test that TimedOut maps to ConnectionError.
+        /// Test that `TimedOut` maps to `ConnectionError`.
         #[test]
         fn timed_out_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::TimedOut, "test");
@@ -324,7 +324,7 @@ mod tests {
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
-        /// Test that UnexpectedEof maps to ConnectionError.
+        /// Test that `UnexpectedEof` maps to `ConnectionError`.
         #[test]
         fn unexpected_eof_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::UnexpectedEof, "test");
@@ -332,7 +332,7 @@ mod tests {
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
-        /// Test that Interrupted maps to ConnectionError.
+        /// Test that Interrupted maps to `ConnectionError`.
         #[test]
         fn interrupted_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::Interrupted, "test");
@@ -340,7 +340,7 @@ mod tests {
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
-        /// Test that other error kinds map to ConnectionError.
+        /// Test that other error kinds map to `ConnectionError`.
         #[test]
         fn other_errors_map_to_connection_error() {
             let other_kinds = [

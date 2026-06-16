@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn reconnect_backoff_delay_doubles_each_call() {
         let base = Duration::from_millis(100);
-        let max = Duration::from_secs(60);
+        let max = Duration::from_mins(1);
         let mut backoff = ReconnectBackoff::new(base, max);
 
         // Use deterministic seed for reproducible jitter
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn reconnect_backoff_jitter_bounds() {
         let base = Duration::from_millis(100);
-        let max = Duration::from_secs(60);
+        let max = Duration::from_mins(1);
 
         // Test jitter bounds over many samples
         // With equal-jitter: delay is in [current/2, current]

@@ -55,7 +55,7 @@ impl SessionIo for ChanIo {
 /// Create a mock `QuicIds` for testing without real network peers.
 ///
 /// Uses:
-/// - DCID: `[0xAA; 20]` (must be exactly MAX_DCID_LEN)
+/// - DCID: `[0xAA; 20]` (must be exactly `MAX_DCID_LEN`)
 /// - SCID: `[]` (empty, matching Chrome behavior)
 /// - Peer: `127.0.0.1:443`
 /// - Socket: Bound to `127.0.0.1:0` (OS-assigned port)

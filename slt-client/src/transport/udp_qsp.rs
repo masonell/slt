@@ -870,15 +870,8 @@ mod real_socket_tests {
         let dcid = Cid::from([0xB2; 20]);
 
         let client_io = ClientUdpIo::new(client_socket, server_addr);
-        let client_session = QuicQspSession::new(
-            client_io,
-            scid.clone(),
-            dcid.clone(),
-            make_test_keys(),
-            0,
-            0,
-            false,
-        );
+        let client_session =
+            QuicQspSession::new(client_io, scid, dcid, make_test_keys(), 0, 0, false);
         let client_metrics = Arc::new(Metrics::default());
         let client = UdpQspTransport::new(client_session, client_metrics);
 

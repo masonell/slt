@@ -1,7 +1,7 @@
 //! Mock TLS server for integration tests.
 //!
 //! Provides a server that can complete TLS handshakes and respond to
-//! AUTH, DISCOVERY, and REGISTER_CID messages. Uses the same test
+//! AUTH, DISCOVERY, and `REGISTER_CID` messages. Uses the same test
 //! certificates as `slt-core/src/transport/tcp.rs` tests.
 
 use std::io;
@@ -176,7 +176,7 @@ impl MockTlsServer {
         Ok(payload)
     }
 
-    /// Receive an AUTH message and send AUTH_OK.
+    /// Receive an AUTH message and send `AUTH_OK`.
     ///
     /// # Errors
     ///
@@ -189,7 +189,7 @@ impl MockTlsServer {
         .await
     }
 
-    /// Receive an AUTH message and send AUTH_FAIL.
+    /// Receive an AUTH message and send `AUTH_FAIL`.
     ///
     /// # Errors
     ///
@@ -234,7 +234,7 @@ impl MockTlsServer {
         Ok(pong.nonce)
     }
 
-    /// Receive a REGISTER_CID message and send REGISTER_OK.
+    /// Receive a `REGISTER_CID` message and send `REGISTER_OK`.
     ///
     /// Returns the DCID from the registration.
     #[allow(dead_code)]

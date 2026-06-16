@@ -178,9 +178,8 @@ async fn session_drops_udp_replay_packet() {
     .unwrap();
 
     // Should NOT receive another packet (replay dropped)
-    match timeout(Duration::from_millis(200), tun_rx.recv()).await {
-        Ok(Some(_)) => panic!("replayed UDP packet should be dropped"),
-        Ok(None) | Err(_) => {}
+    if let Ok(Some(_)) = timeout(Duration::from_millis(200), tun_rx.recv()).await {
+        panic!("replayed UDP packet should be dropped")
     }
 
     let _ = tx.send(SessionEvent::Shutdown).await;
@@ -268,9 +267,8 @@ async fn session_drops_udp_packet_with_bad_crypto() {
     .unwrap();
 
     // Should NOT receive anything (crypto failure)
-    match timeout(Duration::from_millis(200), tun_rx.recv()).await {
-        Ok(Some(_)) => panic!("packet with bad crypto should be dropped"),
-        Ok(None) | Err(_) => {}
+    if let Ok(Some(_)) = timeout(Duration::from_millis(200), tun_rx.recv()).await {
+        panic!("packet with bad crypto should be dropped")
     }
 
     // Session should still be alive and process valid packets

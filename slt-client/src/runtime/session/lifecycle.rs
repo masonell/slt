@@ -176,7 +176,7 @@ mod tests {
     mod schedule_next_ping_logic {
         use super::*;
 
-        /// Compute the next ping deadline using the same logic as schedule_next_ping.
+        /// Compute the next ping deadline using the same logic as `schedule_next_ping`.
         fn compute_next_ping(ping_min: Duration, ping_max: Duration) -> Instant {
             let min_ms = u64::try_from(ping_min.as_millis()).unwrap_or(u64::MAX);
             let max_ms = u64::try_from(ping_max.as_millis()).unwrap_or(u64::MAX);
@@ -188,7 +188,7 @@ mod tests {
             Instant::now() + Duration::from_millis(min_ms + jitter_ms)
         }
 
-        /// Test that ping is scheduled within [ping_min, ping_max] when min equals max.
+        /// Test that ping is scheduled within [`ping_min`, `ping_max`] when min equals max.
         #[test]
         fn ping_scheduled_at_exact_interval_when_min_equals_max() {
             let ping_interval = Duration::from_secs(15);
@@ -205,15 +205,12 @@ mod tests {
 
                 assert!(
                     next_ping >= expected_min && next_ping <= expected_max,
-                    "next_ping {:?} should be within [{:?}, {:?}]",
-                    next_ping,
-                    expected_min,
-                    expected_max
+                    "next_ping {next_ping:?} should be within [{expected_min:?}, {expected_max:?}]"
                 );
             }
         }
 
-        /// Test that ping is scheduled within [ping_min, ping_max] with jitter.
+        /// Test that ping is scheduled within [`ping_min`, `ping_max`] with jitter.
         #[test]
         fn ping_scheduled_within_jitter_range() {
             let ping_min = Duration::from_secs(10);
@@ -235,10 +232,7 @@ mod tests {
 
                 assert!(
                     next_ping >= min_deadline && next_ping <= max_deadline,
-                    "next_ping {:?} should be within [{:?}, {:?}]",
-                    next_ping,
-                    min_deadline,
-                    max_deadline
+                    "next_ping {next_ping:?} should be within [{min_deadline:?}, {max_deadline:?}]"
                 );
             }
         }
@@ -282,7 +276,7 @@ mod tests {
             // Default: ping_min=10s, ping_max=30s, idle_timeout=5m
             assert_eq!(config.ping_min, Duration::from_secs(10));
             assert_eq!(config.ping_max, Duration::from_secs(30));
-            assert_eq!(config.idle_timeout, Duration::from_secs(300));
+            assert_eq!(config.idle_timeout, Duration::from_mins(5));
 
             // ping_min should not exceed ping_max
             assert!(config.ping_min <= config.ping_max);
@@ -298,8 +292,8 @@ mod tests {
         /// Test idle deadline calculation for TCP transport.
         #[test]
         fn tcp_idle_deadline_is_last_rx_plus_timeout() {
-            let idle_timeout = Duration::from_secs(60);
-            let last_tcp_rx = Instant::now() - Duration::from_secs(30);
+            let idle_timeout = Duration::from_mins(1);
+            let last_tcp_rx = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
 
             let idle_deadline = last_tcp_rx + idle_timeout;
 
@@ -310,18 +304,17 @@ mod tests {
             // Allow 100ms tolerance
             let tolerance = Duration::from_millis(100);
             assert!(
-                actual_remaining >= expected_remaining - tolerance
+                actual_remaining >= expected_remaining.checked_sub(tolerance).unwrap()
                     && actual_remaining <= expected_remaining + tolerance,
-                "idle deadline should be ~30s away, got {:?}",
-                actual_remaining
+                "idle deadline should be ~30s away, got {actual_remaining:?}"
             );
         }
 
         /// Test idle deadline calculation for UDP transport.
         #[test]
         fn udp_idle_deadline_is_last_rx_plus_timeout() {
-            let idle_timeout = Duration::from_secs(60);
-            let last_udp_rx = Instant::now() - Duration::from_secs(45);
+            let idle_timeout = Duration::from_mins(1);
+            let last_udp_rx = Instant::now().checked_sub(Duration::from_secs(45)).unwrap();
 
             let idle_deadline = last_udp_rx + idle_timeout;
 
@@ -331,20 +324,19 @@ mod tests {
 
             let tolerance = Duration::from_millis(100);
             assert!(
-                actual_remaining >= expected_remaining - tolerance
+                actual_remaining >= expected_remaining.checked_sub(tolerance).unwrap()
                     && actual_remaining <= expected_remaining + tolerance,
-                "idle deadline should be ~15s away, got {:?}",
-                actual_remaining
+                "idle deadline should be ~15s away, got {actual_remaining:?}"
             );
         }
 
         /// Test that activity resets idle deadline.
         #[test]
         fn activity_resets_idle_deadline() {
-            let idle_timeout = Duration::from_secs(60);
+            let idle_timeout = Duration::from_mins(1);
 
             // Old activity, close to timeout
-            let old_last_rx = Instant::now() - Duration::from_secs(55);
+            let old_last_rx = Instant::now().checked_sub(Duration::from_secs(55)).unwrap();
             let old_deadline = old_last_rx + idle_timeout;
 
             // After activity, deadline extends
@@ -368,8 +360,8 @@ mod tests {
         /// Test that deadline has passed when idle time exceeds timeout.
         #[test]
         fn idle_deadline_passed_when_exceeded() {
-            let idle_timeout = Duration::from_secs(60);
-            let last_rx = Instant::now() - Duration::from_secs(65);
+            let idle_timeout = Duration::from_mins(1);
+            let last_rx = Instant::now().checked_sub(Duration::from_secs(65)).unwrap();
 
             let deadline = last_rx + idle_timeout;
 
@@ -380,8 +372,8 @@ mod tests {
         /// Test deadline is still future when within timeout.
         #[test]
         fn idle_deadline_future_when_within_timeout() {
-            let idle_timeout = Duration::from_secs(60);
-            let last_rx = Instant::now() - Duration::from_secs(30);
+            let idle_timeout = Duration::from_mins(1);
+            let last_rx = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
 
             let deadline = last_rx + idle_timeout;
 
@@ -414,7 +406,7 @@ mod tests {
         /// Test that activity extends idle deadline.
         #[test]
         fn activity_extends_idle_deadline() {
-            let idle_timeout = Duration::from_secs(60);
+            let idle_timeout = Duration::from_mins(1);
 
             // Simulate timeline using mock times
             let t0 = Instant::now();
@@ -445,7 +437,7 @@ mod tests {
         /// Test that pong response prevents timeout (pong counts as activity).
         #[test]
         fn pong_response_prevents_timeout() {
-            let idle_timeout = Duration::from_secs(60);
+            let idle_timeout = Duration::from_mins(1);
 
             // Session starts at t=0
             let start = Instant::now();
@@ -466,7 +458,7 @@ mod tests {
         #[test]
         fn regular_pings_prevent_idle_timeout() {
             let ping_interval = Duration::from_secs(20);
-            let idle_timeout = Duration::from_secs(60);
+            let idle_timeout = Duration::from_mins(1);
 
             // Simulate a session where pings are sent every 20s
             // and pongs are received, updating last_rx
@@ -551,7 +543,7 @@ mod tests {
         /// Test that TCP and UDP activity timestamps are tracked independently.
         #[test]
         fn tcp_and_udp_timestamps_are_independent() {
-            let idle_timeout = Duration::from_secs(60);
+            let idle_timeout = Duration::from_mins(1);
             let now = Instant::now();
 
             // Simulate: TCP activity at t=0, UDP activity at t=30s
@@ -572,7 +564,7 @@ mod tests {
         /// Test that switching transports uses correct deadline.
         #[test]
         fn transport_switch_uses_correct_deadline() {
-            let idle_timeout = Duration::from_secs(60);
+            let idle_timeout = Duration::from_mins(1);
             let now = Instant::now();
 
             // Start on TCP

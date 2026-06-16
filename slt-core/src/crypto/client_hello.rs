@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(parse_client_hello(&buf), None);
     }
 
-    /// Build a minimal ClientHello handshake message with custom extensions.
+    /// Build a minimal `ClientHello` handshake message with custom extensions.
     fn build_minimal_client_hello(random: &[u8; 32], extensions: &[u8]) -> Vec<u8> {
         let session_id: &[u8] = &[];
         let cipher_suites: &[u8] = &[0x00, 0x02, 0x13, 0x01]; // len + TLS_AES_128_GCM_SHA256

@@ -30,9 +30,9 @@ impl UdpSocketIo for TestUdpSocket {
 }
 
 impl TestUdpSocket {
-    /// Creates a new TestUdpSocket with a channel for capturing packets.
+    /// Creates a new `TestUdpSocket` with a channel for capturing packets.
     ///
-    /// Returns (TestUdpSocket, receiver for captured packets).
+    /// Returns (`TestUdpSocket`, receiver for captured packets).
     pub fn new(channel_size: usize) -> (Arc<Self>, mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = mpsc::channel(channel_size);
         (Arc::new(Self { tx }), rx)

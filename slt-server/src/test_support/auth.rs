@@ -18,9 +18,9 @@ use crate::test_support::tun::NullTun;
 #[must_use]
 pub fn default_session_timeouts() -> SessionTimeouts {
     SessionTimeouts {
-        ping_min: Duration::from_secs(3600),
-        ping_max: Duration::from_secs(3600),
-        idle_timeout: Duration::from_secs(3600),
+        ping_min: Duration::from_hours(1),
+        ping_max: Duration::from_hours(1),
+        idle_timeout: Duration::from_hours(1),
     }
 }
 
@@ -78,7 +78,7 @@ impl TestAuthHandlerBuilder {
         self
     }
 
-    /// Builds the test auth handler (async version for use with #[tokio::test]).
+    /// Builds the test auth handler (async version for use with #[`tokio::test`]).
     ///
     /// Returns (handler, registry, metrics) for inspection.
     ///
@@ -165,7 +165,7 @@ impl TestAuthHandlerBuilder {
     }
 }
 
-/// Wrapper around AuthHandlerBase for testing.
+/// Wrapper around `AuthHandlerBase` for testing.
 pub struct TestAuthHandler {
     /// The underlying auth handler.
     pub inner: AuthHandlerBase<NullTun>,

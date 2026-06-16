@@ -19,7 +19,7 @@ use thiserror::Error;
 pub use validate::{validate_ping_interval, validate_timeout};
 
 /// Maximum allowed timeout duration (1 hour).
-pub const MAX_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+pub const MAX_TIMEOUT: Duration = Duration::from_hours(1);
 
 /// Ethernet IP MTU used as the transport envelope target.
 pub const ETHERNET_IP_MTU: u16 = 1500;
@@ -213,8 +213,8 @@ mod tests {
     fn config_error_timeout_too_large_display() {
         let err = ConfigError::TimeoutTooLarge {
             field: "idle_timeout",
-            value: Duration::from_secs(7200),
-            max: Duration::from_secs(3600),
+            value: Duration::from_hours(2),
+            max: Duration::from_hours(1),
         };
         let msg = err.to_string();
         assert!(msg.contains("idle_timeout"));

@@ -145,14 +145,13 @@ async fn session_drops_oversized_tun_packet() {
         .unwrap();
 
     // Should not forward anything to client via TCP
-    match timeout(
+    if let Ok(Ok(_)) = timeout(
         Duration::from_millis(200),
         read_message_bytes(&mut client, limits),
     )
     .await
     {
-        Ok(Ok(_)) => panic!("oversized packet should not be forwarded to client"),
-        Ok(Err(_)) | Err(_) => {}
+        panic!("oversized packet should not be forwarded to client")
     }
 
     let _ = tx.send(SessionEvent::Shutdown).await;
@@ -205,9 +204,8 @@ async fn session_drops_tcp_data_when_udp_active() {
     client.write_all(&tcp_frame).await.unwrap();
 
     // Should NOT appear on TUN (dropped because TCP is not active transport)
-    match timeout(Duration::from_millis(200), tun_rx.recv()).await {
-        Ok(Some(_)) => panic!("TCP data should be dropped when UDP is active"),
-        Ok(None) | Err(_) => {}
+    if let Ok(Some(_)) = timeout(Duration::from_millis(200), tun_rx.recv()).await {
+        panic!("TCP data should be dropped when UDP is active")
     }
 
     let _ = tx.send(SessionEvent::Shutdown).await;

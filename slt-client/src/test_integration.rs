@@ -2,7 +2,7 @@
 //!
 //! These tests cover:
 //! - TCP session message handling (ping/pong, data, close)
-//! - UDP upgrade flow (REGISTER_CID/REGISTER_OK, REGISTER_FAIL)
+//! - UDP upgrade flow (`REGISTER_CID/REGISTER_OK`, `REGISTER_FAIL`)
 //! - Reconnection handling
 
 #[cfg(test)]
@@ -263,7 +263,7 @@ mod tests {
     mod udp_upgrade_flow {
         use super::*;
 
-        /// Test REGISTER_CID/REGISTER_OK exchange.
+        /// Test `REGISTER_CID/REGISTER_OK` exchange.
         #[tokio::test]
         async fn register_cid_ok_exchange() {
             let (mut client, server) = mock_transport_pair().await;
@@ -273,8 +273,8 @@ mod tests {
             let dcid = slt_core::types::Cid::from([0xAA; MAX_DCID_LEN]);
             let scid = slt_core::types::Cid::from([0xBB; MAX_DCID_LEN]);
             let register = slt_core::proto::RegisterCidPayload {
-                client_to_server_cid: dcid.clone(),
-                server_to_client_cid: scid.clone(),
+                client_to_server_cid: dcid,
+                server_to_client_cid: scid,
                 cipher: slt_core::proto::CipherSuite::Aes128Gcm,
                 hp_tx: [0x01; 16],
                 hp_rx: [0x02; 16],
@@ -316,7 +316,7 @@ mod tests {
             }
         }
 
-        /// Test REGISTER_CID/REGISTER_FAIL exchange.
+        /// Test `REGISTER_CID/REGISTER_FAIL` exchange.
         #[tokio::test]
         async fn register_cid_fail_exchange() {
             let (mut client, server) = mock_transport_pair().await;
@@ -326,7 +326,7 @@ mod tests {
             let dcid = slt_core::types::Cid::from([0xAA; MAX_DCID_LEN]);
             let scid = slt_core::types::Cid::from([0xBB; MAX_DCID_LEN]);
             let register = slt_core::proto::RegisterCidPayload {
-                client_to_server_cid: dcid.clone(),
+                client_to_server_cid: dcid,
                 server_to_client_cid: scid,
                 cipher: slt_core::proto::CipherSuite::Aes128Gcm,
                 hp_tx: [0x01; 16],
@@ -379,7 +379,7 @@ mod tests {
             }
         }
 
-        /// Test all REGISTER_FAIL codes can be decoded.
+        /// Test all `REGISTER_FAIL` codes can be decoded.
         #[tokio::test]
         async fn register_fail_all_codes() {
             let codes = [
@@ -397,12 +397,12 @@ mod tests {
             }
         }
 
-        /// Test REGISTER_OK payload roundtrip.
+        /// Test `REGISTER_OK` payload roundtrip.
         #[tokio::test]
         async fn register_ok_payload_roundtrip() {
             let dcid = slt_core::types::Cid::from([0xCD; MAX_DCID_LEN]);
             let payload = RegisterOkPayload {
-                client_to_server_cid: dcid.clone(),
+                client_to_server_cid: dcid,
             };
 
             let mut buf = Vec::new();
@@ -412,7 +412,7 @@ mod tests {
             assert_eq!(decoded.client_to_server_cid, dcid);
         }
 
-        /// Test REGISTER_FAIL payload roundtrip.
+        /// Test `REGISTER_FAIL` payload roundtrip.
         #[tokio::test]
         async fn register_fail_payload_roundtrip() {
             let payload = RegisterFailPayload {
@@ -426,7 +426,7 @@ mod tests {
             assert_eq!(decoded.code, RegisterFailCode::InvalidKeys);
         }
 
-        /// Test REGISTER_OK decode errors.
+        /// Test `REGISTER_OK` decode errors.
         #[tokio::test]
         async fn register_ok_decode_errors() {
             // Empty payload
@@ -442,7 +442,7 @@ mod tests {
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         }
 
-        /// Test REGISTER_FAIL decode errors.
+        /// Test `REGISTER_FAIL` decode errors.
         #[tokio::test]
         async fn register_fail_decode_errors() {
             // Empty payload
@@ -479,17 +479,17 @@ mod tests {
             // First attempt: should be in [50, 100]ms
             let d1 = backoff.next_delay();
             let d1_ms = d1.as_millis() as u64;
-            assert!(d1_ms >= 50 && d1_ms <= 100, "d1_ms = {d1_ms}");
+            assert!((50..=100).contains(&d1_ms), "d1_ms = {d1_ms}");
 
             // After failure, backoff increases
             let d2 = backoff.next_delay();
             let d2_ms = d2.as_millis() as u64;
-            assert!(d2_ms >= 100 && d2_ms <= 200, "d2_ms = {d2_ms}");
+            assert!((100..=200).contains(&d2_ms), "d2_ms = {d2_ms}");
 
             // Continue backoff
             let d3 = backoff.next_delay();
             let d3_ms = d3.as_millis() as u64;
-            assert!(d3_ms >= 200 && d3_ms <= 400, "d3_ms = {d3_ms}");
+            assert!((200..=400).contains(&d3_ms), "d3_ms = {d3_ms}");
         }
 
         /// Test backoff reset after successful connection.
@@ -513,7 +513,7 @@ mod tests {
             // Next delay should be at base level again
             let d = backoff.next_delay();
             let d_ms = d.as_millis() as u64;
-            assert!(d_ms >= 50 && d_ms <= 100, "d_ms = {d_ms}");
+            assert!((50..=100).contains(&d_ms), "d_ms = {d_ms}");
         }
 
         /// Test connection drop detection.
@@ -713,8 +713,10 @@ mod tests {
                 let server_fut = server.recv_auth_and_send_ok(&config);
                 let client_fut = authenticate_with_channel(&mut client, &config, &metrics);
                 let (server_result, client_result) = tokio::join!(server_fut, client_fut);
-                server_result.expect(&format!("server auth should succeed, iteration {i}"));
-                client_result.expect(&format!("client auth should succeed, iteration {i}"));
+                server_result
+                    .unwrap_or_else(|_| panic!("server auth should succeed, iteration {i}"));
+                client_result
+                    .unwrap_or_else(|_| panic!("client auth should succeed, iteration {i}"));
 
                 // Exchange data
                 let data = format!("test data {i}");

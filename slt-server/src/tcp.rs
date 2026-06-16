@@ -285,7 +285,7 @@ mod tests {
                 ping_min: Duration::from_secs(10),
                 ping_max: Duration::from_secs(20),
                 auth_timeout: Duration::from_secs(10),
-                idle_timeout: Duration::from_secs(60),
+                idle_timeout: Duration::from_mins(1),
             },
             udp_nat_max_entries: 1024,
             session_queue_size: 256,
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(snapshot.passed, 1);
     }
 
-    /// Test bind() error path when address is already in use (line 36).
+    /// Test `bind()` error path when address is already in use (line 36).
     #[tokio::test]
     async fn bind_fails_when_address_in_use() {
         let metrics = Arc::new(Metrics::default());
@@ -771,7 +771,7 @@ mod tests {
         );
     }
 
-    /// Test that classify_stream correctly classifies complete ClientHello data.
+    /// Test that `classify_stream` correctly classifies complete `ClientHello` data.
     /// This verifies the peek loop logic works correctly when full data is available.
     #[tokio::test]
     async fn classify_stream_classifies_complete_client_hello() {
@@ -796,7 +796,7 @@ mod tests {
         // Classification should succeed with complete data
         let result = tokio::select! {
             result = classify_task => result,
-            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+            () = tokio::time::sleep(Duration::from_secs(2)) => {
                 panic!("classification timed out");
             }
         };

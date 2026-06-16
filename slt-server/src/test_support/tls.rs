@@ -47,7 +47,7 @@ pub type TlsDuplexStream = tokio_boring::SslStream<DuplexStream>;
 
 /// Creates a connected TLS pair for testing.
 ///
-/// Returns (server_tls, client_tls) where:
+/// Returns (`server_tls`, `client_tls`) where:
 /// - `server_tls` is the server-side of the connection
 /// - `client_tls` is the client-side of the connection
 ///

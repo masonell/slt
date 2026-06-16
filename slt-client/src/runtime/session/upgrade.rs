@@ -734,7 +734,7 @@ mod tests {
         fn valid_payload_decodes() {
             let c2s_cid = Cid::from([0xAA; MAX_DCID_LEN]);
             let payload = RegisterOkPayload {
-                client_to_server_cid: c2s_cid.clone(),
+                client_to_server_cid: c2s_cid,
             };
             let mut buf = Vec::new();
             payload.encode(&mut buf).unwrap();
@@ -887,7 +887,7 @@ mod tests {
         #[test]
         fn deadline_elapsed_check() {
             let now = Instant::now();
-            let past_deadline = now - Duration::from_secs(1);
+            let past_deadline = now.checked_sub(Duration::from_secs(1)).unwrap();
             let future_deadline = now + Duration::from_secs(1);
 
             // Past deadline should be before now

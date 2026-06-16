@@ -38,9 +38,9 @@ impl TunDeviceIo for TestTun {
 }
 
 impl TestTun {
-    /// Creates a new TestTun with a channel for capturing packets.
+    /// Creates a new `TestTun` with a channel for capturing packets.
     ///
-    /// Returns (TestTun, receiver for captured packets).
+    /// Returns (`TestTun`, receiver for captured packets).
     pub fn new(channel_size: usize) -> (Arc<Self>, mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = mpsc::channel(channel_size);
         (Arc::new(Self { tx }), rx)

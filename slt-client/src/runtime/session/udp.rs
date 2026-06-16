@@ -129,7 +129,7 @@ impl ClientSession<'_> {
 mod tests {
     use std::io;
 
-    /// Test unexpected register_ok error properties.
+    /// Test unexpected `register_ok` error properties.
     #[test]
     fn unexpected_register_ok_error_kind() {
         let err = io::Error::new(
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
-    /// Test unexpected register_fail error properties.
+    /// Test unexpected `register_fail` error properties.
     #[test]
     fn unexpected_register_fail_error_kind() {
         let err = io::Error::new(
@@ -162,7 +162,7 @@ mod tests {
     mod handle_udp_error_logic {
         use super::*;
 
-        /// Test that InvalidData errors are considered recoverable (dropped).
+        /// Test that `InvalidData` errors are considered recoverable (dropped).
         #[test]
         fn invalid_data_is_recoverable_kind() {
             // InvalidData is used for packet-level issues (replay, crypto failures)
@@ -239,7 +239,7 @@ mod tests {
     mod error_recovery_paths {
         use super::*;
 
-        /// Test that ConnectionAborted (dead channel) is fatal when TCP is dead.
+        /// Test that `ConnectionAborted` (dead channel) is fatal when TCP is dead.
         #[test]
         fn connection_aborted_is_fatal_when_tcp_dead() {
             let err = io::Error::new(io::ErrorKind::ConnectionAborted, "dead channel");
@@ -248,7 +248,7 @@ mod tests {
             // When TCP is dead, this should cause session closure
         }
 
-        /// Test that InvalidData errors are recoverable regardless of TCP state.
+        /// Test that `InvalidData` errors are recoverable regardless of TCP state.
         #[test]
         fn invalid_data_is_always_recoverable() {
             let recoverable_errors = [

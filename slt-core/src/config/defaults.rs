@@ -12,7 +12,7 @@ pub const DEFAULT_PING_MAX: Duration = Duration::from_secs(30);
 pub const DEFAULT_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default idle timeout.
-pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Default UDP-QSP registration timeout (client only).
 pub const DEFAULT_REGISTER_TIMEOUT: Duration = Duration::from_secs(10);

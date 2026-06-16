@@ -152,7 +152,7 @@ mod tests {
             let err = map_payload_error(PayloadError::InvalidClientToServerCidLen(5));
             assert_io_error(&err, io::ErrorKind::InvalidData, "payload error: ");
             assert!(err.to_string().contains("InvalidClientToServerCidLen"));
-            assert!(err.to_string().contains("5"));
+            assert!(err.to_string().contains('5'));
         }
 
         #[test]

@@ -14,7 +14,7 @@ use super::super::*;
 use super::common::{ipv4_packet, make_register_payload, read_message_bytes, spawn_session};
 use crate::quic::UdpClaim;
 
-fn decode_single_message<'a>(payload: &'a [u8], limits: MessageLimits) -> Message<'a> {
+fn decode_single_message(payload: &[u8], limits: MessageLimits) -> Message<'_> {
     let (message, consumed) = decode_message(payload, limits).unwrap().unwrap();
     assert_eq!(consumed, payload.len());
     message

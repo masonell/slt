@@ -292,9 +292,8 @@ async fn session_ignores_udp_control_messages() {
     }
 
     // Control messages should be silently ignored - no TUN output
-    match timeout(Duration::from_millis(200), tun_rx.recv()).await {
-        Ok(Some(_)) => panic!("UDP control messages should be ignored"),
-        Ok(None) | Err(_) => {}
+    if let Ok(Some(_)) = timeout(Duration::from_millis(200), tun_rx.recv()).await {
+        panic!("UDP control messages should be ignored")
     }
 
     // Session should still work - send a data packet

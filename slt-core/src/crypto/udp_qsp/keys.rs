@@ -963,7 +963,7 @@ mod tests {
 
         let opened = keys.open(dcid.len(), &protected, pn).unwrap();
         assert_eq!(opened.pn, pn);
-        assert_eq!(opened.key_phase, false);
+        assert!(!opened.key_phase);
         assert_eq!(opened.payload, plaintext);
     }
 
@@ -992,7 +992,7 @@ mod tests {
     #[test]
     fn debug_redacts_key_material() {
         let keys = make_directional_keys();
-        let debug_str = format!("{:?}", keys);
+        let debug_str = format!("{keys:?}");
 
         assert!(debug_str.contains("UdpQspKeys"));
         assert!(debug_str.contains("cipher"));

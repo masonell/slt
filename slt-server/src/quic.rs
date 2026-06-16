@@ -485,7 +485,7 @@ mod tests {
                 ping_min: Duration::from_secs(10),
                 ping_max: Duration::from_secs(20),
                 auth_timeout: Duration::from_secs(10),
-                idle_timeout: Duration::from_secs(60),
+                idle_timeout: Duration::from_mins(1),
             },
             udp_nat_max_entries: 1024,
             session_queue_size: 256,
@@ -500,7 +500,7 @@ mod tests {
             socket: Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap()),
             nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
             max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             registry,
             metrics,
         }
@@ -714,7 +714,7 @@ mod tests {
             socket: downstream.clone(),
             nginx_upstream: upstream_addr,
             max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             registry,
             metrics,
         };
@@ -755,7 +755,7 @@ mod tests {
             socket: downstream,
             nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
             max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             registry,
             metrics: metrics.clone(),
         };
@@ -800,7 +800,7 @@ mod tests {
             socket: downstream.clone(),
             nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
             max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             registry: registry.clone(),
             metrics,
         };
@@ -854,7 +854,7 @@ mod tests {
             socket: downstream.clone(),
             nginx_upstream: upstream_addr,
             max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             registry,
             metrics,
         };
@@ -897,7 +897,7 @@ mod tests {
             socket: downstream,
             nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
             max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             registry,
             metrics: metrics.clone(),
         };
@@ -943,7 +943,7 @@ mod tests {
             socket: downstream.clone(),
             nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
             max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_mins(1),
             registry: registry.clone(),
             metrics,
         };
@@ -1113,7 +1113,7 @@ mod tests {
     async fn sweep_idle_evicts_stale_peers() {
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
-        let idle_timeout = Duration::from_secs(60);
+        let idle_timeout = Duration::from_mins(1);
 
         // Manually insert a peer entry with old last_seen
         let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -1139,7 +1139,7 @@ mod tests {
     async fn sweep_idle_keeps_recent_peers() {
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
-        let idle_timeout = Duration::from_secs(60);
+        let idle_timeout = Duration::from_mins(1);
 
         // Manually insert a peer entry with recent last_seen
         let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());

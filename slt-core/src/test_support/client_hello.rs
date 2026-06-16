@@ -1,6 +1,6 @@
-//! ClientHello test utilities.
+//! `ClientHello` test utilities.
 //!
-//! Provides helpers for generating TLS ClientHello bytes for testing.
+//! Provides helpers for generating TLS `ClientHello` bytes for testing.
 
 use std::io::{self, Read, Write};
 
@@ -33,13 +33,14 @@ impl Write for CaptureStream {
     }
 }
 
-/// TLS record header size: content_type(1) + version(2) + length(2).
+/// TLS record header size: `content_type(1)` + version(2) + length(2).
 pub const TLS_RECORD_HEADER_LEN: usize = 5;
 
-/// Generate a real TLS ClientHello using BoringSSL with the given secret.
+/// Generate a real TLS `ClientHello` using `BoringSSL` with the given secret.
 ///
 /// Returns the full TLS record including the 5-byte record header.
 /// Use [`client_hello_handshake_bytes`] to get just the handshake message.
+#[must_use]
 pub fn generate_client_hello_tls_record(secret: SharedSecret) -> Vec<u8> {
     let mut ctx = SslContextBuilder::new(SslMethod::tls()).unwrap();
     ctx.set_verify(SslVerifyMode::NONE);
@@ -60,10 +61,11 @@ pub fn generate_client_hello_tls_record(secret: SharedSecret) -> Vec<u8> {
     mid.into_source_stream().written
 }
 
-/// Generate a TLS ClientHello handshake message (without TLS record header).
+/// Generate a TLS `ClientHello` handshake message (without TLS record header).
 ///
 /// This returns bytes suitable for passing directly to
 /// [`parse_client_hello`](crate::crypto::client_hello::parse_client_hello).
+#[must_use]
 pub fn generate_client_hello_handshake(secret: SharedSecret) -> Vec<u8> {
     let record = generate_client_hello_tls_record(secret);
     record[TLS_RECORD_HEADER_LEN..].to_vec()

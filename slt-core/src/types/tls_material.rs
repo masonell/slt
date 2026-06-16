@@ -100,9 +100,7 @@ mod tests {
     fn deserialize_file_reference() {
         let config: Config = toml::from_str("cert = { file = \"/path/to/cert.pem\" }").unwrap();
         assert!(config.cert.is_file());
-        assert!(
-            matches!(config.cert, TlsMaterial::File { file } if file == PathBuf::from("/path/to/cert.pem"))
-        );
+        assert!(matches!(config.cert, TlsMaterial::File { file } if file == *"/path/to/cert.pem"));
     }
 
     #[test]

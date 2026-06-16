@@ -177,10 +177,9 @@ mod tests {
         // Structure: c2s_cid_len(1) + c2s_cid(20) + s2c_cid_len(1) + s2c_cid(var) + cipher(1) +
         //            hp_tx(16) + hp_rx(16) + aead_tx(16) + aead_rx(16) +
         //            iv_tx(12) + iv_rx(12) + pn_start(8) + pn_start_rx(8) + key_phase(1)
-        let expected_min_len = 1
+        let expected_min_len = (1
             + MAX_DCID_LEN
-            + 1
-            + 0 // s2c can be empty
+            + 1) // s2c can be empty
             + 1
             + HP_KEY_LEN * 2
             + AEAD_KEY_LEN * 2
@@ -195,7 +194,7 @@ mod tests {
         assert_eq!(c2s_cid_len, MAX_DCID_LEN);
 
         // Verify client_to_server_cid bytes
-        assert_eq!(&payload[1..1 + c2s_cid_len], ids.dcid.as_slice());
+        assert_eq!(&payload[1..=c2s_cid_len], ids.dcid.as_slice());
 
         // Verify server_to_client_cid length prefix
         let s2c_cid_len_offset = 1 + c2s_cid_len;
@@ -247,8 +246,8 @@ mod tests {
         let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
 
         // Packet numbers are generated from fastrand::u32(..), so should be in u32 range
-        assert!(decoded.pn_start <= u64::from(u32::MAX));
-        assert!(decoded.pn_start_rx <= u64::from(u32::MAX));
+        assert!(u32::try_from(decoded.pn_start).is_ok());
+        assert!(u32::try_from(decoded.pn_start_rx).is_ok());
     }
 
     #[tokio::test]

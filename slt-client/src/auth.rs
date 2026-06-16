@@ -57,14 +57,10 @@ where
             }
         }
 
-        loop {
-            let Some(msg_buf) = tcp
-                .try_pop_message(limits)
-                .map_err(crate::wire::map_message_error)?
-            else {
-                break;
-            };
-
+        while let Some(msg_buf) = tcp
+            .try_pop_message(limits)
+            .map_err(crate::wire::map_message_error)?
+        {
             match handle_auth_message(tcp, msg_buf.message()).await? {
                 AuthResult::Continue => {}
                 AuthResult::Accepted => {
@@ -307,11 +303,11 @@ mod tests {
     #[test]
     fn auth_payload_various_ipv4_addresses() {
         let test_cases = [
-            (Ipv4Addr::new(0, 0, 0, 0), "zero"),
+            (Ipv4Addr::UNSPECIFIED, "zero"),
             (Ipv4Addr::new(10, 0, 0, 1), "private 10.x"),
             (Ipv4Addr::new(192, 168, 1, 100), "private 192.168.x"),
             (Ipv4Addr::new(172, 16, 0, 1), "private 172.16.x"),
-            (Ipv4Addr::new(255, 255, 255, 255), "broadcast"),
+            (Ipv4Addr::BROADCAST, "broadcast"),
         ];
 
         for (ipv4, desc) in test_cases {
@@ -464,7 +460,7 @@ mod tests {
 
         // Test Clone trait
         let original = AuthResult::Accepted;
-        let cloned = original.clone();
+        let cloned = original;
         assert!(matches!(cloned, AuthResult::Accepted));
 
         // Test Copy trait
@@ -496,7 +492,7 @@ mod integration_tests {
     use crate::test_support::{MockTlsServer, test_config, tls_server_pair};
 
     /// Create a mock TCP transport pair for testing.
-    /// Returns (client_transport, server_stream).
+    /// Returns (`client_transport`, `server_stream`).
     async fn mock_transport_pair() -> (
         TcpChannel<DuplexStream, crate::transport::tcp::ClientKeyUpdater>,
         tokio_boring::SslStream<DuplexStream>,
