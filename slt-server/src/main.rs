@@ -80,7 +80,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     let metrics = Arc::new(Metrics::default());
     let registry = Arc::new(SessionRegistry::new());
     let frontdoor = TcpFrontDoor::bind(&config, metrics.clone()).await?;
-    let quic = QuicEndpoint::bind(&config, registry.clone(), metrics.clone()).await?;
+    let quic = QuicEndpoint::bind(&config, registry.clone(), metrics.clone())?;
     let acceptor = build_tls_acceptor(&config)?;
     let authenticator = Authenticator::from_config(&config);
     let tun = Arc::new(build_async_tun_device(
@@ -295,7 +295,7 @@ async fn join_ignoring_result(handle: tokio::task::JoinHandle<io::Result<()>>) {
 ///
 /// A join handle for the spawned task.
 fn spawn_udp_task(
-    quic: QuicEndpoint,
+    mut quic: QuicEndpoint,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<io::Result<()>> {
     tokio::spawn(async move { quic.run(cancel).await })

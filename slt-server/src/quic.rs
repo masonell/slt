@@ -1,15 +1,17 @@
 //! QUIC front-door handling.
 
-use std::io;
+use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
+use quinn_udp::{BATCH_SIZE, RecvMeta, UdpSockRef, UdpSocketState};
 use slt_core::classifier::{QuicVerdict, classify_quic_datagram};
 use slt_core::config::ServerConfig;
 use slt_core::types::CidPrefix;
+use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -19,8 +21,31 @@ use super::metrics::Metrics;
 use super::registry::SessionRegistry;
 use crate::sessions::SessionEvent;
 
-/// Buffer size for UDP datagram reads.
+/// Buffer size for UDP datagram reads on the passthrough upstream-reader path.
 const QUIC_BUF_LEN: usize = 2 * 1024;
+
+/// Upper bound on a single UDP datagram received by the front-door socket.
+///
+/// UDP-QSP packets carry one TUN frame (≈ `tun_mtu` plus a QUIC short header and
+/// AEAD overhead); passthrough QUIC datagrams are bounded by the link MTU. 1500
+/// (standard Ethernet) covers both. Each recv buffer is sized to
+/// `MAX_DATAGRAM * gro_segments()` so a fully `UDP_GRO`-coalesced batch (up to
+/// 64 datagrams on Linux) fits without truncation. Increase this if deploying on
+/// jumbo-frame links.
+const MAX_DATAGRAM: usize = 1500;
+
+/// Byte ranges of the individual datagrams within one GRO-coalesced receive buffer
+/// of `len` bytes, where each datagram is `stride` bytes (the last may be shorter).
+///
+/// `stride` is clamped to at least 1 (avoids `step_by` panicking and an infinite
+/// loop on a malformed `stride == 0`). A `RecvMeta` whose `len` exceeds its
+/// `stride` (`UDP_GRO` coalescing) yields multiple ranges; otherwise one.
+fn gro_datagram_ranges(len: usize, stride: usize) -> impl Iterator<Item = (usize, usize)> {
+    let stride = stride.max(1);
+    (0..len)
+        .step_by(stride)
+        .map(move |off| (off, (off + stride).min(len)))
+}
 
 /// Claimed UDP-QSP datagram metadata.
 ///
@@ -59,13 +84,61 @@ struct QuicNatState {
     next_token: u64,
 }
 
+/// Batched receive state for the QUIC front-door socket.
+///
+/// Owns the duplicated file descriptor of the bound UDP socket wrapped in tokio's
+/// `AsyncFd` for readiness notifications, the quinn-udp `UdpSocketState` that drives
+/// `recvmmsg` + `UDP_GRO`, and the per-batch receive buffers / metadata scratch space.
+///
+/// The underlying kernel socket is shared (via `dup`) with the [`QuicEndpoint::socket`]
+/// field used for sends; packets sent through either file descriptor leave from the same
+/// local 4-tuple and replies arrive on the shared socket and can be drained here.
+struct QuicRecv {
+    fd: AsyncFd<std::net::UdpSocket>,
+    state: UdpSocketState,
+    bufs: Vec<Vec<u8>>,
+    meta: Vec<RecvMeta>,
+}
+
+impl QuicRecv {
+    /// Builds a new batched-recv state over a nonblocking, bound socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if quinn-udp fails to initialize its per-socket state
+    /// (e.g. kernel `UDP_GRO` probing fails).
+    fn new(socket: std::net::UdpSocket) -> io::Result<Self> {
+        let state = UdpSocketState::new(UdpSockRef::from(&socket))?;
+        // With `UDP_GRO`, one recv buffer can hold up to `gro_segments()` coalesced
+        // datagrams (64 on Linux), so size each buffer to hold a full batch.
+        // quinn-udp's own benchmark uses SEGMENT_SIZE * gro_segments for the same
+        // reason; undersizing here truncates/drops datagrams under a GRO burst.
+        let buf_len = state.gro_segments() * MAX_DATAGRAM;
+        let bufs = (0..BATCH_SIZE).map(|_| vec![0u8; buf_len]).collect();
+        let meta = (0..BATCH_SIZE).map(|_| RecvMeta::default()).collect();
+        let fd = AsyncFd::new(socket)?;
+        Ok(Self {
+            fd,
+            state,
+            bufs,
+            meta,
+        })
+    }
+}
+
 /// QUIC endpoint for UDP front-door handling.
 ///
 /// Wraps a UDP socket that receives datagrams, classifies them as VPN traffic
 /// or passthrough, and forwards to either session handlers or nginx upstream.
 /// Maintains per-peer NAT state for passthrough traffic.
+///
+/// The socket is held in two forms sharing one kernel socket: `socket` (a tokio
+/// `UdpSocket`) is used for sends (VPN replies via [`SessionManager`] and passthrough
+/// replies from upstream-reader tasks), and `recv` drives the batched receive path
+/// (`recvmmsg` + `UDP_GRO`) via an `AsyncFd` over a duplicated descriptor.
 pub struct QuicEndpoint {
     socket: Arc<UdpSocket>,
+    recv: QuicRecv,
     nginx_upstream: SocketAddr,
     max_lru_entries: NonZeroUsize,
     idle_timeout: Duration,
@@ -82,7 +155,7 @@ impl QuicEndpoint {
     /// - `udp_nat_max_entries` is zero
     /// - `idle_timeout` is zero
     /// - UDP socket binding fails
-    pub async fn bind(
+    pub fn bind(
         config: &ServerConfig,
         registry: Arc<SessionRegistry>,
         metrics: Arc<Metrics>,
@@ -100,16 +173,29 @@ impl QuicEndpoint {
                 "idle_timeout must be non-zero",
             ));
         }
-        let socket = UdpSocket::bind(config.network.listen_udp).await?;
+        // Bind a blocking std socket, then duplicate the descriptor so the same
+        // kernel socket backs both the send path (tokio `UdpSocket`) and the
+        // batched recv path (`AsyncFd` + quinn-udp). Both fds share the local
+        // 4-tuple, so passthrough / VPN-reply sends and GRO recv are coherent.
+        let std_socket = std::net::UdpSocket::bind(config.network.listen_udp)?;
+        let recv_socket = std_socket.try_clone()?;
+        recv_socket.set_nonblocking(true)?;
+        let recv = QuicRecv::new(recv_socket)?;
+
+        std_socket.set_nonblocking(true)?;
+        let socket = UdpSocket::from_std(std_socket)?;
         debug!(
             listen_addr = %config.network.listen_udp,
             upstream_addr = %config.network.nginx_udp_upstream,
             max_lru_entries = max_lru_entries.get(),
             idle_timeout_ms = config.timing.idle_timeout.as_millis(),
+            gro_segments = recv.state.gro_segments(),
+            batch_size = BATCH_SIZE,
             "QUIC endpoint bound"
         );
         Ok(Self {
             socket: Arc::new(socket),
+            recv,
             nginx_upstream: config.network.nginx_udp_upstream,
             max_lru_entries,
             idle_timeout: config.timing.idle_timeout,
@@ -124,6 +210,42 @@ impl QuicEndpoint {
         &self.socket
     }
 
+    /// Build an endpoint directly from a pre-bound tokio socket (tests only).
+    ///
+    /// Duplicates the underlying file descriptor so the returned endpoint shares
+    /// one kernel socket between the tokio send path and the batched recv path,
+    /// mirroring the construction performed by [`QuicEndpoint::bind`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file descriptor cannot be duplicated, set non-blocking, or
+    /// wrapped in quinn-udp's per-socket state. Tests are abort-on-infra-failure.
+    #[cfg(test)]
+    async fn from_socket_for_test(
+        socket: Arc<UdpSocket>,
+        nginx_upstream: SocketAddr,
+        max_lru_entries: NonZeroUsize,
+        idle_timeout: Duration,
+        registry: Arc<SessionRegistry>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        let std_socket: std::net::UdpSocket = socket2::SockRef::from(&*socket)
+            .try_clone()
+            .expect("dup socket fd")
+            .into();
+        std_socket.set_nonblocking(true).expect("set_nonblocking");
+        let recv = QuicRecv::new(std_socket).expect("QuicRecv::new");
+        Self {
+            socket,
+            recv,
+            nginx_upstream,
+            max_lru_entries,
+            idle_timeout,
+            registry,
+            metrics,
+        }
+    }
+
     /// Run the UDP accept loop and forward traffic to the nginx upstream.
     ///
     /// Each client gets a dedicated upstream socket to preserve 4-tuple state.
@@ -132,34 +254,80 @@ impl QuicEndpoint {
     /// # Errors
     ///
     /// Returns an error if receiving from the UDP socket fails.
-    pub async fn run(&self, cancel: CancellationToken) -> io::Result<()> {
+    pub async fn run(&mut self, cancel: CancellationToken) -> io::Result<()> {
         debug!("Starting QUIC endpoint accept loop");
         let mut state = QuicNatState::new(self.max_lru_entries);
         let mut sweep = tokio::time::interval(self.idle_timeout);
 
         loop {
-            let mut payload = vec![0u8; QUIC_BUF_LEN];
-            let (len, peer) = tokio::select! {
+            tokio::select! {
                 () = cancel.cancelled() => {
                     debug!("QUIC endpoint accept loop cancelled");
                     return Ok(());
                 }
                 Some((peer, token)) = state.done_rx.recv() => {
                     state.handle_reader_done(peer, token);
-                    continue;
                 }
                 _ = sweep.tick() => {
                     state.sweep_idle(self.idle_timeout);
-                    continue;
                 }
-                res = self.socket.recv_from(&mut payload) => res?,
-            };
-            payload.truncate(len);
-            trace!(peer = %peer, len = len, "Received UDP datagram");
-            self.metrics.inc_udp_accepted();
-            self.handle_datagram(&mut state, cancel.clone(), peer, payload)
-                .await?;
+                guard = self.recv.fd.readable() => {
+                    let mut guard = guard?;
+                    // One recvmmsg batch per readiness edge. `try_io` clears the
+                    // AsyncFd readiness flag only when `recv` returns WouldBlock
+                    // (socket drained); on success it stays set, so the next
+                    // `readable().await` returns immediately and the next batch
+                    // drains on the following outer-select iteration - which also
+                    // gives `cancel` / `done_rx` / `sweep` a turn between batches.
+                    match guard.try_io(|fd| {
+                        let mut iovs: Vec<IoSliceMut> =
+                            self.recv.bufs.iter_mut().map(|b| IoSliceMut::new(b)).collect();
+                        self.recv.state.recv(
+                            UdpSockRef::from(fd.get_ref()),
+                            &mut iovs,
+                            &mut self.recv.meta,
+                        )
+                    }) {
+                        Ok(Ok(m)) => self.dispatch_recv_batch(&mut state, &cancel, m).await?,
+                        Ok(Err(e)) => return Err(e), // fatal recv error
+                        Err(_) => {} // WouldBlock: readiness auto-cleared (Ok(0) never happens on Linux)
+                    }
+                }
+            }
         }
+    }
+
+    /// Dispatch one `recvmmsg` batch: stride-split each (possibly `UDP_GRO`
+    /// coalesced) [`RecvMeta`] into individual datagrams and route each through
+    /// [`handle_datagram`].
+    ///
+    /// Only reads `recv.meta` / `recv.bufs` (the batch was filled by the `recv`
+    /// call in [`run`]), so this takes `&self` and can run while the `AsyncFd`
+    /// readiness guard - which borrows `recv.fd` - is still held.
+    async fn dispatch_recv_batch(
+        &self,
+        nat_state: &mut QuicNatState,
+        cancel: &CancellationToken,
+        count: usize,
+    ) -> io::Result<()> {
+        for i in 0..count {
+            let len = self.recv.meta[i].len;
+            let stride = self.recv.meta[i].stride;
+            let peer = self.recv.meta[i].addr;
+            // GRO stride-split: one RecvMeta may hold K coalesced datagrams of
+            // size `stride` (the last may be shorter). Classify each one.
+            for (off, end) in gro_datagram_ranges(len, stride) {
+                // Copy the datagram out of the reused recv buffer - the single
+                // allocation on the recv->session path - so it can be owned
+                // across the session channel.
+                let payload = self.recv.bufs[i][off..end].to_vec();
+                trace!(peer = %peer, len = payload.len(), "Received UDP datagram");
+                self.metrics.inc_udp_accepted();
+                self.handle_datagram(nat_state, cancel.clone(), peer, payload)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Handle a single UDP datagram.
@@ -459,10 +627,38 @@ mod tests {
     use tokio::time::{Instant, timeout, timeout_at};
     use tokio_util::sync::CancellationToken;
 
-    use super::{PeerEntry, QuicEndpoint, QuicNatState};
+    use super::{PeerEntry, QuicEndpoint, QuicNatState, gro_datagram_ranges};
     use crate::metrics::Metrics;
     use crate::registry::SessionRegistry;
     use crate::sessions::SessionEvent;
+
+    /// The GRO stride-split math must produce one range per coalesced datagram,
+    /// with the last range clipped to `len`, and never panic/infinite-loop on a
+    /// malformed `stride == 0`.
+    #[test]
+    fn gro_datagram_ranges_splits_coalesced_buffer() {
+        // Equal-sized coalesced datagrams.
+        let eq: Vec<_> = gro_datagram_ranges(4096, 1024).collect();
+        assert_eq!(
+            eq,
+            vec![(0, 1024), (1024, 2048), (2048, 3072), (3072, 4096)]
+        );
+
+        // Last datagram shorter than stride.
+        let partial: Vec<_> = gro_datagram_ranges(2500, 1024).collect();
+        assert_eq!(partial, vec![(0, 1024), (1024, 2048), (2048, 2500)]);
+
+        // No coalescing: stride == len yields a single datagram (quinn-udp's non-GRO default).
+        let single: Vec<_> = gro_datagram_ranges(1406, 1406).collect();
+        assert_eq!(single, vec![(0, 1406)]);
+
+        // stride == 0 is defensive: clamped to 1, no infinite loop or panic.
+        let zero: Vec<_> = gro_datagram_ranges(3, 0).collect();
+        assert_eq!(zero, vec![(0, 1), (1, 2), (2, 3)]);
+
+        // Empty buffer yields nothing.
+        assert!(gro_datagram_ranges(0, 1406).next().is_none());
+    }
 
     fn test_config() -> ServerConfig {
         ServerConfig {
@@ -496,14 +692,16 @@ mod tests {
     async fn make_endpoint() -> QuicEndpoint {
         let registry = Arc::new(SessionRegistry::new());
         let metrics = Arc::new(Metrics::default());
-        QuicEndpoint {
-            socket: Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap()),
-            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_mins(1),
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        QuicEndpoint::from_socket_for_test(
+            socket,
+            SocketAddr::from(([127, 0, 0, 1], 8080)),
+            NonZeroUsize::new(1024).unwrap(),
+            Duration::from_mins(1),
             registry,
             metrics,
-        }
+        )
+        .await
     }
 
     fn make_quic_short_header(dcid_prefix: &[u8; QUIC_DCID_PREFIX_LEN]) -> Vec<u8> {
@@ -528,7 +726,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::new());
         let metrics = Arc::new(Metrics::default());
 
-        let result = QuicEndpoint::bind(&config, registry, metrics).await;
+        let result = QuicEndpoint::bind(&config, registry, metrics);
         assert!(result.is_err());
         if let Err(err) = result {
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -546,7 +744,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::new());
         let metrics = Arc::new(Metrics::default());
 
-        let result = QuicEndpoint::bind(&config, registry, metrics).await;
+        let result = QuicEndpoint::bind(&config, registry, metrics);
         assert!(result.is_err());
         if let Err(err) = result {
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -560,7 +758,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::new());
         let metrics = Arc::new(Metrics::default());
 
-        let endpoint = QuicEndpoint::bind(&config, registry, metrics).await;
+        let endpoint = QuicEndpoint::bind(&config, registry, metrics);
         assert!(endpoint.is_ok());
         let endpoint = endpoint.unwrap();
         let local_addr = endpoint.socket().local_addr().unwrap();
@@ -570,7 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_exits_on_cancellation() {
-        let endpoint = make_endpoint().await;
+        let mut endpoint = make_endpoint().await;
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
@@ -598,9 +796,7 @@ mod tests {
 
         let registry = Arc::new(SessionRegistry::new());
         let metrics = Arc::new(Metrics::default());
-        let endpoint = QuicEndpoint::bind(&config, registry, metrics.clone())
-            .await
-            .unwrap();
+        let mut endpoint = QuicEndpoint::bind(&config, registry, metrics.clone()).unwrap();
         let listen_addr = endpoint.socket().local_addr().unwrap();
 
         let cancel = CancellationToken::new();
@@ -644,9 +840,7 @@ mod tests {
 
         let registry = Arc::new(SessionRegistry::new());
         let metrics = Arc::new(Metrics::default());
-        let endpoint = QuicEndpoint::bind(&config, registry, metrics)
-            .await
-            .unwrap();
+        let mut endpoint = QuicEndpoint::bind(&config, registry, metrics).unwrap();
         let listen_addr = endpoint.socket().local_addr().unwrap();
 
         let cancel = CancellationToken::new();
@@ -710,14 +904,15 @@ mod tests {
         let metrics = Arc::new(Metrics::default());
         let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
-        let endpoint = QuicEndpoint {
-            socket: downstream.clone(),
-            nginx_upstream: upstream_addr,
-            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_mins(1),
+        let endpoint = QuicEndpoint::from_socket_for_test(
+            downstream.clone(),
+            upstream_addr,
+            NonZeroUsize::new(1024).unwrap(),
+            Duration::from_mins(1),
             registry,
             metrics,
-        };
+        )
+        .await;
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let cancel = CancellationToken::new();
@@ -751,14 +946,15 @@ mod tests {
         let metrics = Arc::new(Metrics::default());
         let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
-        let endpoint = QuicEndpoint {
-            socket: downstream,
-            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_mins(1),
+        let endpoint = QuicEndpoint::from_socket_for_test(
+            downstream,
+            SocketAddr::from(([127, 0, 0, 1], 8080)),
+            NonZeroUsize::new(1024).unwrap(),
+            Duration::from_mins(1),
             registry,
-            metrics: metrics.clone(),
-        };
+            metrics.clone(),
+        )
+        .await;
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let cancel = CancellationToken::new();
@@ -796,14 +992,15 @@ mod tests {
         let metrics = Arc::new(Metrics::default());
         let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
-        let endpoint = QuicEndpoint {
-            socket: downstream.clone(),
-            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_mins(1),
-            registry: registry.clone(),
+        let endpoint = QuicEndpoint::from_socket_for_test(
+            downstream.clone(),
+            SocketAddr::from(([127, 0, 0, 1], 8080)),
+            NonZeroUsize::new(1024).unwrap(),
+            Duration::from_mins(1),
+            registry.clone(),
             metrics,
-        };
+        )
+        .await;
 
         // Register a CID prefix
         let dcid_prefix = [0xAA; QUIC_DCID_PREFIX_LEN];
@@ -850,14 +1047,15 @@ mod tests {
         let metrics = Arc::new(Metrics::default());
         let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
-        let endpoint = QuicEndpoint {
-            socket: downstream.clone(),
-            nginx_upstream: upstream_addr,
-            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_mins(1),
+        let endpoint = QuicEndpoint::from_socket_for_test(
+            downstream.clone(),
+            upstream_addr,
+            NonZeroUsize::new(1024).unwrap(),
+            Duration::from_mins(1),
             registry,
             metrics,
-        };
+        )
+        .await;
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let cancel = CancellationToken::new();
@@ -893,14 +1091,15 @@ mod tests {
         let metrics = Arc::new(Metrics::default());
         let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
-        let endpoint = QuicEndpoint {
-            socket: downstream,
-            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_mins(1),
+        let endpoint = QuicEndpoint::from_socket_for_test(
+            downstream,
+            SocketAddr::from(([127, 0, 0, 1], 8080)),
+            NonZeroUsize::new(1024).unwrap(),
+            Duration::from_mins(1),
             registry,
-            metrics: metrics.clone(),
-        };
+            metrics.clone(),
+        )
+        .await;
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let cancel = CancellationToken::new();
@@ -939,14 +1138,15 @@ mod tests {
         let metrics = Arc::new(Metrics::default());
         let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
-        let endpoint = QuicEndpoint {
-            socket: downstream.clone(),
-            nginx_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            max_lru_entries: NonZeroUsize::new(1024).unwrap(),
-            idle_timeout: Duration::from_mins(1),
-            registry: registry.clone(),
+        let endpoint = QuicEndpoint::from_socket_for_test(
+            downstream.clone(),
+            SocketAddr::from(([127, 0, 0, 1], 8080)),
+            NonZeroUsize::new(1024).unwrap(),
+            Duration::from_mins(1),
+            registry.clone(),
             metrics,
-        };
+        )
+        .await;
 
         // Register a CID prefix with a channel, then close it
         let dcid_prefix = [0xCC; QUIC_DCID_PREFIX_LEN];

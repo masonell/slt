@@ -14,6 +14,7 @@ ed25519-dalek = { workspace = true }
 fastrand = { workspace = true }
 lru = { workspace = true }
 parking_lot = { workspace = true }
+quinn-udp = { workspace = true }
 slt-core = { workspace = true }
 tokio = { workspace = true }
 tokio-boring = { workspace = true }
@@ -25,6 +26,7 @@ tun-rs = { workspace = true }
 
 [dev-dependencies]
 slt-core = { workspace = true, features = ["testing"] }
+socket2 = { workspace = true }
 
 [lints]
 workspace = true
