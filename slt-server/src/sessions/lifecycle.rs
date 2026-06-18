@@ -10,11 +10,11 @@ use tokio::time;
 use tracing::{debug, error, info};
 
 use super::types::{SessionControl, SessionEvent};
-use super::{ActiveTransport, ClientSessionBase, UdpSocketIo};
+use super::{ActiveTransport, ClientSessionBase, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
-impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
-    ClientSessionBase<T, S, U>
+impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
+    ClientSessionBase<T, S, I>
 {
     /// Run the session event loop until shutdown.
     ///
@@ -29,6 +29,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             "session created"
         );
         let result = self.run_inner().await;
+        self.flush_pending_udp_session_best_effort().await;
         if result.is_err() {
             self.metrics.inc_disconnect_error();
             error!(
@@ -60,8 +61,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             }
 
             let idle_deadline = self.last_activity + self.timeouts.idle_timeout;
+            let should_flush_udp = self.has_pending_udp_flush();
 
+            // Keep UDP-QSP flush last on purpose. Session events and timers get
+            // priority; full GSO slabs flush inline, and this branch sends only
+            // partial batches once the session has no immediately-ready work.
             tokio::select! {
+                biased;
+
                 res = self.tcp.read_more(), if self.tcp_alive => {
                     let n = res?;
                     if n == 0 {
@@ -108,6 +115,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
                     let _ = self.send_close(CloseCode::IdleTimeout).await;
                     return Ok(());
                 }
+                res = async {
+                    if let Some(session) = self.udp_session.as_mut() {
+                        session.flush().await?;
+                    }
+                    Ok::<(), io::Error>(())
+                }, if should_flush_udp => {
+                    res?;
+                }
             }
         }
     }
@@ -137,7 +152,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         ping.encode(&mut buf);
         match self.active_transport {
             ActiveTransport::Tcp => self.send_tcp_message(Message::Ping { payload: &buf }).await,
-            ActiveTransport::UdpQsp => self.send_udp_message(Message::Ping { payload: &buf }).await,
+            ActiveTransport::UdpQsp => {
+                self.send_udp_message_and_flush(Message::Ping { payload: &buf })
+                    .await
+            }
         }
     }
 

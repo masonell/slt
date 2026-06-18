@@ -8,7 +8,7 @@ use slt_core::proto::{
 
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::TcpTransport;
-use crate::transport::udp_qsp::ClientUdpIo;
+use crate::transport::udp_qsp::{ClientUdpQspIo, client_udp_qsp_io};
 
 /// Prepared state for a UDP-QSP `REGISTER_CID` exchange.
 ///
@@ -21,7 +21,7 @@ pub(super) struct PreparedUdpQspRegistration {
     /// Encoded `RegisterCidPayload` bytes (used as the `Message::RegisterCid` payload).
     pub(super) payload_buf: Vec<u8>,
     /// Matching UDP-QSP session to install once registration succeeds.
-    pub(super) session: Option<QuicQspSession<ClientUdpIo>>,
+    pub(super) session: Option<QuicQspSession<ClientUdpQspIo>>,
 }
 
 /// Builds a `REGISTER_CID` payload and a matching UDP-QSP session.
@@ -83,7 +83,7 @@ pub(super) fn prepare_udp_qsp_registration(
     )
     .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "udp-qsp keys invalid"))?;
 
-    let io = ClientUdpIo::new(ids.socket.clone(), ids.peer);
+    let io = client_udp_qsp_io(&ids.socket, ids.peer)?;
     let session = QuicQspSession::new(
         io,
         ids.scid,

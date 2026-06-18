@@ -9,13 +9,13 @@ use slt_core::proto::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
-use super::{ClientSessionBase, SessionControl, UdpSocketIo, map_payload_error};
+use super::{ClientSessionBase, SessionControl, UdpSessionIo, map_payload_error};
 use crate::tun::TunDeviceIo;
 
 const MAX_STALE_UPGRADE_IDS: usize = 16;
 
-impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
-    ClientSessionBase<T, S, U>
+impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
+    ClientSessionBase<T, S, I>
 {
     pub(super) fn reset_udp_upgrade_state(&mut self) {
         self.udp_upgrade = super::UdpUpgradeState::default();
@@ -102,7 +102,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         };
         let mut ack_buf = Vec::with_capacity(16);
         ack.encode(&mut ack_buf);
-        self.send_udp_message(Message::UpgradeProbeAck { payload: &ack_buf })
+        self.send_udp_message_and_flush(Message::UpgradeProbeAck { payload: &ack_buf })
             .await?;
         self.maybe_send_switch_to_udp().await?;
         Ok(SessionControl::Continue)

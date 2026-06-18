@@ -418,7 +418,7 @@ impl ClientSession<'_> {
         let mut buf = Vec::with_capacity(16);
         probe.encode(&mut buf);
         match self
-            .write_udp_message(Message::UpgradeProbe { payload: &buf })
+            .write_udp_message_and_flush(Message::UpgradeProbe { payload: &buf })
             .await
         {
             Ok(()) => {

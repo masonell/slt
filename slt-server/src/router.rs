@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, trace, warn};
 
-use crate::sessions::{ClientSessionBase, UdpSocketIo};
+use crate::sessions::{ClientSessionBase, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
 /// Routes packets between TUN and sessions.
@@ -25,11 +25,11 @@ pub trait SessionMeta {
     fn assigned_ipv4(&self) -> Ipv4Addr;
 }
 
-impl<T, S, U> SessionMeta for ClientSessionBase<T, S, U>
+impl<T, S, I> SessionMeta for ClientSessionBase<T, S, I>
 where
     T: TunDeviceIo,
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    U: UdpSocketIo,
+    I: UdpSessionIo,
 {
     fn assigned_ipv4(&self) -> Ipv4Addr {
         self.assigned_ipv4.addr()

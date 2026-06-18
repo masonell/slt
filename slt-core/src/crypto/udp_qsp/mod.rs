@@ -9,7 +9,8 @@ pub use keys::UdpQspKeys;
 pub use packet::{OpenedPacket, OpenedPacketRef};
 pub use pn::reconstruct_packet_number;
 pub use session::{
-    PN_REPLAY_WINDOW, QspSessionError, QuicQspSession, ReplayError, ReplayWindow, SessionIo,
+    PN_REPLAY_WINDOW, PeerUpdate, QspSessionError, QuicQspSession, ReplayError, ReplayWindow,
+    SessionIo,
 };
 
 /// Length of the header protection mask.

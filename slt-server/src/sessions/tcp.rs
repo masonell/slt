@@ -7,11 +7,11 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::trace;
 
 use super::types::SessionControl;
-use super::{ActiveTransport, ClientSessionBase, UdpSocketIo, map_message_error};
+use super::{ActiveTransport, ClientSessionBase, UdpSessionIo, map_message_error};
 use crate::tun::TunDeviceIo;
 
-impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
-    ClientSessionBase<T, S, U>
+impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
+    ClientSessionBase<T, S, I>
 {
     /// Reads and processes all pending messages from the TCP transport.
     ///

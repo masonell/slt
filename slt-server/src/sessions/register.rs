@@ -11,13 +11,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, warn};
 
 use super::types::SessionControl;
-use super::udp_io::UdpIo;
-use super::{ClientSessionBase, UdpSocketIo, map_payload_error};
+use super::{ClientSessionBase, UdpSessionIo, map_payload_error};
 use crate::registry::CidInsertError;
 use crate::tun::TunDeviceIo;
 
-impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
-    ClientSessionBase<T, S, U>
+impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
+    ClientSessionBase<T, S, I>
 {
     /// Handles an incoming `RegisterCid` message from the client.
     ///
@@ -117,7 +116,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         // 2. `send_udp_message` is only called when `active_transport == UdpQsp`
         // 3. Therefore, we never send to this placeholder address pre-commit
         let placeholder_peer = SocketAddr::from(([0, 0, 0, 0], 0));
-        let io = UdpIo::new(self.udp_socket.clone(), placeholder_peer);
+        let io = self.udp_io_factory.create(placeholder_peer)?;
         let udp = slt_core::crypto::udp_qsp::QuicQspSession::new(
             io,
             register.client_to_server_cid,

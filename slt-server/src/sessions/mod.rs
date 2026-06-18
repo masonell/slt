@@ -19,8 +19,9 @@ use slt_core::proto::{
     CloseCode, ClosePayload, FrameError, Message, MessageError, MessageLimits, PayloadError,
     PingPayload, encode_message,
 };
+use slt_core::transport::UdpQspIo;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tracing::{debug, info, trace};
 use tun_rs::AsyncDevice;
 
@@ -29,8 +30,10 @@ pub use self::types::{
     ActiveTransport, SessionEvent, SessionKeyUpdater, SessionRx, SessionTcpChannel,
     SessionTimeouts, SessionTx,
 };
-use self::udp_io::UdpIo;
-pub use self::udp_io::UdpSocketIo;
+pub(crate) use self::udp_io::ServerUdpQspIoFactory;
+#[cfg(test)]
+pub(crate) use self::udp_io::{UdpIoFactory, UdpSocketIo};
+pub use self::udp_io::{UdpSessionIo, UdpSessionIoFactory};
 use super::metrics::Metrics;
 use super::registry::SessionRegistry;
 use super::router::PacketRouter;
@@ -51,17 +54,17 @@ struct UdpUpgradeState {
 /// Manages the client's connection state, active transport (TCP or UDP-QSP),
 /// message routing between TUN device and network transports, and session lifecycle.
 /// The session is generic over the TUN device implementation, TCP stream type,
-/// and UDP socket type to support testing and flexibility.
+/// and UDP-QSP I/O backend to support testing and flexibility.
 ///
 /// # Type Parameters
 ///
 /// * `T` - TUN device I/O implementation (must implement [`TunDeviceIo`])
 /// * `S` - TCP stream type (defaults to [`TcpStream`], must be async read/write)
-/// * `U` - UDP socket type (defaults to [`UdpSocket`], must implement [`UdpSocketIo`])
+/// * `I` - UDP-QSP session I/O backend (defaults to production [`UdpQspIo`])
 pub struct ClientSessionBase<
     T: TunDeviceIo,
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static = TcpStream,
-    U: UdpSocketIo = UdpSocket,
+    I: UdpSessionIo = UdpQspIo,
 > {
     /// Client identifier.
     pub client_id: ClientId,
@@ -79,7 +82,7 @@ pub struct ClientSessionBase<
     tx: SessionTx,
     tcp: SessionTcpChannel<S>,
     tun: Arc<T>,
-    udp_socket: Arc<U>,
+    udp_io_factory: Arc<dyn UdpSessionIoFactory<I>>,
     /// UDP-QSP session for encrypted UDP traffic. The session's peer address is
     /// updated on every incoming UDP packet from `handle_udp_claim`. This is
     /// safe because `send_udp_message` is only called when either:
@@ -87,7 +90,7 @@ pub struct ClientSessionBase<
     /// - We're inside `handle_udp_claim` processing an incoming UDP packet
     ///
     /// In both cases, the peer has already been set on the session.
-    udp_session: Option<QuicQspSession<UdpIo<U>>>,
+    udp_session: Option<QuicQspSession<I>>,
     udp_upgrade: UdpUpgradeState,
     rx: SessionRx,
     limits: MessageLimits,
@@ -105,8 +108,8 @@ pub struct ClientSessionBase<
 /// `ClientSessionBase` with the runtime `AsyncDevice` implementation.
 pub type ClientSession = ClientSessionBase<AsyncDevice>;
 
-impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
-    ClientSessionBase<T, S, U>
+impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
+    ClientSessionBase<T, S, I>
 {
     /// Create a new client session with TCP active.
     #[must_use]
@@ -119,7 +122,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         assigned_ipv4: AssignedIp,
         tcp: SessionTcpChannel<S>,
         tun: Arc<T>,
-        udp_socket: Arc<U>,
+        udp_io_factory: Arc<dyn UdpSessionIoFactory<I>>,
         registry: Arc<SessionRegistry>,
         metrics: Arc<Metrics>,
         tx: SessionTx,
@@ -140,7 +143,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             tx,
             tcp,
             tun,
-            udp_socket,
+            udp_io_factory,
             udp_session: None,
             udp_upgrade: UdpUpgradeState::default(),
             rx,
@@ -198,9 +201,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     }
 
     /// Update the UDP session's peer address.
-    const fn update_udp_peer(&mut self, peer: SocketAddr) {
+    fn update_udp_peer(&mut self, peer: SocketAddr) {
         if let Some(session) = self.udp_session.as_mut() {
-            session.io_mut().set_peer(peer);
+            session.set_peer(peer);
         }
     }
 
@@ -237,7 +240,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
     async fn send_message(&mut self, message: Message<'_>) -> io::Result<()> {
         match self.active_transport {
             ActiveTransport::Tcp => self.send_tcp_message(message).await,
-            ActiveTransport::UdpQsp => self.send_udp_message(message).await,
+            ActiveTransport::UdpQsp => self.send_udp_message_and_flush(message).await,
         }
     }
 
@@ -289,6 +292,43 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         }
     }
 
+    async fn send_udp_message_and_flush(&mut self, message: Message<'_>) -> io::Result<()> {
+        self.send_udp_message(message).await?;
+        self.flush_udp_session().await
+    }
+
+    async fn flush_udp_session(&mut self) -> io::Result<()> {
+        if let Some(session) = self.udp_session.as_mut() {
+            session.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_pending_udp_session_best_effort(&mut self) {
+        let Some(session) = self.udp_session.as_mut() else {
+            return;
+        };
+        if !session.has_pending_flush() {
+            return;
+        }
+        if let Err(err) = session.flush().await {
+            debug!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                error = %err,
+                "failed to flush pending udp-qsp packets during shutdown"
+            );
+        }
+    }
+
+    fn has_pending_udp_flush(&self) -> bool {
+        self.active_transport == ActiveTransport::UdpQsp
+            && self
+                .udp_session
+                .as_ref()
+                .is_some_and(QuicQspSession::has_pending_flush)
+    }
+
     async fn send_close(&mut self, code: CloseCode) -> io::Result<()> {
         let payload = ClosePayload { code };
         let mut buf = Vec::with_capacity(1);
@@ -299,7 +339,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
             self.send_tcp_message(Message::Close { payload: &buf })
                 .await
         } else {
-            self.send_udp_message(Message::Close { payload: &buf })
+            self.send_udp_message_and_flush(Message::Close { payload: &buf })
                 .await
         }
     }

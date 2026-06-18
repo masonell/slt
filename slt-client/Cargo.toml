@@ -13,7 +13,7 @@ clap = { workspace = true }
 ed25519-dalek = { workspace = true }
 fastrand = { workspace = true }
 quiche = { workspace = true }
-slt-core = { workspace = true }
+slt-core = { workspace = true, features = ["udp-io"] }
 tokio = { workspace = true }
 tokio-boring = { workspace = true }
 tokio-util = { workspace = true }

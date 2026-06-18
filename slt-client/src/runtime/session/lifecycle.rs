@@ -4,7 +4,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload};
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 use super::ClientSession;
 use crate::runtime::session::state::ActiveTransport;
@@ -29,10 +29,15 @@ impl ClientSession<'_> {
         ping.encode(&mut buf);
         trace!(nonce, "sending ping");
         let active = self.active_transport;
-        if let Err(err) = self
-            .write_active_message(Message::Ping { payload: &buf })
-            .await
-        {
+        let result = if active == ActiveTransport::UdpQsp {
+            self.write_udp_message_and_flush(Message::Ping { payload: &buf })
+                .await
+        } else {
+            self.tcp
+                .write_message(Message::Ping { payload: &buf })
+                .await
+        };
+        if let Err(err) = result {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
@@ -66,10 +71,15 @@ impl ClientSession<'_> {
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
         let active = self.active_transport;
-        if let Err(err) = self
-            .write_active_message(Message::Close { payload: &buf })
-            .await
-        {
+        let result = if active == ActiveTransport::UdpQsp {
+            self.write_udp_message_and_flush(Message::Close { payload: &buf })
+                .await
+        } else {
+            self.tcp
+                .write_message(Message::Close { payload: &buf })
+                .await
+        };
+        if let Err(err) = result {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
@@ -107,18 +117,54 @@ impl ClientSession<'_> {
         }
     }
 
-    /// Writes a message on the UDP-QSP transport.
+    /// Writes a message on UDP-QSP and immediately flushes buffered packets.
+    ///
+    /// Use this for client control messages that must not wait behind data
+    /// batching in the socket backend.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - UDP-QSP transport is not active
-    /// - Transport write fails
-    pub(super) async fn write_udp_message(&mut self, message: Message<'_>) -> io::Result<()> {
+    /// Returns an error if UDP-QSP is inactive, write fails, or flush fails.
+    pub(super) async fn write_udp_message_and_flush(
+        &mut self,
+        message: Message<'_>,
+    ) -> io::Result<()> {
         let udp = self.udp_state.as_active_mut().ok_or_else(|| {
             io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
         })?;
-        udp.write_message(message).await
+        udp.write_message(message).await?;
+        udp.flush().await
+    }
+
+    /// Flushes any pending UDP-QSP socket backend packets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if UDP-QSP is inactive or the socket backend fails.
+    pub(super) async fn flush_udp_transport(&mut self) -> io::Result<()> {
+        let udp = self.udp_state.as_active_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+        })?;
+        udp.flush().await
+    }
+
+    /// Flushes pending UDP-QSP packets without changing the session exit reason.
+    pub(super) async fn flush_pending_udp_transport_best_effort(&mut self) {
+        if self.active_transport != ActiveTransport::UdpQsp {
+            return;
+        }
+        let Some(udp) = self.udp_state.as_active_mut() else {
+            return;
+        };
+        if !udp.has_pending_flush() {
+            return;
+        }
+        if let Err(err) = udp.flush().await {
+            debug!(
+                error = %err,
+                "failed to flush pending udp-qsp packets during shutdown"
+            );
+        }
     }
 
     /// Aborts and awaits the discovery task if running.

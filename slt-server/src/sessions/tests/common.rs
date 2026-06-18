@@ -10,7 +10,7 @@ use slt_core::proto::{
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::Cid;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
@@ -46,13 +46,14 @@ pub(super) async fn spawn_session_with_timeouts(timeouts: SessionTimeouts) -> Sp
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
     let (handle, _old) = registry.register_session(client_id, assigned, tx.clone());
     let limits = MessageLimits::from_mtu(1500);
-    let session = ClientSessionBase::<TestTun, DuplexStream, TestUdpSocket>::new(
+    let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
+    let session = ClientSessionBase::new(
         handle.session_id,
         client_id,
         assigned,
         TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
         tun,
-        udp,
+        udp_io_factory,
         registry.clone(),
         metrics,
         tx.clone(),

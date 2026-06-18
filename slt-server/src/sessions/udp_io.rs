@@ -4,13 +4,28 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use slt_core::crypto::udp_qsp::SessionIo;
+use slt_core::crypto::udp_qsp::{PeerUpdate, SessionIo};
+use slt_core::transport::UdpQspIo;
 use tokio::net::UdpSocket;
+
+/// UDP-QSP session I/O that can follow client endpoint changes.
+pub trait UdpSessionIo: SessionIo + PeerUpdate + Send + 'static {}
+
+/// Factory for per-session UDP-QSP I/O backends.
+pub trait UdpSessionIoFactory<I: UdpSessionIo>: Send + Sync + 'static {
+    /// Creates a per-session backend with the given initial peer address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot be constructed.
+    fn create(&self, peer: SocketAddr) -> io::Result<I>;
+}
 
 /// Abstraction over UDP socket I/O for session traffic.
 ///
 /// This trait allows session code to work with different UDP socket
 /// implementations (e.g., real sockets, test doubles, mock implementations).
+#[cfg(test)]
 pub trait UdpSocketIo: Send + Sync + 'static {
     /// Sends a datagram to the specified peer address.
     ///
@@ -29,6 +44,7 @@ pub trait UdpSocketIo: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = io::Result<usize>> + Send + 'a;
 }
 
+#[cfg(test)]
 impl UdpSocketIo for UdpSocket {
     fn send_to<'a>(
         &'a self,
@@ -39,6 +55,33 @@ impl UdpSocketIo for UdpSocket {
     }
 }
 
+/// Production UDP-QSP I/O factory.
+///
+/// Each session gets a duplicated descriptor for the same front-door UDP socket.
+/// The front-door still owns receives and delivers [`crate::quic::UdpClaim`] to
+/// sessions; this backend is used by the server send path for GSO batching.
+pub struct ServerUdpQspIoFactory {
+    socket: Arc<UdpSocket>,
+}
+
+impl ServerUdpQspIoFactory {
+    /// Creates a production UDP-QSP I/O factory.
+    #[must_use]
+    pub const fn new(socket: Arc<UdpSocket>) -> Self {
+        Self { socket }
+    }
+}
+
+impl UdpSessionIoFactory<UdpQspIo> for ServerUdpQspIoFactory {
+    fn create(&self, peer: SocketAddr) -> io::Result<UdpQspIo> {
+        let socket: std::net::UdpSocket = socket2::SockRef::from(&*self.socket).try_clone()?.into();
+        socket.set_nonblocking(true)?;
+        UdpQspIo::new(socket, peer)
+    }
+}
+
+impl UdpSessionIo for UdpQspIo {}
+
 /// UDP I/O wrapper implementing the [`SessionIo`] trait for UDP-QSP.
 ///
 /// Combines a UDP socket with a peer address to provide send/recv operations
@@ -48,11 +91,33 @@ impl UdpSocketIo for UdpSocket {
 /// # Type Parameters
 ///
 /// * `U` - The UDP socket implementation (must implement [`UdpSocketIo`])
+#[cfg(test)]
 pub(super) struct UdpIo<U: UdpSocketIo> {
     socket: Arc<U>,
     peer: SocketAddr,
 }
 
+#[cfg(test)]
+pub(crate) struct UdpIoFactory<U: UdpSocketIo> {
+    socket: Arc<U>,
+}
+
+#[cfg(test)]
+impl<U: UdpSocketIo> UdpIoFactory<U> {
+    #[must_use]
+    pub(crate) const fn new(socket: Arc<U>) -> Self {
+        Self { socket }
+    }
+}
+
+#[cfg(test)]
+impl<U: UdpSocketIo> UdpSessionIoFactory<UdpIo<U>> for UdpIoFactory<U> {
+    fn create(&self, peer: SocketAddr) -> io::Result<UdpIo<U>> {
+        Ok(UdpIo::new(self.socket.clone(), peer))
+    }
+}
+
+#[cfg(test)]
 impl<U: UdpSocketIo> UdpIo<U> {
     /// Creates a new UDP I/O wrapper with the given socket and peer address.
     ///
@@ -69,11 +134,22 @@ impl<U: UdpSocketIo> UdpIo<U> {
     ///
     /// Called when UDP packets arrive from a new endpoint, allowing the session
     /// to track the client's current address (e.g., after a NAT remapping).
-    pub(super) const fn set_peer(&mut self, peer: SocketAddr) {
+    const fn update_peer(&mut self, peer: SocketAddr) {
         self.peer = peer;
     }
 }
 
+#[cfg(test)]
+impl<U: UdpSocketIo> PeerUpdate for UdpIo<U> {
+    fn set_peer(&mut self, peer: SocketAddr) {
+        self.update_peer(peer);
+    }
+}
+
+#[cfg(test)]
+impl<U: UdpSocketIo> UdpSessionIo for UdpIo<U> {}
+
+#[cfg(test)]
 impl<U: UdpSocketIo> SessionIo for UdpIo<U> {
     async fn send<'a>(&'a mut self, bytes: &'a [u8]) -> io::Result<()> {
         let _ = self.socket.send_to(bytes, self.peer).await?;

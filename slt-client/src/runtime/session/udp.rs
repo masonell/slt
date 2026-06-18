@@ -52,7 +52,7 @@ impl ClientSession<'_> {
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload).map_err(wire::map_payload_error)?;
                 let pong_payload = ping_in.nonce.to_be_bytes();
-                self.write_udp_message(Message::Pong {
+                self.write_udp_message_and_flush(Message::Pong {
                     payload: &pong_payload,
                 })
                 .await?;

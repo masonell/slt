@@ -10,6 +10,7 @@ use lru::LruCache;
 use quinn_udp::{BATCH_SIZE, RecvMeta, UdpSockRef, UdpSocketState};
 use slt_core::classifier::{QuicVerdict, classify_quic_datagram};
 use slt_core::config::ServerConfig;
+use slt_core::transport::gro_datagram_ranges;
 use slt_core::types::CidPrefix;
 use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
@@ -33,19 +34,6 @@ const QUIC_BUF_LEN: usize = 2 * 1024;
 /// 64 datagrams on Linux) fits without truncation. Increase this if deploying on
 /// jumbo-frame links.
 const MAX_DATAGRAM: usize = 1500;
-
-/// Byte ranges of the individual datagrams within one GRO-coalesced receive buffer
-/// of `len` bytes, where each datagram is `stride` bytes (the last may be shorter).
-///
-/// `stride` is clamped to at least 1 (avoids `step_by` panicking and an infinite
-/// loop on a malformed `stride == 0`). A `RecvMeta` whose `len` exceeds its
-/// `stride` (`UDP_GRO` coalescing) yields multiple ranges; otherwise one.
-fn gro_datagram_ranges(len: usize, stride: usize) -> impl Iterator<Item = (usize, usize)> {
-    let stride = stride.max(1);
-    (0..len)
-        .step_by(stride)
-        .map(move |off| (off, (off + stride).min(len)))
-}
 
 /// Claimed UDP-QSP datagram metadata.
 ///
@@ -619,6 +607,7 @@ mod tests {
     use std::time::Duration;
 
     use slt_core::config::ServerConfig;
+    use slt_core::transport::gro_datagram_ranges;
     use slt_core::types::{
         QUIC_DCID_PREFIX_LEN, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig,
         SharedSecret, TlsMaterial, TunConfig,
@@ -627,7 +616,7 @@ mod tests {
     use tokio::time::{Instant, timeout, timeout_at};
     use tokio_util::sync::CancellationToken;
 
-    use super::{PeerEntry, QuicEndpoint, QuicNatState, gro_datagram_ranges};
+    use super::{PeerEntry, QuicEndpoint, QuicNatState};
     use crate::metrics::Metrics;
     use crate::registry::SessionRegistry;
     use crate::sessions::SessionEvent;

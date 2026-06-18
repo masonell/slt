@@ -1,19 +1,27 @@
 use std::io;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::fd::AsFd;
 use std::sync::Arc;
 
+#[cfg(not(unix))]
+pub use ClientUdpIo as ClientUdpQspIo;
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, SessionIo};
+#[cfg(unix)]
+pub use slt_core::transport::UdpQspIo as ClientUdpQspIo;
 use tokio::net::UdpSocket;
 use tracing::{info, trace, warn};
 
 use crate::metrics::Metrics;
 
 /// Client-side UDP-QSP socket I/O backed by a `tokio::net::UdpSocket`.
+#[cfg(any(test, not(unix)))]
 pub struct ClientUdpIo {
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
 }
 
+#[cfg(any(test, not(unix)))]
 impl ClientUdpIo {
     /// Create a new UDP-QSP I/O wrapper for traffic to/from `peer`.
     #[must_use]
@@ -22,6 +30,20 @@ impl ClientUdpIo {
     }
 }
 
+#[cfg(unix)]
+pub fn client_udp_qsp_io(socket: &Arc<UdpSocket>, peer: SocketAddr) -> io::Result<ClientUdpQspIo> {
+    let fd = socket.as_fd().try_clone_to_owned()?;
+    let socket = std::net::UdpSocket::from(fd);
+    socket.set_nonblocking(true)?;
+    ClientUdpQspIo::new(socket, peer)
+}
+
+#[cfg(not(unix))]
+pub fn client_udp_qsp_io(socket: &Arc<UdpSocket>, peer: SocketAddr) -> io::Result<ClientUdpQspIo> {
+    Ok(ClientUdpQspIo::new(socket.clone(), peer))
+}
+
+#[cfg(any(test, not(unix)))]
 impl SessionIo for ClientUdpIo {
     async fn send<'a>(&'a mut self, bytes: &'a [u8]) -> io::Result<()> {
         let _ = self.socket.send_to(bytes, self.peer).await?;
@@ -47,7 +69,7 @@ pub struct UdpQspTransport<I> {
 }
 
 /// Production UDP-QSP transport with real socket I/O.
-pub type ClientTransport = UdpQspTransport<ClientUdpIo>;
+pub type ClientTransport = UdpQspTransport<ClientUdpQspIo>;
 
 impl<I: SessionIo> UdpQspTransport<I> {
     /// Create a new UDP-QSP transport around an established session.
@@ -59,6 +81,21 @@ impl<I: SessionIo> UdpQspTransport<I> {
             packet_buf: vec![0u8; 2048],
             metrics,
         }
+    }
+
+    /// Flush protected packets buffered by the underlying I/O layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O error reported by the socket backend.
+    pub async fn flush(&mut self) -> io::Result<()> {
+        self.session.flush().await
+    }
+
+    /// Returns whether the underlying I/O layer has packets waiting for flush.
+    #[must_use]
+    pub fn has_pending_flush(&self) -> bool {
+        self.session.has_pending_flush()
     }
 
     /// Encode and send a VPN protocol message over UDP-QSP.

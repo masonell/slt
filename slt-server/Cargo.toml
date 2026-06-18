@@ -15,7 +15,8 @@ fastrand = { workspace = true }
 lru = { workspace = true }
 parking_lot = { workspace = true }
 quinn-udp = { workspace = true }
-slt-core = { workspace = true }
+slt-core = { workspace = true, features = ["udp-io"] }
+socket2 = { workspace = true }
 tokio = { workspace = true }
 tokio-boring = { workspace = true }
 tokio-util = { workspace = true }
@@ -26,7 +27,6 @@ tun-rs = { workspace = true }
 
 [dev-dependencies]
 slt-core = { workspace = true, features = ["testing"] }
-socket2 = { workspace = true }
 
 [lints]
 workspace = true

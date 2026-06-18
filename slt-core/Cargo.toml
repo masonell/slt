@@ -7,6 +7,8 @@ edition.workspace = true
 default = []
 ## Exposes test support utilities for use in dependent crate tests.
 testing = []
+## Enables the Unix UDP-QSP socket backend with GRO/GSO support.
+udp-io = ["dep:quinn-udp"]
 
 [dependencies]
 boring = { workspace = true }
@@ -18,6 +20,7 @@ fastrand = { workspace = true }
 hex = { workspace = true }
 humantime-serde = { workspace = true }
 parking_lot = { workspace = true }
+quinn-udp = { workspace = true, optional = true }
 quiche = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }

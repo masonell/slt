@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 
 use super::{OpenedPacketRef, QspCryptoError, UdpQspKeys};
 use crate::types::Cid;
@@ -49,6 +50,20 @@ pub trait SessionIo {
         &'a mut self,
         buf: &'a mut [u8],
     ) -> impl Future<Output = io::Result<usize>> + Send + 'a;
+    /// Flush any protected packets buffered by the underlying I/O layer.
+    fn flush(&mut self) -> impl Future<Output = io::Result<()>> + Send + '_ {
+        async { Ok(()) }
+    }
+    /// Return whether the underlying I/O layer has buffered packets to flush.
+    fn has_pending_flush(&self) -> bool {
+        false
+    }
+}
+
+/// I/O backends that can update their UDP peer address.
+pub trait PeerUpdate {
+    /// Update the accepted receive peer and outbound transmit destination.
+    fn set_peer(&mut self, peer: SocketAddr);
 }
 
 /// Replay window outcome.
@@ -325,6 +340,29 @@ impl<I: SessionIo> QuicQspSession<I> {
         self.open_packet(&packet_buf[..len])
     }
 
+    /// Flush any UDP-QSP packets buffered by the underlying I/O layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the IO layer fails.
+    pub async fn flush(&mut self) -> io::Result<()> {
+        self.io.flush().await
+    }
+
+    /// Return whether the underlying I/O layer has buffered packets to flush.
+    #[must_use]
+    pub fn has_pending_flush(&self) -> bool {
+        self.io.has_pending_flush()
+    }
+
+    /// Update the UDP peer address through the underlying I/O backend.
+    pub fn set_peer(&mut self, peer: SocketAddr)
+    where
+        I: PeerUpdate,
+    {
+        self.io.set_peer(peer);
+    }
+
     /// Open a protected UDP-QSP packet and update replay state.
     ///
     /// Returns a reference to the decrypted payload stored in the session.
@@ -381,12 +419,6 @@ impl<I: SessionIo> QuicQspSession<I> {
         }
 
         Err(QspSessionError::Crypto(QspCryptoError::CryptoFail))
-    }
-
-    /// Returns a mutable reference to the underlying IO transport.
-    #[must_use]
-    pub const fn io_mut(&mut self) -> &mut I {
-        &mut self.io
     }
 
     fn maybe_rotate_tx_keys(&mut self, pn: u64) -> Result<(), QspSessionError> {
@@ -964,7 +996,7 @@ mod tests {
         }
 
         for nonce in 0usize..=7usize {
-            let opened = receiver.open_packet(&sender.io_mut().sent[nonce]).unwrap();
+            let opened = receiver.open_packet(&sender.io.sent[nonce]).unwrap();
             assert!(!opened.key_phase);
             let Message::Ping { payload } = decode_one(opened.payload, limits) else {
                 panic!("expected ping");
@@ -972,7 +1004,7 @@ mod tests {
             assert_eq!(PingPayload::decode(payload).unwrap().nonce, nonce as u64);
         }
 
-        let opened = receiver.open_packet(&sender.io_mut().sent[8]).unwrap();
+        let opened = receiver.open_packet(&sender.io.sent[8]).unwrap();
         assert!(opened.key_phase);
         let Message::Ping { payload } = decode_one(opened.payload, limits) else {
             panic!("expected ping");
@@ -1038,18 +1070,18 @@ mod tests {
         }
 
         for nonce in 0usize..=6usize {
-            let opened = receiver.open_packet(&sender.io_mut().sent[nonce]).unwrap();
+            let opened = receiver.open_packet(&sender.io.sent[nonce]).unwrap();
             assert!(!opened.key_phase);
         }
 
-        let opened = receiver.open_packet(&sender.io_mut().sent[8]).unwrap();
+        let opened = receiver.open_packet(&sender.io.sent[8]).unwrap();
         assert!(opened.key_phase);
         let Message::Ping { payload } = decode_one(opened.payload, limits) else {
             panic!("expected ping");
         };
         assert_eq!(PingPayload::decode(payload).unwrap().nonce, 8);
 
-        let opened = receiver.open_packet(&sender.io_mut().sent[7]).unwrap();
+        let opened = receiver.open_packet(&sender.io.sent[7]).unwrap();
         assert!(!opened.key_phase);
         let Message::Ping { payload } = decode_one(opened.payload, limits) else {
             panic!("expected ping");
@@ -1309,7 +1341,7 @@ mod tests {
         );
 
         // Verify we have 16 packets total
-        assert_eq!(sender.io_mut().sent.len(), 16);
+        assert_eq!(sender.io.sent.len(), 16);
     }
 
     #[tokio::test]
@@ -1368,7 +1400,7 @@ mod tests {
             sender.send(b"test").await.unwrap();
         }
         for nonce in 0..8usize {
-            let opened = receiver.open_packet(&sender.io_mut().sent[nonce]).unwrap();
+            let opened = receiver.open_packet(&sender.io.sent[nonce]).unwrap();
             assert!(!opened.key_phase, "packet {nonce} should be phase 0");
         }
         assert!(
@@ -1378,7 +1410,7 @@ mod tests {
 
         // Packet 8 triggers rotation to phase 1
         sender.send(b"test").await.unwrap();
-        let opened = receiver.open_packet(&sender.io_mut().sent[8]).unwrap();
+        let opened = receiver.open_packet(&sender.io.sent[8]).unwrap();
         assert!(opened.key_phase, "packet 8 should be phase 1");
         assert!(
             receiver.rx_key_phase(),
@@ -1390,7 +1422,7 @@ mod tests {
             sender.send(b"test").await.unwrap();
         }
         for nonce in 9..16usize {
-            let opened = receiver.open_packet(&sender.io_mut().sent[nonce]).unwrap();
+            let opened = receiver.open_packet(&sender.io.sent[nonce]).unwrap();
             assert!(opened.key_phase, "packet {nonce} should be phase 1");
         }
         assert!(
@@ -1454,19 +1486,19 @@ mod tests {
         for nonce in 0..7u64 {
             sender.send(b"test").await.unwrap();
             let opened = receiver
-                .open_packet(&sender.io_mut().sent[nonce as usize])
+                .open_packet(&sender.io.sent[nonce as usize])
                 .unwrap();
             assert!(!opened.key_phase, "packet {nonce} should be phase 0");
         }
 
         // Packet 7 (still phase 0 - boundary is at 8)
         sender.send(b"test").await.unwrap();
-        let opened = receiver.open_packet(&sender.io_mut().sent[7]).unwrap();
+        let opened = receiver.open_packet(&sender.io.sent[7]).unwrap();
         assert!(!opened.key_phase, "packet 7 should still be phase 0");
 
         // Packet 8 (exact boundary - triggers phase 1)
         sender.send(b"test").await.unwrap();
-        let opened = receiver.open_packet(&sender.io_mut().sent[8]).unwrap();
+        let opened = receiver.open_packet(&sender.io.sent[8]).unwrap();
         assert!(opened.key_phase, "packet 8 should be phase 1");
     }
 

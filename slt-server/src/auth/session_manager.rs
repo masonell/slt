@@ -2,6 +2,7 @@ use std::io;
 use std::sync::Arc;
 
 use slt_core::proto::MessageLimits;
+use slt_core::transport::UdpQspIo;
 #[cfg(test)]
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::ClientId;
@@ -14,7 +15,10 @@ use crate::metrics::Metrics;
 use crate::registry::SessionRegistry;
 #[cfg(test)]
 use crate::sessions::SessionKeyUpdater;
-use crate::sessions::{ClientSessionBase, SessionEvent, SessionTcpChannel, SessionTimeouts};
+use crate::sessions::{
+    ClientSessionBase, ServerUdpQspIoFactory, SessionEvent, SessionTcpChannel, SessionTimeouts,
+    UdpSessionIoFactory,
+};
 use crate::tun::TunDeviceIo;
 
 /// Manages session creation and lifecycle.
@@ -28,7 +32,7 @@ pub struct SessionManager<T: TunDeviceIo> {
     registry: Arc<SessionRegistry>,
     metrics: Arc<Metrics>,
     tun: Arc<T>,
-    udp_socket: Arc<tokio::net::UdpSocket>,
+    udp_io_factory: Arc<dyn UdpSessionIoFactory<UdpQspIo>>,
     limits: MessageLimits,
     session_timeouts: SessionTimeouts,
     session_queue_size: usize,
@@ -38,7 +42,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
     /// Creates a new session manager.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
-    pub const fn new(
+    pub fn new(
         registry: Arc<SessionRegistry>,
         metrics: Arc<Metrics>,
         tun: Arc<T>,
@@ -51,7 +55,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             registry,
             metrics,
             tun,
-            udp_socket,
+            udp_io_factory: Arc::new(ServerUdpQspIoFactory::new(udp_socket)),
             limits,
             session_timeouts,
             session_queue_size,
@@ -124,7 +128,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             assigned_ip,
             tcp_channel,
             self.tun.clone(),
-            self.udp_socket.clone(),
+            self.udp_io_factory.clone(),
             self.registry.clone(),
             self.metrics.clone(),
             tx,
@@ -201,7 +205,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             assigned_ip,
             tcp_channel,
             self.tun.clone(),
-            self.udp_socket.clone(),
+            self.udp_io_factory.clone(),
             self.registry.clone(),
             self.metrics.clone(),
             tx,

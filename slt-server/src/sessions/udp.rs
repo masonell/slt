@@ -9,13 +9,13 @@ use tracing::{info, trace, warn};
 
 use super::types::SessionControl;
 use super::{
-    ActiveTransport, ClientSessionBase, UdpSocketIo, map_message_error, map_payload_error,
+    ActiveTransport, ClientSessionBase, UdpSessionIo, map_message_error, map_payload_error,
 };
 use crate::quic::UdpClaim;
 use crate::tun::TunDeviceIo;
 
-impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpSocketIo>
-    ClientSessionBase<T, S, U>
+impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
+    ClientSessionBase<T, S, I>
 {
     /// Processes a UDP packet claimed for this session.
     ///
@@ -213,7 +213,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, U: UdpS
         match message {
             Message::Ping { payload } => {
                 let payload = Self::pong_payload_for_ping(payload)?;
-                self.send_udp_message(Message::Pong { payload: &payload })
+                self.send_udp_message_and_flush(Message::Pong { payload: &payload })
                     .await?;
                 Ok(SessionControl::Continue)
             }

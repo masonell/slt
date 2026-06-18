@@ -450,7 +450,7 @@ mod tests {
             rt.block_on(async {
                 let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
                 let peer: std::net::SocketAddr = "127.0.0.1:443".parse().unwrap();
-                let io = crate::transport::udp_qsp::ClientUdpIo::new(socket, peer);
+                let io = crate::transport::udp_qsp::client_udp_qsp_io(&socket, peer).unwrap();
 
                 let dcid = Cid::from([0xAA; MAX_DCID_LEN]);
                 let scid = Cid::from([0xBB; MAX_DCID_LEN]);
@@ -570,7 +570,7 @@ mod tests {
             let new_state = rt.block_on(async {
                 let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
                 let peer: std::net::SocketAddr = "127.0.0.1:443".parse().unwrap();
-                let io = crate::transport::udp_qsp::ClientUdpIo::new(socket, peer);
+                let io = crate::transport::udp_qsp::client_udp_qsp_io(&socket, peer).unwrap();
 
                 let dcid = Cid::from([0xAA; MAX_DCID_LEN]);
                 let scid = Cid::from([0xBB; MAX_DCID_LEN]);

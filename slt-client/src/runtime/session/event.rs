@@ -74,6 +74,8 @@ pub(super) enum SessionEvent {
     TunPacket(Option<Vec<u8>>),
     /// UDP-QSP message read result.
     UdpResult(io::Result<OwnedMessageBuf>),
+    /// UDP-QSP buffered send flush should be driven.
+    UdpFlushReady,
     /// Ping timer expired.
     PingTick,
     /// Idle timeout expired.

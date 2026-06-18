@@ -34,6 +34,7 @@ use super::ReconnectBackoff;
 use crate::metrics::Metrics;
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::{TcpSession, TcpTransport};
+use crate::transport::udp_qsp::ClientTransport;
 use crate::tun::TunChannels;
 
 /// Session managing a single VPN connection.
@@ -152,6 +153,7 @@ impl<'a> ClientSession<'a> {
             }
         };
 
+        self.flush_pending_udp_transport_best_effort().await;
         self.shutdown_background_tasks().await;
         result
     }
@@ -194,8 +196,18 @@ impl<'a> ClientSession<'a> {
         let has_register_timeout = register_deadline.is_some();
         let udp_upgrade_timer_at = self.udp_upgrade.timer_at();
         let has_udp_upgrade_timer = udp_upgrade_timer_at.is_some();
+        let udp_pending_flush = self.active_transport == ActiveTransport::UdpQsp
+            && self
+                .udp_state
+                .as_active()
+                .is_some_and(ClientTransport::has_pending_flush);
 
+        // Keep UDP-QSP flush last on purpose. Data/control work gets priority;
+        // full GSO slabs flush inline, and this branch drains only partial
+        // batches once the session has no immediately-ready work.
         tokio::select! {
+            biased;
+
             () = self.cancel.cancelled() => Ok(SessionEvent::Shutdown),
             res = self.tcp.read_more(), if self.tcp_alive => Ok(SessionEvent::TcpRead(res?)),
             maybe = self.tun_channels.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
@@ -237,6 +249,7 @@ impl<'a> ClientSession<'a> {
             }, if has_udp_upgrade_timer => {
                 Ok(SessionEvent::UdpUpgradeTick)
             }
+            () = std::future::ready(()), if udp_pending_flush => Ok(SessionEvent::UdpFlushReady),
         }
     }
 
@@ -337,6 +350,7 @@ impl<'a> ClientSession<'a> {
                     }
                     warn!("udp-qsp idle timeout; switching to tcp");
                     self.metrics.inc_transport_udp_to_tcp();
+                    self.flush_pending_udp_transport_best_effort().await;
                     self.active_transport = ActiveTransport::Tcp;
                     self.note_tcp_activity();
                     self.schedule_discovery_retry();
@@ -363,13 +377,27 @@ impl<'a> ClientSession<'a> {
                 Ok(self.handle_discovery_result(maybe_ids))
             }
             SessionEvent::UdpUpgradeTick => self.handle_udp_upgrade_tick().await,
+            SessionEvent::UdpFlushReady => {
+                if let Err(err) = self.flush_udp_transport().await {
+                    if err.kind() == io::ErrorKind::ConnectionAborted {
+                        return Err(err);
+                    }
+                    if !self.handle_udp_error(&err) {
+                        self.metrics.inc_disconnect_error();
+                        return Ok(SessionControl::Close(SessionExit::ConnectionError));
+                    }
+                }
+                Ok(SessionControl::Continue)
+            }
         }
     }
 
     /// Forwards a TUN packet to the active transport.
     ///
     /// Writes the packet as a `DATA` message on the active transport.
-    /// If UDP-QSP write fails, attempts TCP fallback if available.
+    /// If UDP-QSP write/enqueue fails, attempts TCP fallback if available.
+    /// Later UDP flush failures are handled as transport loss; individual TUN
+    /// packets already accepted by the UDP batching layer are not replayed.
     /// Drops oversized packets and updates metrics.
     async fn handle_tun_packet(&mut self, packet: Vec<u8>) -> io::Result<SessionControl> {
         if packet.is_empty() {
