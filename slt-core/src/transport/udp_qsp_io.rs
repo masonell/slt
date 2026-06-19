@@ -255,7 +255,7 @@ const fn max_gso_segments_for_size(socket_max_segments: usize, segment_size: usi
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, UdpSocket};
+    use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
     use std::time::Duration;
 
     use tokio::time::timeout;
@@ -492,6 +492,123 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(opened.payload, b"pong");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_rejects_empty_packet() -> io::Result<()> {
+        let (a, b) = socket_pair()?;
+        let b_addr = b.local_addr()?;
+        let mut tx = UdpQspIo::new(a, b_addr)?;
+
+        let err = tx
+            .send(b"")
+            .await
+            .expect_err("empty packet must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // A rejected send must never leave the slab half-populated.
+        assert!(!tx.has_pending_flush());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_rejects_oversized_packet() -> io::Result<()> {
+        let (a, b) = socket_pair()?;
+        let b_addr = b.local_addr()?;
+        let mut tx = UdpQspIo::new(a, b_addr)?;
+
+        let oversize = vec![0u8; MAX_UDP_GSO_PAYLOAD + 1];
+        let err = tx
+            .send(&oversize)
+            .await
+            .expect_err("oversized packet must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(!tx.has_pending_flush());
+        Ok(())
+    }
+
+    /// A failed send surfaces the error but must not corrupt or drop an
+    /// already-buffered batch: `flush_pending` only clears the slab on success,
+    /// so any error leaves it pending and the prior packet still deliverable.
+    #[tokio::test]
+    async fn send_error_preserves_pending_slab() -> io::Result<()> {
+        let (a, b) = socket_pair()?;
+        let a_addr = a.local_addr()?;
+        let b_addr = b.local_addr()?;
+        let mut tx = UdpQspIo::new(a, b_addr)?;
+        let mut rx = UdpQspIo::new(b, a_addr)?;
+
+        // Buffer a valid packet; the slab now holds pending data.
+        let valid = vec![0xA5; 64];
+        tx.send(&valid).await?;
+        assert!(tx.has_pending_flush());
+
+        // A rejected send (oversized) must surface an error without touching the
+        // already-buffered packet.
+        let oversize = vec![0xFF; MAX_UDP_GSO_PAYLOAD + 1];
+        let err = tx
+            .send(&oversize)
+            .await
+            .expect_err("oversized packet must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // The slab is still pending and still contains exactly the valid packet.
+        assert!(tx.has_pending_flush());
+        tx.flush().await?;
+        assert!(!tx.has_pending_flush());
+
+        let mut buf = [0u8; 128];
+        let len = timeout(Duration::from_secs(1), rx.recv(&mut buf)).await??;
+        assert_eq!(&buf[..len], &valid);
+
+        // The rejected oversized packet never reached the peer.
+        assert!(
+            timeout(Duration::from_millis(50), rx.recv(&mut buf))
+                .await
+                .is_err(),
+            "no second packet should arrive"
+        );
+        Ok(())
+    }
+
+    /// Already-queued receive datagrams survive a peer change. They matched the
+    /// previously accepted peer when received, so they are kept in the queue and
+    /// drained by later `recv()` calls even after `set_peer()` redirects future
+    /// batches to a new endpoint.
+    #[tokio::test]
+    async fn queued_recv_datagrams_survive_set_peer() -> io::Result<()> {
+        let (a, b) = socket_pair()?;
+        let a_addr = a.local_addr()?;
+        let b_addr = b.local_addr()?;
+        let mut tx = UdpQspIo::new(a, b_addr)?;
+        let mut rx = UdpQspIo::new(b, a_addr)?;
+
+        // Send two datagrams and let both land in the kernel receive buffer
+        // before reading. quinn-udp's `recvmmsg` returns every buffered datagram
+        // in a single batch, so the first `recv()` queues both and hands back
+        // only the first.
+        tx.send(b"first").await?;
+        tx.send(b"second").await?;
+        tx.flush().await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut buf = [0u8; 64];
+        let len = timeout(Duration::from_secs(1), rx.recv(&mut buf))
+            .await?
+            .expect("first datagram");
+        assert_eq!(&buf[..len], b"first");
+
+        // The second datagram is still queued. Redirecting the peer must not drop
+        // it; `recv()` still drains the queue without needing traffic from the
+        // new (bogus) endpoint.
+        let bogus: SocketAddr = (Ipv4Addr::new(203, 0, 113, 7), 9999).into();
+        rx.set_peer(bogus);
+
+        let len = timeout(Duration::from_secs(1), rx.recv(&mut buf))
+            .await?
+            .expect("second datagram survived set_peer");
+        assert_eq!(&buf[..len], b"second");
         Ok(())
     }
 }

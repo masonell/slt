@@ -1,6 +1,7 @@
 //! Integration tests for client session handling.
 
 mod common;
+mod flush;
 mod lifecycle;
 mod register;
 mod tcp;

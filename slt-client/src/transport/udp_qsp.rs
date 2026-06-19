@@ -1091,4 +1091,64 @@ mod real_socket_tests {
             _ => panic!("expected ping"),
         }
     }
+
+    /// On Unix the client transport wraps the GSO `UdpQspIo` backend, so a data
+    /// write buffers into the send slab and is only transmitted once `flush` runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_message_buffers_until_flush_over_gso_backend() {
+        use std::time::Duration;
+
+        use tokio::time::timeout;
+
+        let (client_socket, server_socket) = udp_pair().await;
+        let client_addr = client_socket.local_addr().unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
+
+        let client_io = client_udp_qsp_io(&client_socket, server_addr).unwrap();
+        let client_session =
+            QuicQspSession::new(client_io, scid, dcid, make_test_keys(), 0, 0, false);
+        let mut client = UdpQspTransport::new(client_session, Arc::new(Metrics::default()));
+
+        let server_io = client_udp_qsp_io(&server_socket, client_addr).unwrap();
+        let server_session =
+            QuicQspSession::new(server_io, dcid, scid, make_server_keys(), 0, 0, false);
+        let mut server = UdpQspTransport::new(server_session, Arc::new(Metrics::default()));
+
+        let limits = MessageLimits::new(2048, 2048);
+        let ping_frame = encode_ping(0xBEEF);
+
+        // Writing buffers into the GSO send slab; nothing is transmitted yet.
+        client
+            .write_message(Message::Ping {
+                payload: &ping_frame[HEADER_LEN..],
+            })
+            .await
+            .unwrap();
+        assert!(
+            client.has_pending_flush(),
+            "write_message must leave a pending flush"
+        );
+        assert!(
+            timeout(Duration::from_millis(80), server.read_next_message(limits))
+                .await
+                .is_err(),
+            "buffered packet must not be delivered until flush"
+        );
+
+        // Flushing transmits the slab and clears the pending flag.
+        client.flush().await.unwrap();
+        assert!(!client.has_pending_flush());
+
+        let msg = server.read_next_message(limits).await.unwrap();
+        match msg.message() {
+            Message::Ping { payload } => {
+                assert_eq!(PingPayload::decode(payload).unwrap().nonce, 0xBEEF);
+            }
+            _ => panic!("expected ping"),
+        }
+    }
 }

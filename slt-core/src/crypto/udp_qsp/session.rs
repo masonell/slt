@@ -519,6 +519,8 @@ const fn next_rekey_after(pn: u64, interval: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use tokio::sync::mpsc;
 
     use super::*;
@@ -553,6 +555,77 @@ mod tests {
             }
             buf[..packet.len()].copy_from_slice(&packet);
             Ok(packet.len())
+        }
+    }
+
+    /// In-memory `SessionIo` that buffers sends until `flush`, modeling the
+    /// batching contract of the real UDP-QSP socket backend. Used to assert that
+    /// `QuicQspSession` proxies `flush`/`has_pending_flush`/`set_peer` to its
+    /// underlying I/O layer instead of dropping or short-circuiting them.
+    #[derive(Debug)]
+    struct BufferingIo {
+        state: Arc<Mutex<BufferingIoState>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct BufferingIoState {
+        pending: Vec<Vec<u8>>,
+        flushed: Vec<Vec<u8>>,
+        last_peer: Option<SocketAddr>,
+    }
+
+    impl BufferingIo {
+        /// Create a buffering I/O and a shared handle to observe its internal state.
+        fn pair() -> (Self, Arc<Mutex<BufferingIoState>>) {
+            let state = Arc::new(Mutex::new(BufferingIoState::default()));
+            (
+                Self {
+                    state: state.clone(),
+                },
+                state,
+            )
+        }
+    }
+
+    impl SessionIo for BufferingIo {
+        async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.state
+                .lock()
+                .expect("BufferingIo lock")
+                .pending
+                .push(bytes.to_vec());
+            Ok(())
+        }
+
+        async fn recv(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "BufferingIo has no recv path",
+            ))
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            {
+                let mut state = self.state.lock().expect("BufferingIo lock");
+                let pending = std::mem::take(&mut state.pending);
+                state.flushed.extend(pending);
+            }
+            Ok(())
+        }
+
+        fn has_pending_flush(&self) -> bool {
+            !self
+                .state
+                .lock()
+                .expect("BufferingIo lock")
+                .pending
+                .is_empty()
+        }
+    }
+
+    impl PeerUpdate for BufferingIo {
+        fn set_peer(&mut self, peer: SocketAddr) {
+            self.state.lock().expect("BufferingIo lock").last_peer = Some(peer);
         }
     }
 
@@ -1699,5 +1772,72 @@ mod tests {
             receiver.open_packet(&packet),
             Err(QspSessionError::DeadChannel)
         ));
+    }
+
+    // =========================================================================
+    // Session flush / peer-update proxying contract
+    // =========================================================================
+
+    fn buffering_keys() -> UdpQspKeys {
+        UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],
+            [0x11; HP_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x55; AEAD_IV_LEN],
+            [0x55; AEAD_IV_LEN],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn session_proxies_flush_and_pending_flush_state() {
+        let (io, state) = BufferingIo::pair();
+        let mut session = QuicQspSession::new(
+            io,
+            Cid::from([0xCD; 20]),
+            Cid::from([0xAB; 20]),
+            buffering_keys(),
+            0,
+            0,
+            false,
+        );
+
+        assert!(!session.has_pending_flush());
+
+        // `send` buffers through the underlying I/O, so a pending flush becomes
+        // visible through the session's proxy.
+        session.send(b"hello").await.unwrap();
+        assert!(session.has_pending_flush());
+        assert_eq!(state.lock().expect("state lock").pending.len(), 1);
+        assert!(state.lock().expect("state lock").flushed.is_empty());
+
+        // `flush` proxies to the I/O layer and drains the buffered packet.
+        session.flush().await.unwrap();
+        assert!(!session.has_pending_flush());
+        assert!(state.lock().expect("state lock").pending.is_empty());
+        assert_eq!(state.lock().expect("state lock").flushed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_proxies_set_peer_to_io() {
+        let (io, state) = BufferingIo::pair();
+        let mut session = QuicQspSession::new(
+            io,
+            Cid::from([0xCD; 20]),
+            Cid::from([0xAB; 20]),
+            buffering_keys(),
+            0,
+            0,
+            false,
+        );
+
+        assert!(state.lock().expect("state lock").last_peer.is_none());
+
+        let peer: SocketAddr = "127.0.0.1:9999".parse().expect("valid addr");
+        session.set_peer(peer);
+
+        assert_eq!(state.lock().expect("state lock").last_peer, Some(peer));
     }
 }
