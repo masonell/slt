@@ -6,6 +6,7 @@ edition.workspace = true
 [lib]
 name = "slt_client"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "client"

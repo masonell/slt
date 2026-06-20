@@ -4,6 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val rustJniLibsDir = layout.buildDirectory.dir("generated/jniLibs/rust")
+
 android {
     namespace = "dev.slt.android"
     compileSdk = 35
@@ -28,6 +30,73 @@ android {
     buildFeatures {
         compose = true
     }
+
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDir(rustJniLibsDir)
+        }
+    }
+}
+
+val buildRustNative by tasks.registering(Exec::class) {
+    val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
+    val androidNdkHome = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.environmentVariable("ANDROID_NDK_ROOT"))
+
+    group = "build"
+    description = "Build Rust Android shared libraries for SLT."
+    workingDir = workspaceDir
+
+    inputs.property("androidNdkHome", androidNdkHome)
+    inputs.file(workspaceDir.resolve("Cargo.lock"))
+    inputs.file(workspaceDir.resolve("Cargo.toml"))
+    inputs.file(workspaceDir.resolve("slt-client/Cargo.toml"))
+    inputs.dir(workspaceDir.resolve("slt-client/src"))
+    inputs.file(workspaceDir.resolve("slt-core/Cargo.toml"))
+    inputs.dir(workspaceDir.resolve("slt-core/src"))
+    outputs.dir(rustJniLibsDir)
+
+    commandLine(
+        "cargo",
+        "ndk",
+        "-t",
+        "arm64-v8a",
+        "-t",
+        "x86_64",
+        "-o",
+        rustJniLibsDir.get().asFile.absolutePath,
+        "build",
+        "-p",
+        "slt-client",
+        "--release",
+        "--lib",
+    )
+
+    doLast {
+        val ndkDir = androidNdkHome.orNull
+            ?: error("ANDROID_NDK_HOME or ANDROID_NDK_ROOT must be set")
+        val prebuiltDir = file(ndkDir)
+            .resolve("toolchains/llvm/prebuilt")
+            .listFiles()
+            ?.singleOrNull { it.isDirectory && it.resolve("sysroot").isDirectory }
+            ?: error("could not find LLVM prebuilt sysroot in Android NDK: $ndkDir")
+        val sysrootLibDir = prebuiltDir.resolve("sysroot/usr/lib")
+        val libcxxTargets = mapOf(
+            "arm64-v8a" to "aarch64-linux-android",
+            "x86_64" to "x86_64-linux-android",
+        )
+
+        libcxxTargets.forEach { (abi, target) ->
+            copy {
+                from(sysrootLibDir.resolve("$target/libc++_shared.so"))
+                into(rustJniLibsDir.get().asFile.resolve(abi))
+            }
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(buildRustNative)
 }
 
 dependencies {

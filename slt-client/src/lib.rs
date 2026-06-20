@@ -10,6 +10,8 @@
 //! (Linux only); other platforms provide their own spawn function — for example
 //! Android wraps a `VpnService` file descriptor.
 
+#[cfg(target_os = "android")]
+mod android;
 mod auth;
 mod metrics;
 mod runtime;

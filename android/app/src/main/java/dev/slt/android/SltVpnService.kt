@@ -51,6 +51,8 @@ class SltVpnService : VpnService() {
         }
 
         try {
+            SltNative.load()
+
             val fd = Builder()
                 .setSession(DEBUG_SESSION)
                 .setMtu(DEBUG_MTU)
