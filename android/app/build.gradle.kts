@@ -87,9 +87,14 @@ val buildRustNative by tasks.registering(Exec::class) {
         )
 
         libcxxTargets.forEach { (abi, target) ->
+            val abiDir = rustJniLibsDir.get().asFile.resolve(abi)
+            val existingLibcxx = abiDir.resolve("libc++_shared.so")
+            if (existingLibcxx.exists() && !existingLibcxx.delete()) {
+                error("could not replace generated JNI lib: $existingLibcxx")
+            }
             copy {
                 from(sysrootLibDir.resolve("$target/libc++_shared.so"))
-                into(rustJniLibsDir.get().asFile.resolve(abi))
+                into(abiDir)
             }
         }
     }

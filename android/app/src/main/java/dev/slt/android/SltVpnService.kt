@@ -8,12 +8,28 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
 import android.os.ParcelFileDescriptor
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
 class SltVpnService : VpnService() {
     private var tunFd: ParcelFileDescriptor? = null
+    private var nativeHandle: Long = 0
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+
+    private val nativeCallback = object : SltNative.NativeCallback {
+        override fun onStatus(status: String, detail: String?) {
+            mainHandler.post {
+                handleNativeStatus(status, detail)
+            }
+        }
+
+        override fun onLog(level: String, message: String) {
+            Log.println(androidLogPriority(level), TAG, message)
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -45,7 +61,7 @@ class SltVpnService : VpnService() {
         startForeground(NOTIFICATION_ID, buildNotification("Starting"))
 
         if (tunFd != null) {
-            SltVpnStatusBus.update(VpnStatus.Running, "fd=${tunFd?.fd}")
+            SltVpnStatusBus.update(VpnStatus.Running, "fd=${tunFd?.fd} native=$nativeHandle")
             updateNotification("Running")
             return
         }
@@ -67,9 +83,10 @@ class SltVpnService : VpnService() {
             }
 
             tunFd = fd
+            nativeHandle = SltNative.start(DEBUG_CLIENT_CONFIG_TOML, fd.fd, DEBUG_MTU, nativeCallback)
             val detail = "fd=${fd.fd} $DEBUG_ADDRESS/$DEBUG_ADDRESS_PREFIX $DEBUG_ROUTE/$DEBUG_ROUTE_PREFIX"
             Log.i(TAG, "SLT VPN established: $detail")
-            SltVpnStatusBus.update(VpnStatus.Running, detail)
+            SltVpnStatusBus.update(VpnStatus.Running, "$detail native=$nativeHandle")
             updateNotification("Running")
         } catch (error: RuntimeException) {
             failVpn(error.message ?: error::class.java.simpleName)
@@ -77,6 +94,7 @@ class SltVpnService : VpnService() {
     }
 
     private fun stopVpn(detail: String) {
+        stopNativeClient()
         closeTunFd()
         stopForegroundCompat()
         SltVpnStatusBus.update(VpnStatus.Stopped, detail)
@@ -84,10 +102,54 @@ class SltVpnService : VpnService() {
 
     private fun failVpn(message: String) {
         Log.e(TAG, "SLT VPN failed: $message")
+        stopNativeClient()
         closeTunFd()
         stopForegroundCompat()
         SltVpnStatusBus.update(VpnStatus.Error, message)
         stopSelf()
+    }
+
+    private fun stopNativeClient() {
+        val handle = nativeHandle
+        nativeHandle = 0
+        if (handle == 0L) {
+            return
+        }
+
+        try {
+            SltNative.stop(handle)
+            Log.i(TAG, "SLT native client stopped: handle=$handle")
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Failed to stop SLT native client: handle=$handle", error)
+        }
+    }
+
+    private fun handleNativeStatus(status: String, detail: String?) {
+        when (status) {
+            "starting" -> {
+                SltVpnStatusBus.update(VpnStatus.Starting, detail)
+                updateNotification("Starting")
+            }
+            "ready" -> {
+                SltVpnStatusBus.update(VpnStatus.Running, detail)
+                updateNotification("Running")
+            }
+            "stopping" -> {
+                if (nativeHandle != 0L) {
+                    updateNotification("Stopping")
+                }
+            }
+            "stopped" -> {
+                if (nativeHandle != 0L) {
+                    SltVpnStatusBus.update(VpnStatus.Stopped, detail)
+                }
+            }
+            "error" -> {
+                SltVpnStatusBus.update(VpnStatus.Error, detail)
+                updateNotification("Error")
+            }
+            else -> Log.w(TAG, "Unknown native status: $status ${detail.orEmpty()}")
+        }
     }
 
     private fun closeTunFd() {
@@ -170,6 +232,27 @@ class SltVpnService : VpnService() {
         private const val DEBUG_ROUTE = "0.0.0.0"
         private const val DEBUG_ROUTE_PREFIX = 0
         private const val DEBUG_DNS = "1.1.1.1"
+        private val DEBUG_CLIENT_CONFIG_TOML = """
+            enable_upgrade = false
+            require_udp = false
+
+            [network]
+            hostname = "example.com"
+            port = 443
+
+            [tls]
+            tls_ca = ""
+
+            [identity]
+            client_id = "0102030405060708090a0b0c0d0e0f10"
+            shared_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            assigned_ipv4 = "10.10.0.2"
+            privkey_ed25519 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+            [tun]
+            tun_name = "slt0"
+            tun_mtu = 1280
+        """.trimIndent()
 
         fun startIntent(context: Context): Intent =
             Intent(context, SltVpnService::class.java).setAction(ACTION_START)
@@ -178,3 +261,12 @@ class SltVpnService : VpnService() {
             Intent(context, SltVpnService::class.java).setAction(ACTION_STOP)
     }
 }
+
+private fun androidLogPriority(level: String): Int =
+    when (level) {
+        "error" -> Log.ERROR
+        "warn" -> Log.WARN
+        "debug" -> Log.DEBUG
+        "trace" -> Log.VERBOSE
+        else -> Log.INFO
+    }
