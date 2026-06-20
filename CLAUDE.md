@@ -10,6 +10,8 @@ SLT is a VPN implementation that multiplexes VPN traffic with standard web traff
 - **slt-cli**: WireGuard-style management CLI (`slt` binary) for project init, key/cert generation, client management, and config validation
 - **slt-tools**: CLI utilities for generating TLS/QUIC ClientHello packets
 
+The Android client skeleton lives in `android/` as a standalone Kotlin/Compose Gradle project. It owns Android platform integration such as `VpnService`, VPN permission flow, foreground service lifecycle, and TUN fd creation.
+
 ### Key Protocol Concepts
 
 **Traffic Classification**: The server inspects TLS ClientHello `legacy_session_id` for a 32-byte HMAC token to identify VPN clients. Unknown traffic is forwarded to nginx.
@@ -34,6 +36,10 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 - `slt-server/src/` provides the `server` binary plus server library modules (`auth`, `sessions`, `quic`, `tcp`, `tun`, `registry`, `router`, `udp_qsp`, `metrics`).
 - `slt-cli/src/` is the `slt` management binary (project init, key/cert generation, client add/remove/list/show, config validation).
 - `slt-tools/src/bin/` contains helper CLIs (`tcp_client_hello`, `quic_client_hello`).
+- `android/` contains the Android VPN client skeleton:
+    - `android/app/src/main/java/dev/slt/android/` holds the Kotlin/Compose UI and `VpnService`.
+    - `android/app/src/main/AndroidManifest.xml` declares VPN and foreground-service integration.
+    - `android/*.gradle.kts` and `android/gradle.properties` configure the standalone Android Gradle build.
 - `vendor/` includes patched dependencies (`boring`, `boring-sys`, `quiche`).
 - `scripts/` holds local capture helpers (e.g., `scripts/chrome-*.sh`).
 - `local/` is an ignored scratch directory for temporary files and temporary docs.
@@ -43,6 +49,8 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 ## Coding Standards
 
 - Rust 2024 edition
+- Format Rust with `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate`
+- Android code is Kotlin + Jetpack Compose; keep Kotlin/XML formatted with Android Studio defaults until a checked-in formatter is added.
 - All `pub` items must have doc comments
 - Descriptive names (e.g., `configure_client_chrome_ssl`, `quic_client_chrome_config`)
 - Tests colocated with code using `#[cfg(test)]`
@@ -58,6 +66,8 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
 - Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy/test).
 - Run `cargo build`, `cargo test`, and `cargo clippy` before finalizing
+- For Android changes, run `gradle assembleDebug` and `gradle testDebugUnitTest lintDebug` from `android/`.
+- For Rust Android smoke checks, run `cargo ndk -t x86_64-linux-android build -p slt-client --lib`.
 - Changes under `vendor/` must be in a separate commit
 
 ## Vendor Update Workflow

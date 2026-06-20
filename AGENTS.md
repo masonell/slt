@@ -11,6 +11,10 @@
 - `slt-server/src/` provides the `server` binary plus server library modules (`auth`, `sessions`, `quic`, `tcp`, `tun`, `registry`, `router`, `udp_qsp`, `metrics`).
 - `slt-cli/src/` is the `slt` management binary (project init, key/cert generation, client add/remove/list/show, config validation).
 - `slt-tools/src/bin/` contains helper CLIs (`tcp_client_hello`, `quic_client_hello`).
+- `android/` contains the Android VPN client skeleton:
+  - `android/app/src/main/java/dev/slt/android/` holds the Kotlin/Compose UI and `VpnService`.
+  - `android/app/src/main/AndroidManifest.xml` declares VPN and foreground-service integration.
+  - `android/*.gradle.kts` and `android/gradle.properties` configure the standalone Android Gradle build.
 - `vendor/` includes patched dependencies (`boring`, `boring-sys`, `quiche`).
 - `scripts/` holds local capture helpers (e.g., `scripts/chrome-*.sh`).
 - `local/` is an ignored scratch directory for temporary files and temporary docs.
@@ -22,6 +26,7 @@
 
 ## Coding Style & Naming Conventions
 - Rust 2024 workspace; format with `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate`.
+- Android code is Kotlin + Jetpack Compose; keep Kotlin/XML formatted with Android Studio defaults until a checked-in formatter is added.
 - Workspace lints are strict: rustc warnings are denied, clippy `all` is denied, and `pedantic`/`nursery` run at warn level.
 - Keep shared protocol/config/crypto logic in `slt-core`; keep runtime/orchestration logic in `slt-client` and `slt-server`.
 - Prefer small, focused modules and descriptive names (`configure_client_chrome_ssl`, `message_limits_from_mtu`).
@@ -36,6 +41,11 @@
   - `cargo build --workspace`
   - `cargo test --workspace`
   - `cargo clippy --workspace`
+- Run Android checks from `android/`:
+  - `gradle assembleDebug`
+  - `gradle testDebugUnitTest lintDebug`
+- Rust Android build smoke test:
+  - `cargo ndk -t x86_64-linux-android build -p slt-client --lib`
 - For focused changes, run targeted crate checks first (for example `cargo test -p slt-core`) before workspace-wide checks.
 - Favor real protocol artifacts (e.g., Boring/quiche-generated handshakes and frames) for tests.
 
@@ -46,6 +56,7 @@
 - Commit hooks run tests and may need capabilities unavailable in the sandbox (for example local socket binds). Agents should perform `git commit` outside the sandbox so hooks can run successfully.
 - Do not bypass hooks with `--no-verify` unless explicitly requested by the user.
 - Run `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace` and fix errors before the final response.
+- For Android changes, also run `gradle assembleDebug` and `gradle testDebugUnitTest lintDebug` from `android/`.
 - Changes under `vendor/` must be in a separate commit.
 - Separate vendor updates from project changes when possible.
 - PRs should describe behavior changes, include relevant commands run, and link any issues.

@@ -14,3 +14,7 @@
 /result
 /result-*
 /local
+/android/.gradle
+/android/build
+/android/app/build
+/android/local.properties

@@ -60,6 +60,9 @@
           ANDROID_SDK_ROOT = "${androidSdk.androidsdk}/libexec/android-sdk";
           ANDROID_NDK_HOME = "${ndk}/libexec/android-sdk/ndk-bundle";
           ANDROID_NDK_ROOT = "${ndk}/libexec/android-sdk/ndk-bundle";
+          # AGP otherwise downloads Maven's generic Linux aapt2, which does
+          # not run on NixOS. Use the auto-patchelf'd SDK binary instead.
+          GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${androidSdk.androidsdk}/libexec/android-sdk/build-tools/35.0.0/aapt2";
         };
       };
     };
