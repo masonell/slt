@@ -54,7 +54,15 @@ async fn main() -> anyhow::Result<()> {
         "client starting"
     );
 
-    Box::pin(slt_client::run_client(config, cancel)).await
+    let (tun_handles, tun_channels) = slt_client::spawn_desktop(&config, cancel.clone())?;
+
+    Box::pin(slt_client::run_client(
+        config,
+        tun_handles,
+        tun_channels,
+        cancel,
+    ))
+    .await
 }
 
 fn init_tracing(filter: Option<&str>) {

@@ -23,11 +23,14 @@ use crate::{auth, transport, tun};
 ///
 /// Returns `Ok(())` on clean shutdown: cancellation requested, the TUN device
 /// closed, or the remote end closed the session.
-pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyhow::Result<()> {
+pub async fn run_client(
+    config: ClientConfig,
+    tun_handles: tun::TunHandles,
+    mut tun_channels: tun::TunChannels,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
     let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
-
-    let (tun_handles, mut tun_channels) = tun::create(&config, cancel.clone())?;
 
     let result = run_sessions(&config, &cancel, &metrics, &mut tun_channels).await;
 

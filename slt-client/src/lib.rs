@@ -5,9 +5,10 @@
 //! authentication, the TCP-to-UDP-QSP transport upgrade, and TUN packet
 //! forwarding until shutdown is requested.
 //!
-//! The runtime is currently desktop-only: it creates a local TUN device with
-//! `tun-rs`. Injecting platform-specific packet I/O (for example an Android
-//! `VpnService` file descriptor) is a later milestone.
+//! The runtime is platform-agnostic: `run_client` consumes packet I/O injected
+//! as [`TunHandles`] + [`TunChannels`]. The desktop backend is `spawn_desktop`
+//! (Linux only); other platforms provide their own spawn function — for example
+//! Android wraps a `VpnService` file descriptor.
 
 mod auth;
 mod metrics;
@@ -23,3 +24,6 @@ mod test_support;
 mod test_integration;
 
 pub use runtime::run_client;
+#[cfg(target_os = "linux")]
+pub use tun::spawn_desktop;
+pub use tun::{TunChannels, TunHandles};

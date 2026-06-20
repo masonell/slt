@@ -1,3 +1,8 @@
+//! Desktop `tun-rs` packet-I/O backend (Linux only).
+//!
+//! [`spawn_desktop`] creates a `tun-rs` device with GRO/GSO offload and spawns
+//! the reader/writer tasks.
+
 use std::io;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -5,63 +10,23 @@ use std::sync::Arc;
 use slt_core::config::ClientConfig;
 use slt_core::packet::extract_src_ipv4;
 use slt_core::proto::{Message, OwnedMessageBuf};
-use slt_core::transport::tun::{DEFAULT_TUN_CHANNEL_SIZE, build_async_tun_device};
-#[cfg(target_os = "linux")]
-use slt_core::transport::tun::{LinuxRecvBatch, LinuxSendBatch};
+use slt_core::transport::tun::{
+    DEFAULT_TUN_CHANNEL_SIZE, LinuxRecvBatch, LinuxSendBatch, build_async_tun_device,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use tun_rs::AsyncDevice;
 
-/// TUN task handles for shutdown coordination.
-pub struct TunHandles {
-    reader: JoinHandle<io::Result<()>>,
-    writer: JoinHandle<io::Result<()>>,
-}
+use super::{TunChannels, TunHandles};
 
-/// TUN channel endpoints for packet I/O with the session.
-pub struct TunChannels {
-    /// Receives packets from TUN destined for the session.
-    pub to_session_rx: mpsc::Receiver<Vec<u8>>,
-    /// Sends owned DATA frames from the session to TUN.
-    pub to_tun_tx: mpsc::Sender<OwnedMessageBuf>,
-}
-
-impl TunHandles {
-    /// Wait for the TUN reader/writer tasks to stop.
-    ///
-    /// Gracefully shuts down the TUN reader and writer tasks, logging any
-    /// errors or panics that occurred during execution.
-    pub async fn shutdown(self) {
-        join_task("tun_reader", self.reader).await;
-        join_task("tun_writer", self.writer).await;
-    }
-}
-
-/// Create TUN device and spawn reader/writer tasks.
-///
-/// Configures and creates a TUN device with the specified name and MTU,
-/// then spawns reader and writer tasks for asynchronous packet I/O.
-/// On Linux, enables GRO/GSO offload for improved performance.
-///
-/// # Arguments
-///
-/// * `config` - Client configuration containing TUN device settings
-/// * `cancel` - Cancellation token to signal task shutdown
-///
-/// # Returns
-///
-/// A tuple containing:
-/// - `TunHandles`: Join handles for the reader/writer tasks
-/// - `TunChannels`: MPSC channels for packet I/O
+/// Create the desktop TUN device and spawn its reader/writer tasks.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - TUN device creation fails (permission denied, device name invalid, etc.)
-/// - MTU configuration is invalid
-pub fn create(
+/// Returns an error if the `tun-rs` device cannot be created or configured.
+pub fn spawn_desktop(
     config: &ClientConfig,
     cancel: CancellationToken,
 ) -> io::Result<(TunHandles, TunChannels)> {
@@ -70,20 +35,16 @@ pub fn create(
         config.tun.tun_mtu,
     )?);
 
-    let (handles, channels) = spawn(
+    Ok(spawn_tasks(
         tun,
         config.identity.assigned_ipv4,
         cancel,
         config.tun.tun_mtu,
-    );
-
-    Ok((handles, channels))
+    ))
 }
 
-/// Spawn TUN reader/writer tasks.
-///
-/// Returns handles for shutdown coordination and channels for packet I/O.
-fn spawn(
+/// Spawn the TUN reader/writer tasks and return their handles and channels.
+fn spawn_tasks(
     tun: Arc<AsyncDevice>,
     assigned_ipv4: Ipv4Addr,
     cancel: CancellationToken,
@@ -131,7 +92,6 @@ fn spawn_tun_writer(
 /// Reads packets from the TUN device and sends them to the session.
 ///
 /// Uses `recv_multiple` to batch packets per syscall with GRO offload.
-#[cfg(target_os = "linux")]
 async fn run_tun_reader(
     tun: Arc<AsyncDevice>,
     assigned_ipv4: Ipv4Addr,
@@ -185,7 +145,6 @@ async fn run_tun_reader(
 /// Writes packets to the TUN device from the channel.
 ///
 /// Batches packets and uses `send_multiple` with GSO offload.
-#[cfg(target_os = "linux")]
 async fn run_tun_writer(
     tun: Arc<AsyncDevice>,
     mut rx: mpsc::Receiver<OwnedMessageBuf>,
@@ -286,17 +245,5 @@ async fn run_tun_writer(
             estimated_coalesced_packets = ?estimated_coalesced_packets,
             "tun writer batch stats"
         );
-    }
-}
-
-async fn join_task(name: &'static str, handle: JoinHandle<io::Result<()>>) {
-    match handle.await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            warn!(task = name, error = %err, "task exited with error");
-        }
-        Err(err) => {
-            warn!(task = name, error = %err, "task panicked");
-        }
     }
 }
