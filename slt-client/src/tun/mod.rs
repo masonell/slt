@@ -56,3 +56,10 @@ mod desktop;
 
 #[cfg(target_os = "linux")]
 pub use desktop::spawn_desktop;
+
+/// Android `tun-rs` backend wrapping a `VpnService` file descriptor.
+#[cfg(target_os = "android")]
+mod android;
+
+#[cfg(target_os = "android")]
+pub use android::spawn_from_fd;

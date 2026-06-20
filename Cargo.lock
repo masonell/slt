@@ -1785,6 +1785,7 @@ dependencies = [
  "ed25519-dalek",
  "fastrand",
  "jni",
+ "libc",
  "quiche",
  "slt-core",
  "tokio",

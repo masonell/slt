@@ -2,14 +2,15 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 use jni::sys::{jint, jlong};
 use jni::{JNIEnv, JavaVM};
 use slt_core::config::ClientConfig;
+use tokio_util::sync::CancellationToken;
 
 const JNI_VERSION_1_6: i32 = 0x0001_0006;
 type NativeHandle = u64;
@@ -22,14 +23,14 @@ static SESSIONS: OnceLock<Mutex<HashMap<NativeHandle, NativeSession>>> = OnceLoc
 /// This symbol makes the shared library loadable and gives Android a stable
 /// place to initialize native state.
 #[unsafe(no_mangle)]
-pub extern "C" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> i32 {
+pub const extern "C" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> i32 {
     JNI_VERSION_1_6
 }
 
 /// Start a native Android client bridge session.
 ///
-/// The session proves config parsing, fd transfer, cancellation, and callback
-/// delivery. Real packet I/O is added by the Android TUN fd backend milestone.
+/// The session starts the Rust client runtime on top of Android's `VpnService`
+/// TUN file descriptor.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_slt_android_SltNative_nativeStart(
     mut env: JNIEnv<'_>,
@@ -39,7 +40,7 @@ pub extern "system" fn Java_dev_slt_android_SltNative_nativeStart(
     mtu: jint,
     callback: JObject<'_>,
 ) -> jlong {
-    match start_native_session(&mut env, config_toml, tun_fd, mtu, callback) {
+    match start_native_session(&mut env, &config_toml, tun_fd, mtu, callback) {
         Ok(handle) => handle_to_jlong(handle),
         Err(err) => {
             throw_runtime_exception(&mut env, &err);
@@ -67,7 +68,7 @@ pub extern "system" fn Java_dev_slt_android_SltNative_nativeStop(
 
 fn start_native_session(
     env: &mut JNIEnv<'_>,
-    config_toml: JString<'_>,
+    config_toml: &JString<'_>,
     tun_fd: jint,
     mtu: jint,
     callback: JObject<'_>,
@@ -75,16 +76,11 @@ fn start_native_session(
     if tun_fd < 0 {
         return Err(format!("invalid Android TUN fd: {tun_fd}"));
     }
-    if mtu <= 0 {
-        return Err(format!("invalid Android TUN mtu: {mtu}"));
-    }
 
     let raw_config: String = env
-        .get_string(&config_toml)
+        .get_string(config_toml)
         .map_err(|err| format!("read config TOML from JNI: {err}"))?
         .into();
-    let config = ClientConfig::from_toml_str(&raw_config)
-        .map_err(|err| format!("parse Android client config: {err}"))?;
     let callback = env
         .new_global_ref(callback)
         .map_err(|err| format!("create native callback reference: {err}"))?;
@@ -98,32 +94,100 @@ fn start_native_session(
     }
 
     let sink = EventSink::new(vm, callback);
-    let control = Arc::new(SessionControl::default());
-    let summary = SessionSummary::new(handle, tun_fd, mtu, &config);
-    let worker_control = control.clone();
-    let worker_sink = sink.clone();
+    let cancel = CancellationToken::new();
+    let worker_cancel = cancel.clone();
+    let worker_sink = sink;
     let worker = thread::Builder::new()
         .name(format!("slt-android-{handle}"))
-        .spawn(move || run_native_session(worker_control, worker_sink, summary))
+        .spawn(move || {
+            run_native_session(
+                &raw_config,
+                tun_fd,
+                mtu,
+                worker_cancel,
+                &worker_sink,
+                handle,
+            );
+        })
         .map_err(|err| format!("spawn native client thread: {err}"))?;
 
-    let session = NativeSession { control, worker };
+    let session = NativeSession { cancel, worker };
     register_session(handle, session)?;
     Ok(handle)
 }
 
-fn run_native_session(control: Arc<SessionControl>, sink: EventSink, summary: SessionSummary) {
-    sink.status("starting", Some(&summary.detail));
-    sink.log(
-        "info",
-        "native bridge started; Android TUN packet I/O is deferred to milestone 6",
-    );
-    sink.status("ready", Some(&summary.detail));
+fn run_native_session(
+    raw_config: &str,
+    tun_fd: jint,
+    mtu: jint,
+    cancel: CancellationToken,
+    sink: &EventSink,
+    handle: NativeHandle,
+) {
+    let startup_detail = format!("handle={handle} fd={tun_fd} android_mtu={mtu}");
+    sink.status("starting", Some(&startup_detail));
 
-    control.wait_cancelled();
+    match run_native_client(raw_config, tun_fd, mtu, cancel, sink, handle) {
+        Ok(stop_detail) => {
+            sink.status("stopping", Some(&stop_detail));
+            sink.status("stopped", Some(&stop_detail));
+        }
+        Err(err) => {
+            sink.log("error", &format!("Android client runtime failed: {err}"));
+            sink.status("error", Some(&err));
+        }
+    }
+}
 
-    sink.status("stopping", Some(&summary.handle_detail()));
-    sink.status("stopped", Some(&summary.handle_detail()));
+fn run_native_client(
+    raw_config: &str,
+    tun_fd: jint,
+    mtu: jint,
+    cancel: CancellationToken,
+    sink: &EventSink,
+    handle: NativeHandle,
+) -> Result<String, String> {
+    let config = ClientConfig::from_toml_str(raw_config)
+        .map_err(|err| format!("parse Android client config: {err}"))?;
+    let android_mtu = validate_android_mtu(mtu, config.tun.tun_mtu)?;
+    let summary = SessionSummary::new(handle, tun_fd, android_mtu, &config);
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|err| format!("create Android client runtime: {err}"))?;
+
+    let detail = summary.detail.clone();
+    let stop_detail = summary.handle_detail();
+    runtime.block_on(async move {
+        let (tun_handles, tun_channels) =
+            crate::tun::spawn_from_fd(&config, tun_fd, cancel.clone())
+                .map_err(|err| format!("start Android TUN backend: {err}"))?;
+        sink.log("info", "Android TUN backend started");
+        sink.status("ready", Some(&detail));
+
+        crate::run_client(config, tun_handles, tun_channels, cancel)
+            .await
+            .map_err(|err| format!("client runtime exited with error: {err}"))
+    })?;
+
+    Ok(stop_detail)
+}
+
+fn validate_android_mtu(mtu: jint, config_mtu: u16) -> Result<u16, String> {
+    let Ok(mtu) = u16::try_from(mtu) else {
+        return Err(format!("invalid Android TUN mtu: {mtu}"));
+    };
+    if mtu == 0 {
+        return Err("invalid Android TUN mtu: 0".to_string());
+    }
+    if mtu != config_mtu {
+        return Err(format!(
+            "Android TUN mtu {mtu} does not match config tun_mtu {config_mtu}"
+        ));
+    }
+    Ok(mtu)
 }
 
 fn sessions() -> &'static Mutex<HashMap<NativeHandle, NativeSession>> {
@@ -131,18 +195,16 @@ fn sessions() -> &'static Mutex<HashMap<NativeHandle, NativeSession>> {
 }
 
 fn register_session(handle: NativeHandle, session: NativeSession) -> Result<(), String> {
-    let mut sessions = match sessions().lock() {
-        Ok(sessions) => sessions,
-        Err(_) => {
-            session.stop();
-            return Err("native session registry poisoned".to_string());
-        }
+    let Ok(mut sessions) = sessions().lock() else {
+        session.stop();
+        return Err("native session registry poisoned".to_string());
     };
     if sessions.contains_key(&handle) {
         session.stop();
         return Err(format!("duplicate native handle: {handle}"));
     }
     sessions.insert(handle, session);
+    drop(sessions);
     Ok(())
 }
 
@@ -151,38 +213,14 @@ fn remove_session(handle: NativeHandle) -> Option<NativeSession> {
 }
 
 struct NativeSession {
-    control: Arc<SessionControl>,
+    cancel: CancellationToken,
     worker: JoinHandle<()>,
 }
 
 impl NativeSession {
     fn stop(self) {
-        self.control.cancel();
+        self.cancel.cancel();
         let _ = self.worker.join();
-    }
-}
-
-#[derive(Default)]
-struct SessionControl {
-    cancelled: AtomicBool,
-    mutex: Mutex<()>,
-    condvar: Condvar,
-}
-
-impl SessionControl {
-    fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        self.condvar.notify_all();
-    }
-
-    fn wait_cancelled(&self) {
-        let mut guard = self.mutex.lock().expect("session control mutex poisoned");
-        while !self.cancelled.load(Ordering::Acquire) {
-            guard = self
-                .condvar
-                .wait(guard)
-                .expect("session control mutex poisoned");
-        }
     }
 }
 
@@ -192,7 +230,7 @@ struct SessionSummary {
 }
 
 impl SessionSummary {
-    fn new(handle: NativeHandle, tun_fd: jint, mtu: jint, config: &ClientConfig) -> Self {
+    fn new(handle: NativeHandle, tun_fd: jint, mtu: u16, config: &ClientConfig) -> Self {
         Self {
             handle,
             detail: format!(

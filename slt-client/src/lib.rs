@@ -28,4 +28,6 @@ mod test_integration;
 pub use runtime::run_client;
 #[cfg(target_os = "linux")]
 pub use tun::spawn_desktop;
+#[cfg(target_os = "android")]
+pub use tun::spawn_from_fd;
 pub use tun::{TunChannels, TunHandles};
