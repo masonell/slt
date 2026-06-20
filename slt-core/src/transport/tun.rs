@@ -2,6 +2,7 @@
 
 use std::io;
 
+#[cfg(target_os = "linux")]
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
 /// Default channel capacity used for TUN packet queues.
@@ -26,27 +27,18 @@ pub fn tun_mtu_to_usize(mtu: u16) -> io::Result<usize> {
     Ok(usize::from(mtu))
 }
 
-/// Build an async TUN device with platform-specific offload configuration.
-///
-/// Linux builds enable GRO/GSO offload. Other platforms use default settings.
+/// Build an async TUN device with GRO/GSO offload enabled (Linux only).
 ///
 /// # Errors
 ///
 /// Returns any error from `tun-rs` device creation.
+#[cfg(target_os = "linux")]
 pub fn build_async_tun_device(name: &str, mtu: u16) -> io::Result<AsyncDevice> {
-    #[cfg(target_os = "linux")]
-    {
-        DeviceBuilder::new()
-            .name(name)
-            .mtu(mtu)
-            .offload(true)
-            .build_async()
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        DeviceBuilder::new().name(name).mtu(mtu).build_async()
-    }
+    DeviceBuilder::new()
+        .name(name)
+        .mtu(mtu)
+        .offload(true)
+        .build_async()
 }
 
 /// Whether Linux GRO/GSO offload is enabled by [`build_async_tun_device`].

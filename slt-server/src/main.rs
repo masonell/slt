@@ -9,8 +9,6 @@ use clap::Parser;
 use slt_core::config::ServerConfig;
 use slt_core::packet::extract_dst_ipv4;
 use slt_core::proto::MessageLimits;
-#[cfg(not(target_os = "linux"))]
-use slt_core::transport::tun::tun_mtu_to_usize;
 use slt_core::transport::tun::{
     DEFAULT_TUN_CHANNEL_SIZE, build_async_tun_device, tun_offload_enabled,
 };
@@ -464,8 +462,7 @@ fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std:
 
 /// Reads packets from the TUN device and routes them to active sessions.
 ///
-/// On Linux with GRO enabled, uses `recv_multiple` to batch packets per syscall.
-/// On other platforms, falls back to single-packet reads.
+/// Uses `recv_multiple` to batch packets per syscall with GRO offload.
 ///
 /// # Arguments
 ///
@@ -527,59 +524,9 @@ async fn run_tun_reader(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn run_tun_reader(
-    tun: Arc<tun_rs::AsyncDevice>,
-    registry: Arc<SessionRegistry>,
-    metrics: Arc<Metrics>,
-    cancel: CancellationToken,
-    mtu: u16,
-) -> io::Result<()> {
-    let mtu = tun_mtu_to_usize(mtu)?;
-    let mut packet = vec![0u8; mtu];
-    loop {
-        let n = tokio::select! {
-            () = cancel.cancelled() => return Ok(()),
-            res = tun.recv(&mut packet) => res?,
-        };
-
-        if n == 0 {
-            continue;
-        }
-
-        packet.truncate(n);
-        let Some(dst_ip) = extract_dst_ipv4(&packet) else {
-            debug!(len = n, "tun packet missing IPv4 dst");
-            packet.resize(mtu, 0);
-            continue;
-        };
-        trace!(len = n, dst_ip = %dst_ip, "tun packet received");
-        if let Some(tx) = registry.lookup_ip(dst_ip) {
-            match tx.try_send(SessionEvent::TunPacket(packet)) {
-                Ok(()) => {
-                    packet = vec![0u8; mtu];
-                }
-                Err(err) => {
-                    metrics.inc_tun_queue_overflow_drops();
-                    debug!(dst_ip = %dst_ip, "tun packet dropped (session queue full)");
-                    let SessionEvent::TunPacket(inner) = err.into_inner() else {
-                        unreachable!("only TunPacket is sent from this site");
-                    };
-                    packet = inner;
-                    packet.resize(mtu, 0);
-                }
-            }
-        } else {
-            debug!(dst_ip = %dst_ip, "tun packet dropped (no session)");
-            packet.resize(mtu, 0);
-        }
-    }
-}
-
 /// Writes packets to the TUN device from the channel.
 ///
-/// On Linux with GSO enabled, batches packets and uses `send_multiple`.
-/// On other platforms, sends packets individually.
+/// Batches packets and uses `send_multiple` with GSO offload.
 ///
 /// # Arguments
 ///
@@ -675,31 +622,5 @@ async fn run_tun_writer(
             estimated_coalesced_packets = ?estimated_coalesced_packets,
             "tun writer batch stats"
         );
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn run_tun_writer(
-    tun: Arc<tun_rs::AsyncDevice>,
-    mut rx: mpsc::Receiver<Vec<u8>>,
-    cancel: CancellationToken,
-) -> io::Result<()> {
-    loop {
-        let packet = tokio::select! {
-            () = cancel.cancelled() => return Ok(()),
-            maybe = rx.recv() => match maybe {
-                Some(pkt) => pkt,
-                None => return Ok(()),
-            },
-        };
-
-        let written = tun.send(&packet).await?;
-        if written != packet.len() {
-            warn!(
-                written,
-                expected = packet.len(),
-                "unexpected partial tun write"
-            );
-        }
     }
 }

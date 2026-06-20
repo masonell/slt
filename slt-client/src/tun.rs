@@ -5,8 +5,6 @@ use std::sync::Arc;
 use slt_core::config::ClientConfig;
 use slt_core::packet::extract_src_ipv4;
 use slt_core::proto::{Message, OwnedMessageBuf};
-#[cfg(not(target_os = "linux"))]
-use slt_core::transport::tun::tun_mtu_to_usize;
 use slt_core::transport::tun::{DEFAULT_TUN_CHANNEL_SIZE, build_async_tun_device};
 #[cfg(target_os = "linux")]
 use slt_core::transport::tun::{LinuxRecvBatch, LinuxSendBatch};
@@ -132,8 +130,7 @@ fn spawn_tun_writer(
 
 /// Reads packets from the TUN device and sends them to the session.
 ///
-/// On Linux with GRO enabled, uses `recv_multiple` to batch packets per syscall.
-/// On other platforms, falls back to single-packet reads.
+/// Uses `recv_multiple` to batch packets per syscall with GRO offload.
 #[cfg(target_os = "linux")]
 async fn run_tun_reader(
     tun: Arc<AsyncDevice>,
@@ -185,55 +182,9 @@ async fn run_tun_reader(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn run_tun_reader(
-    tun: Arc<AsyncDevice>,
-    assigned_ipv4: Ipv4Addr,
-    tx: mpsc::Sender<Vec<u8>>,
-    cancel: CancellationToken,
-    mtu: u16,
-) -> io::Result<()> {
-    let mtu = tun_mtu_to_usize(mtu)?;
-    let mut packet = vec![0u8; mtu];
-    loop {
-        let n = tokio::select! {
-            () = cancel.cancelled() => return Ok(()),
-            res = tun.recv(&mut packet) => res?,
-        };
-
-        if n == 0 {
-            continue;
-        }
-
-        packet.truncate(n);
-        let Some(src_ip) = extract_src_ipv4(&packet) else {
-            debug!(len = n, "tun packet missing IPv4 src");
-            packet.resize(mtu, 0);
-            continue;
-        };
-        trace!(len = n, src_ip = %src_ip, "tun packet received");
-        if src_ip != assigned_ipv4 {
-            warn!(
-                src_ip = %src_ip,
-                assigned_ip = %assigned_ipv4,
-                "dropping tun packet due to source IP mismatch"
-            );
-            packet.resize(mtu, 0);
-            continue;
-        }
-
-        if tx.send(packet).await.is_err() {
-            debug!(len = n, "tun queue closed, exiting reader");
-            return Ok(());
-        }
-        packet = vec![0u8; mtu];
-    }
-}
-
 /// Writes packets to the TUN device from the channel.
 ///
-/// On Linux with GSO enabled, batches packets and uses `send_multiple`.
-/// On other platforms, sends packets individually.
+/// Batches packets and uses `send_multiple` with GSO offload.
 #[cfg(target_os = "linux")]
 async fn run_tun_writer(
     tun: Arc<AsyncDevice>,
@@ -335,44 +286,6 @@ async fn run_tun_writer(
             estimated_coalesced_packets = ?estimated_coalesced_packets,
             "tun writer batch stats"
         );
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn run_tun_writer(
-    tun: Arc<AsyncDevice>,
-    mut rx: mpsc::Receiver<OwnedMessageBuf>,
-    cancel: CancellationToken,
-) -> io::Result<()> {
-    loop {
-        let frame = tokio::select! {
-            () = cancel.cancelled() => return Ok(()),
-            maybe = rx.recv() => match maybe {
-                Some(frame) => frame,
-                None => return Ok(()),
-            },
-        };
-
-        let Message::Data { packet } = frame.message() else {
-            debug!("dropping non-data frame in tun writer");
-            continue;
-        };
-
-        if packet.is_empty() {
-            continue;
-        }
-
-        // TUN writes are atomic: the kernel either accepts the entire packet or
-        // fails with an error. Partial writes should never occur; if they do,
-        // something is very wrong and worth investigating.
-        let written = tun.send(packet).await?;
-        if written != packet.len() {
-            warn!(
-                written,
-                expected = packet.len(),
-                "unexpected partial tun write"
-            );
-        }
     }
 }
 
