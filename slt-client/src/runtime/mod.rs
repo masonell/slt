@@ -14,6 +14,15 @@ use crate::metrics::Metrics;
 use crate::{auth, transport, tun};
 
 /// Run the client runtime until shutdown.
+///
+/// # Errors
+///
+/// Returns an error if the runtime exits due to a non-recoverable condition,
+/// such as an authentication rejection, a protocol error, a non-recoverable
+/// connection or authentication failure, or a failed mandatory UDP upgrade.
+///
+/// Returns `Ok(())` on clean shutdown: cancellation requested, the TUN device
+/// closed, or the remote end closed the session.
 pub async fn run_client(config: ClientConfig, cancel: CancellationToken) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
     let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());

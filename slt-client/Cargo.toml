@@ -3,6 +3,10 @@ name = "slt-client"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "slt_client"
+path = "src/lib.rs"
+
 [[bin]]
 name = "client"
 path = "src/main.rs"

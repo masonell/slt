@@ -11,19 +11,6 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-mod auth;
-mod metrics;
-mod runtime;
-mod transport;
-mod tun;
-mod wire;
-
-#[cfg(test)]
-mod test_support;
-
-#[cfg(test)]
-mod test_integration;
-
 #[derive(Parser, Debug)]
 #[command(about = "Run the SLT client.", version)]
 struct Args {
@@ -67,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         "client starting"
     );
 
-    Box::pin(runtime::run_client(config, cancel)).await
+    Box::pin(slt_client::run_client(config, cancel)).await
 }
 
 fn init_tracing(filter: Option<&str>) {
