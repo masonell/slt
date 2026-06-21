@@ -2,15 +2,20 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::io;
+use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
-use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use jni::objects::{GlobalRef, JClass, JObject, JString, JValue, JValueGen};
 use jni::sys::{jint, jlong};
 use jni::{JNIEnv, JavaVM};
 use slt_core::config::ClientConfig;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
+
+use crate::transport::socket_protector::{SocketKind, SocketProtector};
 
 const JNI_VERSION_1_6: i32 = 0x0001_0006;
 type NativeHandle = u64;
@@ -167,7 +172,8 @@ fn run_native_client(
         sink.log("info", "Android TUN backend started");
         sink.status("ready", Some(&detail));
 
-        crate::run_client(config, tun_handles, tun_channels, cancel)
+        let socket_protector = Arc::new(AndroidSocketProtector { sink: sink.clone() });
+        crate::run_client(config, tun_handles, tun_channels, cancel, socket_protector)
             .await
             .map_err(|err| format!("client runtime exited with error: {err}"))
     })?;
@@ -257,6 +263,16 @@ struct EventSinkInner {
     callback: GlobalRef,
 }
 
+struct AndroidSocketProtector {
+    sink: EventSink,
+}
+
+impl SocketProtector for AndroidSocketProtector {
+    fn protect(&self, fd: RawFd, kind: SocketKind) -> io::Result<()> {
+        self.sink.protect_socket(fd, kind)
+    }
+}
+
 impl EventSink {
     fn new(vm: JavaVM, callback: GlobalRef) -> Self {
         Self {
@@ -290,6 +306,46 @@ impl EventSink {
             level,
             Some(message),
         );
+    }
+
+    fn protect_socket(&self, fd: RawFd, kind: SocketKind) -> io::Result<()> {
+        let mut env = self.inner.vm.attach_current_thread().map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("attach JNI thread for socket protection: {err}"),
+            )
+        })?;
+        let fd = jint::try_from(fd).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("socket fd out of JNI int range: {fd}"),
+            )
+        })?;
+
+        let protected = env
+            .call_method(
+                self.inner.callback.as_obj(),
+                "protectSocket",
+                "(I)Z",
+                &[JValue::Int(fd)],
+            )
+            .and_then(JValueGen::z)
+            .map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("call Android protectSocket for {kind:?} fd {fd}: {err}"),
+                )
+            })?;
+
+        if protected {
+            debug!(fd, kind = ?kind, "Android socket protected");
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("Android protectSocket returned false for {kind:?} fd {fd}"),
+            ))
+        }
     }
 
     fn call(&self, method: &str, signature: &str, first: &str, second: Option<&str>) {

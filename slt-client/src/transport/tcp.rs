@@ -1,5 +1,6 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,12 +15,13 @@ use slt_core::crypto::{
 use slt_core::transport::tcp::{
     IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
 };
-use tokio::net::{TcpStream, lookup_host};
+use tokio::net::{TcpSocket, TcpStream, lookup_host};
 use tokio::time::timeout;
 use tokio_boring::HandshakeError;
 use tracing::{debug, trace};
 
 use crate::metrics::Metrics;
+use crate::transport::socket_protector::{SharedSocketProtector, SocketKind, SocketProtector};
 
 /// Maximum time allowed for TCP connect + TLS handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -85,12 +87,19 @@ pub struct TcpSession {
 /// - Hostname configuration is empty
 /// - CA certificate configuration fails
 /// - Hostname verification fails
-pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result<TcpSession> {
+pub async fn connect(
+    config: &ClientConfig,
+    metrics: Arc<Metrics>,
+    socket_protector: SharedSocketProtector,
+) -> io::Result<TcpSession> {
     metrics.inc_tcp_connections();
 
-    let stream = timeout(CONNECT_TIMEOUT, connect_stream(config))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tcp connect timeout"))??;
+    let stream = timeout(
+        CONNECT_TIMEOUT,
+        connect_stream(config, socket_protector.as_ref()),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tcp connect timeout"))??;
     let peer = stream.peer_addr().ok();
     debug!(peer = ?peer, "tcp connected");
 
@@ -158,9 +167,12 @@ pub async fn connect(config: &ClientConfig, metrics: Arc<Metrics>) -> io::Result
     })
 }
 
-async fn connect_stream(config: &ClientConfig) -> io::Result<TcpStream> {
+async fn connect_stream(
+    config: &ClientConfig,
+    socket_protector: &dyn SocketProtector,
+) -> io::Result<TcpStream> {
     if let Some(ip) = config.network.ip {
-        return TcpStream::connect(SocketAddr::new(ip, config.network.port)).await;
+        return connect_addr(SocketAddr::new(ip, config.network.port), socket_protector).await;
     }
 
     let addrs: Vec<SocketAddr> =
@@ -177,13 +189,25 @@ async fn connect_stream(config: &ClientConfig) -> io::Result<TcpStream> {
 
     let mut last_err = None;
     for addr in addrs {
-        match TcpStream::connect(addr).await {
+        match connect_addr(addr, socket_protector).await {
             Ok(stream) => return Ok(stream),
             Err(err) => last_err = Some(err),
         }
     }
 
     Err(last_err.unwrap_or_else(|| io::Error::other("tcp connect failed")))
+}
+
+async fn connect_addr(
+    addr: SocketAddr,
+    socket_protector: &dyn SocketProtector,
+) -> io::Result<TcpStream> {
+    let socket = match addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    socket_protector.protect(socket.as_raw_fd(), SocketKind::Tcp)?;
+    socket.connect(addr).await
 }
 
 fn configure_hostname_verification(ssl: &mut Ssl, host: &str) -> Result<(), ErrorStack> {
@@ -201,4 +225,82 @@ fn map_error(err: impl std::fmt::Display) -> io::Error {
 
 fn map_handshake_error(err: &HandshakeError<TcpStream>) -> io::Error {
     io::Error::other(format!("tls handshake failed: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::test_support::test_config;
+
+    #[derive(Default)]
+    struct RecordingProtector {
+        calls: Mutex<Vec<(i32, SocketKind)>>,
+        fail: bool,
+    }
+
+    impl SocketProtector for RecordingProtector {
+        fn protect(&self, fd: i32, kind: SocketKind) -> io::Result<()> {
+            self.calls.lock().unwrap().push((fd, kind));
+            if self.fail {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test protection failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_stream_protects_socket_before_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let _ = listener.accept().await.unwrap();
+        });
+
+        let mut config = test_config();
+        config.network.ip = Some(addr.ip());
+        config.network.port = addr.port();
+        let protector = RecordingProtector::default();
+
+        let stream = connect_stream(&config, &protector).await.unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), addr);
+
+        let calls = protector.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, SocketKind::Tcp);
+        assert!(calls[0].0 >= 0);
+
+        drop(stream);
+        accept.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_stream_returns_permission_denied_when_protection_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut config = test_config();
+        config.network.ip = Some(addr.ip());
+        config.network.port = addr.port();
+        let protector = RecordingProtector {
+            fail: true,
+            ..RecordingProtector::default()
+        };
+
+        let err = connect_stream(&config, &protector).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        let calls = protector.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, SocketKind::Tcp);
+
+        drop(listener);
+    }
 }

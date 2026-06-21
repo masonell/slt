@@ -26,6 +26,9 @@ mod test_support;
 mod test_integration;
 
 pub use runtime::run_client;
+pub use transport::socket_protector::{
+    NoopSocketProtector, SharedSocketProtector, SocketKind, SocketProtector, noop_socket_protector,
+};
 #[cfg(target_os = "linux")]
 pub use tun::spawn_desktop;
 #[cfg(target_os = "android")]

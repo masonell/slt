@@ -49,11 +49,12 @@ impl ClientSession<'_> {
         let config = self.config.clone();
         let cancel = self.cancel.clone();
         let peer = self.peer;
+        let socket_protector = self.socket_protector.clone();
 
         tokio::spawn(async move {
             let result = tokio::select! {
                 () = cancel.cancelled() => return None,
-                result = quic::discover_quic_ids(&config, &cancel, peer) => result,
+                result = quic::discover_quic_ids(&config, &cancel, peer, socket_protector) => result,
             };
 
             match result {

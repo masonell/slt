@@ -24,6 +24,8 @@ object SltNative {
         fun onStatus(status: String, detail: String?)
 
         fun onLog(level: String, message: String)
+
+        fun protectSocket(fd: Int): Boolean
     }
 
     @JvmStatic

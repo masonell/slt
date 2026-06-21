@@ -1,5 +1,6 @@
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,8 @@ use tokio::net::{UdpSocket, lookup_host};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
+
+use crate::transport::socket_protector::{SharedSocketProtector, SocketKind, SocketProtector};
 
 const QUIC_MAX_DATAGRAM: usize = 1350;
 const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,6 +49,7 @@ pub async fn discover_quic_ids(
     config: &ClientConfig,
     cancel: &CancellationToken,
     peer_override: Option<SocketAddr>,
+    socket_protector: SharedSocketProtector,
 ) -> io::Result<QuicIds> {
     if config.network.hostname.is_empty() {
         return Err(io::Error::new(
@@ -57,7 +61,14 @@ pub async fn discover_quic_ids(
     let peers = resolve_peers(config, peer_override).await?;
     let mut last_err = None;
     for peer in peers {
-        match Box::pin(discover_quic_ids_for_peer(config, cancel, peer)).await {
+        match Box::pin(discover_quic_ids_for_peer(
+            config,
+            cancel,
+            peer,
+            socket_protector.as_ref(),
+        ))
+        .await
+        {
             Ok(ids) => return Ok(ids),
             Err(err) => {
                 debug!(peer = %peer, error = %err, "quic discovery failed for peer");
@@ -99,12 +110,9 @@ async fn discover_quic_ids_for_peer(
     config: &ClientConfig,
     cancel: &CancellationToken,
     peer: SocketAddr,
+    socket_protector: &dyn SocketProtector,
 ) -> io::Result<QuicIds> {
-    let bind_addr = match peer {
-        SocketAddr::V4(_) => "0.0.0.0:0",
-        SocketAddr::V6(_) => "[::]:0",
-    };
-    let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
+    let socket = Arc::new(bind_protected_udp_socket(peer, socket_protector)?);
     let local = socket.local_addr()?;
 
     let mut quic_config =
@@ -199,6 +207,20 @@ async fn discover_quic_ids_for_peer(
     }
 }
 
+fn bind_protected_udp_socket(
+    peer: SocketAddr,
+    socket_protector: &dyn SocketProtector,
+) -> io::Result<UdpSocket> {
+    let bind_addr = match peer {
+        SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+    };
+    let socket = StdUdpSocket::bind(bind_addr)?;
+    socket_protector.protect(socket.as_raw_fd(), SocketKind::Udp)?;
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket)
+}
+
 fn fill_random(buf: &mut [u8]) {
     let mut offset = 0;
     while offset < buf.len() {
@@ -215,4 +237,61 @@ fn map_quic_error(err: quiche::Error) -> io::Error {
 
 fn map_cid_error(err: CidError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingProtector {
+        calls: Mutex<Vec<(i32, SocketKind)>>,
+        fail: bool,
+    }
+
+    impl SocketProtector for RecordingProtector {
+        fn protect(&self, fd: i32, kind: SocketKind) -> io::Result<()> {
+            self.calls.lock().unwrap().push((fd, kind));
+            if self.fail {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test protection failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_protected_udp_socket_protects_socket_before_use() {
+        let peer: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let protector = RecordingProtector::default();
+
+        let socket = bind_protected_udp_socket(peer, &protector).unwrap();
+        assert!(socket.local_addr().unwrap().is_ipv4());
+
+        let calls = protector.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, SocketKind::Udp);
+        assert!(calls[0].0 >= 0);
+    }
+
+    #[tokio::test]
+    async fn bind_protected_udp_socket_returns_permission_denied_when_protection_fails() {
+        let peer: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let protector = RecordingProtector {
+            fail: true,
+            ..RecordingProtector::default()
+        };
+
+        let err = bind_protected_udp_socket(peer, &protector).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        let calls = protector.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, SocketKind::Udp);
+    }
 }

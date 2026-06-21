@@ -29,6 +29,18 @@ class SltVpnService : VpnService() {
         override fun onLog(level: String, message: String) {
             Log.println(androidLogPriority(level), TAG, message)
         }
+
+        override fun protectSocket(fd: Int): Boolean =
+            try {
+                val protected = protect(fd)
+                if (!protected) {
+                    Log.w(TAG, "Android refused to protect SLT socket: fd=$fd")
+                }
+                protected
+            } catch (error: RuntimeException) {
+                Log.w(TAG, "Failed to protect SLT socket: fd=$fd", error)
+                false
+            }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
