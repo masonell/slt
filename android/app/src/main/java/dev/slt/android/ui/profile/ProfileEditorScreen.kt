@@ -36,7 +36,6 @@ import dev.slt.android.DnsSettings
 import dev.slt.android.ProfileMetadata
 import dev.slt.android.ProfileRepository
 import dev.slt.android.SltNative
-import dev.slt.android.SltProfile
 import dev.slt.android.VpnRouteRule
 import dev.slt.android.dnsExcludedRouteWarnings
 import dev.slt.android.exportDnsServers
@@ -59,234 +58,250 @@ internal fun ProfileEditorScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var loadedProfile by remember(profileId) { mutableStateOf<SltProfile?>(null) }
-    var name by remember(profileId) { mutableStateOf("") }
-    var toml by remember(profileId) { mutableStateOf("") }
-    var routeText by remember(profileId) { mutableStateOf("") }
-    var dnsMode by remember(profileId) { mutableStateOf(DnsMode.System) }
-    var dnsText by remember(profileId) { mutableStateOf("") }
-    var appMode by remember(profileId) { mutableStateOf(AppVpnMode.All) }
-    var appPackageNames by remember(profileId) { mutableStateOf(emptyList<String>()) }
-    var testUrlsText by remember(profileId) { mutableStateOf("") }
-    var validation by remember(profileId) { mutableStateOf<ConfigValidationResult?>(null) }
-    var message by remember(profileId) { mutableStateOf<String?>(null) }
-    var routeMessage by remember(profileId) { mutableStateOf<String?>(null) }
-    var dnsMessage by remember(profileId) { mutableStateOf<String?>(null) }
-    var appMessage by remember(profileId) { mutableStateOf<String?>(null) }
-    var testUrlsMessage by remember(profileId) { mutableStateOf<String?>(null) }
-    var editingRoutes by remember(profileId) { mutableStateOf(false) }
-    var editingDns by remember(profileId) { mutableStateOf(false) }
-    var editingApps by remember(profileId) { mutableStateOf(false) }
-    var editingTestUrls by remember(profileId) { mutableStateOf(false) }
+    var editorState by remember(profileId) { mutableStateOf(ProfileEditorState()) }
 
     LaunchedEffect(profileId) {
         val profile = profileId?.let { profileRepository.loadProfile(it) }
-        loadedProfile = profile
-        name = profile?.metadata?.name.orEmpty()
-        toml = profile?.clientToml.orEmpty()
-        routeText = exportVpnRouteRules(profile?.metadata?.routes.orEmpty())
-        dnsMode = profile?.metadata?.dns?.mode ?: DnsMode.System
-        dnsText = exportDnsServers(profile?.metadata?.dns?.servers.orEmpty())
-        appMode = profile?.metadata?.appRules?.mode ?: AppVpnMode.All
-        appPackageNames = profile?.metadata?.appRules?.packageNames.orEmpty()
-        testUrlsText = exportTestUrls(profile?.metadata?.testUrls.orEmpty())
-        validation = null
-        message = null
-        routeMessage = null
-        dnsMessage = null
-        appMessage = null
-        testUrlsMessage = null
-        editingRoutes = false
-        editingDns = false
-        editingApps = false
-        editingTestUrls = false
+        editorState = profileEditorStateFrom(profile)
     }
 
-    BackHandler(enabled = editingRoutes || editingDns || editingApps || editingTestUrls) {
-        editingRoutes = false
-        editingDns = false
-        editingApps = false
-        editingTestUrls = false
+    BackHandler(enabled = editorState.isEditingNestedScreen) {
+        editorState = editorState.withClosedNestedScreen()
     }
 
     fun validate(): ConfigValidationResult {
-        val result = SltNative.validateClientConfig(toml)
-        validation = result
-        message = if (result.isValid) "Config is valid" else result.error
+        val result = SltNative.validateClientConfig(editorState.toml)
+        editorState = editorState.copy(
+            validation = result,
+            message = if (result.isValid) "Config is valid" else result.error,
+        )
         return result
     }
 
     fun parseRoutesForSave(): List<VpnRouteRule>? =
         try {
-            val routes = parseVpnRouteRules(routeText)
+            val routes = parseVpnRouteRules(editorState.routeText)
             if (routes.isEmpty()) {
-                routeMessage = "At least one VPN route is required"
-                message = routeMessage
+                val routeMessage = "At least one VPN route is required"
+                editorState = editorState.copy(
+                    routeMessage = routeMessage,
+                    message = routeMessage,
+                )
                 null
             } else {
-                routeText = exportVpnRouteRules(routes)
-                routeMessage = "${routes.size} route${if (routes.size == 1) "" else "s"} ready"
+                editorState = editorState.copy(
+                    routeText = exportVpnRouteRules(routes),
+                    routeMessage = "${routes.size} route${if (routes.size == 1) "" else "s"} ready",
+                )
                 routes
             }
         } catch (error: IllegalArgumentException) {
-            routeMessage = error.message ?: "Invalid routes"
-            message = routeMessage
+            val routeMessage = error.message ?: "Invalid routes"
+            editorState = editorState.copy(
+                routeMessage = routeMessage,
+                message = routeMessage,
+            )
             null
         }
 
     fun parseDnsForSave(routes: List<VpnRouteRule>?): DnsSettings? =
         try {
-            val dns = parseDnsSettings(dnsMode, dnsText)
-            dnsText = exportDnsServers(dns.servers)
+            val dns = parseDnsSettings(editorState.dnsMode, editorState.dnsText)
             val warnings = routes?.let { dnsExcludedRouteWarnings(it, dns) }.orEmpty()
-            dnsMessage = warnings.firstOrNull()
+            val dnsMessage = warnings.firstOrNull()
                 ?: when (dns.mode) {
                     DnsMode.System -> "System DNS ready"
                     DnsMode.Custom -> "${dns.servers.size} DNS server${if (dns.servers.size == 1) "" else "s"} ready"
                 }
+            editorState = editorState.copy(
+                dnsText = exportDnsServers(dns.servers),
+                dnsMessage = dnsMessage,
+            )
             dns
         } catch (error: IllegalArgumentException) {
-            dnsMessage = error.message ?: "Invalid DNS settings"
-            message = dnsMessage
+            val dnsMessage = error.message ?: "Invalid DNS settings"
+            editorState = editorState.copy(
+                dnsMessage = dnsMessage,
+                message = dnsMessage,
+            )
             null
         }
 
     fun parseAppsForSave(): AppVpnRules? =
         try {
-            val appRules = normalizeAppVpnRules(appMode, appPackageNames, context.packageName)
-            appMode = appRules.mode
-            appPackageNames = appRules.packageNames
-            appMessage = appRulesSummary(appRules)
+            val appRules = normalizeAppVpnRules(
+                editorState.appMode,
+                editorState.selectedPackageNames,
+                context.packageName,
+            )
+            editorState = editorState.copy(
+                appMode = appRules.mode,
+                selectedPackageNames = appRules.packageNames,
+                appMessage = appRulesSummary(appRules),
+            )
             appRules
         } catch (error: IllegalArgumentException) {
-            appMessage = error.message ?: "Invalid app rules"
-            message = appMessage
+            val appMessage = error.message ?: "Invalid app rules"
+            editorState = editorState.copy(
+                appMessage = appMessage,
+                message = appMessage,
+            )
             null
         }
 
     fun parseTestUrlsForSave(): List<String>? =
         try {
-            val testUrls = parseTestUrls(testUrlsText)
-            testUrlsText = exportTestUrls(testUrls)
-            testUrlsMessage = if (testUrls.isEmpty()) {
+            val testUrls = parseTestUrls(editorState.testUrlsText)
+            val testUrlsMessage = if (testUrls.isEmpty()) {
                 "No test URLs configured"
             } else {
                 "${testUrls.size} test URL${if (testUrls.size == 1) "" else "s"} ready"
             }
+            editorState = editorState.copy(
+                testUrlsText = exportTestUrls(testUrls),
+                testUrlsMessage = testUrlsMessage,
+            )
             testUrls
         } catch (error: IllegalArgumentException) {
-            testUrlsMessage = error.message ?: "Invalid test URLs"
-            message = testUrlsMessage
+            val testUrlsMessage = error.message ?: "Invalid test URLs"
+            editorState = editorState.copy(
+                testUrlsMessage = testUrlsMessage,
+                message = testUrlsMessage,
+            )
             null
         }
 
-    if (editingRoutes) {
+    if (editorState.activeNestedScreen == ProfileEditorNestedScreen.Routes) {
         RouteEditorScreen(
-            routeText = routeText,
-            routeMessage = routeMessage,
+            routeText = editorState.routeText,
+            routeMessage = editorState.routeMessage,
             onRouteTextChange = {
-                routeText = it
-                routeMessage = null
+                editorState = editorState.copy(
+                    routeText = it,
+                    routeMessage = null,
+                )
             },
             onApply = {
                 val routes = parseRoutesForSave()
                 if (routes != null) {
-                    editingRoutes = false
-                    message = null
+                    editorState = editorState.copy(
+                        activeNestedScreen = null,
+                        message = null,
+                    )
                 }
             },
             onCopy = {
                 try {
-                    val routes = parseVpnRouteRules(routeText)
+                    val routes = parseVpnRouteRules(editorState.routeText)
                     val normalizedRoutes = exportVpnRouteRules(routes)
-                    routeText = normalizedRoutes
                     context.copySensitiveText("SLT routes", normalizedRoutes)
-                    routeMessage = "Routes copied"
+                    editorState = editorState.copy(
+                        routeText = normalizedRoutes,
+                        routeMessage = "Routes copied",
+                    )
                 } catch (error: IllegalArgumentException) {
-                    routeMessage = error.message ?: "Invalid routes"
+                    editorState = editorState.copy(
+                        routeMessage = error.message ?: "Invalid routes",
+                    )
                 }
             },
             onCancel = {
-                editingRoutes = false
+                editorState = editorState.withClosedNestedScreen()
             },
         )
         return
     }
 
-    if (editingDns) {
+    if (editorState.activeNestedScreen == ProfileEditorNestedScreen.Dns) {
         DnsEditorScreen(
-            dnsMode = dnsMode,
-            dnsText = dnsText,
-            dnsMessage = dnsMessage,
+            dnsMode = editorState.dnsMode,
+            dnsText = editorState.dnsText,
+            dnsMessage = editorState.dnsMessage,
             onDnsModeChange = {
-                dnsMode = it
-                dnsMessage = null
+                editorState = editorState.copy(
+                    dnsMode = it,
+                    dnsMessage = null,
+                )
             },
             onDnsTextChange = {
-                dnsText = it
-                dnsMessage = null
+                editorState = editorState.copy(
+                    dnsText = it,
+                    dnsMessage = null,
+                )
             },
             onApply = {
                 val routes = try {
-                    parseVpnRouteRules(routeText)
+                    parseVpnRouteRules(editorState.routeText)
                 } catch (_: IllegalArgumentException) {
                     null
                 }
                 if (parseDnsForSave(routes) != null) {
-                    editingDns = false
-                    message = null
+                    editorState = editorState.copy(
+                        activeNestedScreen = null,
+                        message = null,
+                    )
                 }
             },
             onCancel = {
-                editingDns = false
+                editorState = editorState.withClosedNestedScreen()
             },
         )
         return
     }
 
-    if (editingApps) {
+    if (editorState.activeNestedScreen == ProfileEditorNestedScreen.Apps) {
         AppRulesEditorScreen(
-            appMode = appMode,
-            selectedPackageNames = appPackageNames,
-            appMessage = appMessage,
+            appMode = editorState.appMode,
+            selectedPackageNames = editorState.selectedPackageNames,
+            appMessage = editorState.appMessage,
             ownPackageName = context.packageName,
             onAppModeChange = {
-                appMode = it
-                appMessage = null
+                editorState = editorState.copy(
+                    appMode = it,
+                    appMessage = null,
+                )
             },
             onSelectedPackageNamesChange = {
-                appPackageNames = it
-                appMessage = null
+                editorState = editorState.copy(
+                    selectedPackageNames = it,
+                    appMessage = null,
+                )
             },
             onApply = {
                 if (parseAppsForSave() != null) {
-                    editingApps = false
-                    message = null
+                    editorState = editorState.copy(
+                        activeNestedScreen = null,
+                        message = null,
+                    )
                 }
             },
             onCancel = {
-                editingApps = false
+                editorState = editorState.withClosedNestedScreen()
             },
         )
         return
     }
 
-    if (editingTestUrls) {
+    if (editorState.activeNestedScreen == ProfileEditorNestedScreen.TestUrls) {
         TestUrlsEditorScreen(
-            testUrlsText = testUrlsText,
-            testUrlsMessage = testUrlsMessage,
+            testUrlsText = editorState.testUrlsText,
+            testUrlsMessage = editorState.testUrlsMessage,
             onTestUrlsTextChange = {
-                testUrlsText = it
-                testUrlsMessage = null
+                editorState = editorState.copy(
+                    testUrlsText = it,
+                    testUrlsMessage = null,
+                )
             },
             onApply = {
                 if (parseTestUrlsForSave() != null) {
-                    editingTestUrls = false
-                    message = null
+                    editorState = editorState.copy(
+                        activeNestedScreen = null,
+                        message = null,
+                    )
                 }
             },
             onCancel = {
-                editingTestUrls = false
+                editorState = editorState.withClosedNestedScreen()
             },
         )
         return
@@ -306,18 +321,20 @@ internal fun ProfileEditorScreen(
             fontWeight = FontWeight.SemiBold,
         )
         OutlinedTextField(
-            value = name,
-            onValueChange = { name = it },
+            value = editorState.name,
+            onValueChange = { editorState = editorState.copy(name = it) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             label = { Text("Profile name") },
         )
         OutlinedTextField(
-            value = toml,
+            value = editorState.toml,
             onValueChange = {
-                toml = it
-                validation = null
-                message = null
+                editorState = editorState.copy(
+                    toml = it,
+                    validation = null,
+                    message = null,
+                )
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -325,7 +342,7 @@ internal fun ProfileEditorScreen(
             label = { Text("SLT client TOML") },
             textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
         )
-        validation?.summary?.let { summary ->
+        editorState.validation?.summary?.let { summary ->
             Text(
                 text = "Server ${summary.serverHost}:${summary.serverPort}  MTU ${summary.tunMtu}  IPv4 ${summary.assignedIpv4}",
                 style = MaterialTheme.typography.bodySmall,
@@ -334,14 +351,18 @@ internal fun ProfileEditorScreen(
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                text = routeSummary(routeText),
+                text = routeSummary(editorState.routeText),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedButton(onClick = { editingRoutes = true }) {
+            OutlinedButton(
+                onClick = {
+                    editorState = editorState.copy(activeNestedScreen = ProfileEditorNestedScreen.Routes)
+                },
+            ) {
                 Text("Edit Routes")
             }
-            routeMessage?.let {
+            editorState.routeMessage?.let {
                 Text(
                     text = it,
                     style = MaterialTheme.typography.bodySmall,
@@ -355,14 +376,18 @@ internal fun ProfileEditorScreen(
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                text = dnsSummary(dnsMode, dnsText),
+                text = dnsSummary(editorState.dnsMode, editorState.dnsText),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedButton(onClick = { editingDns = true }) {
+            OutlinedButton(
+                onClick = {
+                    editorState = editorState.copy(activeNestedScreen = ProfileEditorNestedScreen.Dns)
+                },
+            ) {
                 Text("Edit DNS")
             }
-            dnsMessage?.let {
+            editorState.dnsMessage?.let {
                 Text(
                     text = it,
                     style = MaterialTheme.typography.bodySmall,
@@ -376,14 +401,21 @@ internal fun ProfileEditorScreen(
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                text = appsSummary(appMode, appPackageNames.filterNot { it == context.packageName }),
+                text = appsSummary(
+                    editorState.appMode,
+                    editorState.selectedPackageNames.filterNot { it == context.packageName },
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedButton(onClick = { editingApps = true }) {
+            OutlinedButton(
+                onClick = {
+                    editorState = editorState.copy(activeNestedScreen = ProfileEditorNestedScreen.Apps)
+                },
+            ) {
                 Text("Edit Apps")
             }
-            appMessage?.let {
+            editorState.appMessage?.let {
                 Text(
                     text = it,
                     style = MaterialTheme.typography.bodySmall,
@@ -397,14 +429,18 @@ internal fun ProfileEditorScreen(
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                text = testUrlsSummary(testUrlsText),
+                text = testUrlsSummary(editorState.testUrlsText),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedButton(onClick = { editingTestUrls = true }) {
+            OutlinedButton(
+                onClick = {
+                    editorState = editorState.copy(activeNestedScreen = ProfileEditorNestedScreen.TestUrls)
+                },
+            ) {
                 Text("Edit Test URLs")
             }
-            testUrlsMessage?.let {
+            editorState.testUrlsMessage?.let {
                 Text(
                     text = it,
                     style = MaterialTheme.typography.bodySmall,
@@ -416,11 +452,11 @@ internal fun ProfileEditorScreen(
                 )
             }
         }
-        message?.let {
+        editorState.message?.let {
             Text(
                 text = it,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (validation?.isValid == false || messageIsError(it)) {
+                color = if (editorState.validation?.isValid == false || messageIsError(it)) {
                     MaterialTheme.colorScheme.error
                 } else {
                     MaterialTheme.colorScheme.primary
@@ -437,9 +473,9 @@ internal fun ProfileEditorScreen(
             }
             Button(
                 onClick = {
-                    val trimmedName = name.trim()
+                    val trimmedName = editorState.name.trim()
                     if (trimmedName.isEmpty()) {
-                        message = "Profile name is required"
+                        editorState = editorState.copy(message = "Profile name is required")
                         return@Button
                     }
                     val result = validate()
@@ -451,7 +487,7 @@ internal fun ProfileEditorScreen(
                     val appRules = parseAppsForSave() ?: return@Button
                     val testUrls = parseTestUrlsForSave() ?: return@Button
                     scope.launch {
-                        val metadata = (loadedProfile?.metadata ?: ProfileMetadata(name = trimmedName))
+                        val metadata = (editorState.sourceMetadata ?: ProfileMetadata(name = trimmedName))
                             .copy(
                                 name = trimmedName,
                                 routes = routes,
@@ -462,7 +498,7 @@ internal fun ProfileEditorScreen(
                         profileRepository.saveProfile(
                             id = profileId,
                             name = trimmedName,
-                            clientToml = toml,
+                            clientToml = editorState.toml,
                             metadata = metadata,
                         )
                         onSaved()
@@ -471,7 +507,7 @@ internal fun ProfileEditorScreen(
             ) {
                 Text("Save")
             }
-            OutlinedButton(onClick = { context.copySensitiveText("SLT config", toml) }) {
+            OutlinedButton(onClick = { context.copySensitiveText("SLT config", editorState.toml) }) {
                 Text("Copy")
             }
             TextButton(onClick = onCancel) {
@@ -523,4 +559,3 @@ private fun appRulesSummary(rules: AppVpnRules): String =
         AppVpnMode.Allowlist -> "${rules.packageNames.size} allowed app${if (rules.packageNames.size == 1) "" else "s"} ready"
         AppVpnMode.Blocklist -> "${rules.packageNames.size} blocked app${if (rules.packageNames.size == 1) "" else "s"} ready"
     }
-
