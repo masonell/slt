@@ -53,6 +53,47 @@ class VpnRouteRulesTest {
     }
 
     @Test
+    fun removesSameActionRoutesCoveredByBroaderRoutes() {
+        val routes = parseVpnRouteRules(
+            """
+            2.0.0.0/8
+            2.2.2.2/32
+            !192.168.0.0/16
+            !192.168.1.1/32
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            listOf(
+                VpnRouteRule(cidr = "2.0.0.0/8", excluded = false),
+                VpnRouteRule(cidr = "192.168.0.0/16", excluded = true),
+            ),
+            routes,
+        )
+    }
+
+    @Test
+    fun keepsSameActionRouteThatOverridesOppositeActionRoute() {
+        val routes = parseVpnRouteRules(
+            """
+            0.0.0.0/0
+            !10.0.0.0/8
+            10.10.0.0/16
+            10.10.1.0/24
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            listOf(
+                VpnRouteRule(cidr = "0.0.0.0/0", excluded = false),
+                VpnRouteRule(cidr = "10.10.0.0/16", excluded = false),
+                VpnRouteRule(cidr = "10.0.0.0/8", excluded = true),
+            ),
+            routes,
+        )
+    }
+
+    @Test
     fun rejectsExactCrossListConflictsAfterCanonicalization() {
         val error = assertThrows(IllegalArgumentException::class.java) {
             parseVpnRouteRules(

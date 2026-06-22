@@ -617,7 +617,7 @@ private fun RouteEditorScreen(
     var newRouteCidr by remember { mutableStateOf("") }
     var newRouteExcluded by remember { mutableStateOf(false) }
     var listMessage by remember { mutableStateOf<String?>(null) }
-    val currentMessage = routeMessage ?: listMessage
+    val currentMessage = listMessage ?: routeMessage
 
     fun currentRoutesOrNull(): List<VpnRouteRule>? =
         try {
@@ -646,14 +646,30 @@ private fun RouteEditorScreen(
             return
         }
         val prefix = if (newRouteExcluded) "!" else ""
-        val existingText = exportVpnRouteRules(currentRoutesOrNull() ?: return)
+        val existingRoutes = currentRoutesOrNull() ?: return
+        val newRoutes = try {
+            parseVpnRouteRules("$prefix$cidr")
+        } catch (error: IllegalArgumentException) {
+            listMessage = error.message ?: "Invalid route"
+            return
+        }
+        val existingText = exportVpnRouteRules(existingRoutes)
         val candidateText = listOf(existingText, "$prefix$cidr")
             .filter { it.isNotBlank() }
             .joinToString("\n")
         try {
             val routes = parseVpnRouteRules(candidateText)
+            if (routes == existingRoutes) {
+                listMessage = if (newRoutes.any { route -> existingRoutes.contains(route) }) {
+                    "Route already exists"
+                } else {
+                    "Route is already covered by an existing ${if (newRouteExcluded) "exclude" else "include"} route"
+                }
+                return
+            }
             replaceRoutes(routes)
             newRouteCidr = ""
+            listMessage = "Route added"
         } catch (error: IllegalArgumentException) {
             listMessage = error.message ?: "Invalid route"
         }

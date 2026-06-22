@@ -30,7 +30,9 @@ fun parseVpnRouteRules(text: String): List<VpnRouteRule> {
         "Route ${conflict?.key} cannot be both included and excluded"
     }
 
-    return routesByListAndCidr.values
+    val deduplicatedRoutes = routesByListAndCidr.values.toList()
+    return deduplicatedRoutes
+        .filterNot { route -> route.isCoveredBySameActionRoute(deduplicatedRoutes) }
         .sortedWith(parsedRouteComparator)
         .map { it.rule }
 }
@@ -166,3 +168,27 @@ private fun compareNetworkBytes(left: ByteArray, right: ByteArray): Int {
     }
     return 0
 }
+
+private fun ParsedVpnRouteRule.isCoveredBySameActionRoute(routes: List<ParsedVpnRouteRule>): Boolean =
+    routes.any { candidate ->
+        candidate.rule.excluded == rule.excluded &&
+            candidate.prefixLength < prefixLength &&
+            candidate.covers(this) &&
+            !hasOppositeActionRouteBetween(candidate, routes)
+    }
+
+private fun ParsedVpnRouteRule.hasOppositeActionRouteBetween(
+    coveringRoute: ParsedVpnRouteRule,
+    routes: List<ParsedVpnRouteRule>,
+): Boolean =
+    routes.any { candidate ->
+        candidate.rule.excluded != rule.excluded &&
+            candidate.prefixLength > coveringRoute.prefixLength &&
+            candidate.prefixLength < prefixLength &&
+            candidate.covers(this)
+    }
+
+private fun ParsedVpnRouteRule.covers(other: ParsedVpnRouteRule): Boolean =
+    addressFamily == other.addressFamily &&
+        prefixLength <= other.prefixLength &&
+        maskedNetworkBytes(other.networkBytes, prefixLength).contentEquals(networkBytes)
