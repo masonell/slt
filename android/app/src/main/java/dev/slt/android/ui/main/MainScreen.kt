@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -21,10 +23,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.slt.android.profile.ProfileStoreState
-import dev.slt.android.vpn.VpnStatus
-import dev.slt.android.vpn.VpnUiState
 import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.uiMessageColor
+import dev.slt.android.vpn.VpnStatus
+import dev.slt.android.vpn.VpnUiState
 
 @Composable
 internal fun MainScreen(
@@ -32,20 +34,24 @@ internal fun MainScreen(
     profileState: ProfileStoreState?,
     message: UiMessage?,
     canStop: Boolean,
+    connectionTestState: ConnectionTestUiState,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onRunConnectionTests: () -> Unit,
     onOpenProfiles: () -> Unit,
 ) {
     val activeProfile = profileState?.activeProfile
     val canStart = activeProfile != null &&
         vpnState.status != VpnStatus.Starting &&
         vpnState.status != VpnStatus.Running
+    val canTest = activeProfile != null && !connectionTestState.inProgress
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
@@ -109,6 +115,16 @@ internal fun MainScreen(
             ) {
                 Text("Disconnect")
             }
+        }
+        OutlinedButton(
+            onClick = onRunConnectionTests,
+            enabled = canTest,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (connectionTestState.inProgress) "Testing..." else "Test connection")
+        }
+        connectionTestState.results?.let { results ->
+            ConnectionTestResultsView(results)
         }
     }
 }

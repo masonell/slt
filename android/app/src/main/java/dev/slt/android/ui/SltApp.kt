@@ -1,6 +1,5 @@
 package dev.slt.android.ui
 
-import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -14,14 +13,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.profile.ProfileStoreState
-import dev.slt.android.vpn.SltVpnStatusBus
-import dev.slt.android.vpn.VpnStatus
-import dev.slt.android.ui.main.MainScreen
+import dev.slt.android.profile.store.ProfileRepository
+import dev.slt.android.ui.main.MainScreenRoute
 import dev.slt.android.ui.profile.ProfileEditorScreen
 import dev.slt.android.ui.profiles.ProfilesScreen
+import dev.slt.android.vpn.SltVpnStatusBus
 import kotlinx.coroutines.launch
 
 @Composable
@@ -31,7 +28,6 @@ internal fun SltApp(
     onStop: () -> Unit,
 ) {
     val vpnState by SltVpnStatusBus.state.collectAsState()
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var screen by remember { mutableStateOf<AppScreen>(AppScreen.Main) }
     var profileState by remember { mutableStateOf<ProfileStoreState?>(null) }
@@ -56,15 +52,14 @@ internal fun SltApp(
             color = MaterialTheme.colorScheme.background,
         ) {
             when (val currentScreen = screen) {
-                AppScreen.Main -> MainScreen(
+                AppScreen.Main -> MainScreenRoute(
                     vpnState = vpnState,
                     profileState = profileState,
                     message = message,
-                    canStop = context.canStopVpn(vpnState.status),
+                    onMessageChange = { message = it },
                     onStart = onStart,
                     onStop = onStop,
                     onOpenProfiles = {
-                        message = null
                         screen = AppScreen.Profiles
                     },
                 )
@@ -131,6 +126,3 @@ private sealed interface AppScreen {
 
     data class EditProfile(val profileId: String?) : AppScreen
 }
-
-private fun Context.canStopVpn(status: VpnStatus): Boolean =
-    status == VpnStatus.Starting || status == VpnStatus.Running
