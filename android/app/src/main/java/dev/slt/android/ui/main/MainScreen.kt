@@ -23,12 +23,14 @@ import androidx.compose.ui.unit.dp
 import dev.slt.android.ProfileStoreState
 import dev.slt.android.VpnStatus
 import dev.slt.android.VpnUiState
+import dev.slt.android.ui.UiMessage
+import dev.slt.android.ui.uiMessageColor
 
 @Composable
 internal fun MainScreen(
     vpnState: VpnUiState,
     profileState: ProfileStoreState?,
-    message: String?,
+    message: UiMessage?,
     canStop: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit,
@@ -83,9 +85,9 @@ internal fun MainScreen(
         }
         message?.let {
             Text(
-                text = it,
+                text = it.text,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = uiMessageColor(it),
             )
         }
         Row(
@@ -120,4 +122,3 @@ private fun statusLabel(state: VpnUiState): String =
         VpnStatus.Stopped -> "Stopped"
         VpnStatus.Error -> "Error"
     }
-

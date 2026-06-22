@@ -35,7 +35,7 @@ internal fun SltApp(
     val scope = rememberCoroutineScope()
     var screen by remember { mutableStateOf<AppScreen>(AppScreen.Main) }
     var profileState by remember { mutableStateOf<ProfileStoreState?>(null) }
-    var message by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<UiMessage?>(null) }
 
     LaunchedEffect(Unit) {
         profileState = profileRepository.loadState()
@@ -84,22 +84,22 @@ internal fun SltApp(
                         scope.launch {
                             profileRepository.setActiveProfileId(id)
                             profileState = profileRepository.loadState()
-                            message = "Active profile changed"
+                            message = UiMessage.info("Active profile changed")
                         }
                     },
                     onDuplicate = { id ->
                         scope.launch {
                             val profile = profileRepository.duplicateProfile(id)
                             profileState = profileRepository.loadState()
-                            message = profile?.let { "Duplicated ${it.metadata.name}" }
-                                ?: "Profile not found"
+                            message = profile?.let { UiMessage.info("Duplicated ${it.metadata.name}") }
+                                ?: UiMessage.error("Profile not found")
                         }
                     },
                     onDelete = { id ->
                         scope.launch {
                             profileRepository.deleteProfile(id)
                             profileState = profileRepository.loadState()
-                            message = "Profile deleted"
+                            message = UiMessage.info("Profile deleted")
                         }
                     },
                 )
@@ -110,7 +110,7 @@ internal fun SltApp(
                     onSaved = {
                         scope.launch {
                             profileState = profileRepository.loadState()
-                            message = "Profile saved"
+                            message = UiMessage.info("Profile saved")
                             screen = AppScreen.Profiles
                         }
                     },
@@ -134,4 +134,3 @@ private sealed interface AppScreen {
 
 private fun Context.canStopVpn(status: VpnStatus): Boolean =
     status == VpnStatus.Starting || status == VpnStatus.Running
-

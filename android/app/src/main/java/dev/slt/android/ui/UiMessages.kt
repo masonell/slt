@@ -5,6 +5,31 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.PersistableBundle
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
+
+internal data class UiMessage(
+    val text: String,
+    val severity: UiMessageSeverity,
+) {
+    companion object {
+        fun info(text: String): UiMessage =
+            UiMessage(text = text, severity = UiMessageSeverity.Info)
+
+        fun warning(text: String): UiMessage =
+            UiMessage(text = text, severity = UiMessageSeverity.Warning)
+
+        fun error(text: String): UiMessage =
+            UiMessage(text = text, severity = UiMessageSeverity.Error)
+    }
+}
+
+internal enum class UiMessageSeverity {
+    Info,
+    Warning,
+    Error,
+}
 
 internal fun Context.copySensitiveText(label: String, text: String) {
     val clipboardManager = getSystemService(ClipboardManager::class.java)
@@ -15,11 +40,13 @@ internal fun Context.copySensitiveText(label: String, text: String) {
     clipboardManager.setPrimaryClip(clip)
 }
 
-internal fun messageIsError(message: String): Boolean =
-    message.contains("Line ") ||
-        message.contains("cannot") ||
-        message.contains("required") ||
-        message.contains("Invalid") ||
-        message.contains("not valid") ||
-        message.contains("must be") ||
-        message.contains("must not")
+@Composable
+internal fun uiMessageColor(
+    message: UiMessage,
+    infoColor: Color = MaterialTheme.colorScheme.primary,
+): Color =
+    when (message.severity) {
+        UiMessageSeverity.Info -> infoColor
+        UiMessageSeverity.Warning -> MaterialTheme.colorScheme.tertiary
+        UiMessageSeverity.Error -> MaterialTheme.colorScheme.error
+    }

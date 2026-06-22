@@ -7,6 +7,7 @@ import dev.slt.android.ConfigValidationResult
 import dev.slt.android.DnsMode
 import dev.slt.android.DnsSettings
 import dev.slt.android.VpnRouteRule
+import dev.slt.android.ui.UiMessageSeverity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -26,7 +27,8 @@ class ProfileEditorActionsTest {
 
         assertEquals(validation, result.validation)
         assertEquals(validation, result.state.validation)
-        assertEquals("Config is valid", result.state.message)
+        assertEquals("Config is valid", result.state.message?.text)
+        assertEquals(UiMessageSeverity.Info, result.state.message?.severity)
     }
 
     @Test
@@ -80,13 +82,17 @@ class ProfileEditorActionsTest {
         )
         assertEquals(listOf("https://example.com/check"), ready.metadata.testUrls)
         assertEquals("0.0.0.0/0", ready.state.routeText)
-        assertEquals("1 route ready", ready.state.routeMessage)
+        assertEquals("1 route ready", ready.state.routeMessage?.text)
+        assertEquals(UiMessageSeverity.Info, ready.state.routeMessage?.severity)
         assertEquals("1.1.1.1", ready.state.dnsText)
-        assertEquals("1 DNS server ready", ready.state.dnsMessage)
+        assertEquals("1 DNS server ready", ready.state.dnsMessage?.text)
+        assertEquals(UiMessageSeverity.Info, ready.state.dnsMessage?.severity)
         assertEquals(listOf("com.example.app"), ready.state.selectedPackageNames)
-        assertEquals("1 allowed app ready", ready.state.appMessage)
+        assertEquals("1 allowed app ready", ready.state.appMessage?.text)
+        assertEquals(UiMessageSeverity.Info, ready.state.appMessage?.severity)
         assertEquals("https://example.com/check", ready.state.testUrlsText)
-        assertEquals("1 test URL ready", ready.state.testUrlsMessage)
+        assertEquals("1 test URL ready", ready.state.testUrlsMessage?.text)
+        assertEquals(UiMessageSeverity.Info, ready.state.testUrlsMessage?.severity)
     }
 
     @Test
@@ -103,7 +109,8 @@ class ProfileEditorActionsTest {
         )
 
         assertTrue(result is ProfileEditorSaveResult.Blocked)
-        assertEquals("Profile name is required", result.state.message)
+        assertEquals("Profile name is required", result.state.message?.text)
+        assertEquals(UiMessageSeverity.Error, result.state.message?.severity)
         assertEquals(false, validated)
     }
 
@@ -125,7 +132,8 @@ class ProfileEditorActionsTest {
         )
 
         assertTrue(result is ProfileEditorSaveResult.Blocked)
-        assertEquals("Invalid config", result.state.message)
+        assertEquals("Invalid config", result.state.message?.text)
+        assertEquals(UiMessageSeverity.Error, result.state.message?.severity)
         assertEquals("not a route", result.state.routeText)
         assertNull(result.state.routeMessage)
     }
@@ -137,8 +145,28 @@ class ProfileEditorActionsTest {
         )
 
         assertTrue(result is ProfileEditorActionResult.Failure)
-        assertEquals("At least one VPN route is required", result.state.routeMessage)
-        assertEquals("At least one VPN route is required", result.state.message)
+        assertEquals("At least one VPN route is required", result.state.routeMessage?.text)
+        assertEquals(UiMessageSeverity.Error, result.state.routeMessage?.severity)
+        assertEquals("At least one VPN route is required", result.state.message?.text)
+        assertEquals(UiMessageSeverity.Error, result.state.message?.severity)
+    }
+
+    @Test
+    fun dnsExcludedRouteProducesWarningMessage() {
+        val result = parseProfileEditorDnsForSave(
+            state = ProfileEditorState(
+                dnsMode = DnsMode.Custom,
+                dnsText = "8.8.8.8",
+            ),
+            routes = listOf(VpnRouteRule(cidr = "8.8.8.0/24", excluded = true)),
+        )
+
+        assertTrue(result is ProfileEditorActionResult.Success)
+        assertEquals(
+            "DNS server 8.8.8.8 is excluded by 8.8.8.0/24; a DNS route will still be added",
+            result.state.dnsMessage?.text,
+        )
+        assertEquals(UiMessageSeverity.Warning, result.state.dnsMessage?.severity)
     }
 
     private fun validValidation(): ConfigValidationResult =

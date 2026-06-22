@@ -22,11 +22,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.slt.android.ProfileStoreState
+import dev.slt.android.ui.UiMessage
+import dev.slt.android.ui.uiMessageColor
 
 @Composable
 internal fun ProfilesScreen(
     profileState: ProfileStoreState?,
-    message: String?,
+    message: UiMessage?,
     onAdd: () -> Unit,
     onEdit: (String) -> Unit,
     onSelect: (String) -> Unit,
@@ -52,9 +54,9 @@ internal fun ProfilesScreen(
         }
         message?.let {
             Text(
-                text = it,
+                text = it.text,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = uiMessageColor(it),
             )
         }
 
@@ -108,4 +110,3 @@ internal fun ProfilesScreen(
         }
     }
 }
-

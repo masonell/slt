@@ -37,7 +37,8 @@ import dev.slt.android.AppVpnRules
 import dev.slt.android.InstalledApp
 import dev.slt.android.loadInstalledLaunchableApps
 import dev.slt.android.missingAppPackages
-import dev.slt.android.ui.messageIsError
+import dev.slt.android.ui.UiMessage
+import dev.slt.android.ui.uiMessageColor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -45,7 +46,7 @@ import kotlinx.coroutines.withContext
 internal fun AppRulesEditorScreen(
     appMode: AppVpnMode,
     selectedPackageNames: List<String>,
-    appMessage: String?,
+    appMessage: UiMessage?,
     ownPackageName: String,
     onAppModeChange: (AppVpnMode) -> Unit,
     onSelectedPackageNamesChange: (List<String>) -> Unit,
@@ -54,7 +55,7 @@ internal fun AppRulesEditorScreen(
 ) {
     val context = LocalContext.current
     var installedApps by remember { mutableStateOf<List<InstalledApp>?>(null) }
-    var loadMessage by remember { mutableStateOf<String?>(null) }
+    var loadMessage by remember { mutableStateOf<UiMessage?>(null) }
     var search by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
@@ -63,7 +64,7 @@ internal fun AppRulesEditorScreen(
                 loadInstalledLaunchableApps(context)
             }
         } catch (error: RuntimeException) {
-            loadMessage = error.message ?: "Could not load installed apps"
+            loadMessage = UiMessage.error(error.message ?: "Could not load installed apps")
             installedApps = emptyList()
         }
     }
@@ -182,13 +183,9 @@ internal fun AppRulesEditorScreen(
         }
         currentMessage?.let {
             Text(
-                text = it,
+                text = it.text,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (messageIsError(it)) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.primary
-                },
+                color = uiMessageColor(it),
             )
         }
         if (appMode == AppVpnMode.All) {
@@ -315,4 +312,3 @@ private fun AppVpnMode.label(): String =
         AppVpnMode.Allowlist -> "Allowlist"
         AppVpnMode.Blocklist -> "Blocklist"
     }
-

@@ -8,23 +8,24 @@ import dev.slt.android.SltProfile
 import dev.slt.android.exportDnsServers
 import dev.slt.android.exportTestUrls
 import dev.slt.android.exportVpnRouteRules
+import dev.slt.android.ui.UiMessage
 
 internal data class ProfileEditorState(
     val sourceMetadata: ProfileMetadata? = null,
     val name: String = "",
     val toml: String = "",
     val routeText: String = "",
-    val routeMessage: String? = null,
+    val routeMessage: UiMessage? = null,
     val dnsMode: DnsMode = DnsMode.System,
     val dnsText: String = "",
-    val dnsMessage: String? = null,
+    val dnsMessage: UiMessage? = null,
     val appMode: AppVpnMode = AppVpnMode.All,
     val selectedPackageNames: List<String> = emptyList(),
-    val appMessage: String? = null,
+    val appMessage: UiMessage? = null,
     val testUrlsText: String = "",
-    val testUrlsMessage: String? = null,
+    val testUrlsMessage: UiMessage? = null,
     val validation: ConfigValidationResult? = null,
-    val message: String? = null,
+    val message: UiMessage? = null,
     val activeNestedScreen: ProfileEditorNestedScreen? = null,
 ) {
     val isEditingNestedScreen: Boolean

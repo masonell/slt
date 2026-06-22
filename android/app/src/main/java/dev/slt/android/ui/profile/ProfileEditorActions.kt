@@ -15,6 +15,7 @@ import dev.slt.android.normalizeAppVpnRules
 import dev.slt.android.parseDnsSettings
 import dev.slt.android.parseTestUrls
 import dev.slt.android.parseVpnRouteRules
+import dev.slt.android.ui.UiMessage
 
 internal sealed interface ProfileEditorActionResult<out T> {
     val state: ProfileEditorState
@@ -58,9 +59,9 @@ internal fun validateProfileEditorToml(
         state = state.copy(
             validation = result,
             message = if (result.isValid) {
-                "Config is valid"
+                UiMessage.info("Config is valid")
             } else {
-                result.error ?: "Invalid config"
+                UiMessage.error(result.error ?: "Invalid config")
             },
         ),
         validation = result,
@@ -73,7 +74,7 @@ internal fun parseProfileEditorRoutesForSave(
     try {
         val routes = parseVpnRouteRules(state.routeText)
         if (routes.isEmpty()) {
-            val routeMessage = "At least one VPN route is required"
+            val routeMessage = UiMessage.error("At least one VPN route is required")
             ProfileEditorActionResult.Failure(
                 state.copy(
                     routeMessage = routeMessage,
@@ -84,13 +85,13 @@ internal fun parseProfileEditorRoutesForSave(
             ProfileEditorActionResult.Success(
                 state = state.copy(
                     routeText = exportVpnRouteRules(routes),
-                    routeMessage = "${routes.size} route${pluralSuffix(routes.size)} ready",
+                    routeMessage = UiMessage.info("${routes.size} route${pluralSuffix(routes.size)} ready"),
                 ),
                 value = routes,
             )
         }
     } catch (error: IllegalArgumentException) {
-        val routeMessage = error.message ?: "Invalid routes"
+        val routeMessage = UiMessage.error(error.message ?: "Invalid routes")
         ProfileEditorActionResult.Failure(
             state.copy(
                 routeMessage = routeMessage,
@@ -106,11 +107,13 @@ internal fun parseProfileEditorDnsForSave(
     try {
         val dns = parseDnsSettings(state.dnsMode, state.dnsText)
         val warnings = routes?.let { dnsExcludedRouteWarnings(it, dns) }.orEmpty()
-        val dnsMessage = warnings.firstOrNull()
-            ?: when (dns.mode) {
-                DnsMode.System -> "System DNS ready"
-                DnsMode.Custom -> "${dns.servers.size} DNS server${pluralSuffix(dns.servers.size)} ready"
-            }
+        val dnsMessage = warnings.firstOrNull()?.let(UiMessage::warning)
+            ?: UiMessage.info(
+                when (dns.mode) {
+                    DnsMode.System -> "System DNS ready"
+                    DnsMode.Custom -> "${dns.servers.size} DNS server${pluralSuffix(dns.servers.size)} ready"
+                },
+            )
         ProfileEditorActionResult.Success(
             state = state.copy(
                 dnsText = exportDnsServers(dns.servers),
@@ -119,7 +122,7 @@ internal fun parseProfileEditorDnsForSave(
             value = dns,
         )
     } catch (error: IllegalArgumentException) {
-        val dnsMessage = error.message ?: "Invalid DNS settings"
+        val dnsMessage = UiMessage.error(error.message ?: "Invalid DNS settings")
         ProfileEditorActionResult.Failure(
             state.copy(
                 dnsMessage = dnsMessage,
@@ -142,12 +145,12 @@ internal fun normalizeProfileEditorAppsForSave(
             state = state.copy(
                 appMode = appRules.mode,
                 selectedPackageNames = appRules.packageNames,
-                appMessage = appRulesSummary(appRules),
+                appMessage = UiMessage.info(appRulesSummary(appRules)),
             ),
             value = appRules,
         )
     } catch (error: IllegalArgumentException) {
-        val appMessage = error.message ?: "Invalid app rules"
+        val appMessage = UiMessage.error(error.message ?: "Invalid app rules")
         ProfileEditorActionResult.Failure(
             state.copy(
                 appMessage = appMessage,
@@ -169,12 +172,12 @@ internal fun parseProfileEditorTestUrlsForSave(
         ProfileEditorActionResult.Success(
             state = state.copy(
                 testUrlsText = exportTestUrls(testUrls),
-                testUrlsMessage = testUrlsMessage,
+                testUrlsMessage = UiMessage.info(testUrlsMessage),
             ),
             value = testUrls,
         )
     } catch (error: IllegalArgumentException) {
-        val testUrlsMessage = error.message ?: "Invalid test URLs"
+        val testUrlsMessage = UiMessage.error(error.message ?: "Invalid test URLs")
         ProfileEditorActionResult.Failure(
             state.copy(
                 testUrlsMessage = testUrlsMessage,
@@ -190,7 +193,7 @@ internal fun prepareProfileEditorSave(
 ): ProfileEditorSaveResult {
     val trimmedName = state.name.trim()
     if (trimmedName.isEmpty()) {
-        return ProfileEditorSaveResult.Blocked(state.copy(message = "Profile name is required"))
+        return ProfileEditorSaveResult.Blocked(state.copy(message = UiMessage.error("Profile name is required")))
     }
 
     val validationResult = validateProfileEditorToml(state, validateClientConfig)

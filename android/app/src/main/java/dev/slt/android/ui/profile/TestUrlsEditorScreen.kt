@@ -29,18 +29,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.slt.android.exportTestUrls
 import dev.slt.android.parseTestUrls
-import dev.slt.android.ui.messageIsError
+import dev.slt.android.ui.UiMessage
+import dev.slt.android.ui.uiMessageColor
 
 @Composable
 internal fun TestUrlsEditorScreen(
     testUrlsText: String,
-    testUrlsMessage: String?,
+    testUrlsMessage: UiMessage?,
     onTestUrlsTextChange: (String) -> Unit,
     onApply: () -> Unit,
     onCancel: () -> Unit,
 ) {
     var newTestUrl by remember { mutableStateOf("") }
-    var listMessage by remember { mutableStateOf<String?>(null) }
+    var listMessage by remember { mutableStateOf<UiMessage?>(null) }
     val currentUrls = try {
         parseTestUrls(testUrlsText)
     } catch (_: IllegalArgumentException) {
@@ -56,7 +57,7 @@ internal fun TestUrlsEditorScreen(
     fun addTestUrl() {
         val candidate = newTestUrl.trim()
         if (candidate.isEmpty()) {
-            listMessage = "Test URL is required"
+            listMessage = UiMessage.error("Test URL is required")
             return
         }
 
@@ -65,14 +66,14 @@ internal fun TestUrlsEditorScreen(
                 (currentUrls + candidate).joinToString("\n"),
             )
             if (nextUrls == currentUrls) {
-                listMessage = "Test URL already exists"
+                listMessage = UiMessage.info("Test URL already exists")
                 return
             }
             replaceTestUrls(nextUrls)
             newTestUrl = ""
-            listMessage = "Test URL added"
+            listMessage = UiMessage.info("Test URL added")
         } catch (error: IllegalArgumentException) {
-            listMessage = error.message ?: "Invalid test URL"
+            listMessage = UiMessage.error(error.message ?: "Invalid test URL")
         }
     }
 
@@ -130,13 +131,9 @@ internal fun TestUrlsEditorScreen(
         )
         currentMessage?.let {
             Text(
-                text = it,
+                text = it.text,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (messageIsError(it)) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.primary
-                },
+                color = uiMessageColor(it),
             )
         }
         Row(
@@ -180,4 +177,3 @@ private fun TestUrlListItem(
         }
     }
 }
-

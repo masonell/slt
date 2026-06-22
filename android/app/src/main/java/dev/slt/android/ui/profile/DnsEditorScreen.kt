@@ -22,13 +22,14 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.slt.android.DnsMode
-import dev.slt.android.ui.messageIsError
+import dev.slt.android.ui.UiMessage
+import dev.slt.android.ui.uiMessageColor
 
 @Composable
 internal fun DnsEditorScreen(
     dnsMode: DnsMode,
     dnsText: String,
-    dnsMessage: String?,
+    dnsMessage: UiMessage?,
     onDnsModeChange: (DnsMode) -> Unit,
     onDnsTextChange: (String) -> Unit,
     onApply: () -> Unit,
@@ -95,13 +96,9 @@ internal fun DnsEditorScreen(
         }
         dnsMessage?.let {
             Text(
-                text = it,
+                text = it.text,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (messageIsError(it)) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.primary
-                },
+                color = uiMessageColor(it),
             )
         }
         Row(
@@ -118,4 +115,3 @@ internal fun DnsEditorScreen(
         }
     }
 }
-

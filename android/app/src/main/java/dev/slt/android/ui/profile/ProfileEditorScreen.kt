@@ -36,8 +36,9 @@ import dev.slt.android.exportVpnRouteRules
 import dev.slt.android.parseDnsSettings
 import dev.slt.android.parseTestUrls
 import dev.slt.android.parseVpnRouteRules
+import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.copySensitiveText
-import dev.slt.android.ui.messageIsError
+import dev.slt.android.ui.uiMessageColor
 import kotlinx.coroutines.launch
 
 @Composable
@@ -86,11 +87,11 @@ internal fun ProfileEditorScreen(
                     context.copySensitiveText("SLT routes", normalizedRoutes)
                     editorState = editorState.copy(
                         routeText = normalizedRoutes,
-                        routeMessage = "Routes copied",
+                        routeMessage = UiMessage.info("Routes copied"),
                     )
                 } catch (error: IllegalArgumentException) {
                     editorState = editorState.copy(
-                        routeMessage = error.message ?: "Invalid routes",
+                        routeMessage = UiMessage.error(error.message ?: "Invalid routes"),
                     )
                 }
             },
@@ -256,13 +257,9 @@ internal fun ProfileEditorScreen(
             }
             editorState.routeMessage?.let {
                 Text(
-                    text = it,
+                    text = it.text,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (it.contains("required") || it.contains("Line ") || it.contains("cannot")) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = uiMessageColor(it, infoColor = MaterialTheme.colorScheme.onSurfaceVariant),
                 )
             }
         }
@@ -281,13 +278,9 @@ internal fun ProfileEditorScreen(
             }
             editorState.dnsMessage?.let {
                 Text(
-                    text = it,
+                    text = it.text,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (messageIsError(it)) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = uiMessageColor(it, infoColor = MaterialTheme.colorScheme.onSurfaceVariant),
                 )
             }
         }
@@ -309,13 +302,9 @@ internal fun ProfileEditorScreen(
             }
             editorState.appMessage?.let {
                 Text(
-                    text = it,
+                    text = it.text,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (messageIsError(it)) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = uiMessageColor(it, infoColor = MaterialTheme.colorScheme.onSurfaceVariant),
                 )
             }
         }
@@ -334,25 +323,17 @@ internal fun ProfileEditorScreen(
             }
             editorState.testUrlsMessage?.let {
                 Text(
-                    text = it,
+                    text = it.text,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (messageIsError(it)) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = uiMessageColor(it, infoColor = MaterialTheme.colorScheme.onSurfaceVariant),
                 )
             }
         }
         editorState.message?.let {
             Text(
-                text = it,
+                text = it.text,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (editorState.validation?.isValid == false || messageIsError(it)) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.primary
-                },
+                color = uiMessageColor(it),
             )
         }
         Row(
