@@ -417,14 +417,17 @@ private fun ProfileEditorScreen(
     var dnsText by remember(profileId) { mutableStateOf("") }
     var appMode by remember(profileId) { mutableStateOf(AppVpnMode.All) }
     var appPackageNames by remember(profileId) { mutableStateOf(emptyList<String>()) }
+    var testUrlsText by remember(profileId) { mutableStateOf("") }
     var validation by remember(profileId) { mutableStateOf<ConfigValidationResult?>(null) }
     var message by remember(profileId) { mutableStateOf<String?>(null) }
     var routeMessage by remember(profileId) { mutableStateOf<String?>(null) }
     var dnsMessage by remember(profileId) { mutableStateOf<String?>(null) }
     var appMessage by remember(profileId) { mutableStateOf<String?>(null) }
+    var testUrlsMessage by remember(profileId) { mutableStateOf<String?>(null) }
     var editingRoutes by remember(profileId) { mutableStateOf(false) }
     var editingDns by remember(profileId) { mutableStateOf(false) }
     var editingApps by remember(profileId) { mutableStateOf(false) }
+    var editingTestUrls by remember(profileId) { mutableStateOf(false) }
 
     LaunchedEffect(profileId) {
         val profile = profileId?.let { profileRepository.loadProfile(it) }
@@ -436,20 +439,24 @@ private fun ProfileEditorScreen(
         dnsText = exportDnsServers(profile?.metadata?.dns?.servers.orEmpty())
         appMode = profile?.metadata?.appRules?.mode ?: AppVpnMode.All
         appPackageNames = profile?.metadata?.appRules?.packageNames.orEmpty()
+        testUrlsText = exportTestUrls(profile?.metadata?.testUrls.orEmpty())
         validation = null
         message = null
         routeMessage = null
         dnsMessage = null
         appMessage = null
+        testUrlsMessage = null
         editingRoutes = false
         editingDns = false
         editingApps = false
+        editingTestUrls = false
     }
 
-    BackHandler(enabled = editingRoutes || editingDns || editingApps) {
+    BackHandler(enabled = editingRoutes || editingDns || editingApps || editingTestUrls) {
         editingRoutes = false
         editingDns = false
         editingApps = false
+        editingTestUrls = false
     }
 
     fun validate(): ConfigValidationResult {
@@ -504,6 +511,22 @@ private fun ProfileEditorScreen(
         } catch (error: IllegalArgumentException) {
             appMessage = error.message ?: "Invalid app rules"
             message = appMessage
+            null
+        }
+
+    fun parseTestUrlsForSave(): List<String>? =
+        try {
+            val testUrls = parseTestUrls(testUrlsText)
+            testUrlsText = exportTestUrls(testUrls)
+            testUrlsMessage = if (testUrls.isEmpty()) {
+                "No test URLs configured"
+            } else {
+                "${testUrls.size} test URL${if (testUrls.size == 1) "" else "s"} ready"
+            }
+            testUrls
+        } catch (error: IllegalArgumentException) {
+            testUrlsMessage = error.message ?: "Invalid test URLs"
+            message = testUrlsMessage
             null
         }
 
@@ -593,6 +616,27 @@ private fun ProfileEditorScreen(
             },
             onCancel = {
                 editingApps = false
+            },
+        )
+        return
+    }
+
+    if (editingTestUrls) {
+        TestUrlsEditorScreen(
+            testUrlsText = testUrlsText,
+            testUrlsMessage = testUrlsMessage,
+            onTestUrlsTextChange = {
+                testUrlsText = it
+                testUrlsMessage = null
+            },
+            onApply = {
+                if (parseTestUrlsForSave() != null) {
+                    editingTestUrls = false
+                    message = null
+                }
+            },
+            onCancel = {
+                editingTestUrls = false
             },
         )
         return
@@ -701,6 +745,27 @@ private fun ProfileEditorScreen(
                 )
             }
         }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = testUrlsSummary(testUrlsText),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = { editingTestUrls = true }) {
+                Text("Edit Test URLs")
+            }
+            testUrlsMessage?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (messageIsError(it)) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
         message?.let {
             Text(
                 text = it,
@@ -734,9 +799,16 @@ private fun ProfileEditorScreen(
                     val routes = parseRoutesForSave() ?: return@Button
                     val dns = parseDnsForSave(routes) ?: return@Button
                     val appRules = parseAppsForSave() ?: return@Button
+                    val testUrls = parseTestUrlsForSave() ?: return@Button
                     scope.launch {
                         val metadata = (loadedProfile?.metadata ?: ProfileMetadata(name = trimmedName))
-                            .copy(name = trimmedName, routes = routes, dns = dns, appRules = appRules)
+                            .copy(
+                                name = trimmedName,
+                                routes = routes,
+                                dns = dns,
+                                testUrls = testUrls,
+                                appRules = appRules,
+                            )
                         profileRepository.saveProfile(
                             id = profileId,
                             name = trimmedName,
@@ -754,6 +826,156 @@ private fun ProfileEditorScreen(
             }
             TextButton(onClick = onCancel) {
                 Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
+private fun TestUrlsEditorScreen(
+    testUrlsText: String,
+    testUrlsMessage: String?,
+    onTestUrlsTextChange: (String) -> Unit,
+    onApply: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    var newTestUrl by remember { mutableStateOf("") }
+    var listMessage by remember { mutableStateOf<String?>(null) }
+    val currentUrls = try {
+        parseTestUrls(testUrlsText)
+    } catch (_: IllegalArgumentException) {
+        emptyList()
+    }
+    val currentMessage = listMessage ?: testUrlsMessage
+
+    fun replaceTestUrls(urls: List<String>) {
+        onTestUrlsTextChange(exportTestUrls(urls))
+        listMessage = null
+    }
+
+    fun addTestUrl() {
+        val candidate = newTestUrl.trim()
+        if (candidate.isEmpty()) {
+            listMessage = "Test URL is required"
+            return
+        }
+
+        try {
+            val nextUrls = parseTestUrls(
+                (currentUrls + candidate).joinToString("\n"),
+            )
+            if (nextUrls == currentUrls) {
+                listMessage = "Test URL already exists"
+                return
+            }
+            replaceTestUrls(nextUrls)
+            newTestUrl = ""
+            listMessage = "Test URL added"
+        } catch (error: IllegalArgumentException) {
+            listMessage = error.message ?: "Invalid test URL"
+        }
+    }
+
+    fun removeTestUrl(index: Int) {
+        replaceTestUrls(currentUrls.filterIndexed { urlIndex, _ -> urlIndex != index })
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "Test URLs",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (currentUrls.isEmpty()) {
+                item {
+                    Text(
+                        text = "No test URLs",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                items(currentUrls, key = { it }) { url ->
+                    TestUrlListItem(
+                        url = url,
+                        onRemove = { removeTestUrl(currentUrls.indexOf(url)) },
+                    )
+                }
+            }
+        }
+        HorizontalDivider()
+        OutlinedTextField(
+            value = newTestUrl,
+            onValueChange = {
+                newTestUrl = it
+                listMessage = null
+            },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("URL") },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+        )
+        currentMessage?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (messageIsError(it)) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedButton(onClick = ::addTestUrl) {
+                Text("Add")
+            }
+            Button(onClick = onApply) {
+                Text("Apply")
+            }
+            TextButton(onClick = onCancel) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
+private fun TestUrlListItem(
+    url: String,
+    onRemove: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        HorizontalDivider()
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = url,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            )
+            TextButton(onClick = onRemove) {
+                Text("Remove")
             }
         }
     }
@@ -1463,6 +1685,14 @@ private fun appsSummary(mode: AppVpnMode, packageNames: List<String>): String =
         AppVpnMode.Blocklist -> "Apps: ${packageNames.size} blocked"
     }
 
+private fun testUrlsSummary(testUrlsText: String): String =
+    try {
+        val testUrls = parseTestUrls(testUrlsText)
+        "Tests: ${testUrls.size} URL${if (testUrls.size == 1) "" else "s"}"
+    } catch (_: IllegalArgumentException) {
+        "Tests need attention"
+    }
+
 private fun appRulesSummary(rules: AppVpnRules): String =
     when (rules.mode) {
         AppVpnMode.All -> "All apps ready"
@@ -1483,4 +1713,5 @@ private fun messageIsError(message: String): Boolean =
         message.contains("required") ||
         message.contains("Invalid") ||
         message.contains("not valid") ||
-        message.contains("must be")
+        message.contains("must be") ||
+        message.contains("must not")
