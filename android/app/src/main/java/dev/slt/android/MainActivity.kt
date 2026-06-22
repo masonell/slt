@@ -408,10 +408,14 @@ private fun ProfileEditorScreen(
     var name by remember(profileId) { mutableStateOf("") }
     var toml by remember(profileId) { mutableStateOf("") }
     var routeText by remember(profileId) { mutableStateOf("") }
+    var dnsMode by remember(profileId) { mutableStateOf(DnsMode.System) }
+    var dnsText by remember(profileId) { mutableStateOf("") }
     var validation by remember(profileId) { mutableStateOf<ConfigValidationResult?>(null) }
     var message by remember(profileId) { mutableStateOf<String?>(null) }
     var routeMessage by remember(profileId) { mutableStateOf<String?>(null) }
+    var dnsMessage by remember(profileId) { mutableStateOf<String?>(null) }
     var editingRoutes by remember(profileId) { mutableStateOf(false) }
+    var editingDns by remember(profileId) { mutableStateOf(false) }
 
     LaunchedEffect(profileId) {
         val profile = profileId?.let { profileRepository.loadProfile(it) }
@@ -419,14 +423,19 @@ private fun ProfileEditorScreen(
         name = profile?.metadata?.name.orEmpty()
         toml = profile?.clientToml.orEmpty()
         routeText = exportVpnRouteRules(profile?.metadata?.routes.orEmpty())
+        dnsMode = profile?.metadata?.dns?.mode ?: DnsMode.System
+        dnsText = exportDnsServers(profile?.metadata?.dns?.servers.orEmpty())
         validation = null
         message = null
         routeMessage = null
+        dnsMessage = null
         editingRoutes = false
+        editingDns = false
     }
 
-    BackHandler(enabled = editingRoutes) {
+    BackHandler(enabled = editingRoutes || editingDns) {
         editingRoutes = false
+        editingDns = false
     }
 
     fun validate(): ConfigValidationResult {
@@ -451,6 +460,23 @@ private fun ProfileEditorScreen(
         } catch (error: IllegalArgumentException) {
             routeMessage = error.message ?: "Invalid routes"
             message = routeMessage
+            null
+        }
+
+    fun parseDnsForSave(routes: List<VpnRouteRule>?): DnsSettings? =
+        try {
+            val dns = parseDnsSettings(dnsMode, dnsText)
+            dnsText = exportDnsServers(dns.servers)
+            val warnings = routes?.let { dnsExcludedRouteWarnings(it, dns) }.orEmpty()
+            dnsMessage = warnings.firstOrNull()
+                ?: when (dns.mode) {
+                    DnsMode.System -> "System DNS ready"
+                    DnsMode.Custom -> "${dns.servers.size} DNS server${if (dns.servers.size == 1) "" else "s"} ready"
+                }
+            dns
+        } catch (error: IllegalArgumentException) {
+            dnsMessage = error.message ?: "Invalid DNS settings"
+            message = dnsMessage
             null
         }
 
@@ -482,6 +508,37 @@ private fun ProfileEditorScreen(
             },
             onCancel = {
                 editingRoutes = false
+            },
+        )
+        return
+    }
+
+    if (editingDns) {
+        DnsEditorScreen(
+            dnsMode = dnsMode,
+            dnsText = dnsText,
+            dnsMessage = dnsMessage,
+            onDnsModeChange = {
+                dnsMode = it
+                dnsMessage = null
+            },
+            onDnsTextChange = {
+                dnsText = it
+                dnsMessage = null
+            },
+            onApply = {
+                val routes = try {
+                    parseVpnRouteRules(routeText)
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+                if (parseDnsForSave(routes) != null) {
+                    editingDns = false
+                    message = null
+                }
+            },
+            onCancel = {
+                editingDns = false
             },
         )
         return
@@ -548,11 +605,32 @@ private fun ProfileEditorScreen(
                 )
             }
         }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = dnsSummary(dnsMode, dnsText),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = { editingDns = true }) {
+                Text("Edit DNS")
+            }
+            dnsMessage?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (messageIsError(it)) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
         message?.let {
             Text(
                 text = it,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (validation?.isValid == false) {
+                color = if (validation?.isValid == false || messageIsError(it)) {
                     MaterialTheme.colorScheme.error
                 } else {
                     MaterialTheme.colorScheme.primary
@@ -579,9 +657,10 @@ private fun ProfileEditorScreen(
                         return@Button
                     }
                     val routes = parseRoutesForSave() ?: return@Button
+                    val dns = parseDnsForSave(routes) ?: return@Button
                     scope.launch {
                         val metadata = (loadedProfile?.metadata ?: ProfileMetadata(name = trimmedName))
-                            .copy(name = trimmedName, routes = routes)
+                            .copy(name = trimmedName, routes = routes, dns = dns)
                         profileRepository.saveProfile(
                             id = profileId,
                             name = trimmedName,
@@ -596,6 +675,101 @@ private fun ProfileEditorScreen(
             }
             OutlinedButton(onClick = { context.copySensitiveText("SLT config", toml) }) {
                 Text("Copy")
+            }
+            TextButton(onClick = onCancel) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DnsEditorScreen(
+    dnsMode: DnsMode,
+    dnsText: String,
+    dnsMessage: String?,
+    onDnsModeChange: (DnsMode) -> Unit,
+    onDnsTextChange: (String) -> Unit,
+    onApply: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "DNS",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (dnsMode == DnsMode.System) {
+                Button(
+                    onClick = { onDnsModeChange(DnsMode.System) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("System")
+                }
+                OutlinedButton(
+                    onClick = { onDnsModeChange(DnsMode.Custom) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Custom")
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { onDnsModeChange(DnsMode.System) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("System")
+                }
+                Button(
+                    onClick = { onDnsModeChange(DnsMode.Custom) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Custom")
+                }
+            }
+        }
+        if (dnsMode == DnsMode.Custom) {
+            OutlinedTextField(
+                value = dnsText,
+                onValueChange = onDnsTextChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                label = { Text("DNS servers") },
+                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            )
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
+        }
+        dnsMessage?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (messageIsError(it)) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(onClick = onApply) {
+                Text("Apply")
             }
             TextButton(onClick = onCancel) {
                 Text("Cancel")
@@ -739,7 +913,7 @@ private fun RouteEditorScreen(
             Text(
                 text = it,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (it.contains("Line ") || it.contains("cannot") || it.contains("required")) {
+                color = if (messageIsError(it)) {
                     MaterialTheme.colorScheme.error
                 } else {
                     MaterialTheme.colorScheme.primary
@@ -926,3 +1100,22 @@ private fun routeSummary(routeText: String): String =
     } catch (_: IllegalArgumentException) {
         "Routes need attention"
     }
+
+private fun dnsSummary(mode: DnsMode, dnsText: String): String =
+    try {
+        val dns = parseDnsSettings(mode, dnsText)
+        when (dns.mode) {
+            DnsMode.System -> "DNS: system"
+            DnsMode.Custom -> "DNS: ${dns.servers.size} custom server${if (dns.servers.size == 1) "" else "s"}"
+        }
+    } catch (_: IllegalArgumentException) {
+        "DNS needs attention"
+    }
+
+private fun messageIsError(message: String): Boolean =
+    message.contains("Line ") ||
+        message.contains("cannot") ||
+        message.contains("required") ||
+        message.contains("Invalid") ||
+        message.contains("not valid") ||
+        message.contains("must be")

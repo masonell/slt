@@ -133,4 +133,24 @@ class VpnRouteRulesTest {
             text,
         )
     }
+
+    @Test
+    fun findsMostSpecificRouteActionForAddress() {
+        val routes = parseVpnRouteRules(
+            """
+            0.0.0.0/0
+            !10.0.0.0/8
+            10.10.0.0/16
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            VpnRouteRule(cidr = "10.10.0.0/16", excluded = false),
+            vpnRouteActionForAddress(routes, "10.10.1.1"),
+        )
+        assertEquals(
+            VpnRouteRule(cidr = "10.0.0.0/8", excluded = true),
+            vpnRouteActionForAddress(routes, "10.20.1.1"),
+        )
+    }
 }

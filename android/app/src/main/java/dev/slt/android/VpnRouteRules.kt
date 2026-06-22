@@ -48,6 +48,18 @@ fun exportVpnRouteRules(routes: List<VpnRouteRule>): String =
             }
         }
 
+fun vpnRouteActionForAddress(routes: List<VpnRouteRule>, address: String): VpnRouteRule? {
+    val hostRoute = parsedHostRouteForAddress(address)
+    return routes
+        .map(::parsedRouteForRule)
+        .filter { route -> route.covers(hostRoute) }
+        .maxWithOrNull(compareBy<ParsedVpnRouteRule> { it.prefixLength })
+        ?.rule
+}
+
+fun hostVpnRouteForAddress(address: String): VpnRouteRule =
+    parsedHostRouteForAddress(address).rule
+
 private data class ParsedVpnRouteRule(
     val rule: VpnRouteRule,
     val addressFamily: Int,
@@ -68,6 +80,26 @@ private data class ParsedVpnRouteRule(
         result = 31 * result + prefixLength
         return result
     }
+}
+
+private fun parsedRouteForRule(route: VpnRouteRule): ParsedVpnRouteRule {
+    val line = if (route.excluded) {
+        "!${route.cidr}"
+    } else {
+        route.cidr
+    }
+    return parseVpnRouteRuleLine(line, 1)
+}
+
+private fun parsedHostRouteForAddress(address: String): ParsedVpnRouteRule {
+    val parsedAddress = parseNumericAddress(address, 1)
+    val prefixLength = when (parsedAddress) {
+        is Inet4Address -> 32
+        is Inet6Address -> 128
+        else -> error("unsupported address family")
+    }
+    val canonicalAddress = InetAddress.getByAddress(parsedAddress.address).hostAddress
+    return parseVpnRouteRuleLine("$canonicalAddress/$prefixLength", 1)
 }
 
 private val parsedRouteComparator = Comparator<ParsedVpnRouteRule> { left, right ->

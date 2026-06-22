@@ -129,6 +129,7 @@ class SltVpnService : VpnService() {
 
     private fun applyProfileSettings(builder: Builder, profile: SltProfile) {
         applyRoutes(builder, profile.metadata.routes)
+        applyDnsRoutes(builder, profile.metadata.routes, profile.metadata.dns)
         applyDns(builder, profile.metadata.dns)
         applyAppRules(builder, profile.metadata.appRules)
     }
@@ -145,6 +146,15 @@ class SltVpnService : VpnService() {
             } else {
                 builder.addRoute(prefix)
             }
+        }
+    }
+
+    private fun applyDnsRoutes(builder: Builder, routes: List<VpnRouteRule>, dns: DnsSettings) {
+        dnsExcludedRouteWarnings(routes, dns).forEach { warning ->
+            Log.w(TAG, warning)
+        }
+        dnsHostRoutesToAdd(routes, dns).forEach { route ->
+            builder.addRoute(route.cidr.toIpPrefix())
         }
     }
 
