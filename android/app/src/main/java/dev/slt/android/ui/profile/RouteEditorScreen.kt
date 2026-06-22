@@ -30,8 +30,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.slt.android.VpnRouteRule
-import dev.slt.android.exportVpnRouteRules
-import dev.slt.android.parseVpnRouteRules
 import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.uiMessageColor
 
@@ -50,67 +48,25 @@ internal fun RouteEditorScreen(
     var listMessage by remember { mutableStateOf<UiMessage?>(null) }
     val currentMessage = listMessage ?: routeMessage
 
-    fun currentRoutesOrNull(): List<VpnRouteRule>? =
-        try {
-            parseVpnRouteRules(routeText)
-        } catch (error: IllegalArgumentException) {
-            listMessage = UiMessage.error(error.message ?: "Invalid routes")
-            null
-        }
-
-    fun currentRoutesForDisplay(): List<VpnRouteRule>? =
-        try {
-            parseVpnRouteRules(routeText)
-        } catch (_: IllegalArgumentException) {
-            null
-        }
-
-    fun replaceRoutes(routes: List<VpnRouteRule>) {
-        onRouteTextChange(exportVpnRouteRules(routes))
-        listMessage = null
-    }
-
     fun addRouteFromListForm() {
-        val cidr = newRouteCidr.trim()
-        if (cidr.isEmpty()) {
-            listMessage = UiMessage.error("Route CIDR is required")
-            return
-        }
-        val prefix = if (newRouteExcluded) "!" else ""
-        val existingRoutes = currentRoutesOrNull() ?: return
-        val newRoutes = try {
-            parseVpnRouteRules("$prefix$cidr")
-        } catch (error: IllegalArgumentException) {
-            listMessage = UiMessage.error(error.message ?: "Invalid route")
-            return
-        }
-        val existingText = exportVpnRouteRules(existingRoutes)
-        val candidateText = listOf(existingText, "$prefix$cidr")
-            .filter { it.isNotBlank() }
-            .joinToString("\n")
-        try {
-            val routes = parseVpnRouteRules(candidateText)
-            if (routes == existingRoutes) {
-                listMessage = if (newRoutes.any { route -> existingRoutes.contains(route) }) {
-                    UiMessage.info("Route already exists")
-                } else {
-                    UiMessage.info(
-                        "Route is already covered by an existing ${if (newRouteExcluded) "exclude" else "include"} route",
-                    )
-                }
-                return
-            }
-            replaceRoutes(routes)
+        val result = addVpnRouteFromForm(
+            routeText = routeText,
+            cidrText = newRouteCidr,
+            excluded = newRouteExcluded,
+        )
+        if (result.changed) {
+            onRouteTextChange(result.text)
             newRouteCidr = ""
-            listMessage = UiMessage.info("Route added")
-        } catch (error: IllegalArgumentException) {
-            listMessage = UiMessage.error(error.message ?: "Invalid route")
         }
+        listMessage = result.message
     }
 
     fun removeRoute(index: Int) {
-        val routes = currentRoutesOrNull() ?: return
-        replaceRoutes(routes.filterIndexed { routeIndex, _ -> routeIndex != index })
+        val result = removeVpnRouteAt(routeText, index)
+        if (result.changed) {
+            onRouteTextChange(result.text)
+        }
+        listMessage = result.message
     }
 
     Column(
@@ -137,7 +93,7 @@ internal fun RouteEditorScreen(
         }
         when (editorMode) {
             RouteEditorMode.List -> RouteListEditor(
-                routes = currentRoutesForDisplay(),
+                routes = displayedVpnRoutes(routeText),
                 newRouteCidr = newRouteCidr,
                 newRouteExcluded = newRouteExcluded,
                 onNewRouteCidrChange = {

@@ -69,55 +69,35 @@ internal fun AppRulesEditorScreen(
         }
     }
 
-    val effectiveSelectedPackages = when (appMode) {
-        AppVpnMode.All -> emptyList()
-        AppVpnMode.Allowlist -> selectedPackageNames.filterNot { it == ownPackageName }.distinct()
-        AppVpnMode.Blocklist -> selectedPackageNames.filterNot { it == ownPackageName }.distinct()
-    }
+    val effectiveSelectedPackages = effectiveSelectedPackages(
+        appMode = appMode,
+        selectedPackageNames = selectedPackageNames,
+        ownPackageName = ownPackageName,
+    )
     val selectedPackageSet = effectiveSelectedPackages.toSet()
     val installedPackageNames = installedApps.orEmpty().map { it.packageName }.toSet() + ownPackageName
     val missingPackages = missingAppPackages(
         rules = AppVpnRules(mode = appMode, packageNames = effectiveSelectedPackages),
         installedPackages = installedPackageNames,
     )
-    val visibleApps = installedApps.orEmpty()
-        .filterNot { app -> app.packageName == ownPackageName }
-        .filter { app ->
-            search.isBlank() ||
-                app.label.contains(search, ignoreCase = true) ||
-                app.packageName.contains(search, ignoreCase = true)
-        }
-        .sortedWith(
-            compareByDescending<InstalledApp> { it.packageName in selectedPackageSet }
-                .thenBy { it.label.lowercase() }
-                .thenBy { it.packageName },
-        )
+    val visibleApps = visibleInstalledAppsForEditor(
+        installedApps = installedApps.orEmpty(),
+        search = search,
+        selectedPackageNames = selectedPackageSet,
+        ownPackageName = ownPackageName,
+    )
     val currentMessage = loadMessage ?: appMessage
 
-    fun replaceSelectedPackages(packageNames: List<String>) {
+    fun setAppPackageSelected(packageName: String, selected: Boolean) {
         onSelectedPackageNamesChange(
-            when (appMode) {
-                AppVpnMode.All -> emptyList()
-                AppVpnMode.Allowlist -> packageNames.distinct()
-                AppVpnMode.Blocklist -> packageNames.filterNot { it == ownPackageName }.distinct()
-            },
+            setPackageSelected(
+                appMode = appMode,
+                selectedPackageNames = selectedPackageNames,
+                ownPackageName = ownPackageName,
+                packageName = packageName,
+                selected = selected,
+            ),
         )
-    }
-
-    fun setPackageSelected(packageName: String, selected: Boolean) {
-        if (appMode == AppVpnMode.All) {
-            return
-        }
-        if (packageName == ownPackageName) {
-            return
-        }
-
-        val nextPackages = if (selected) {
-            effectiveSelectedPackages + packageName
-        } else {
-            effectiveSelectedPackages.filterNot { it == packageName }
-        }
-        replaceSelectedPackages(nextPackages)
     }
 
     Column(
@@ -137,15 +117,7 @@ internal fun AppRulesEditorScreen(
             appMode = appMode,
             onAppModeChange = {
                 onAppModeChange(it)
-                when (it) {
-                    AppVpnMode.All -> onSelectedPackageNamesChange(emptyList())
-                    AppVpnMode.Allowlist -> onSelectedPackageNamesChange(selectedPackageNames.filterNot { packageName ->
-                        packageName == ownPackageName
-                    })
-                    AppVpnMode.Blocklist -> onSelectedPackageNamesChange(selectedPackageNames.filterNot { packageName ->
-                        packageName == ownPackageName
-                    })
-                }
+                onSelectedPackageNamesChange(selectedPackagesForMode(it, selectedPackageNames, ownPackageName))
             },
         )
         if (appMode != AppVpnMode.All) {
@@ -163,13 +135,29 @@ internal fun AppRulesEditorScreen(
             ) {
                 OutlinedButton(
                     onClick = {
-                        replaceSelectedPackages(effectiveSelectedPackages + installedApps.orEmpty().map { it.packageName })
+                        onSelectedPackageNamesChange(
+                            addAllInstalledPackages(
+                                appMode = appMode,
+                                selectedPackageNames = selectedPackageNames,
+                                ownPackageName = ownPackageName,
+                                installedApps = installedApps.orEmpty(),
+                            ),
+                        )
                     },
                     enabled = installedApps != null,
                 ) {
                     Text("Add all")
                 }
-                OutlinedButton(onClick = { replaceSelectedPackages(emptyList()) }) {
+                OutlinedButton(
+                    onClick = {
+                        onSelectedPackageNamesChange(
+                            removeAllSelectedPackages(
+                                appMode = appMode,
+                                ownPackageName = ownPackageName,
+                            ),
+                        )
+                    },
+                ) {
                     Text("Remove all")
                 }
             }
@@ -219,7 +207,7 @@ internal fun AppRulesEditorScreen(
                             app = app,
                             checked = app.packageName in selectedPackageSet,
                             enabled = app.packageName != ownPackageName,
-                            onCheckedChange = { selected -> setPackageSelected(app.packageName, selected) },
+                            onCheckedChange = { selected -> setAppPackageSelected(app.packageName, selected) },
                         )
                     }
                 }

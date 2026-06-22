@@ -27,8 +27,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import dev.slt.android.exportTestUrls
-import dev.slt.android.parseTestUrls
 import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.uiMessageColor
 
@@ -42,43 +40,27 @@ internal fun TestUrlsEditorScreen(
 ) {
     var newTestUrl by remember { mutableStateOf("") }
     var listMessage by remember { mutableStateOf<UiMessage?>(null) }
-    val currentUrls = try {
-        parseTestUrls(testUrlsText)
-    } catch (_: IllegalArgumentException) {
-        emptyList()
-    }
+    val currentUrls = displayedTestUrls(testUrlsText)
     val currentMessage = listMessage ?: testUrlsMessage
 
-    fun replaceTestUrls(urls: List<String>) {
-        onTestUrlsTextChange(exportTestUrls(urls))
-        listMessage = null
-    }
-
     fun addTestUrl() {
-        val candidate = newTestUrl.trim()
-        if (candidate.isEmpty()) {
-            listMessage = UiMessage.error("Test URL is required")
-            return
-        }
-
-        try {
-            val nextUrls = parseTestUrls(
-                (currentUrls + candidate).joinToString("\n"),
-            )
-            if (nextUrls == currentUrls) {
-                listMessage = UiMessage.info("Test URL already exists")
-                return
-            }
-            replaceTestUrls(nextUrls)
+        val result = addTestUrlFromForm(
+            currentUrls = currentUrls,
+            urlText = newTestUrl,
+        )
+        if (result.changed) {
+            onTestUrlsTextChange(result.text)
             newTestUrl = ""
-            listMessage = UiMessage.info("Test URL added")
-        } catch (error: IllegalArgumentException) {
-            listMessage = UiMessage.error(error.message ?: "Invalid test URL")
         }
+        listMessage = result.message
     }
 
     fun removeTestUrl(index: Int) {
-        replaceTestUrls(currentUrls.filterIndexed { urlIndex, _ -> urlIndex != index })
+        val result = removeTestUrlAt(currentUrls, index)
+        if (result.changed) {
+            onTestUrlsTextChange(result.text)
+        }
+        listMessage = result.message
     }
 
     Column(
