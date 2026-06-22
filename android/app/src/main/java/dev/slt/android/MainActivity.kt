@@ -405,16 +405,26 @@ private fun ProfileEditorScreen(
     var loadedProfile by remember(profileId) { mutableStateOf<SltProfile?>(null) }
     var name by remember(profileId) { mutableStateOf("") }
     var toml by remember(profileId) { mutableStateOf("") }
+    var routeText by remember(profileId) { mutableStateOf("") }
     var validation by remember(profileId) { mutableStateOf<ConfigValidationResult?>(null) }
     var message by remember(profileId) { mutableStateOf<String?>(null) }
+    var routeMessage by remember(profileId) { mutableStateOf<String?>(null) }
+    var editingRoutes by remember(profileId) { mutableStateOf(false) }
 
     LaunchedEffect(profileId) {
         val profile = profileId?.let { profileRepository.loadProfile(it) }
         loadedProfile = profile
         name = profile?.metadata?.name.orEmpty()
         toml = profile?.clientToml.orEmpty()
+        routeText = exportVpnRouteRules(profile?.metadata?.routes.orEmpty())
         validation = null
         message = null
+        routeMessage = null
+        editingRoutes = false
+    }
+
+    BackHandler(enabled = editingRoutes) {
+        editingRoutes = false
     }
 
     fun validate(): ConfigValidationResult {
@@ -422,6 +432,57 @@ private fun ProfileEditorScreen(
         validation = result
         message = if (result.isValid) "Config is valid" else result.error
         return result
+    }
+
+    fun parseRoutesForSave(): List<VpnRouteRule>? =
+        try {
+            val routes = parseVpnRouteRules(routeText)
+            if (routes.isEmpty()) {
+                routeMessage = "At least one VPN route is required"
+                message = routeMessage
+                null
+            } else {
+                routeText = exportVpnRouteRules(routes)
+                routeMessage = "${routes.size} route${if (routes.size == 1) "" else "s"} ready"
+                routes
+            }
+        } catch (error: IllegalArgumentException) {
+            routeMessage = error.message ?: "Invalid routes"
+            message = routeMessage
+            null
+        }
+
+    if (editingRoutes) {
+        RouteEditorScreen(
+            routeText = routeText,
+            routeMessage = routeMessage,
+            onRouteTextChange = {
+                routeText = it
+                routeMessage = null
+            },
+            onApply = {
+                val routes = parseRoutesForSave()
+                if (routes != null) {
+                    editingRoutes = false
+                    message = null
+                }
+            },
+            onCopy = {
+                try {
+                    val routes = parseVpnRouteRules(routeText)
+                    val normalizedRoutes = exportVpnRouteRules(routes)
+                    routeText = normalizedRoutes
+                    context.copySensitiveText("SLT routes", normalizedRoutes)
+                    routeMessage = "Routes copied"
+                } catch (error: IllegalArgumentException) {
+                    routeMessage = error.message ?: "Invalid routes"
+                }
+            },
+            onCancel = {
+                editingRoutes = false
+            },
+        )
+        return
     }
 
     Column(
@@ -464,6 +525,27 @@ private fun ProfileEditorScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = routeSummary(routeText),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = { editingRoutes = true }) {
+                Text("Edit Routes")
+            }
+            routeMessage?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (it.contains("required") || it.contains("Line ") || it.contains("cannot")) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
         message?.let {
             Text(
                 text = it,
@@ -494,12 +576,15 @@ private fun ProfileEditorScreen(
                     if (!result.isValid) {
                         return@Button
                     }
+                    val routes = parseRoutesForSave() ?: return@Button
                     scope.launch {
+                        val metadata = (loadedProfile?.metadata ?: ProfileMetadata(name = trimmedName))
+                            .copy(name = trimmedName, routes = routes)
                         profileRepository.saveProfile(
                             id = profileId,
                             name = trimmedName,
                             clientToml = toml,
-                            metadata = loadedProfile?.metadata,
+                            metadata = metadata,
                         )
                         onSaved()
                     }
@@ -508,6 +593,66 @@ private fun ProfileEditorScreen(
                 Text("Save")
             }
             OutlinedButton(onClick = { context.copySensitiveText("SLT config", toml) }) {
+                Text("Copy")
+            }
+            TextButton(onClick = onCancel) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
+private fun RouteEditorScreen(
+    routeText: String,
+    routeMessage: String?,
+    onRouteTextChange: (String) -> Unit,
+    onApply: () -> Unit,
+    onCopy: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "Routes",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        OutlinedTextField(
+            value = routeText,
+            onValueChange = onRouteTextChange,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            label = { Text("VPN routes") },
+            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        )
+        routeMessage?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (it.contains("Line ") || it.contains("cannot") || it.contains("required")) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(onClick = onApply) {
+                Text("Apply")
+            }
+            OutlinedButton(onClick = onCopy) {
                 Text("Copy")
             }
             TextButton(onClick = onCancel) {
@@ -546,3 +691,13 @@ private fun Context.copySensitiveText(label: String, text: String) {
     }
     clipboardManager.setPrimaryClip(clip)
 }
+
+private fun routeSummary(routeText: String): String =
+    try {
+        val routes = parseVpnRouteRules(routeText)
+        val included = routes.count { !it.excluded }
+        val excluded = routes.count { it.excluded }
+        "Routes: $included include, $excluded exclude"
+    } catch (_: IllegalArgumentException) {
+        "Routes need attention"
+    }
