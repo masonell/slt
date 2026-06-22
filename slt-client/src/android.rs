@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue, JValueGen};
-use jni::sys::{jint, jlong};
+use jni::sys::{jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 use slt_core::config::ClientConfig;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +30,28 @@ static SESSIONS: OnceLock<Mutex<HashMap<NativeHandle, NativeSession>>> = OnceLoc
 #[unsafe(no_mangle)]
 pub const extern "C" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> i32 {
     JNI_VERSION_1_6
+}
+
+/// Validate a client config and return a small non-secret JSON summary.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_slt_android_SltNative_nativeValidateClientConfig(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    config_toml: JString<'_>,
+) -> jstring {
+    match validate_client_config(&mut env, &config_toml) {
+        Ok(summary) => match env.new_string(summary) {
+            Ok(summary) => summary.into_raw(),
+            Err(err) => {
+                throw_runtime_exception(&mut env, &format!("create config summary: {err}"));
+                std::ptr::null_mut()
+            }
+        },
+        Err(err) => {
+            throw_runtime_exception(&mut env, &err);
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Start a native Android client bridge session.
@@ -119,6 +141,39 @@ fn start_native_session(
     let session = NativeSession { cancel, worker };
     register_session(handle, session)?;
     Ok(handle)
+}
+
+fn validate_client_config(
+    env: &mut JNIEnv<'_>,
+    config_toml: &JString<'_>,
+) -> Result<String, String> {
+    let raw_config: String = env
+        .get_string(config_toml)
+        .map_err(|err| format!("read config TOML from JNI: {err}"))?
+        .into();
+    let config = ClientConfig::from_toml_str(&raw_config)
+        .map_err(|err| format!("validate client config: {err}"))?;
+    Ok(client_config_summary_json(&config))
+}
+
+fn client_config_summary_json(config: &ClientConfig) -> String {
+    format!(
+        r#"{{"assignedIpv4":"{}","tunMtu":{},"serverHost":"{}","serverPort":{},"clientId":"{}"}}"#,
+        json_escape(&config.identity.assigned_ipv4.to_string()),
+        config.tun.tun_mtu,
+        json_escape(&config.network.hostname),
+        config.network.port,
+        json_escape(&config.identity.client_id.to_string()),
+    )
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 fn run_native_session(

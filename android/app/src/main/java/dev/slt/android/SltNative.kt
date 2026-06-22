@@ -1,5 +1,7 @@
 package dev.slt.android
 
+import org.json.JSONObject
+
 object SltNative {
     init {
         System.loadLibrary("slt_client")
@@ -20,6 +22,23 @@ object SltNative {
         }
     }
 
+    fun validateClientConfig(configToml: String): ConfigValidationResult =
+        try {
+            val json = JSONObject(nativeValidateClientConfig(configToml))
+            ConfigValidationResult(
+                summary = ClientConfigSummary(
+                    assignedIpv4 = json.getString("assignedIpv4"),
+                    tunMtu = json.getInt("tunMtu"),
+                    serverHost = json.getString("serverHost"),
+                    serverPort = json.getInt("serverPort"),
+                    clientId = json.getString("clientId"),
+                ),
+                error = null,
+            )
+        } catch (error: RuntimeException) {
+            ConfigValidationResult(summary = null, error = error.message ?: "Invalid config")
+        }
+
     interface NativeCallback {
         fun onStatus(status: String, detail: String?)
 
@@ -37,5 +56,24 @@ object SltNative {
     ): Long
 
     @JvmStatic
+    private external fun nativeValidateClientConfig(configToml: String): String
+
+    @JvmStatic
     private external fun nativeStop(handle: Long)
 }
+
+data class ConfigValidationResult(
+    val summary: ClientConfigSummary?,
+    val error: String?,
+) {
+    val isValid: Boolean
+        get() = summary != null
+}
+
+data class ClientConfigSummary(
+    val assignedIpv4: String,
+    val tunMtu: Int,
+    val serverHost: String,
+    val serverPort: Int,
+    val clientId: String,
+)

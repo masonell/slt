@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.IpPrefix
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -13,10 +15,13 @@ import android.os.ParcelFileDescriptor
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.runBlocking
+import java.net.InetAddress
 
 class SltVpnService : VpnService() {
     private var tunFd: ParcelFileDescriptor? = null
     private var nativeHandle: Long = 0
+    private var terminalStatusReported = false
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     private val nativeCallback = object : SltNative.NativeCallback {
@@ -63,11 +68,16 @@ class SltVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        stopVpn("Service destroyed")
+        if (terminalStatusReported) {
+            cleanupVpn()
+        } else {
+            stopVpn("Service destroyed")
+        }
         super.onDestroy()
     }
 
     private fun startVpn() {
+        terminalStatusReported = false
         SltVpnStatusBus.update(VpnStatus.Starting)
         ensureNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Starting"))
@@ -80,14 +90,16 @@ class SltVpnService : VpnService() {
 
         try {
             SltNative.load()
+            val profile = loadActiveProfile()
+            val summary = validateProfile(profile)
 
-            val fd = Builder()
-                .setSession(DEBUG_SESSION)
-                .setMtu(DEBUG_MTU)
-                .addAddress(DEBUG_ADDRESS, DEBUG_ADDRESS_PREFIX)
-                .addRoute(DEBUG_ROUTE, DEBUG_ROUTE_PREFIX)
-                .addDnsServer(DEBUG_DNS)
-                .establish()
+            val builder = Builder()
+                .setSession(profile.metadata.name)
+                .setMtu(summary.tunMtu)
+                .addAddress(summary.assignedIpv4, CLIENT_ADDRESS_PREFIX)
+            applyProfileSettings(builder, profile)
+
+            val fd = builder.establish()
 
             if (fd == null) {
                 failVpn("Android did not return a TUN fd")
@@ -95,28 +107,110 @@ class SltVpnService : VpnService() {
             }
 
             tunFd = fd
-            nativeHandle = SltNative.start(DEBUG_CLIENT_CONFIG_TOML, fd.fd, DEBUG_MTU, nativeCallback)
-            val detail = "fd=${fd.fd} $DEBUG_ADDRESS/$DEBUG_ADDRESS_PREFIX $DEBUG_ROUTE/$DEBUG_ROUTE_PREFIX"
+            nativeHandle = SltNative.start(profile.clientToml, fd.fd, summary.tunMtu, nativeCallback)
+            val detail = "profile=${profile.metadata.name} fd=${fd.fd} ${summary.assignedIpv4}/$CLIENT_ADDRESS_PREFIX"
             Log.i(TAG, "SLT VPN established: $detail")
             SltVpnStatusBus.update(VpnStatus.Running, "$detail native=$nativeHandle")
             updateNotification("Running")
-        } catch (error: RuntimeException) {
+        } catch (error: Exception) {
             failVpn(error.message ?: error::class.java.simpleName)
         }
     }
 
+    private fun loadActiveProfile(): SltProfile =
+        runBlocking {
+            ProfileRepository(applicationContext).loadState().activeProfile
+        } ?: error("No active profile")
+
+    private fun validateProfile(profile: SltProfile): ClientConfigSummary {
+        val result = SltNative.validateClientConfig(profile.clientToml)
+        return result.summary ?: error(result.error ?: "Invalid active profile config")
+    }
+
+    private fun applyProfileSettings(builder: Builder, profile: SltProfile) {
+        applyRoutes(builder, profile.metadata.routes)
+        applyDns(builder, profile.metadata.dns)
+        applyAppRules(builder, profile.metadata.appRules)
+    }
+
+    private fun applyRoutes(builder: Builder, routes: List<VpnRouteRule>) {
+        if (routes.isEmpty()) {
+            error("Active profile has no VPN routes configured")
+        }
+
+        routes.forEach { route ->
+            val prefix = route.cidr.toIpPrefix()
+            if (route.excluded) {
+                builder.excludeRoute(prefix)
+            } else {
+                builder.addRoute(prefix)
+            }
+        }
+    }
+
+    private fun applyDns(builder: Builder, dns: DnsSettings) {
+        if (dns.mode != DnsMode.Custom) {
+            return
+        }
+
+        dns.servers.forEach { server ->
+            builder.addDnsServer(InetAddress.getByName(server))
+        }
+    }
+
+    private fun applyAppRules(builder: Builder, appRules: AppVpnRules) {
+        when (appRules.mode) {
+            AppVpnMode.All -> Unit
+            AppVpnMode.Allowlist -> {
+                val packages = (appRules.packageNames + packageName).distinct().filterInstalled()
+                packages.forEach { builder.addAllowedApplication(it) }
+            }
+            AppVpnMode.Blocklist -> {
+                val packages = appRules.packageNames
+                    .filterNot { it == packageName }
+                    .distinct()
+                    .filterInstalled()
+                packages.forEach { builder.addDisallowedApplication(it) }
+            }
+        }
+    }
+
+    private fun List<String>.filterInstalled(): List<String> =
+        filter { packageName ->
+            try {
+                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+                true
+            } catch (_: PackageManager.NameNotFoundException) {
+                Log.w(TAG, "Profile references missing Android package: $packageName")
+                false
+            }
+        }
+
+    private fun String.toIpPrefix(): IpPrefix {
+        val parts = split('/', limit = 2)
+        require(parts.size == 2) { "invalid CIDR route: $this" }
+        val address = InetAddress.getByName(parts[0])
+        val prefixLength = parts[1].toIntOrNull()
+            ?: error("invalid CIDR prefix length: $this")
+        return IpPrefix(address, prefixLength)
+    }
+
     private fun stopVpn(detail: String) {
+        cleanupVpn()
+        terminalStatusReported = true
+        SltVpnStatusBus.update(VpnStatus.Stopped, detail)
+    }
+
+    private fun cleanupVpn() {
         stopNativeClient()
         closeTunFd()
         stopForegroundCompat()
-        SltVpnStatusBus.update(VpnStatus.Stopped, detail)
     }
 
     private fun failVpn(message: String) {
         Log.e(TAG, "SLT VPN failed: $message")
-        stopNativeClient()
-        closeTunFd()
-        stopForegroundCompat()
+        cleanupVpn()
+        terminalStatusReported = true
         SltVpnStatusBus.update(VpnStatus.Error, message)
         stopSelf()
     }
@@ -240,35 +334,7 @@ class SltVpnService : VpnService() {
         private const val TAG = "SltVpnService"
         private const val NOTIFICATION_ID = 1001
         private const val NOTIFICATION_CHANNEL_ID = "slt_vpn"
-
-        private const val DEBUG_SESSION = "SLT"
-        private const val DEBUG_MTU = 1280
-        private const val DEBUG_ADDRESS = "10.10.0.2"
-        private const val DEBUG_ADDRESS_PREFIX = 32
-        private const val DEBUG_ROUTE = "0.0.0.0"
-        private const val DEBUG_ROUTE_PREFIX = 0
-        private const val DEBUG_DNS = "1.1.1.1"
-        private val DEBUG_CLIENT_CONFIG_TOML = """
-            enable_upgrade = false
-            require_udp = false
-
-            [network]
-            hostname = "example.com"
-            port = 443
-
-            [tls]
-            tls_ca = ""
-
-            [identity]
-            client_id = "0102030405060708090a0b0c0d0e0f10"
-            shared_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            assigned_ipv4 = "10.10.0.2"
-            privkey_ed25519 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-            [tun]
-            tun_name = "slt0"
-            tun_mtu = 1280
-        """.trimIndent()
+        private const val CLIENT_ADDRESS_PREFIX = 32
 
         fun startIntent(context: Context): Intent =
             Intent(context, SltVpnService::class.java).setAction(ACTION_START)
