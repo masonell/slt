@@ -27,8 +27,11 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -53,7 +56,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private lateinit var profileRepository: ProfileRepository
@@ -410,12 +415,16 @@ private fun ProfileEditorScreen(
     var routeText by remember(profileId) { mutableStateOf("") }
     var dnsMode by remember(profileId) { mutableStateOf(DnsMode.System) }
     var dnsText by remember(profileId) { mutableStateOf("") }
+    var appMode by remember(profileId) { mutableStateOf(AppVpnMode.All) }
+    var appPackageNames by remember(profileId) { mutableStateOf(emptyList<String>()) }
     var validation by remember(profileId) { mutableStateOf<ConfigValidationResult?>(null) }
     var message by remember(profileId) { mutableStateOf<String?>(null) }
     var routeMessage by remember(profileId) { mutableStateOf<String?>(null) }
     var dnsMessage by remember(profileId) { mutableStateOf<String?>(null) }
+    var appMessage by remember(profileId) { mutableStateOf<String?>(null) }
     var editingRoutes by remember(profileId) { mutableStateOf(false) }
     var editingDns by remember(profileId) { mutableStateOf(false) }
+    var editingApps by remember(profileId) { mutableStateOf(false) }
 
     LaunchedEffect(profileId) {
         val profile = profileId?.let { profileRepository.loadProfile(it) }
@@ -425,17 +434,22 @@ private fun ProfileEditorScreen(
         routeText = exportVpnRouteRules(profile?.metadata?.routes.orEmpty())
         dnsMode = profile?.metadata?.dns?.mode ?: DnsMode.System
         dnsText = exportDnsServers(profile?.metadata?.dns?.servers.orEmpty())
+        appMode = profile?.metadata?.appRules?.mode ?: AppVpnMode.All
+        appPackageNames = profile?.metadata?.appRules?.packageNames.orEmpty()
         validation = null
         message = null
         routeMessage = null
         dnsMessage = null
+        appMessage = null
         editingRoutes = false
         editingDns = false
+        editingApps = false
     }
 
-    BackHandler(enabled = editingRoutes || editingDns) {
+    BackHandler(enabled = editingRoutes || editingDns || editingApps) {
         editingRoutes = false
         editingDns = false
+        editingApps = false
     }
 
     fun validate(): ConfigValidationResult {
@@ -477,6 +491,19 @@ private fun ProfileEditorScreen(
         } catch (error: IllegalArgumentException) {
             dnsMessage = error.message ?: "Invalid DNS settings"
             message = dnsMessage
+            null
+        }
+
+    fun parseAppsForSave(): AppVpnRules? =
+        try {
+            val appRules = normalizeAppVpnRules(appMode, appPackageNames, context.packageName)
+            appMode = appRules.mode
+            appPackageNames = appRules.packageNames
+            appMessage = appRulesSummary(appRules)
+            appRules
+        } catch (error: IllegalArgumentException) {
+            appMessage = error.message ?: "Invalid app rules"
+            message = appMessage
             null
         }
 
@@ -539,6 +566,33 @@ private fun ProfileEditorScreen(
             },
             onCancel = {
                 editingDns = false
+            },
+        )
+        return
+    }
+
+    if (editingApps) {
+        AppRulesEditorScreen(
+            appMode = appMode,
+            selectedPackageNames = appPackageNames,
+            appMessage = appMessage,
+            ownPackageName = context.packageName,
+            onAppModeChange = {
+                appMode = it
+                appMessage = null
+            },
+            onSelectedPackageNamesChange = {
+                appPackageNames = it
+                appMessage = null
+            },
+            onApply = {
+                if (parseAppsForSave() != null) {
+                    editingApps = false
+                    message = null
+                }
+            },
+            onCancel = {
+                editingApps = false
             },
         )
         return
@@ -626,6 +680,27 @@ private fun ProfileEditorScreen(
                 )
             }
         }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = appsSummary(appMode, appPackageNames.filterNot { it == context.packageName }),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = { editingApps = true }) {
+                Text("Edit Apps")
+            }
+            appMessage?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (messageIsError(it)) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
         message?.let {
             Text(
                 text = it,
@@ -658,9 +733,10 @@ private fun ProfileEditorScreen(
                     }
                     val routes = parseRoutesForSave() ?: return@Button
                     val dns = parseDnsForSave(routes) ?: return@Button
+                    val appRules = parseAppsForSave() ?: return@Button
                     scope.launch {
                         val metadata = (loadedProfile?.metadata ?: ProfileMetadata(name = trimmedName))
-                            .copy(name = trimmedName, routes = routes, dns = dns)
+                            .copy(name = trimmedName, routes = routes, dns = dns, appRules = appRules)
                         profileRepository.saveProfile(
                             id = profileId,
                             name = trimmedName,
@@ -773,6 +849,274 @@ private fun DnsEditorScreen(
             }
             TextButton(onClick = onCancel) {
                 Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppRulesEditorScreen(
+    appMode: AppVpnMode,
+    selectedPackageNames: List<String>,
+    appMessage: String?,
+    ownPackageName: String,
+    onAppModeChange: (AppVpnMode) -> Unit,
+    onSelectedPackageNamesChange: (List<String>) -> Unit,
+    onApply: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val context = LocalContext.current
+    var installedApps by remember { mutableStateOf<List<InstalledApp>?>(null) }
+    var loadMessage by remember { mutableStateOf<String?>(null) }
+    var search by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        try {
+            installedApps = withContext(Dispatchers.Default) {
+                loadInstalledLaunchableApps(context)
+            }
+        } catch (error: RuntimeException) {
+            loadMessage = error.message ?: "Could not load installed apps"
+            installedApps = emptyList()
+        }
+    }
+
+    val effectiveSelectedPackages = when (appMode) {
+        AppVpnMode.All -> emptyList()
+        AppVpnMode.Allowlist -> selectedPackageNames.filterNot { it == ownPackageName }.distinct()
+        AppVpnMode.Blocklist -> selectedPackageNames.filterNot { it == ownPackageName }.distinct()
+    }
+    val selectedPackageSet = effectiveSelectedPackages.toSet()
+    val installedPackageNames = installedApps.orEmpty().map { it.packageName }.toSet() + ownPackageName
+    val missingPackages = missingAppPackages(
+        rules = AppVpnRules(mode = appMode, packageNames = effectiveSelectedPackages),
+        installedPackages = installedPackageNames,
+    )
+    val visibleApps = installedApps.orEmpty()
+        .filterNot { app -> app.packageName == ownPackageName }
+        .filter { app ->
+            search.isBlank() ||
+                app.label.contains(search, ignoreCase = true) ||
+                app.packageName.contains(search, ignoreCase = true)
+        }
+        .sortedWith(
+            compareByDescending<InstalledApp> { it.packageName in selectedPackageSet }
+                .thenBy { it.label.lowercase() }
+                .thenBy { it.packageName },
+        )
+    val currentMessage = loadMessage ?: appMessage
+
+    fun replaceSelectedPackages(packageNames: List<String>) {
+        onSelectedPackageNamesChange(
+            when (appMode) {
+                AppVpnMode.All -> emptyList()
+                AppVpnMode.Allowlist -> packageNames.distinct()
+                AppVpnMode.Blocklist -> packageNames.filterNot { it == ownPackageName }.distinct()
+            },
+        )
+    }
+
+    fun setPackageSelected(packageName: String, selected: Boolean) {
+        if (appMode == AppVpnMode.All) {
+            return
+        }
+        if (packageName == ownPackageName) {
+            return
+        }
+
+        val nextPackages = if (selected) {
+            effectiveSelectedPackages + packageName
+        } else {
+            effectiveSelectedPackages.filterNot { it == packageName }
+        }
+        replaceSelectedPackages(nextPackages)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "Apps",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        AppVpnModeSelector(
+            appMode = appMode,
+            onAppModeChange = {
+                onAppModeChange(it)
+                when (it) {
+                    AppVpnMode.All -> onSelectedPackageNamesChange(emptyList())
+                    AppVpnMode.Allowlist -> onSelectedPackageNamesChange(selectedPackageNames.filterNot { packageName ->
+                        packageName == ownPackageName
+                    })
+                    AppVpnMode.Blocklist -> onSelectedPackageNamesChange(selectedPackageNames.filterNot { packageName ->
+                        packageName == ownPackageName
+                    })
+                }
+            },
+        )
+        if (appMode != AppVpnMode.All) {
+            OutlinedTextField(
+                value = search,
+                onValueChange = { search = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Search apps") },
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        replaceSelectedPackages(effectiveSelectedPackages + installedApps.orEmpty().map { it.packageName })
+                    },
+                    enabled = installedApps != null,
+                ) {
+                    Text("Add all")
+                }
+                OutlinedButton(onClick = { replaceSelectedPackages(emptyList()) }) {
+                    Text("Remove all")
+                }
+            }
+        }
+        if (missingPackages.isNotEmpty()) {
+            Text(
+                text = "Missing saved packages: ${missingPackages.joinToString(", ")}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        currentMessage?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (messageIsError(it)) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
+            )
+        }
+        if (appMode == AppVpnMode.All) {
+            Spacer(modifier = Modifier.weight(1f))
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (installedApps == null) {
+                    item {
+                        Text(
+                            text = "Loading apps",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else if (visibleApps.isEmpty()) {
+                    item {
+                        Text(
+                            text = "No apps found",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
+                    items(visibleApps, key = { it.packageName }) { app ->
+                        AppListItem(
+                            app = app,
+                            checked = app.packageName in selectedPackageSet,
+                            enabled = app.packageName != ownPackageName,
+                            onCheckedChange = { selected -> setPackageSelected(app.packageName, selected) },
+                        )
+                    }
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(onClick = onApply) {
+                Text("Apply")
+            }
+            TextButton(onClick = onCancel) {
+                Text("Cancel")
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppVpnModeSelector(
+    appMode: AppVpnMode,
+    onAppModeChange: (AppVpnMode) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppVpnMode.entries.forEach { mode ->
+            if (appMode == mode) {
+                Button(
+                    onClick = { onAppModeChange(mode) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(mode.label())
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { onAppModeChange(mode) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(mode.label())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppListItem(
+    app: InstalledApp,
+    checked: Boolean,
+    enabled: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        HorizontalDivider()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = enabled) { onCheckedChange(!checked) },
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(
+                checked = checked,
+                onCheckedChange = if (enabled) onCheckedChange else null,
+                enabled = enabled,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = app.label,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Text(
+                    text = app.packageName,
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -1110,6 +1454,27 @@ private fun dnsSummary(mode: DnsMode, dnsText: String): String =
         }
     } catch (_: IllegalArgumentException) {
         "DNS needs attention"
+    }
+
+private fun appsSummary(mode: AppVpnMode, packageNames: List<String>): String =
+    when (mode) {
+        AppVpnMode.All -> "Apps: all"
+        AppVpnMode.Allowlist -> "Apps: ${packageNames.size} allowed"
+        AppVpnMode.Blocklist -> "Apps: ${packageNames.size} blocked"
+    }
+
+private fun appRulesSummary(rules: AppVpnRules): String =
+    when (rules.mode) {
+        AppVpnMode.All -> "All apps ready"
+        AppVpnMode.Allowlist -> "${rules.packageNames.size} allowed app${if (rules.packageNames.size == 1) "" else "s"} ready"
+        AppVpnMode.Blocklist -> "${rules.packageNames.size} blocked app${if (rules.packageNames.size == 1) "" else "s"} ready"
+    }
+
+private fun AppVpnMode.label(): String =
+    when (this) {
+        AppVpnMode.All -> "All"
+        AppVpnMode.Allowlist -> "Allowlist"
+        AppVpnMode.Blocklist -> "Blocklist"
     }
 
 private fun messageIsError(message: String): Boolean =
