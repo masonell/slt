@@ -1,28 +1,22 @@
 package dev.slt.android
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.IpPrefix
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
 import android.os.ParcelFileDescriptor
 import android.os.Looper
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.runBlocking
-import java.net.InetAddress
 
 class SltVpnService : VpnService() {
     private var tunFd: ParcelFileDescriptor? = null
     private var nativeHandle: Long = 0
     private var terminalStatusReported = false
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val profileApplier by lazy { VpnProfileApplier(this, TAG) }
+    private val notificationFactory by lazy { VpnNotificationFactory(this) }
 
     private val nativeCallback = object : SltNative.NativeCallback {
         override fun onStatus(status: String, detail: String?) {
@@ -79,8 +73,8 @@ class SltVpnService : VpnService() {
     private fun startVpn() {
         terminalStatusReported = false
         SltVpnStatusBus.update(VpnStatus.Starting)
-        ensureNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Starting"))
+        notificationFactory.ensureChannel()
+        startForeground(VpnNotificationFactory.NOTIFICATION_ID, notificationFactory.build("Starting"))
 
         if (tunFd != null) {
             SltVpnStatusBus.update(VpnStatus.Running, "fd=${tunFd?.fd} native=$nativeHandle")
@@ -97,7 +91,7 @@ class SltVpnService : VpnService() {
                 .setSession(profile.metadata.name)
                 .setMtu(summary.tunMtu)
                 .addAddress(summary.assignedIpv4, CLIENT_ADDRESS_PREFIX)
-            applyProfileSettings(builder, profile)
+            profileApplier.apply(builder, profile)
 
             val fd = builder.establish()
 
@@ -125,84 +119,6 @@ class SltVpnService : VpnService() {
     private fun validateProfile(profile: SltProfile): ClientConfigSummary {
         val result = SltNative.validateClientConfig(profile.clientToml)
         return result.summary ?: error(result.error ?: "Invalid active profile config")
-    }
-
-    private fun applyProfileSettings(builder: Builder, profile: SltProfile) {
-        applyRoutes(builder, profile.metadata.routes)
-        applyDnsRoutes(builder, profile.metadata.routes, profile.metadata.dns)
-        applyDns(builder, profile.metadata.dns)
-        applyAppRules(builder, profile.metadata.appRules)
-    }
-
-    private fun applyRoutes(builder: Builder, routes: List<VpnRouteRule>) {
-        if (routes.isEmpty()) {
-            error("Active profile has no VPN routes configured")
-        }
-
-        routes.forEach { route ->
-            val prefix = route.cidr.toIpPrefix()
-            if (route.excluded) {
-                builder.excludeRoute(prefix)
-            } else {
-                builder.addRoute(prefix)
-            }
-        }
-    }
-
-    private fun applyDnsRoutes(builder: Builder, routes: List<VpnRouteRule>, dns: DnsSettings) {
-        dnsExcludedRouteWarnings(routes, dns).forEach { warning ->
-            Log.w(TAG, warning)
-        }
-        dnsHostRoutesToAdd(routes, dns).forEach { route ->
-            builder.addRoute(route.cidr.toIpPrefix())
-        }
-    }
-
-    private fun applyDns(builder: Builder, dns: DnsSettings) {
-        if (dns.mode != DnsMode.Custom) {
-            return
-        }
-
-        dns.servers.forEach { server ->
-            builder.addDnsServer(InetAddress.getByName(server))
-        }
-    }
-
-    private fun applyAppRules(builder: Builder, appRules: AppVpnRules) {
-        when (appRules.mode) {
-            AppVpnMode.All -> Unit
-            AppVpnMode.Allowlist -> {
-                val packages = (appRules.packageNames + packageName).distinct().filterInstalled()
-                packages.forEach { builder.addAllowedApplication(it) }
-            }
-            AppVpnMode.Blocklist -> {
-                val packages = appRules.packageNames
-                    .filterNot { it == packageName }
-                    .distinct()
-                    .filterInstalled()
-                packages.forEach { builder.addDisallowedApplication(it) }
-            }
-        }
-    }
-
-    private fun List<String>.filterInstalled(): List<String> =
-        filter { packageName ->
-            try {
-                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
-                true
-            } catch (_: PackageManager.NameNotFoundException) {
-                Log.w(TAG, "Profile references missing Android package: $packageName")
-                false
-            }
-        }
-
-    private fun String.toIpPrefix(): IpPrefix {
-        val parts = split('/', limit = 2)
-        require(parts.size == 2) { "invalid CIDR route: $this" }
-        val address = InetAddress.getByName(parts[0])
-        val prefixLength = parts[1].toIntOrNull()
-            ?: error("invalid CIDR prefix length: $this")
-        return IpPrefix(address, prefixLength)
     }
 
     private fun stopVpn(detail: String) {
@@ -284,48 +200,8 @@ class SltVpnService : VpnService() {
         }
     }
 
-    private fun ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return
-        }
-
-        val channel = NotificationChannel(
-            NOTIFICATION_CHANNEL_ID,
-            getString(R.string.vpn_notification_channel),
-            NotificationManager.IMPORTANCE_LOW,
-        )
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(channel)
-    }
-
     private fun updateNotification(status: String) {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification(status))
-    }
-
-    private fun buildNotification(status: String): Notification {
-        val openIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val stopIntent = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, SltVpnService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-
-        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-            .setContentTitle("SLT VPN")
-            .setContentText(status)
-            .setContentIntent(openIntent)
-            .setOngoing(true)
-            .setSilent(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent)
-            .build()
+        notificationFactory.update(status)
     }
 
     private fun stopForegroundCompat() {
@@ -342,8 +218,6 @@ class SltVpnService : VpnService() {
         const val ACTION_STOP = "dev.slt.android.action.STOP"
 
         private const val TAG = "SltVpnService"
-        private const val NOTIFICATION_ID = 1001
-        private const val NOTIFICATION_CHANNEL_ID = "slt_vpn"
         private const val CLIENT_ADDRESS_PREFIX = 32
 
         fun startIntent(context: Context): Intent =
