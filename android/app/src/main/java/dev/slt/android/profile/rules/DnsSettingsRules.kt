@@ -1,8 +1,8 @@
-package dev.slt.android.ui.profile.rules
+package dev.slt.android.profile.rules
 
-import dev.slt.android.ui.profile.DnsMode
-import dev.slt.android.ui.profile.DnsSettings
-import dev.slt.android.ui.profile.VpnRouteRule
+import dev.slt.android.profile.DnsMode
+import dev.slt.android.profile.DnsSettings
+import dev.slt.android.profile.VpnRouteRule
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress

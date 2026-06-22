@@ -1,14 +1,20 @@
 package dev.slt.android.ui.profile
 
 import dev.slt.android.ConfigValidationResult
-import dev.slt.android.ui.profile.rules.dnsExcludedRouteWarnings
-import dev.slt.android.ui.profile.rules.exportDnsServers
-import dev.slt.android.ui.profile.rules.exportTestUrls
-import dev.slt.android.ui.profile.rules.exportVpnRouteRules
-import dev.slt.android.ui.profile.rules.normalizeAppVpnRules
-import dev.slt.android.ui.profile.rules.parseDnsSettings
-import dev.slt.android.ui.profile.rules.parseTestUrls
-import dev.slt.android.ui.profile.rules.parseVpnRouteRules
+import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.AppVpnRules
+import dev.slt.android.profile.DnsMode
+import dev.slt.android.profile.DnsSettings
+import dev.slt.android.profile.ProfileMetadata
+import dev.slt.android.profile.VpnRouteRule
+import dev.slt.android.profile.rules.dnsExcludedRouteWarnings
+import dev.slt.android.profile.rules.exportDnsServers
+import dev.slt.android.profile.rules.exportTestUrls
+import dev.slt.android.profile.rules.exportVpnRouteRules
+import dev.slt.android.profile.rules.normalizeAppVpnRules
+import dev.slt.android.profile.rules.parseDnsSettings
+import dev.slt.android.profile.rules.parseTestUrls
+import dev.slt.android.profile.rules.parseVpnRouteRules
 import dev.slt.android.ui.UiMessage
 
 internal sealed interface ProfileEditorActionResult<out T> {

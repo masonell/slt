@@ -1,9 +1,13 @@
 package dev.slt.android.ui.profile
 
 import dev.slt.android.ConfigValidationResult
-import dev.slt.android.ui.profile.rules.exportDnsServers
-import dev.slt.android.ui.profile.rules.exportTestUrls
-import dev.slt.android.ui.profile.rules.exportVpnRouteRules
+import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.DnsMode
+import dev.slt.android.profile.ProfileMetadata
+import dev.slt.android.profile.SltProfile
+import dev.slt.android.profile.rules.exportDnsServers
+import dev.slt.android.profile.rules.exportTestUrls
+import dev.slt.android.profile.rules.exportVpnRouteRules
 import dev.slt.android.ui.UiMessage
 
 internal data class ProfileEditorState(

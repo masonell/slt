@@ -1,4 +1,4 @@
-package dev.slt.android.ui.profile.rules
+package dev.slt.android.profile.rules
 
 import java.net.URI
 import java.net.URISyntaxException

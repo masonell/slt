@@ -1,15 +1,14 @@
-package dev.slt.android.ui.profile.rules
+package dev.slt.android.profile.rules
 
-import dev.slt.android.ui.profile.AppVpnMode
-import dev.slt.android.ui.profile.AppVpnRules
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertThrows
+import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.AppVpnRules
+import org.junit.Assert
 import org.junit.Test
 
 class AppVpnRulesRulesTest {
     @Test
     fun allModeClearsPackageNames() {
-        assertEquals(
+        Assert.assertEquals(
             AppVpnRules(),
             normalizeAppVpnRules(
                 mode = AppVpnMode.All,
@@ -21,7 +20,7 @@ class AppVpnRulesRulesTest {
 
     @Test
     fun allowlistDeduplicatesAndRemovesOwnPackage() {
-        assertEquals(
+        Assert.assertEquals(
             AppVpnRules(
                 mode = AppVpnMode.Allowlist,
                 packageNames = listOf("com.example.app"),
@@ -36,7 +35,7 @@ class AppVpnRulesRulesTest {
 
     @Test
     fun blocklistRemovesOwnPackage() {
-        assertEquals(
+        Assert.assertEquals(
             AppVpnRules(
                 mode = AppVpnMode.Blocklist,
                 packageNames = listOf("com.example.app"),
@@ -51,7 +50,7 @@ class AppVpnRulesRulesTest {
 
     @Test
     fun rejectsMalformedPackageNames() {
-        val error = assertThrows(IllegalArgumentException::class.java) {
+        val error = Assert.assertThrows(IllegalArgumentException::class.java) {
             normalizeAppVpnRules(
                 mode = AppVpnMode.Allowlist,
                 packageNames = listOf("example"),
@@ -59,7 +58,7 @@ class AppVpnRulesRulesTest {
             )
         }
 
-        assertEquals("App package example must contain at least one dot", error.message)
+        Assert.assertEquals("App package example must contain at least one dot", error.message)
     }
 
     @Test
@@ -72,6 +71,6 @@ class AppVpnRulesRulesTest {
             installedPackages = setOf("com.example.installed"),
         )
 
-        assertEquals(listOf("com.example.missing"), missing)
+        Assert.assertEquals(listOf("com.example.missing"), missing)
     }
 }

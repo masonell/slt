@@ -10,7 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import dev.slt.android.ui.SltApp
-import dev.slt.android.ui.profile.store.ProfileRepository
+import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.vpn.SltVpnService
 import dev.slt.android.vpn.SltVpnStatusBus
 import dev.slt.android.vpn.VpnStatus

@@ -1,6 +1,9 @@
-package dev.slt.android.ui.profile.rules
+package dev.slt.android.profile.rules
 
-import dev.slt.android.ui.profile.VpnRouteRule
+import dev.slt.android.profile.VpnRouteRule
+import dev.slt.android.profile.rules.exportVpnRouteRules
+import dev.slt.android.profile.rules.parseVpnRouteRules
+import dev.slt.android.profile.rules.vpnRouteActionForAddress
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test

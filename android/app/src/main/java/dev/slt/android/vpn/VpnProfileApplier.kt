@@ -4,14 +4,14 @@ import android.content.pm.PackageManager
 import android.net.IpPrefix
 import android.net.VpnService
 import android.util.Log
-import dev.slt.android.ui.profile.AppVpnMode
-import dev.slt.android.ui.profile.AppVpnRules
-import dev.slt.android.ui.profile.DnsMode
-import dev.slt.android.ui.profile.DnsSettings
-import dev.slt.android.ui.profile.SltProfile
-import dev.slt.android.ui.profile.VpnRouteRule
-import dev.slt.android.ui.profile.rules.dnsExcludedRouteWarnings
-import dev.slt.android.ui.profile.rules.dnsHostRoutesToAdd
+import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.AppVpnRules
+import dev.slt.android.profile.DnsMode
+import dev.slt.android.profile.DnsSettings
+import dev.slt.android.profile.SltProfile
+import dev.slt.android.profile.VpnRouteRule
+import dev.slt.android.profile.rules.dnsExcludedRouteWarnings
+import dev.slt.android.profile.rules.dnsHostRoutesToAdd
 import java.net.InetAddress
 
 internal class VpnProfileApplier(

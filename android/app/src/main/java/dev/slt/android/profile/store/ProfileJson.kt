@@ -1,11 +1,11 @@
-package dev.slt.android.ui.profile.store
+package dev.slt.android.profile.store
 
-import dev.slt.android.ui.profile.AppVpnMode
-import dev.slt.android.ui.profile.AppVpnRules
-import dev.slt.android.ui.profile.DnsMode
-import dev.slt.android.ui.profile.DnsSettings
-import dev.slt.android.ui.profile.ProfileMetadata
-import dev.slt.android.ui.profile.VpnRouteRule
+import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.AppVpnRules
+import dev.slt.android.profile.DnsMode
+import dev.slt.android.profile.DnsSettings
+import dev.slt.android.profile.ProfileMetadata
+import dev.slt.android.profile.VpnRouteRule
 import org.json.JSONArray
 import org.json.JSONObject
 

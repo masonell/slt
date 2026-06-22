@@ -32,7 +32,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import dev.slt.android.ui.profile.rules.missingAppPackages
+import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.AppVpnRules
+import dev.slt.android.profile.rules.missingAppPackages
 import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.uiMessageColor
 import kotlinx.coroutines.Dispatchers

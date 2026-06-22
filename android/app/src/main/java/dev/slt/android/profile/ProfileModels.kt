@@ -1,4 +1,4 @@
-package dev.slt.android.ui.profile
+package dev.slt.android.profile
 
 data class ProfileStoreState(
     val profiles: List<ProfileListItem>,

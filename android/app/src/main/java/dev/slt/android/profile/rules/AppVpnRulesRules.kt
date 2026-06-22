@@ -1,7 +1,7 @@
-package dev.slt.android.ui.profile.rules
+package dev.slt.android.profile.rules
 
-import dev.slt.android.ui.profile.AppVpnMode
-import dev.slt.android.ui.profile.AppVpnRules
+import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.AppVpnRules
 
 fun normalizeAppVpnRules(
     mode: AppVpnMode,

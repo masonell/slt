@@ -1,5 +1,12 @@
 package dev.slt.android.ui.profile
 
+import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.AppVpnRules
+import dev.slt.android.profile.DnsMode
+import dev.slt.android.profile.DnsSettings
+import dev.slt.android.profile.ProfileMetadata
+import dev.slt.android.profile.SltProfile
+import dev.slt.android.profile.VpnRouteRule
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull

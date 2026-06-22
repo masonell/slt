@@ -1,5 +1,7 @@
-package dev.slt.android.ui.profile.rules
+package dev.slt.android.profile.rules
 
+import dev.slt.android.profile.rules.exportTestUrls
+import dev.slt.android.profile.rules.parseTestUrls
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
