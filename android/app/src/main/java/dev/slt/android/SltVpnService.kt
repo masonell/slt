@@ -153,12 +153,16 @@ class SltVpnService : VpnService() {
             }
             "stopped" -> {
                 if (nativeHandle != 0L) {
-                    SltVpnStatusBus.update(VpnStatus.Stopped, detail)
+                    stopVpn(detail ?: "Native client stopped")
+                    stopSelf()
                 }
             }
             "error" -> {
-                SltVpnStatusBus.update(VpnStatus.Error, detail)
-                updateNotification("Error")
+                if (nativeHandle != 0L || tunFd != null) {
+                    failVpn(detail ?: "Native client failed")
+                } else {
+                    SltVpnStatusBus.update(VpnStatus.Error, detail)
+                }
             }
             else -> Log.w(TAG, "Unknown native status: $status ${detail.orEmpty()}")
         }
