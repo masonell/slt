@@ -1,9 +1,17 @@
-package dev.slt.android
+package dev.slt.android.vpn
 
 import android.content.pm.PackageManager
 import android.net.IpPrefix
 import android.net.VpnService
 import android.util.Log
+import dev.slt.android.ui.profile.AppVpnMode
+import dev.slt.android.ui.profile.AppVpnRules
+import dev.slt.android.ui.profile.DnsMode
+import dev.slt.android.ui.profile.DnsSettings
+import dev.slt.android.ui.profile.SltProfile
+import dev.slt.android.ui.profile.VpnRouteRule
+import dev.slt.android.ui.profile.rules.dnsExcludedRouteWarnings
+import dev.slt.android.ui.profile.rules.dnsHostRoutesToAdd
 import java.net.InetAddress
 
 internal class VpnProfileApplier(

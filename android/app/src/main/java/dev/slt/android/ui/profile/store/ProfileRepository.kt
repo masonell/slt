@@ -1,16 +1,21 @@
-package dev.slt.android
+package dev.slt.android.ui.profile.store
 
 import android.content.Context
 import android.util.Log
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.slt.android.ui.profile.ProfileListItem
+import dev.slt.android.ui.profile.ProfileMetadata
+import dev.slt.android.ui.profile.ProfileStoreState
+import dev.slt.android.ui.profile.SltProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
+import kotlin.text.get
 
 private val Context.profileDataStore by preferencesDataStore(name = "profiles")
 

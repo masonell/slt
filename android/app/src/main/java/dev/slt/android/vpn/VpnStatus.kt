@@ -1,4 +1,4 @@
-package dev.slt.android
+package dev.slt.android.vpn
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

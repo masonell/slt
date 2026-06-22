@@ -1,4 +1,4 @@
-package dev.slt.android
+package dev.slt.android.vpn
 
 import android.content.Context
 import android.content.Intent
@@ -8,6 +8,10 @@ import android.os.Handler
 import android.os.ParcelFileDescriptor
 import android.os.Looper
 import android.util.Log
+import dev.slt.android.ClientConfigSummary
+import dev.slt.android.SltNative
+import dev.slt.android.ui.profile.SltProfile
+import dev.slt.android.ui.profile.store.ProfileRepository
 import kotlinx.coroutines.runBlocking
 
 class SltVpnService : VpnService() {

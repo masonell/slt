@@ -20,9 +20,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import dev.slt.android.ProfileStoreState
-import dev.slt.android.VpnStatus
-import dev.slt.android.VpnUiState
+import dev.slt.android.ui.profile.ProfileStoreState
+import dev.slt.android.vpn.VpnStatus
+import dev.slt.android.vpn.VpnUiState
 import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.uiMessageColor
 

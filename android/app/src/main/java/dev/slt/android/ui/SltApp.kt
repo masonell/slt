@@ -15,10 +15,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import dev.slt.android.ProfileRepository
-import dev.slt.android.ProfileStoreState
-import dev.slt.android.SltVpnStatusBus
-import dev.slt.android.VpnStatus
+import dev.slt.android.ui.profile.store.ProfileRepository
+import dev.slt.android.ui.profile.ProfileStoreState
+import dev.slt.android.vpn.SltVpnStatusBus
+import dev.slt.android.vpn.VpnStatus
 import dev.slt.android.ui.main.MainScreen
 import dev.slt.android.ui.profile.ProfileEditorScreen
 import dev.slt.android.ui.profiles.ProfilesScreen

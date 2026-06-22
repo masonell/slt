@@ -1,5 +1,11 @@
-package dev.slt.android
+package dev.slt.android.ui.profile.store
 
+import dev.slt.android.ui.profile.AppVpnMode
+import dev.slt.android.ui.profile.AppVpnRules
+import dev.slt.android.ui.profile.DnsMode
+import dev.slt.android.ui.profile.DnsSettings
+import dev.slt.android.ui.profile.ProfileMetadata
+import dev.slt.android.ui.profile.VpnRouteRule
 import org.json.JSONArray
 import org.json.JSONObject
 

@@ -26,7 +26,7 @@
         </activity>
 
         <service
-            android:name=".SltVpnService"
+            android:name=".vpn.SltVpnService"
             android:exported="false"
             android:foregroundServiceType="specialUse"
             android:permission="android.permission.BIND_VPN_SERVICE">

@@ -29,7 +29,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import dev.slt.android.VpnRouteRule
 import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.uiMessageColor
 

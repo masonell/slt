@@ -1,4 +1,4 @@
-package dev.slt.android
+package dev.slt.android.ui.profile.rules
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows

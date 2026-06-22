@@ -1,8 +1,5 @@
 package dev.slt.android.ui.profile
 
-import dev.slt.android.AppVpnMode
-import dev.slt.android.InstalledApp
-import dev.slt.android.VpnRouteRule
 import dev.slt.android.ui.UiMessageSeverity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

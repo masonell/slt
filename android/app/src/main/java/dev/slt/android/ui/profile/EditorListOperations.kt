@@ -1,13 +1,10 @@
 package dev.slt.android.ui.profile
 
-import dev.slt.android.AppVpnMode
-import dev.slt.android.InstalledApp
-import dev.slt.android.VpnRouteRule
-import dev.slt.android.exportTestUrls
-import dev.slt.android.exportVpnRouteRules
-import dev.slt.android.parseTestUrls
-import dev.slt.android.parseVpnRouteRules
 import dev.slt.android.ui.UiMessage
+import dev.slt.android.ui.profile.rules.exportTestUrls
+import dev.slt.android.ui.profile.rules.exportVpnRouteRules
+import dev.slt.android.ui.profile.rules.parseTestUrls
+import dev.slt.android.ui.profile.rules.parseVpnRouteRules
 
 internal data class EditorTextOperationResult(
     val text: String,

@@ -1,4 +1,4 @@
-package dev.slt.android
+package dev.slt.android.vpn
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import dev.slt.android.MainActivity
+import dev.slt.android.R
 
 internal class VpnNotificationFactory(
     private val context: Context,
