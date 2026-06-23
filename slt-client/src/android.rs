@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue, JValueGen};
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 use slt_core::config::ClientConfig;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, error, info};
 
 use crate::transport::socket_protector::{SocketKind, SocketProtector};
 
@@ -30,6 +30,28 @@ static SESSIONS: OnceLock<Mutex<HashMap<NativeHandle, NativeSession>>> = OnceLoc
 #[unsafe(no_mangle)]
 pub const extern "C" fn JNI_OnLoad(_vm: *mut c_void, _reserved: *mut c_void) -> i32 {
     JNI_VERSION_1_6
+}
+
+/// Initialize the file-backed Rust log sink.
+///
+/// Kotlin passes a log file path once per process. Returns `true` when logging
+/// is active after the call (this call succeeded or an earlier one did); `false`
+/// on failure, in which case Kotlin may retry or `Log.e` the failure.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_slt_android_SltNative_nativeInitLogSink(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    file_path: JString<'_>,
+) -> jboolean {
+    let path: String = match env.get_string(&file_path) {
+        Ok(path) => path.into(),
+        Err(_) => return JNI_FALSE,
+    };
+    if crate::android_logging::init(&path) {
+        JNI_TRUE
+    } else {
+        JNI_FALSE
+    }
 }
 
 /// Validate a client config and return a small non-secret JSON summary.
@@ -185,15 +207,18 @@ fn run_native_session(
     handle: NativeHandle,
 ) {
     let startup_detail = format!("handle={handle} fd={tun_fd} android_mtu={mtu}");
+    info!("[session start] handle={handle}");
     sink.status("starting", Some(&startup_detail));
 
     match run_native_client(raw_config, tun_fd, mtu, cancel, sink, handle) {
         Ok(stop_detail) => {
+            info!("[session stop] handle={handle}");
             sink.status("stopping", Some(&stop_detail));
             sink.status("stopped", Some(&stop_detail));
         }
         Err(err) => {
-            sink.log("error", &format!("Android client runtime failed: {err}"));
+            error!("Android client runtime failed: {err}");
+            info!("[session stop reason=error] handle={handle}");
             sink.status("error", Some(&err));
         }
     }
@@ -224,7 +249,7 @@ fn run_native_client(
         let (tun_handles, tun_channels) =
             crate::tun::spawn_from_fd(&config, tun_fd, cancel.clone())
                 .map_err(|err| format!("start Android TUN backend: {err}"))?;
-        sink.log("info", "Android TUN backend started");
+        info!("Android TUN backend started");
         sink.status("ready", Some(&detail));
 
         let socket_protector = Arc::new(AndroidSocketProtector { sink: sink.clone() });
@@ -351,15 +376,6 @@ impl EventSink {
             "(Ljava/lang/String;Ljava/lang/String;)V",
             status,
             detail,
-        );
-    }
-
-    fn log(&self, level: &str, message: &str) {
-        self.call(
-            "onLog",
-            "(Ljava/lang/String;Ljava/lang/String;)V",
-            level,
-            Some(message),
         );
     }
 

@@ -12,6 +12,8 @@
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "android")]
+mod android_logging;
 mod auth;
 mod metrics;
 mod runtime;

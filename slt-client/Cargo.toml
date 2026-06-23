@@ -25,6 +25,7 @@ tokio = { workspace = true }
 tokio-boring = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-appender = { workspace = true }
 tracing-error = { workspace = true }
 tracing-subscriber = { workspace = true }
 tun-rs = { workspace = true }
