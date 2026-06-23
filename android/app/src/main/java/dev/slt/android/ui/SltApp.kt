@@ -13,6 +13,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import dev.slt.android.log.LogStore
+import dev.slt.android.log.LogsScreen
 import dev.slt.android.profile.ProfileStoreState
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.ui.main.MainScreenRoute
@@ -29,6 +32,8 @@ internal fun SltApp(
 ) {
     val vpnState by SltVpnStatusBus.state.collectAsState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val logStore = remember { LogStore(context) }
     var screen by remember { mutableStateOf<AppScreen>(AppScreen.Main) }
     var profileState by remember { mutableStateOf<ProfileStoreState?>(null) }
     var message by remember { mutableStateOf<UiMessage?>(null) }
@@ -42,6 +47,7 @@ internal fun SltApp(
             AppScreen.Main -> AppScreen.Main
             AppScreen.Profiles -> AppScreen.Main
             is AppScreen.EditProfile -> AppScreen.Profiles
+            AppScreen.Logs -> AppScreen.Main
         }
         message = null
     }
@@ -61,6 +67,9 @@ internal fun SltApp(
                     onStop = onStop,
                     onOpenProfiles = {
                         screen = AppScreen.Profiles
+                    },
+                    onOpenLogs = {
+                        screen = AppScreen.Logs
                     },
                 )
 
@@ -114,6 +123,14 @@ internal fun SltApp(
                         screen = AppScreen.Profiles
                     },
                 )
+
+                AppScreen.Logs -> LogsScreen(
+                    logStore = logStore,
+                    onClose = {
+                        message = null
+                        screen = AppScreen.Main
+                    },
+                )
             }
         }
     }
@@ -125,4 +142,6 @@ private sealed interface AppScreen {
     data object Profiles : AppScreen
 
     data class EditProfile(val profileId: String?) : AppScreen
+
+    data object Logs : AppScreen
 }

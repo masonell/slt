@@ -29,10 +29,6 @@ class SltVpnService : VpnService() {
             }
         }
 
-        override fun onLog(level: String, message: String) {
-            Log.println(androidLogPriority(level), TAG, message)
-        }
-
         override fun protectSocket(fd: Int): Boolean =
             try {
                 val protected = protect(fd)
@@ -231,12 +227,3 @@ class SltVpnService : VpnService() {
             Intent(context, SltVpnService::class.java).setAction(ACTION_STOP)
     }
 }
-
-private fun androidLogPriority(level: String): Int =
-    when (level) {
-        "error" -> Log.ERROR
-        "warn" -> Log.WARN
-        "debug" -> Log.DEBUG
-        "trace" -> Log.VERBOSE
-        else -> Log.INFO
-    }

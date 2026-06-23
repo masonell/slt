@@ -39,6 +39,7 @@ internal fun MainScreen(
     onStop: () -> Unit,
     onRunConnectionTests: () -> Unit,
     onOpenProfiles: () -> Unit,
+    onOpenLogs: () -> Unit,
 ) {
     val activeProfile = profileState?.activeProfile
     val canStart = activeProfile != null &&
@@ -125,6 +126,12 @@ internal fun MainScreen(
         }
         connectionTestState.results?.let { results ->
             ConnectionTestResultsView(results)
+        }
+        OutlinedButton(
+            onClick = onOpenLogs,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Logs")
         }
     }
 }

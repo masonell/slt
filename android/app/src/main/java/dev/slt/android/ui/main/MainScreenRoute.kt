@@ -24,6 +24,7 @@ internal fun MainScreenRoute(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onOpenProfiles: () -> Unit,
+    onOpenLogs: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -70,6 +71,7 @@ internal fun MainScreenRoute(
             onMessageChange(null)
             onOpenProfiles()
         },
+        onOpenLogs = onOpenLogs,
     )
 }
 

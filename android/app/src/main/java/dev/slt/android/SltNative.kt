@@ -9,6 +9,8 @@ object SltNative {
 
     fun load() = Unit
 
+    fun initLogSink(filePath: String): Boolean = nativeInitLogSink(filePath)
+
     fun start(
         configToml: String,
         tunFd: Int,
@@ -42,8 +44,6 @@ object SltNative {
     interface NativeCallback {
         fun onStatus(status: String, detail: String?)
 
-        fun onLog(level: String, message: String)
-
         fun protectSocket(fd: Int): Boolean
     }
 
@@ -54,6 +54,9 @@ object SltNative {
         mtu: Int,
         callback: NativeCallback,
     ): Long
+
+    @JvmStatic
+    private external fun nativeInitLogSink(filePath: String): Boolean
 
     @JvmStatic
     private external fun nativeValidateClientConfig(configToml: String): String
