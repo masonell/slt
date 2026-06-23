@@ -49,6 +49,21 @@ class AppVpnRulesRulesTest {
     }
 
     @Test
+    fun allowsAndroidFrameworkPackage() {
+        Assert.assertEquals(
+            AppVpnRules(
+                mode = AppVpnMode.Blocklist,
+                packageNames = listOf("android", "com.example.app"),
+            ),
+            normalizeAppVpnRules(
+                mode = AppVpnMode.Blocklist,
+                packageNames = listOf("android", "com.example.app"),
+                ownPackageName = "dev.slt.android",
+            ),
+        )
+    }
+
+    @Test
     fun rejectsMalformedPackageNames() {
         val error = Assert.assertThrows(IllegalArgumentException::class.java) {
             normalizeAppVpnRules(

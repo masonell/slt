@@ -59,7 +59,7 @@ internal fun AppRulesEditorScreen(
     LaunchedEffect(Unit) {
         try {
             installedApps = withContext(Dispatchers.Default) {
-                loadInstalledLaunchableApps(context)
+                loadInstalledApps(context)
             }
         } catch (error: RuntimeException) {
             loadMessage = UiMessage.error(error.message ?: "Could not load installed apps")

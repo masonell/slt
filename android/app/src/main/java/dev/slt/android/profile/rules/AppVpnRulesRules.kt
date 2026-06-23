@@ -39,6 +39,9 @@ private fun normalizePackageName(packageName: String, ordinal: Int): String {
     val trimmed = packageName.trim()
     require(trimmed.isNotEmpty()) { "App package $ordinal is empty" }
     require(trimmed.length <= 255) { "App package $trimmed is too long" }
+    if (trimmed == "android") {
+        return trimmed
+    }
 
     val segments = trimmed.split('.')
     require(segments.size >= 2) { "App package $trimmed must contain at least one dot" }

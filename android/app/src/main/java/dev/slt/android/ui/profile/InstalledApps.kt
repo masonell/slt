@@ -1,7 +1,6 @@
 package dev.slt.android.ui.profile
 
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 
 internal data class InstalledApp(
@@ -9,14 +8,14 @@ internal data class InstalledApp(
     val packageName: String,
 )
 
-internal fun loadInstalledLaunchableApps(context: Context): List<InstalledApp> {
+internal fun loadInstalledApps(context: Context): List<InstalledApp> {
     val packageManager = context.packageManager
-    val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-    return packageManager.queryIntentActivities(launcherIntent, PackageManager.ResolveInfoFlags.of(0L))
-        .map { resolveInfo ->
+    return packageManager.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+        .map { applicationInfo ->
+            val label = applicationInfo.loadLabel(packageManager).toString()
             InstalledApp(
-                label = resolveInfo.loadLabel(packageManager).toString(),
-                packageName = resolveInfo.activityInfo.packageName,
+                label = label.ifBlank { applicationInfo.packageName },
+                packageName = applicationInfo.packageName,
             )
         }
         .distinctBy { it.packageName }
