@@ -44,7 +44,8 @@ internal fun MainScreen(
     val activeProfile = profileState?.activeProfile
     val canStart = activeProfile != null &&
         vpnState.status != VpnStatus.Starting &&
-        vpnState.status != VpnStatus.Running
+        vpnState.status != VpnStatus.Running &&
+        vpnState.status != VpnStatus.Reconnecting
     val canTest = activeProfile != null && !connectionTestState.inProgress
 
     Column(
@@ -142,6 +143,7 @@ private fun statusLabel(state: VpnUiState): String =
         VpnStatus.PermissionRequired -> "Permission required"
         VpnStatus.Starting -> "Connecting"
         VpnStatus.Running -> "Connected"
+        VpnStatus.Reconnecting -> "Reconnecting"
         VpnStatus.Stopped -> "Stopped"
         VpnStatus.Error -> "Error"
     }

@@ -76,4 +76,6 @@ internal fun MainScreenRoute(
 }
 
 private fun Context.canStopVpn(status: VpnStatus): Boolean =
-    status == VpnStatus.Starting || status == VpnStatus.Running
+    status == VpnStatus.Starting ||
+        status == VpnStatus.Running ||
+        status == VpnStatus.Reconnecting

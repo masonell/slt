@@ -9,6 +9,7 @@ enum class VpnStatus {
     PermissionRequired,
     Starting,
     Running,
+    Reconnecting,
     Stopped,
     Error,
 }
