@@ -8,10 +8,15 @@ use crate::config::{ConfigError, MAX_TUN_MTU};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunConfig {
     /// TUN interface name.
+    #[serde(default = "default_tun_name")]
     pub tun_name: String,
     /// TUN interface MTU.
     #[serde(default = "default_tun_mtu")]
     pub tun_mtu: u16,
+}
+
+fn default_tun_name() -> String {
+    "tun0".to_string()
 }
 
 const fn default_tun_mtu() -> u16 {
@@ -21,7 +26,7 @@ const fn default_tun_mtu() -> u16 {
 impl Default for TunConfig {
     fn default() -> Self {
         Self {
-            tun_name: String::new(),
+            tun_name: default_tun_name(),
             tun_mtu: default_tun_mtu(),
         }
     }
@@ -95,5 +100,19 @@ mod tests {
         let config = TunConfig::default();
         assert!(config.tun_mtu > 0);
         assert!(config.tun_mtu <= MAX_TUN_MTU);
+    }
+
+    #[test]
+    fn serde_defaults_tun_name_when_omitted() {
+        // Android configs omit `tun_name`; it should deserialize to the default,
+        // not fail, and the result must still validate.
+        let config: TunConfig = toml::from_str("tun_mtu = 1280").unwrap();
+        assert_eq!(config.tun_name, "tun0");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn default_tun_config_validates() {
+        assert!(TunConfig::default().validate().is_ok());
     }
 }
