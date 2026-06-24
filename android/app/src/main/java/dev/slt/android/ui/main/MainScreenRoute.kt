@@ -1,20 +1,27 @@
 package dev.slt.android.ui.main
 
-import android.content.Context
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import dev.slt.android.connection.ConnectionTestRunner
 import dev.slt.android.profile.ProfileStoreState
 import dev.slt.android.ui.UiMessage
-import dev.slt.android.vpn.VpnStatus
 import dev.slt.android.vpn.VpnUiState
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun MainScreenRoute(
     vpnState: VpnUiState,
@@ -23,20 +30,20 @@ internal fun MainScreenRoute(
     onMessageChange: (UiMessage?) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onSelectProfile: (String) -> Unit,
     onOpenProfiles: () -> Unit,
     onOpenLogs: () -> Unit,
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val connectionTestRunner = remember { ConnectionTestRunner() }
     var connectionTestState by remember { mutableStateOf(ConnectionTestUiState()) }
+    var showResultsSheet by remember { mutableStateOf(false) }
 
     MainScreen(
         vpnState = vpnState,
         profileState = profileState,
         message = message,
-        canStop = context.canStopVpn(vpnState.status),
-        connectionTestState = connectionTestState,
+        connectionTestInProgress = connectionTestState.inProgress,
         onStart = onStart,
         onStop = onStop,
         onRunConnectionTests = {
@@ -53,29 +60,45 @@ internal fun MainScreenRoute(
                 }
                 is ConnectionTestStartResult.Ready -> {
                     connectionTestState = result.state
-                    onMessageChange(result.message)
+                    showResultsSheet = true
                     scope.launch {
-                        val finishResult = try {
-                            completeConnectionTestSuccess(connectionTestRunner.run(result.profile))
+                        try {
+                            val results = connectionTestRunner.run(result.profile)
+                            connectionTestState = completeConnectionTestSuccess(results).state
+                            onMessageChange(null)
                         } catch (error: Exception) {
-                            completeConnectionTestFailure(error)
+                            val failure = completeConnectionTestFailure(error)
+                            connectionTestState = failure.state
+                            onMessageChange(failure.message)
                         }
-                        connectionTestState = finishResult.state
-                        onMessageChange(finishResult.message)
                     }
                 }
             }
         },
+        onSelectProfile = onSelectProfile,
         onOpenProfiles = {
             connectionTestState = connectionTestState.copy(results = null)
             onMessageChange(null)
             onOpenProfiles()
         },
         onOpenLogs = onOpenLogs,
+        onDismissMessage = { onMessageChange(null) },
     )
-}
 
-private fun Context.canStopVpn(status: VpnStatus): Boolean =
-    status == VpnStatus.Starting ||
-        status == VpnStatus.Running ||
-        status == VpnStatus.Reconnecting
+    if (showResultsSheet) {
+        ModalBottomSheet(onDismissRequest = { showResultsSheet = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp)
+                    .padding(bottom = 24.dp),
+            ) {
+                ConnectionTestResultsView(
+                    results = connectionTestState.results,
+                    inProgress = connectionTestState.inProgress,
+                )
+            }
+        }
+    }
+}

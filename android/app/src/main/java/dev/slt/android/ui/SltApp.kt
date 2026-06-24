@@ -64,6 +64,13 @@ internal fun SltApp(
                     profileState = profileState,
                     message = message,
                     onMessageChange = { message = it },
+                    onSelectProfile = { id ->
+                        scope.launch {
+                            profileRepository.setActiveProfileId(id)
+                            profileState = profileRepository.loadState()
+                            message = UiMessage.info("Active profile changed")
+                        }
+                    },
                     onStart = onStart,
                     onStop = onStop,
                     onOpenProfiles = {

@@ -3,7 +3,6 @@ package dev.slt.android.ui.main
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -14,20 +13,38 @@ import dev.slt.android.connection.ConnectionTestOutcome
 import dev.slt.android.connection.ConnectionTestResult
 import dev.slt.android.connection.ExpectedNetworkPath
 
+/**
+ * Connection-test results, hosted inside the results bottom sheet. Shows a
+ * "Testing…" placeholder while [inProgress], "No results" when empty, otherwise
+ * one row per tested URL.
+ */
 @Composable
-internal fun ConnectionTestResultsView(results: List<ConnectionTestResult>) {
+internal fun ConnectionTestResultsView(
+    results: List<ConnectionTestResult>?,
+    inProgress: Boolean,
+    modifier: Modifier = Modifier,
+) {
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        HorizontalDivider()
         Text(
             text = "Connection tests",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
-        results.forEach { result ->
-            ConnectionTestResultRow(result)
+        when {
+            inProgress -> Text(
+                text = "Testing…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            results.isNullOrEmpty() -> Text(
+                text = "No results",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            else -> results.forEach { result -> ConnectionTestResultRow(result) }
         }
     }
 }
