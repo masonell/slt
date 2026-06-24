@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Window host for the Compose UI (light variant). Compose owns all visuals
+      through SltTheme; this theme only governs the launch window, the system
+      bars, and the Android 12+ splash. Brand colors are forced and the layout is
+      kept non-edge-to-edge so content keeps its existing inset behavior.
+    -->
+    <style name="Theme.Slt" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/slt_window_background</item>
+        <item name="android:statusBarColor">@color/slt_window_background</item>
+        <item name="android:navigationBarColor">@color/slt_window_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowSplashScreenBackground">@color/slt_window_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+    </style>
+</resources>

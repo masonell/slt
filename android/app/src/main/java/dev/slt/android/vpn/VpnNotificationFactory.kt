@@ -48,7 +48,7 @@ internal class VpnNotificationFactory(
         )
 
         return NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setSmallIcon(R.drawable.ic_stat_vpn)
             .setContentTitle("SLT VPN")
             .setContentText(status)
             .setContentIntent(openIntent)

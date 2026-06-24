@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark variant: same window host with dark brand surfaces and light
+         system-bar icons so the clock and navigation affordances stay visible. -->
+    <style name="Theme.Slt" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/slt_window_background</item>
+        <item name="android:statusBarColor">@color/slt_window_background</item>
+        <item name="android:navigationBarColor">@color/slt_window_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowSplashScreenBackground">@color/slt_window_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+    </style>
+</resources>

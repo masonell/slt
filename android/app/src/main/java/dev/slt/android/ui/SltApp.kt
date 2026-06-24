@@ -21,6 +21,7 @@ import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.ui.main.MainScreenRoute
 import dev.slt.android.ui.profile.ProfileEditorScreen
 import dev.slt.android.ui.profiles.ProfilesScreen
+import dev.slt.android.ui.theme.SltTheme
 import dev.slt.android.vpn.SltVpnStatusBus
 import kotlinx.coroutines.launch
 
@@ -52,7 +53,7 @@ internal fun SltApp(
         message = null
     }
 
-    MaterialTheme {
+    SltTheme {
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background,
