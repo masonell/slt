@@ -8,6 +8,7 @@
   - `proto/`, `types/`, and `transport/` hold wire formats, domain types, and shared transport helpers.
   - `classifier.rs` implements TCP ClientHello classification.
 - `slt-client/src/` is the `client` binary (runtime loop, auth flow, transport switching, TUN I/O, metrics).
+  - `slt-client/src/android/` contains Rust Android native-library support: JNI entrypoints, session lifecycle, callback-backed socket protection/DNS resolution, config validation summaries, and file-backed logging.
 - `slt-server/src/` provides the `server` binary plus server library modules (`auth`, `sessions`, `quic`, `tcp`, `tun`, `registry`, `router`, `udp_qsp`, `metrics`).
 - `slt-cli/src/` is the `slt` management binary (project init, key/cert generation, client add/remove/list/show, config validation).
 - `slt-tools/src/bin/` contains helper CLIs (`tcp_client_hello`, `quic_client_hello`).
