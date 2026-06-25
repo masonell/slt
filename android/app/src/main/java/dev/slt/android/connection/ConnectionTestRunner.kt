@@ -4,68 +4,111 @@ import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.VpnRouteRule
 import dev.slt.android.profile.rules.vpnRouteActionForAddress
 import java.io.IOException
-import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URI
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 internal class ConnectionTestRunner(
     private val resolver: HostResolver = JvmHostResolver,
-    private val httpClient: TestHttpClient = UrlConnectionTestHttpClient,
+    private val httpClient: TestHttpClient = OkHttpTestHttpClient,
 ) {
-    suspend fun run(profile: SltProfile): List<ConnectionTestResult> =
-        withContext(Dispatchers.IO) {
-            profile.metadata.testUrls.map { url ->
-                runOne(url = url, routes = profile.metadata.routes)
+    /**
+     * Run connection tests for all of the profile's URLs concurrently, emitting a
+     * [ConnectionTestEntry] per URL as it moves through [ConnectionTestPhase].
+     * Collecting the flow drives progress; cancelling the collector cancels the
+     * run (blocking DNS/HTTP calls in flight finish on their own but their
+     * results are dropped).
+     */
+    fun run(profile: SltProfile): Flow<ConnectionTestEntry> = channelFlow {
+        coroutineScope {
+            profile.metadata.testUrls.forEach { url ->
+                launch {
+                    runOne(url, profile.metadata.routes) { entry -> send(entry) }
+                }
             }
         }
+    }.flowOn(Dispatchers.IO)
 
-    private fun runOne(
+    private suspend fun runOne(
         url: String,
         routes: List<VpnRouteRule>,
-    ): ConnectionTestResult {
+        emit: suspend (ConnectionTestEntry) -> Unit,
+    ) {
         val host = URI(url).host
-            ?: return ConnectionTestResult(
-                url = url,
-                resolvedAddresses = emptyList(),
-                expectedPath = ExpectedNetworkPath.Direct,
-                outcome = ConnectionTestOutcome.Failure("URL has no host"),
+        if (host == null) {
+            emit(
+                ConnectionTestEntry(
+                    url = url,
+                    phase = ConnectionTestPhase.Done,
+                    outcome = ConnectionTestOutcome.Failure("URL has no host"),
+                ),
             )
+            return
+        }
 
+        emit(ConnectionTestEntry(url = url, phase = ConnectionTestPhase.Resolving))
         val addresses = try {
             resolver.resolve(host)
         } catch (error: IOException) {
-            return ConnectionTestResult(
-                url = url,
-                resolvedAddresses = emptyList(),
-                expectedPath = ExpectedNetworkPath.Direct,
-                outcome = ConnectionTestOutcome.Failure("DNS failed: ${error.readableMessage()}"),
+            emit(
+                ConnectionTestEntry(
+                    url = url,
+                    phase = ConnectionTestPhase.Done,
+                    outcome = ConnectionTestOutcome.Failure("DNS failed: ${error.readableMessage()}"),
+                ),
             )
+            return
         }
         val expectedPath = expectedPathForAddresses(routes, addresses)
+        val numeric = addresses.map { it.numericHostAddress() }
 
+        emit(
+            ConnectionTestEntry(
+                url = url,
+                phase = ConnectionTestPhase.Checking,
+                resolvedAddresses = numeric,
+                expectedPath = expectedPath,
+            ),
+        )
         val outcome = try {
             httpClient.get(url)
         } catch (error: IOException) {
             ConnectionTestOutcome.Failure("GET failed: ${error.readableMessage()}")
         }
-
-        return ConnectionTestResult(
-            url = url,
-            resolvedAddresses = addresses.map { it.numericHostAddress() },
-            expectedPath = expectedPath,
-            outcome = outcome,
+        emit(
+            ConnectionTestEntry(
+                url = url,
+                phase = ConnectionTestPhase.Done,
+                resolvedAddresses = numeric,
+                expectedPath = expectedPath,
+                outcome = outcome,
+            ),
         )
     }
 }
 
-internal data class ConnectionTestResult(
+/** Live state of one URL's connection test. */
+internal data class ConnectionTestEntry(
     val url: String,
-    val resolvedAddresses: List<String>,
-    val expectedPath: ExpectedNetworkPath,
-    val outcome: ConnectionTestOutcome,
+    val phase: ConnectionTestPhase,
+    val resolvedAddresses: List<String> = emptyList(),
+    val expectedPath: ExpectedNetworkPath = ExpectedNetworkPath.Direct,
+    val outcome: ConnectionTestOutcome? = null,
 )
+
+internal enum class ConnectionTestPhase {
+    Resolving,
+    Checking,
+    Done,
+}
 
 internal enum class ExpectedNetworkPath {
     Vpn,
@@ -121,36 +164,22 @@ internal fun interface TestHttpClient {
     fun get(url: String): ConnectionTestOutcome
 }
 
-internal object UrlConnectionTestHttpClient : TestHttpClient {
-    private const val CONNECT_TIMEOUT_MILLIS = 5_000
-    private const val READ_TIMEOUT_MILLIS = 5_000
+internal object OkHttpTestHttpClient : TestHttpClient {
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.SECONDS)
+        .build()
 
-    override fun get(url: String): ConnectionTestOutcome {
-        val connection = URI(url).toURL().openConnection() as HttpURLConnection
-        return try {
-            connection.requestMethod = "GET"
-            connection.instanceFollowRedirects = true
-            connection.connectTimeout = CONNECT_TIMEOUT_MILLIS
-            connection.readTimeout = READ_TIMEOUT_MILLIS
-            val statusCode = connection.responseCode
-            val responseStream = if (statusCode in 200..399) {
-                connection.inputStream
+    override fun get(url: String): ConnectionTestOutcome =
+        client.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            val code = response.code
+            if (code in 200..399) {
+                ConnectionTestOutcome.Success(code)
             } else {
-                connection.errorStream
+                ConnectionTestOutcome.Failure("GET returned HTTP $code")
             }
-            responseStream?.use { stream ->
-                val buffer = ByteArray(256)
-                stream.read(buffer)
-            }
-            if (statusCode in 200..399) {
-                ConnectionTestOutcome.Success(statusCode)
-            } else {
-                ConnectionTestOutcome.Failure("GET returned HTTP $statusCode")
-            }
-        } finally {
-            connection.disconnect()
         }
-    }
 }
 
 private fun Throwable.readableMessage(): String =

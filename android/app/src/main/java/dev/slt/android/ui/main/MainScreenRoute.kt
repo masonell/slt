@@ -19,6 +19,9 @@ import dev.slt.android.connection.ConnectionTestRunner
 import dev.slt.android.profile.ProfileStoreState
 import dev.slt.android.ui.UiMessage
 import dev.slt.android.vpn.VpnUiState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -38,6 +41,7 @@ internal fun MainScreenRoute(
     val connectionTestRunner = remember { ConnectionTestRunner() }
     var connectionTestState by remember { mutableStateOf(ConnectionTestUiState()) }
     var showResultsSheet by remember { mutableStateOf(false) }
+    var testJob by remember { mutableStateOf<Job?>(null) }
 
     MainScreen(
         vpnState = vpnState,
@@ -61,15 +65,20 @@ internal fun MainScreenRoute(
                 is ConnectionTestStartResult.Ready -> {
                     connectionTestState = result.state
                     showResultsSheet = true
-                    scope.launch {
+                    testJob?.cancel()
+                    testJob = scope.launch {
                         try {
-                            val results = connectionTestRunner.run(result.profile)
-                            connectionTestState = completeConnectionTestSuccess(results).state
-                            onMessageChange(null)
+                            connectionTestRunner.run(result.profile).collect { entry ->
+                                connectionTestState = connectionTestState.withEntry(entry)
+                            }
+                            connectionTestState = connectionTestState.copy(inProgress = false)
+                        } catch (cancel: CancellationException) {
+                            throw cancel
                         } catch (error: Exception) {
-                            val failure = completeConnectionTestFailure(error)
-                            connectionTestState = failure.state
-                            onMessageChange(failure.message)
+                            connectionTestState = connectionTestState.copy(inProgress = false)
+                            onMessageChange(
+                                UiMessage.error(error.message ?: error::class.java.simpleName),
+                            )
                         }
                     }
                 }
@@ -77,7 +86,7 @@ internal fun MainScreenRoute(
         },
         onSelectProfile = onSelectProfile,
         onOpenProfiles = {
-            connectionTestState = connectionTestState.copy(results = null)
+            connectionTestState = ConnectionTestUiState()
             onMessageChange(null)
             onOpenProfiles()
         },
@@ -86,7 +95,16 @@ internal fun MainScreenRoute(
     )
 
     if (showResultsSheet) {
-        ModalBottomSheet(onDismissRequest = { showResultsSheet = false }) {
+        ModalBottomSheet(
+            onDismissRequest = {
+                // Dismissing the sheet cancels any in-flight tests; it can't be
+                // reopened, so dropping the partial results is correct.
+                showResultsSheet = false
+                testJob?.cancel()
+                testJob = null
+                connectionTestState = ConnectionTestUiState()
+            },
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -95,7 +113,7 @@ internal fun MainScreenRoute(
                     .padding(bottom = 24.dp),
             ) {
                 ConnectionTestResultsView(
-                    results = connectionTestState.results,
+                    entries = connectionTestState.entries,
                     inProgress = connectionTestState.inProgress,
                 )
             }

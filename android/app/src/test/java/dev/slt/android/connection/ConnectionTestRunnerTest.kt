@@ -5,8 +5,10 @@ import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.VpnRouteRule
 import java.io.IOException
 import java.net.InetAddress
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ConnectionTestRunnerTest {
@@ -43,57 +45,52 @@ class ConnectionTestRunnerTest {
     }
 
     @Test
-    fun runnerReturnsResolvedAddressesExpectedPathAndHttpStatus() = runBlocking {
+    fun runnerStreamsResolvingCheckingDoneWithResolvedAddressesAndStatus() = runBlocking {
         val runner = ConnectionTestRunner(
             resolver = HostResolver { listOf(InetAddress.getByName("8.8.8.8")) },
             httpClient = TestHttpClient { ConnectionTestOutcome.Success(204) },
         )
 
-        val results = runner.run(
-            profile = profile(
+        val entries = runner.run(
+            profile(
                 testUrls = listOf("https://example.com/check"),
                 routes = listOf(VpnRouteRule(cidr = "0.0.0.0/0", excluded = false)),
             ),
-        )
+        ).toList()
 
         assertEquals(
-            listOf(
-                ConnectionTestResult(
-                    url = "https://example.com/check",
-                    resolvedAddresses = listOf("8.8.8.8"),
-                    expectedPath = ExpectedNetworkPath.Vpn,
-                    outcome = ConnectionTestOutcome.Success(204),
-                ),
-            ),
-            results,
+            listOf(ConnectionTestPhase.Resolving, ConnectionTestPhase.Checking, ConnectionTestPhase.Done),
+            entries.map { it.phase },
         )
+        val done = entries.single { it.phase == ConnectionTestPhase.Done }
+        assertEquals("https://example.com/check", done.url)
+        assertEquals(listOf("8.8.8.8"), done.resolvedAddresses)
+        assertEquals(ExpectedNetworkPath.Vpn, done.expectedPath)
+        assertEquals(ConnectionTestOutcome.Success(204), done.outcome)
     }
 
     @Test
-    fun runnerReportsDnsFailuresPerUrl() = runBlocking {
+    fun runnerReportsDnsFailureAsDoneEntry() = runBlocking {
         val runner = ConnectionTestRunner(
             resolver = HostResolver { throw IOException("host not found") },
             httpClient = TestHttpClient { ConnectionTestOutcome.Success(200) },
         )
 
-        val results = runner.run(
-            profile = profile(
+        val entries = runner.run(
+            profile(
                 testUrls = listOf("https://example.com/check"),
                 routes = emptyList(),
             ),
-        )
+        ).toList()
 
         assertEquals(
-            listOf(
-                ConnectionTestResult(
-                    url = "https://example.com/check",
-                    resolvedAddresses = emptyList(),
-                    expectedPath = ExpectedNetworkPath.Direct,
-                    outcome = ConnectionTestOutcome.Failure("DNS failed: host not found"),
-                ),
-            ),
-            results,
+            listOf(ConnectionTestPhase.Resolving, ConnectionTestPhase.Done),
+            entries.map { it.phase },
         )
+        val done = entries.single { it.phase == ConnectionTestPhase.Done }
+        assertEquals("https://example.com/check", done.url)
+        assertTrue(done.resolvedAddresses.isEmpty())
+        assertEquals(ConnectionTestOutcome.Failure("DNS failed: host not found"), done.outcome)
     }
 
     private fun profile(

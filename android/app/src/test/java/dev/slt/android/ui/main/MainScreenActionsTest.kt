@@ -1,14 +1,14 @@
 package dev.slt.android.ui.main
 
+import dev.slt.android.connection.ConnectionTestEntry
 import dev.slt.android.connection.ConnectionTestOutcome
-import dev.slt.android.connection.ConnectionTestResult
+import dev.slt.android.connection.ConnectionTestPhase
 import dev.slt.android.connection.ExpectedNetworkPath
 import dev.slt.android.profile.ProfileMetadata
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.ui.UiMessageSeverity
 import dev.slt.android.vpn.VpnStatus
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,50 +16,55 @@ class MainScreenActionsTest {
     @Test
     fun prepareConnectionTestStartBlocksMissingProfile() {
         val result = prepareConnectionTestStart(
-            state = ConnectionTestUiState(results = existingResults()),
+            state = ConnectionTestUiState(entries = existingEntries()),
             vpnStatus = VpnStatus.Running,
             activeProfile = null,
         )
 
         assertTrue(result is ConnectionTestStartResult.Blocked)
-        assertEquals("No active profile", result.message.text)
-        assertEquals(UiMessageSeverity.Error, result.message.severity)
-        assertEquals(null, result.state.results)
+        val blocked = result as ConnectionTestStartResult.Blocked
+        assertEquals("No active profile", blocked.message.text)
+        assertEquals(UiMessageSeverity.Error, blocked.message.severity)
+        assertTrue(blocked.state.entries.isEmpty())
     }
 
     @Test
     fun prepareConnectionTestStartBlocksWhenVpnIsNotRunning() {
         val result = prepareConnectionTestStart(
-            state = ConnectionTestUiState(results = existingResults()),
+            state = ConnectionTestUiState(entries = existingEntries()),
             vpnStatus = VpnStatus.Stopped,
             activeProfile = profile(testUrls = listOf("https://example.com/check")),
         )
 
         assertTrue(result is ConnectionTestStartResult.Blocked)
-        assertEquals("Connect the VPN before running tests", result.message.text)
-        assertEquals(UiMessageSeverity.Warning, result.message.severity)
-        assertEquals(null, result.state.results)
+        val blocked = result as ConnectionTestStartResult.Blocked
+        assertEquals("Connect the VPN before running tests", blocked.message.text)
+        assertEquals(UiMessageSeverity.Warning, blocked.message.severity)
+        assertTrue(blocked.state.entries.isEmpty())
     }
 
     @Test
     fun prepareConnectionTestStartBlocksMissingUrls() {
         val result = prepareConnectionTestStart(
-            state = ConnectionTestUiState(results = existingResults()),
+            state = ConnectionTestUiState(entries = existingEntries()),
             vpnStatus = VpnStatus.Running,
             activeProfile = profile(testUrls = emptyList()),
         )
 
         assertTrue(result is ConnectionTestStartResult.Blocked)
-        assertEquals("Active profile has no test URLs", result.message.text)
-        assertEquals(UiMessageSeverity.Warning, result.message.severity)
-        assertEquals(null, result.state.results)
+        val blocked = result as ConnectionTestStartResult.Blocked
+        assertEquals("Active profile has no test URLs", blocked.message.text)
+        assertEquals(UiMessageSeverity.Warning, blocked.message.severity)
+        assertTrue(blocked.state.entries.isEmpty())
     }
 
     @Test
     fun prepareConnectionTestStartReturnsReadyState() {
-        val profile = profile(testUrls = listOf("https://example.com/check"))
+        val profile = profile(
+            testUrls = listOf("https://example.com/check", "https://example.org/check"),
+        )
         val result = prepareConnectionTestStart(
-            state = ConnectionTestUiState(results = existingResults()),
+            state = ConnectionTestUiState(entries = existingEntries()),
             vpnStatus = VpnStatus.Running,
             activeProfile = profile,
         )
@@ -67,31 +72,9 @@ class MainScreenActionsTest {
         assertTrue(result is ConnectionTestStartResult.Ready)
         val ready = result as ConnectionTestStartResult.Ready
         assertEquals(profile, ready.profile)
-        assertEquals("Running connection tests", ready.message.text)
-        assertEquals(UiMessageSeverity.Info, ready.message.severity)
         assertTrue(ready.state.inProgress)
-        assertEquals(null, ready.state.results)
-    }
-
-    @Test
-    fun completeConnectionTestSuccessStoresResults() {
-        val results = existingResults()
-        val result = completeConnectionTestSuccess(results)
-
-        assertFalse(result.state.inProgress)
-        assertEquals(results, result.state.results)
-        assertEquals("Connection tests finished", result.message.text)
-        assertEquals(UiMessageSeverity.Info, result.message.severity)
-    }
-
-    @Test
-    fun completeConnectionTestFailureClearsState() {
-        val result = completeConnectionTestFailure(IllegalStateException("failed"))
-
-        assertFalse(result.state.inProgress)
-        assertEquals(null, result.state.results)
-        assertEquals("failed", result.message.text)
-        assertEquals(UiMessageSeverity.Error, result.message.severity)
+        assertEquals(profile.metadata.testUrls, ready.state.entries.map { it.url })
+        assertTrue(ready.state.entries.all { it.phase == ConnectionTestPhase.Resolving })
     }
 
     private fun profile(testUrls: List<String>): SltProfile =
@@ -104,10 +87,11 @@ class MainScreenActionsTest {
             ),
         )
 
-    private fun existingResults(): List<ConnectionTestResult> =
+    private fun existingEntries(): List<ConnectionTestEntry> =
         listOf(
-            ConnectionTestResult(
+            ConnectionTestEntry(
                 url = "https://example.com/check",
+                phase = ConnectionTestPhase.Done,
                 resolvedAddresses = listOf("203.0.113.1"),
                 expectedPath = ExpectedNetworkPath.Direct,
                 outcome = ConnectionTestOutcome.Success(204),
