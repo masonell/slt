@@ -32,10 +32,11 @@ internal data class ProfileEditorState(
         get() = activeNestedScreen != null
 
     fun withClosedNestedScreen(): ProfileEditorState =
-        copy(activeNestedScreen = null)
+        copy(activeNestedScreen = null, message = null)
 }
 
 internal enum class ProfileEditorNestedScreen {
+    Toml,
     Routes,
     Dns,
     Apps,
