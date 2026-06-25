@@ -115,34 +115,15 @@ internal fun ProfileEditorScreen(
 
     if (editorState.activeNestedScreen == ProfileEditorNestedScreen.Dns) {
         DnsEditorScreen(
-            dnsMode = editorState.dnsMode,
-            dnsText = editorState.dnsText,
-            dnsMessage = editorState.dnsMessage,
-            onDnsModeChange = {
+            initialMode = editorState.dnsMode,
+            initialText = editorState.dnsText,
+            onApply = { mode, text ->
                 editorState = editorState.copy(
-                    dnsMode = it,
-                    dnsMessage = null,
+                    dnsMode = mode,
+                    dnsText = text,
+                    activeNestedScreen = null,
+                    message = null,
                 )
-            },
-            onDnsTextChange = {
-                editorState = editorState.copy(
-                    dnsText = it,
-                    dnsMessage = null,
-                )
-            },
-            onApply = {
-                val routes = try {
-                    parseVpnRouteRules(editorState.routeText)
-                } catch (_: IllegalArgumentException) {
-                    null
-                }
-                when (val result = parseProfileEditorDnsForSave(editorState, routes)) {
-                    is ProfileEditorActionResult.Success -> editorState = result.state.copy(
-                        activeNestedScreen = null,
-                        message = null,
-                    )
-                    is ProfileEditorActionResult.Failure -> editorState = result.state
-                }
             },
             onCancel = {
                 editorState = editorState.withClosedNestedScreen()

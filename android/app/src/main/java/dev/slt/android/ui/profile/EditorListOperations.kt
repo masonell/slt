@@ -1,10 +1,13 @@
 package dev.slt.android.ui.profile
 
 import dev.slt.android.profile.AppVpnMode
+import dev.slt.android.profile.DnsMode
 import dev.slt.android.profile.VpnRouteRule
 import dev.slt.android.ui.UiMessage
+import dev.slt.android.profile.rules.exportDnsServers
 import dev.slt.android.profile.rules.exportTestUrls
 import dev.slt.android.profile.rules.exportVpnRouteRules
+import dev.slt.android.profile.rules.parseDnsSettings
 import dev.slt.android.profile.rules.parseTestUrls
 import dev.slt.android.profile.rules.parseVpnRouteRules
 
@@ -155,6 +158,60 @@ internal fun addTestUrlFromForm(
 internal fun removeTestUrlAt(currentUrls: List<String>, index: Int): EditorTextOperationResult =
     EditorTextOperationResult(
         text = exportTestUrls(currentUrls.filterIndexed { urlIndex, _ -> urlIndex != index }),
+        message = null,
+        changed = true,
+    )
+
+internal fun displayedDnsServers(dnsText: String): List<String> =
+    try {
+        parseDnsSettings(DnsMode.Custom, dnsText).servers
+    } catch (_: IllegalArgumentException) {
+        emptyList()
+    }
+
+internal fun addDnsServerFromForm(
+    currentServers: List<String>,
+    serverText: String,
+): EditorTextOperationResult {
+    val candidate = serverText.trim()
+    if (candidate.isEmpty()) {
+        return EditorTextOperationResult(
+            text = exportDnsServers(currentServers),
+            message = UiMessage.error("DNS server is required"),
+            changed = false,
+        )
+    }
+
+    return try {
+        val nextServers = parseDnsSettings(
+            DnsMode.Custom,
+            (currentServers + candidate).joinToString("\n"),
+        ).servers
+        if (nextServers == currentServers) {
+            EditorTextOperationResult(
+                text = exportDnsServers(currentServers),
+                message = UiMessage.info("DNS server already exists"),
+                changed = false,
+            )
+        } else {
+            EditorTextOperationResult(
+                text = exportDnsServers(nextServers),
+                message = UiMessage.info("DNS server added"),
+                changed = true,
+            )
+        }
+    } catch (error: IllegalArgumentException) {
+        EditorTextOperationResult(
+            text = exportDnsServers(currentServers),
+            message = UiMessage.error(error.message ?: "Invalid DNS server"),
+            changed = false,
+        )
+    }
+}
+
+internal fun removeDnsServerAt(currentServers: List<String>, index: Int): EditorTextOperationResult =
+    EditorTextOperationResult(
+        text = exportDnsServers(currentServers.filterIndexed { serverIndex, _ -> serverIndex != index }),
         message = null,
         changed = true,
     )
