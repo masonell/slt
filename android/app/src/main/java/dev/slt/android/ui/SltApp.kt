@@ -139,7 +139,7 @@ internal fun SltApp(
 
                 AppScreen.Logs -> LogsScreen(
                     logStore = logStore,
-                    onClose = {
+                    onBack = {
                         message = null
                         screen = AppScreen.Main
                     },

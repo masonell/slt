@@ -8,6 +8,7 @@ import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 /**
  * Owns the Rust log directory: file naming, the active-file lookup, the keep-N
@@ -21,11 +22,13 @@ class LogStore(context: Context) {
     private val appContext = context.applicationContext
     private val dir = File(appContext.filesDir, DIR_NAME)
 
-    /** Build a fresh per-process log file path (`slt-<ts>-<pid>.log`). */
+    /** Build a fresh per-process log file path (`slt-<utc-ts>Z-<pid>.log`). */
     fun newFilePath(): String {
         if (!dir.exists()) dir.mkdirs()
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(Date())
-        val path = File(dir, "$PREFIX$stamp-${Process.myPid()}$SUFFIX").absolutePath
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date())
+        val path = File(dir, "$PREFIX${stamp}Z-${Process.myPid()}$SUFFIX").absolutePath
         // Remember the file Rust will write to so sweep/clear never touch it,
         // even if a wall-clock jump makes its name sort older than leftovers.
         activePath = path
@@ -49,12 +52,15 @@ class LogStore(context: Context) {
     }
 
     /**
-     * Keep the active file plus the newest [KEEP_INACTIVE] inactive files. Never
-     * deletes the active file (it may be open and being written by Rust).
+     * Keep the active file plus the newest [KEEP_INACTIVE] non-empty inactive
+     * files. Empty inactive files (e.g. from a quick launch/close cycle that
+     * wrote nothing) are removed, and the active file is never deleted (it may
+     * be open and being written by Rust).
      */
     fun sweep() {
         val active = activeFile() ?: return
         val keep = (files() - active)
+            .filter { it.length() > 0 }
             .sortedByDescending { it.name }
             .take(KEEP_INACTIVE)
             .toMutableSet()
@@ -101,7 +107,7 @@ class LogStore(context: Context) {
         const val DIR_NAME = "logs"
         const val PREFIX = "slt-"
         const val SUFFIX = ".log"
-        const val KEEP_INACTIVE = 4
+        const val KEEP_INACTIVE = 5
         const val MAX_READ_CHUNK = 512 * 1024
 
         /** Absolute path of the file the current process handed to Rust. */
