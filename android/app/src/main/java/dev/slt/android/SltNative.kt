@@ -45,6 +45,8 @@ object SltNative {
         fun onStatus(status: String, detail: String?)
 
         fun protectSocket(fd: Int): Boolean
+
+        fun resolveHost(hostname: String): Array<String>
     }
 
     @JvmStatic

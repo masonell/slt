@@ -15,12 +15,13 @@ use slt_core::crypto::{
 use slt_core::transport::tcp::{
     IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
 };
-use tokio::net::{TcpSocket, TcpStream, lookup_host};
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tokio_boring::HandshakeError;
 use tracing::{debug, trace};
 
 use crate::metrics::Metrics;
+use crate::transport::host_resolver::{HostResolver, SharedHostResolver};
 use crate::transport::socket_protector::{SharedSocketProtector, SocketKind, SocketProtector};
 
 /// Maximum time allowed for TCP connect + TLS handshake.
@@ -91,12 +92,13 @@ pub async fn connect(
     config: &ClientConfig,
     metrics: Arc<Metrics>,
     socket_protector: SharedSocketProtector,
+    host_resolver: SharedHostResolver,
 ) -> io::Result<TcpSession> {
     metrics.inc_tcp_connections();
 
     let stream = timeout(
         CONNECT_TIMEOUT,
-        connect_stream(config, socket_protector.as_ref()),
+        connect_stream(config, socket_protector.as_ref(), host_resolver.as_ref()),
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tcp connect timeout"))??;
@@ -170,22 +172,15 @@ pub async fn connect(
 async fn connect_stream(
     config: &ClientConfig,
     socket_protector: &dyn SocketProtector,
+    host_resolver: &dyn HostResolver,
 ) -> io::Result<TcpStream> {
     if let Some(ip) = config.network.ip {
         return connect_addr(SocketAddr::new(ip, config.network.port), socket_protector).await;
     }
 
-    let addrs: Vec<SocketAddr> =
-        lookup_host((config.network.hostname.as_str(), config.network.port))
-            .await?
-            .collect();
-
-    if addrs.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "dns lookup returned no addresses",
-        ));
-    }
+    let addrs = host_resolver
+        .resolve(config.network.hostname.as_str(), config.network.port)
+        .await?;
 
     let mut last_err = None;
     for addr in addrs {
@@ -235,6 +230,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::test_config;
+    use crate::transport::host_resolver::TokioHostResolver;
 
     #[derive(Default)]
     struct RecordingProtector {
@@ -269,7 +265,9 @@ mod tests {
         config.network.port = addr.port();
         let protector = RecordingProtector::default();
 
-        let stream = connect_stream(&config, &protector).await.unwrap();
+        let stream = connect_stream(&config, &protector, &TokioHostResolver)
+            .await
+            .unwrap();
         assert_eq!(stream.peer_addr().unwrap(), addr);
 
         let calls = protector.calls.lock().unwrap();
@@ -294,7 +292,9 @@ mod tests {
             ..RecordingProtector::default()
         };
 
-        let err = connect_stream(&config, &protector).await.unwrap_err();
+        let err = connect_stream(&config, &protector, &TokioHostResolver)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
 
         let calls = protector.calls.lock().unwrap();

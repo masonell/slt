@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         tun_channels,
         cancel,
         slt_client::noop_socket_protector(),
+        slt_client::default_host_resolver(),
     ))
     .await
 }

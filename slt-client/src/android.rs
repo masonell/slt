@@ -3,21 +3,25 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-use jni::objects::{GlobalRef, JClass, JObject, JString, JValue, JValueGen};
+use jni::objects::{GlobalRef, JClass, JObject, JObjectArray, JString, JValue, JValueGen};
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 use slt_core::config::ClientConfig;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+use crate::transport::host_resolver::{HostResolver, HostResolverFuture, ensure_non_empty};
 use crate::transport::socket_protector::{SocketKind, SocketProtector};
 
 const JNI_VERSION_1_6: i32 = 0x0001_0006;
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 type NativeHandle = u64;
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -245,7 +249,7 @@ fn run_native_client(
 
     let detail = summary.detail.clone();
     let stop_detail = summary.handle_detail();
-    runtime.block_on(async move {
+    let result = runtime.block_on(async move {
         let (tun_handles, tun_channels) =
             crate::tun::spawn_from_fd(&config, tun_fd, cancel.clone())
                 .map_err(|err| format!("start Android TUN backend: {err}"))?;
@@ -253,10 +257,20 @@ fn run_native_client(
         sink.status("ready", Some(&detail));
 
         let socket_protector = Arc::new(AndroidSocketProtector { sink: sink.clone() });
-        crate::run_client(config, tun_handles, tun_channels, cancel, socket_protector)
-            .await
-            .map_err(|err| format!("client runtime exited with error: {err}"))
-    })?;
+        let host_resolver = Arc::new(AndroidHostResolver { sink: sink.clone() });
+        crate::run_client(
+            config,
+            tun_handles,
+            tun_channels,
+            cancel,
+            socket_protector,
+            host_resolver,
+        )
+        .await
+        .map_err(|err| format!("client runtime exited with error: {err}"))
+    });
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+    result?;
 
     Ok(stop_detail)
 }
@@ -347,9 +361,25 @@ struct AndroidSocketProtector {
     sink: EventSink,
 }
 
+struct AndroidHostResolver {
+    sink: EventSink,
+}
+
 impl SocketProtector for AndroidSocketProtector {
     fn protect(&self, fd: RawFd, kind: SocketKind) -> io::Result<()> {
         self.sink.protect_socket(fd, kind)
+    }
+}
+
+impl HostResolver for AndroidHostResolver {
+    fn resolve<'a>(&'a self, hostname: &'a str, port: u16) -> HostResolverFuture<'a> {
+        let sink = self.sink.clone();
+        let hostname = hostname.to_string();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || sink.resolve_host(&hostname, port))
+                .await
+                .map_err(|err| io::Error::other(format!("Android DNS task failed: {err}")))?
+        })
     }
 }
 
@@ -419,6 +449,88 @@ impl EventSink {
         }
     }
 
+    fn resolve_host(&self, hostname: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        let mut env = self.inner.vm.attach_current_thread().map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("attach JNI thread for host resolution: {err}"),
+            )
+        })?;
+        let hostname_arg = env.new_string(hostname).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("create host resolution argument: {err}"),
+            )
+        })?;
+        let hostname_arg = JObject::from(hostname_arg);
+
+        let resolved = match env
+            .call_method(
+                self.inner.callback.as_obj(),
+                "resolveHost",
+                "(Ljava/lang/String;)[Ljava/lang/String;",
+                &[JValue::Object(&hostname_arg)],
+            )
+            .and_then(JValueGen::l)
+        {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                clear_pending_exception(&mut env);
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("call Android resolveHost for {hostname}: {err}"),
+                ));
+            }
+        };
+        if resolved.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Android resolveHost returned null for {hostname}"),
+            ));
+        }
+
+        let resolved = JObjectArray::from(resolved);
+        let len = env.get_array_length(&resolved).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("read Android resolveHost result length for {hostname}: {err}"),
+            )
+        })?;
+        let mut addrs = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+        for index in 0..len {
+            let element = env
+                .get_object_array_element(&resolved, index)
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("read Android resolveHost result {index} for {hostname}: {err}"),
+                    )
+                })?;
+            if element.is_null() {
+                continue;
+            }
+            let address = JString::from(element);
+            let address: String = env
+                .get_string(&address)
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("read Android resolveHost address {index} for {hostname}: {err}"),
+                    )
+                })?
+                .into();
+            let ip = address.parse::<IpAddr>().map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Android resolveHost returned non-IP address {address}: {err}"),
+                )
+            })?;
+            addrs.push(SocketAddr::new(ip, port));
+        }
+
+        ensure_non_empty(addrs)
+    }
+
     fn call(&self, method: &str, signature: &str, first: &str, second: Option<&str>) {
         let Ok(mut env) = self.inner.vm.attach_current_thread() else {
             return;
@@ -452,6 +564,12 @@ fn jlong_to_handle(handle: jlong) -> Option<NativeHandle> {
 
 fn throw_runtime_exception(env: &mut JNIEnv<'_>, message: &str) {
     let _ = env.throw_new("java/lang/RuntimeException", message);
+}
+
+fn clear_pending_exception(env: &mut JNIEnv<'_>) {
+    if matches!(env.exception_check(), Ok(true)) {
+        let _ = env.exception_clear();
+    }
 }
 
 #[cfg(test)]

@@ -40,10 +40,12 @@ internal data class UnderlyingNetworkState<K>(
 
 /**
  * Result of applying one event: the updated state and whether a reconnect should
- * be scheduled.
+ * be scheduled. [networkChanged] is true whenever [UnderlyingNetworkState.current]
+ * changed and should be published to DNS resolution.
  */
 internal data class UnderlyingNetworkTransition<K>(
     val state: UnderlyingNetworkState<K>,
+    val networkChanged: Boolean,
     val reconnect: Boolean,
 )
 
@@ -78,6 +80,7 @@ internal fun <K> applyUnderlyingNetworkEvent(
                 current = current,
                 primed = event is UnderlyingNetworkEvent.PrimingComplete,
             ),
+            networkChanged = current != state.current,
             reconnect = false,
         )
     }
@@ -87,24 +90,38 @@ internal fun <K> applyUnderlyingNetworkEvent(
             if (event.network != state.current) {
                 UnderlyingNetworkTransition(
                     state = state.copy(current = event.network),
+                    networkChanged = true,
                     reconnect = true,
                 )
             } else {
-                UnderlyingNetworkTransition(state = state, reconnect = false)
+                UnderlyingNetworkTransition(
+                    state = state,
+                    networkChanged = false,
+                    reconnect = false,
+                )
             }
 
         is UnderlyingNetworkEvent.Lost ->
             if (event.network == state.current) {
                 UnderlyingNetworkTransition(
                     state = state.copy(current = null),
+                    networkChanged = true,
                     reconnect = true,
                 )
             } else {
-                UnderlyingNetworkTransition(state = state, reconnect = false)
+                UnderlyingNetworkTransition(
+                    state = state,
+                    networkChanged = false,
+                    reconnect = false,
+                )
             }
 
         UnderlyingNetworkEvent.PrimingComplete ->
-            UnderlyingNetworkTransition(state = state, reconnect = false)
+            UnderlyingNetworkTransition(
+                state = state,
+                networkChanged = false,
+                reconnect = false,
+            )
     }
 }
 
@@ -127,23 +144,27 @@ internal fun <K> applyUnderlyingNetworkEvent(
  * unit-tested independently of the Android framework.
  *
  * @param context used to obtain the [ConnectivityManager].
- * @param onReconnect invoked on the main looper when a settled underlying-network
- * change is observed.
+ * @param onUnderlyingNetworkChanged invoked when the current underlying network
+ * changes, including during the initial priming window.
+ * @param onReconnect invoked on the main looper with the current underlying
+ * network when a settled underlying-network change is observed.
  */
 internal class NetworkChangeWatcher(
     context: Context,
     private val initialNetwork: Network?,
-    private val onReconnect: () -> Unit,
+    private val onUnderlyingNetworkChanged: (Network?) -> Unit,
+    private val onReconnect: (Network?) -> Unit,
 ) {
     private val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
-    private val debounceRunnable = Runnable { onReconnect() }
+    private val debounceRunnable = Runnable { onReconnect(pendingReconnectNetwork) }
     private val primingCompleteRunnable = Runnable {
         handleEvent(UnderlyingNetworkEvent.PrimingComplete)
     }
     private val lock = Any()
 
     private var registered = false
+    private var pendingReconnectNetwork: Network? = null
     private var state: UnderlyingNetworkState<Network> =
         UnderlyingNetworkState(current = initialNetwork, primed = false)
 
@@ -190,6 +211,7 @@ internal class NetworkChangeWatcher(
         synchronized(lock) {
             handler.removeCallbacks(debounceRunnable)
             handler.removeCallbacks(primingCompleteRunnable)
+            pendingReconnectNetwork = null
             state = UnderlyingNetworkState(current = null, primed = false)
             if (!registered) return
             registered = false
@@ -203,15 +225,19 @@ internal class NetworkChangeWatcher(
     }
 
     private fun handleEvent(event: UnderlyingNetworkEvent<Network>) {
-        val transition = synchronized(lock) {
+        synchronized(lock) {
             val result = applyUnderlyingNetworkEvent(event, state)
             state = result.state
-            result
-        }
 
-        if (transition.reconnect) {
-            handler.removeCallbacks(debounceRunnable)
-            handler.postDelayed(debounceRunnable, RECONNECT_DEBOUNCE_MS)
+            if (result.networkChanged) {
+                onUnderlyingNetworkChanged(result.state.current)
+            }
+
+            if (result.reconnect) {
+                handler.removeCallbacks(debounceRunnable)
+                pendingReconnectNetwork = result.state.current
+                handler.postDelayed(debounceRunnable, RECONNECT_DEBOUNCE_MS)
+            }
         }
     }
 

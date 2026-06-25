@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
+use crate::transport::host_resolver::SharedHostResolver;
 use crate::transport::socket_protector::SharedSocketProtector;
 use crate::{auth, transport, tun};
 
@@ -30,6 +31,7 @@ pub async fn run_client(
     mut tun_channels: tun::TunChannels,
     cancel: CancellationToken,
     socket_protector: SharedSocketProtector,
+    host_resolver: SharedHostResolver,
 ) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
     let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
@@ -40,6 +42,7 @@ pub async fn run_client(
         &metrics,
         &mut tun_channels,
         socket_protector,
+        host_resolver,
     )
     .await;
 
@@ -62,6 +65,7 @@ async fn run_sessions(
     metrics: &Arc<Metrics>,
     tun_channels: &mut tun::TunChannels,
     socket_protector: SharedSocketProtector,
+    host_resolver: SharedHostResolver,
 ) -> io::Result<()> {
     let mut backoff =
         ReconnectBackoff::new(config.timing.reconnect_min, config.timing.reconnect_max);
@@ -75,6 +79,7 @@ async fn run_sessions(
             &mut backoff,
             &mut attempt,
             socket_protector.clone(),
+            host_resolver.clone(),
         )
         .await
         {
@@ -87,6 +92,7 @@ async fn run_sessions(
                     cancel.clone(),
                     metrics.clone(),
                     socket_protector.clone(),
+                    host_resolver.clone(),
                 );
                 match handle_session_exit(session.run().await, cancel) {
                     SessionAction::Break => break Ok(()),
@@ -131,6 +137,7 @@ async fn try_connect(
     backoff: &mut ReconnectBackoff,
     attempt: &mut u64,
     socket_protector: SharedSocketProtector,
+    host_resolver: SharedHostResolver,
 ) -> ConnectOutcome {
     if cancel.is_cancelled() {
         return ConnectOutcome::Shutdown;
@@ -139,7 +146,7 @@ async fn try_connect(
     *attempt = attempt.saturating_add(1);
     info!(attempt, hostname = %config.network.hostname, port = config.network.port, "connecting");
 
-    match connect_authenticated(config, cancel, metrics, socket_protector).await {
+    match connect_authenticated(config, cancel, metrics, socket_protector, host_resolver).await {
         Ok(tcp) => ConnectOutcome::Connected(tcp),
         Err(err) => {
             if cancel.is_cancelled() {
@@ -323,12 +330,13 @@ async fn connect_authenticated(
     cancel: &CancellationToken,
     metrics: &Arc<Metrics>,
     socket_protector: SharedSocketProtector,
+    host_resolver: SharedHostResolver,
 ) -> io::Result<transport::tcp::TcpSession> {
     let mut tcp = tokio::select! {
         () = cancel.cancelled() => {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "connect cancelled"));
         }
-        res = transport::tcp::connect(config, metrics.clone(), socket_protector) => res,
+        res = transport::tcp::connect(config, metrics.clone(), socket_protector, host_resolver) => res,
     }?;
 
     info!(peer = ?tcp.peer, sni = ?tcp.sni, "tcp handshake complete");

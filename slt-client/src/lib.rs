@@ -28,6 +28,9 @@ mod test_support;
 mod test_integration;
 
 pub use runtime::run_client;
+pub use transport::host_resolver::{
+    HostResolver, SharedHostResolver, TokioHostResolver, default_host_resolver,
+};
 pub use transport::socket_protector::{
     NoopSocketProtector, SharedSocketProtector, SocketKind, SocketProtector, noop_socket_protector,
 };

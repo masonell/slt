@@ -32,6 +32,7 @@ use tracing::{debug, info, warn};
 
 use super::ReconnectBackoff;
 use crate::metrics::Metrics;
+use crate::transport::host_resolver::SharedHostResolver;
 use crate::transport::quic_discovery as quic;
 use crate::transport::socket_protector::SharedSocketProtector;
 use crate::transport::tcp::{TcpSession, TcpTransport};
@@ -58,6 +59,7 @@ pub(super) struct ClientSession<'a> {
     discovery_task: Option<JoinHandle<Option<quic::QuicIds>>>,
     metrics: Arc<Metrics>,
     socket_protector: SharedSocketProtector,
+    host_resolver: SharedHostResolver,
     /// Whether the TCP connection is still usable. Set to false when TCP closes
     /// while UDP-QSP is active, allowing the session to continue on UDP alone.
     tcp_alive: bool,
@@ -76,6 +78,7 @@ impl<'a> ClientSession<'a> {
         cancel: CancellationToken,
         metrics: Arc<Metrics>,
         socket_protector: SharedSocketProtector,
+        host_resolver: SharedHostResolver,
     ) -> Self {
         let now = Instant::now();
         let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
@@ -117,6 +120,7 @@ impl<'a> ClientSession<'a> {
             discovery_task: None,
             metrics,
             socket_protector,
+            host_resolver,
             tcp_alive: true,
         }
     }

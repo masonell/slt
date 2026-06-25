@@ -8,11 +8,12 @@ use slt_core::config::ClientConfig;
 use slt_core::crypto::quic_client_chrome_config_with_ca;
 use slt_core::types::cid::CidError;
 use slt_core::types::{Cid, MAX_DCID_LEN};
-use tokio::net::{UdpSocket, lookup_host};
+use tokio::net::UdpSocket;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
+use crate::transport::host_resolver::SharedHostResolver;
 use crate::transport::socket_protector::{SharedSocketProtector, SocketKind, SocketProtector};
 
 const QUIC_MAX_DATAGRAM: usize = 1350;
@@ -50,6 +51,7 @@ pub async fn discover_quic_ids(
     cancel: &CancellationToken,
     peer_override: Option<SocketAddr>,
     socket_protector: SharedSocketProtector,
+    host_resolver: SharedHostResolver,
 ) -> io::Result<QuicIds> {
     if config.network.hostname.is_empty() {
         return Err(io::Error::new(
@@ -58,7 +60,7 @@ pub async fn discover_quic_ids(
         ));
     }
 
-    let peers = resolve_peers(config, peer_override).await?;
+    let peers = resolve_peers(config, peer_override, host_resolver.as_ref()).await?;
     let mut last_err = None;
     for peer in peers {
         match Box::pin(discover_quic_ids_for_peer(
@@ -84,6 +86,7 @@ pub async fn discover_quic_ids(
 async fn resolve_peers(
     config: &ClientConfig,
     peer_override: Option<SocketAddr>,
+    host_resolver: &dyn crate::transport::host_resolver::HostResolver,
 ) -> io::Result<Vec<SocketAddr>> {
     if let Some(peer) = peer_override {
         return Ok(vec![peer]);
@@ -93,17 +96,9 @@ async fn resolve_peers(
         return Ok(vec![SocketAddr::new(ip, config.network.port)]);
     }
 
-    let addrs: Vec<SocketAddr> =
-        lookup_host((config.network.hostname.as_str(), config.network.port))
-            .await?
-            .collect();
-    if addrs.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "dns lookup returned no addresses",
-        ));
-    }
-    Ok(addrs)
+    host_resolver
+        .resolve(config.network.hostname.as_str(), config.network.port)
+        .await
 }
 
 async fn discover_quic_ids_for_peer(

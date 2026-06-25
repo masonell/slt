@@ -30,6 +30,7 @@ class SltVpnService : VpnService() {
     @Volatile private var sessionGeneration: Int = 0
     @Volatile private var reconnecting: Boolean = false
     @Volatile private var reconnectAttempt: Int = 0
+    @Volatile private var activeUnderlyingNetwork: Network? = null
     private var terminalStatusReported = false
     private var activeProfileToml: String? = null
     private var activeTunMtu: Int = 0
@@ -93,6 +94,7 @@ class SltVpnService : VpnService() {
             val summary = validateProfile(profile)
             val initialUnderlyingNetwork =
                 getSystemService(ConnectivityManager::class.java)?.activeNetwork
+            activeUnderlyingNetwork = initialUnderlyingNetwork
 
             activeProfileToml = profile.clientToml
             activeTunMtu = summary.tunMtu
@@ -124,8 +126,21 @@ class SltVpnService : VpnService() {
     }
 
     private fun startNetworkWatcher(initialNetwork: Network?) {
-        networkWatcher = NetworkChangeWatcher(this, initialNetwork) { reconnect() }
+        networkWatcher = NetworkChangeWatcher(
+            this,
+            initialNetwork,
+            ::publishUnderlyingNetwork,
+        ) { network -> reconnect(network) }
         networkWatcher?.start()
+    }
+
+    private fun publishUnderlyingNetwork(network: Network?) {
+        synchronized(stateLock) {
+            if (tunFd == null && nativeHandle == 0L && !reconnecting) {
+                return
+            }
+            activeUnderlyingNetwork = network
+        }
     }
 
     private fun loadActiveProfile(): SltProfile =
@@ -147,6 +162,7 @@ class SltVpnService : VpnService() {
     private fun cleanupVpn() {
         networkWatcher?.stop()
         networkWatcher = null
+        activeUnderlyingNetwork = null
         reconnectScope.cancel()
         synchronized(stateLock) { reconnecting = false }
         stopNativeClient()
@@ -192,9 +208,13 @@ class SltVpnService : VpnService() {
     /// Reconnect over the existing TUN fd after the underlying network changed.
     /// Guards run on the main thread; the blocking stop/start runs on the
     /// reconnect scope. The TUN interface, routes, and app rules are left intact.
-    private fun reconnect() {
+    private fun reconnect(network: Network?) {
         synchronized(stateLock) {
-            if (nativeHandle == 0L || tunFd == null || reconnecting) {
+            if (tunFd == null || (nativeHandle == 0L && !reconnecting)) {
+                return
+            }
+            activeUnderlyingNetwork = network
+            if (reconnecting) {
                 return
             }
             if (SltVpnStatusBus.state.value.status != VpnStatus.Running) {
@@ -290,6 +310,23 @@ class SltVpnService : VpnService() {
                     Log.w(TAG, "Failed to protect SLT socket: fd=$fd", error)
                     false
                 }
+
+            override fun resolveHost(hostname: String): Array<String> {
+                val network = activeUnderlyingNetwork
+                    ?: throw IllegalStateException("No underlying network available for DNS")
+                return try {
+                    val addresses = network.getAllByName(hostname)
+                        .mapNotNull { it.hostAddress }
+                        .toTypedArray()
+                    if (addresses.isEmpty()) {
+                        throw IllegalStateException("No addresses returned for $hostname")
+                    }
+                    addresses
+                } catch (error: Exception) {
+                    Log.w(TAG, "Failed to resolve $hostname on underlying network", error)
+                    throw RuntimeException("Failed to resolve $hostname on underlying network", error)
+                }
+            }
         }
 
     private fun handleNativeStatus(status: String, detail: String?) {

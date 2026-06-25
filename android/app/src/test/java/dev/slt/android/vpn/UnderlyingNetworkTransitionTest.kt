@@ -16,6 +16,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Available("wifi"), unprimed)
 
         assertFalse(transition.reconnect)
+        assertTrue(transition.networkChanged)
         assertFalse(transition.state.primed)
         assertEquals("wifi", transition.state.current)
     }
@@ -25,6 +26,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Lost("wifi"), unprimed)
 
         assertFalse(transition.reconnect)
+        assertFalse(transition.networkChanged)
         assertFalse(transition.state.primed)
         assertNull(transition.state.current)
     }
@@ -37,6 +39,7 @@ class UnderlyingNetworkTransitionTest {
         )
 
         assertFalse(transition.reconnect)
+        assertFalse(transition.networkChanged)
         assertTrue(transition.state.primed)
         assertEquals("wifi", transition.state.current)
     }
@@ -48,6 +51,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Available("cellular"), capturedWifi)
 
         assertFalse(transition.reconnect)
+        assertFalse(transition.networkChanged)
         assertFalse(transition.state.primed)
         assertEquals("wifi", transition.state.current)
     }
@@ -62,7 +66,9 @@ class UnderlyingNetworkTransitionTest {
         )
 
         assertFalse(extraAvailable.reconnect)
+        assertFalse(extraAvailable.networkChanged)
         assertFalse(primed.reconnect)
+        assertFalse(primed.networkChanged)
         assertTrue(primed.state.primed)
         assertEquals("wifi", primed.state.current)
     }
@@ -74,6 +80,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Available("cellular"), primed)
 
         assertTrue(transition.reconnect)
+        assertTrue(transition.networkChanged)
         assertEquals("cellular", transition.state.current)
     }
 
@@ -84,6 +91,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Available("wifi"), primed)
 
         assertFalse(transition.reconnect)
+        assertFalse(transition.networkChanged)
         assertEquals("wifi", transition.state.current)
     }
 
@@ -94,6 +102,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Lost("wifi"), primed)
 
         assertTrue(transition.reconnect)
+        assertTrue(transition.networkChanged)
         assertNull(transition.state.current)
     }
 
@@ -105,6 +114,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Lost("cellular"), primed)
 
         assertFalse(transition.reconnect)
+        assertFalse(transition.networkChanged)
         assertEquals("wifi", transition.state.current)
     }
 
@@ -115,6 +125,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Available("cellular"), lost)
 
         assertTrue(transition.reconnect)
+        assertTrue(transition.networkChanged)
         assertEquals("cellular", transition.state.current)
     }
 
@@ -127,6 +138,7 @@ class UnderlyingNetworkTransitionTest {
         val transition = applyUnderlyingNetworkEvent(Lost("wifi"), onCellular)
 
         assertFalse(transition.reconnect)
+        assertFalse(transition.networkChanged)
         assertEquals("cellular", transition.state.current)
     }
 }
