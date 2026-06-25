@@ -134,30 +134,16 @@ internal fun ProfileEditorScreen(
 
     if (editorState.activeNestedScreen == ProfileEditorNestedScreen.Apps) {
         AppRulesEditorScreen(
-            appMode = editorState.appMode,
-            selectedPackageNames = editorState.selectedPackageNames,
-            appMessage = editorState.appMessage,
+            initialMode = editorState.appMode,
+            initialPackages = editorState.selectedPackageNames,
             ownPackageName = context.packageName,
-            onAppModeChange = {
+            onApply = { mode, packages ->
                 editorState = editorState.copy(
-                    appMode = it,
-                    appMessage = null,
+                    appMode = mode,
+                    selectedPackageNames = packages,
+                    activeNestedScreen = null,
+                    message = null,
                 )
-            },
-            onSelectedPackageNamesChange = {
-                editorState = editorState.copy(
-                    selectedPackageNames = it,
-                    appMessage = null,
-                )
-            },
-            onApply = {
-                when (val result = normalizeProfileEditorAppsForSave(editorState, context.packageName)) {
-                    is ProfileEditorActionResult.Success -> editorState = result.state.copy(
-                        activeNestedScreen = null,
-                        message = null,
-                    )
-                    is ProfileEditorActionResult.Failure -> editorState = result.state
-                }
             },
             onCancel = {
                 editorState = editorState.withClosedNestedScreen()
