@@ -2,6 +2,7 @@ package dev.slt.android.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -55,7 +56,7 @@ internal fun SltApp(
 
     SltTheme {
         Surface(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().imePadding(),
             color = MaterialTheme.colorScheme.background,
         ) {
             when (val currentScreen = screen) {
