@@ -1,6 +1,11 @@
 package dev.slt.android.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.material3.MaterialTheme
@@ -59,7 +64,12 @@ internal fun SltApp(
             modifier = Modifier.fillMaxSize().imePadding(),
             color = MaterialTheme.colorScheme.background,
         ) {
-            when (val currentScreen = screen) {
+            AnimatedContent(
+                targetState = screen,
+                transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(220)) },
+                label = "screen",
+            ) { currentScreen ->
+            when (currentScreen) {
                 AppScreen.Main -> MainScreenRoute(
                     vpnState = vpnState,
                     profileState = profileState,
@@ -145,6 +155,7 @@ internal fun SltApp(
                         screen = AppScreen.Main
                     },
                 )
+            }
             }
         }
     }

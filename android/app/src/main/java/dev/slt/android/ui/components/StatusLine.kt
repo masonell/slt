@@ -1,5 +1,7 @@
 package dev.slt.android.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -68,14 +70,16 @@ internal fun StatusLine(
 }
 
 @Composable
-private fun statusColor(status: VpnStatus): Color =
-    when (status) {
+private fun statusColor(status: VpnStatus): Color {
+    val target = when (status) {
         VpnStatus.Running -> MaterialTheme.colorScheme.primary
         VpnStatus.Starting, VpnStatus.Reconnecting ->
             if (isSystemInDarkTheme()) StatusConnectingDark else StatusConnectingLight
         VpnStatus.Error -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+    return animateColorAsState(target, tween(300), label = "statusColor").value
+}
 
 private fun statusLabel(status: VpnStatus): String =
     when (status) {
