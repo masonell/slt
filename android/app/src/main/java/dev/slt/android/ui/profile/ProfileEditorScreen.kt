@@ -42,12 +42,10 @@ import androidx.compose.ui.unit.dp
 import dev.slt.android.SltNative
 import dev.slt.android.profile.AppVpnMode
 import dev.slt.android.profile.DnsMode
-import dev.slt.android.profile.rules.exportVpnRouteRules
 import dev.slt.android.profile.rules.parseDnsSettings
 import dev.slt.android.profile.rules.parseTestUrls
 import dev.slt.android.profile.rules.parseVpnRouteRules
 import dev.slt.android.profile.store.ProfileRepository
-import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.copySensitiveText
 import kotlinx.coroutines.launch
 
@@ -99,38 +97,15 @@ internal fun ProfileEditorScreen(
 
     if (editorState.activeNestedScreen == ProfileEditorNestedScreen.Routes) {
         RouteEditorScreen(
-            routeText = editorState.routeText,
-            routeMessage = editorState.routeMessage,
-            onRouteTextChange = {
+            initialText = editorState.routeText,
+            onApply = { committed ->
                 editorState = editorState.copy(
-                    routeText = it,
-                    routeMessage = null,
+                    routeText = committed,
+                    activeNestedScreen = null,
+                    message = null,
                 )
             },
-            onApply = {
-                when (val result = parseProfileEditorRoutesForSave(editorState)) {
-                    is ProfileEditorActionResult.Success -> editorState = result.state.copy(
-                        activeNestedScreen = null,
-                        message = null,
-                    )
-                    is ProfileEditorActionResult.Failure -> editorState = result.state
-                }
-            },
-            onCopy = {
-                try {
-                    val routes = parseVpnRouteRules(editorState.routeText)
-                    val normalizedRoutes = exportVpnRouteRules(routes)
-                    context.copySensitiveText("SLT routes", normalizedRoutes)
-                    editorState = editorState.copy(
-                        routeText = normalizedRoutes,
-                        routeMessage = UiMessage.info("Routes copied"),
-                    )
-                } catch (error: IllegalArgumentException) {
-                    editorState = editorState.copy(
-                        routeMessage = UiMessage.error(error.message ?: "Invalid routes"),
-                    )
-                }
-            },
+            onCopy = { context.copySensitiveText("SLT routes", it) },
             onCancel = {
                 editorState = editorState.withClosedNestedScreen()
             },
