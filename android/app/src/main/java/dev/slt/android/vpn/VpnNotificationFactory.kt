@@ -49,11 +49,12 @@ internal class VpnNotificationFactory(
 
         return NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_vpn)
+            .setColor(context.getColor(R.color.slt_primary))
             .setContentTitle(status)
             .setContentIntent(openIntent)
             .setOngoing(true)
             .setSilent(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, context.getString(R.string.vpn_action_stop), stopIntent)
+            .addAction(0, context.getString(R.string.vpn_action_stop), stopIntent)
             .build()
     }
 
