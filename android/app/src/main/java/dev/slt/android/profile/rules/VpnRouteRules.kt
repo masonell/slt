@@ -32,8 +32,7 @@ fun parseVpnRouteRules(text: String): List<VpnRouteRule> {
     }
 
     val deduplicatedRoutes = routesByListAndCidr.values.toList()
-    return deduplicatedRoutes
-        .filterNot { route -> route.isCoveredBySameActionRoute(deduplicatedRoutes) }
+    return removeRoutesCoveredBySameActionAncestor(deduplicatedRoutes)
         .sortedWith(parsedRouteComparator)
         .map { it.rule }
 }
@@ -79,6 +78,25 @@ private data class ParsedVpnRouteRule(
         result = 31 * result + addressFamily
         result = 31 * result + networkBytes.contentHashCode()
         result = 31 * result + prefixLength
+        return result
+    }
+}
+
+private data class RoutePrefixKey(
+    val addressFamily: Int,
+    val prefixLength: Int,
+    val networkBytes: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is RoutePrefixKey &&
+            addressFamily == other.addressFamily &&
+            prefixLength == other.prefixLength &&
+            networkBytes.contentEquals(other.networkBytes)
+
+    override fun hashCode(): Int {
+        var result = addressFamily
+        result = 31 * result + prefixLength
+        result = 31 * result + networkBytes.contentHashCode()
         return result
     }
 }
@@ -202,24 +220,36 @@ private fun compareNetworkBytes(left: ByteArray, right: ByteArray): Int {
     return 0
 }
 
-private fun ParsedVpnRouteRule.isCoveredBySameActionRoute(routes: List<ParsedVpnRouteRule>): Boolean =
-    routes.any { candidate ->
-        candidate.rule.excluded == rule.excluded &&
-            candidate.prefixLength < prefixLength &&
-            candidate.covers(this) &&
-            !hasOppositeActionRouteBetween(candidate, routes)
-    }
+private fun removeRoutesCoveredBySameActionAncestor(routes: List<ParsedVpnRouteRule>): List<ParsedVpnRouteRule> {
+    val actionsByPrefix = mutableMapOf<RoutePrefixKey, Boolean>()
+    return routes
+        .sortedWith(compareBy<ParsedVpnRouteRule> { it.addressFamily }.thenBy { it.prefixLength })
+        .mapNotNull { route ->
+            val inheritedAction = route.nearestCoveringRouteAction(actionsByPrefix)
+            actionsByPrefix[route.prefixKey()] = route.rule.excluded
+            route.takeUnless { inheritedAction == route.rule.excluded }
+        }
+}
 
-private fun ParsedVpnRouteRule.hasOppositeActionRouteBetween(
-    coveringRoute: ParsedVpnRouteRule,
-    routes: List<ParsedVpnRouteRule>,
-): Boolean =
-    routes.any { candidate ->
-        candidate.rule.excluded != rule.excluded &&
-            candidate.prefixLength > coveringRoute.prefixLength &&
-            candidate.prefixLength < prefixLength &&
-            candidate.covers(this)
+private fun ParsedVpnRouteRule.nearestCoveringRouteAction(
+    actionsByPrefix: Map<RoutePrefixKey, Boolean>,
+): Boolean? {
+    for (candidatePrefixLength in prefixLength - 1 downTo 0) {
+        val key = prefixKey(candidatePrefixLength)
+        val action = actionsByPrefix[key]
+        if (action != null) {
+            return action
+        }
     }
+    return null
+}
+
+private fun ParsedVpnRouteRule.prefixKey(prefixLength: Int = this.prefixLength): RoutePrefixKey =
+    RoutePrefixKey(
+        addressFamily = addressFamily,
+        prefixLength = prefixLength,
+        networkBytes = maskedNetworkBytes(networkBytes, prefixLength),
+    )
 
 private fun ParsedVpnRouteRule.covers(other: ParsedVpnRouteRule): Boolean =
     addressFamily == other.addressFamily &&
