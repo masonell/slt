@@ -84,6 +84,11 @@ internal fun SltApp(
                 AppScreen.Profiles -> ProfilesScreen(
                     profileState = profileState,
                     message = message,
+                    onBack = {
+                        message = null
+                        screen = AppScreen.Main
+                    },
+                    onDismissMessage = { message = null },
                     onAdd = {
                         message = null
                         screen = AppScreen.EditProfile(null)
