@@ -10,7 +10,7 @@ SLT is a VPN implementation that multiplexes VPN traffic with standard web traff
 - **slt-cli**: WireGuard-style management CLI (`slt` binary) for project init, key/cert generation, client management, and config validation
 - **slt-tools**: CLI utilities for generating TLS/QUIC ClientHello packets
 
-The Android client skeleton lives in `android/` as a standalone Kotlin/Compose Gradle project. It owns Android platform integration such as `VpnService`, VPN permission flow, foreground service lifecycle, and TUN fd creation.
+The Android client lives in `android/` as a standalone Kotlin/Compose Gradle project. It owns Android platform integration such as `VpnService`, VPN permission flow, foreground service lifecycle, and TUN fd creation, plus a full UI: main screen (Start/Stop hero, profile switcher, status, connection-test results sheet), profiles list, profile editor with sub-editors (TOML, routes, DNS, apps, test URLs), and a log viewer. The UI uses a custom green-accented dark-first Material 3 theme.
 
 ### Key Protocol Concepts
 
@@ -36,9 +36,14 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 - `slt-server/src/` provides the `server` binary plus server library modules (`auth`, `sessions`, `quic`, `tcp`, `tun`, `registry`, `router`, `udp_qsp`, `metrics`).
 - `slt-cli/src/` is the `slt` management binary (project init, key/cert generation, client add/remove/list/show, config validation).
 - `slt-tools/src/bin/` contains helper CLIs (`tcp_client_hello`, `quic_client_hello`).
-- `android/` contains the Android VPN client skeleton:
-    - `android/app/src/main/java/dev/slt/android/` holds the Kotlin/Compose UI and `VpnService`.
+- `android/` contains the Android VPN client:
+    - `android/app/src/main/java/dev/slt/android/` holds the Kotlin/Compose UI, `VpnService`, and JNI bridge.
+    - `android/app/src/main/java/dev/slt/android/ui/` contains the screen tree: `main/` (main screen + route + connection test), `profiles/` (profiles list), `profile/` (editor hub + sub-editors: TOML, routes, DNS, apps, test URLs), `log/` (log viewer), `components/` (shared StartStopButton, StatusLine), and `theme/` (Color/Type/Shape/Theme tokens).
+    - `android/app/src/main/java/dev/slt/android/vpn/` contains `SltVpnService`, `VpnNotificationFactory`, `VpnProfileApplier`, `NetworkChangeWatcher`, and `VpnStatus`.
+    - `android/app/src/main/java/dev/slt/android/connection/` contains `ConnectionTestRunner` (streaming concurrent URL tests via OkHttp).
+    - `android/app/src/main/java/dev/slt/android/profile/` contains profile models, the profile repository, and validation rules.
     - `android/app/src/main/AndroidManifest.xml` declares VPN and foreground-service integration.
+    - `android/app/src/main/res/` contains the adaptive launcher icon (elephant foreground + monochrome), the VPN notification icon, DayNight themes, and the splash screen.
     - `android/*.gradle.kts` and `android/gradle.properties` configure the standalone Android Gradle build.
 - `vendor/` includes patched dependencies (`boring`, `boring-sys`, `quiche`).
 - `scripts/` holds local capture helpers (e.g., `scripts/chrome-*.sh`).
