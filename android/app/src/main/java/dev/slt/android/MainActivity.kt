@@ -3,7 +3,6 @@ package dev.slt.android
 import android.Manifest
 import android.content.pm.PackageManager
 import android.net.VpnService
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -47,7 +46,6 @@ class MainActivity : ComponentActivity() {
 
     private fun requestStart() {
         if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -70,11 +68,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startVpnService() {
         val intent = SltVpnService.startIntent(this)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ContextCompat.startForegroundService(this, intent)
-        } else {
-            startService(intent)
-        }
+        ContextCompat.startForegroundService(this, intent)
     }
 
     private fun stopVpnService() {

@@ -268,25 +268,30 @@ private fun LogScrollbar(
             .width(4.dp)
             .draggable(dragState, Orientation.Vertical),
     ) {
-        val info = listState.layoutInfo
-        val total = info.totalItemsCount
-        val visible = info.visibleItemsInfo
+        val metrics by remember {
+            derivedStateOf {
+                val info = listState.layoutInfo
+                val total = info.totalItemsCount
+                val visible = info.visibleItemsInfo
+                val thumbFraction = if (total > 0) {
+                    (visible.size.toFloat() / total).coerceIn(0.05f, 1f)
+                } else {
+                    0f
+                }
+                val topFraction = if (total > visible.size && visible.isNotEmpty()) {
+                    (visible.first().index.toFloat() / (total - visible.size)).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
+                ScrollbarMetrics(thumbFraction, topFraction)
+            }
+        }
         val trackPx = constraints.maxHeight.toFloat()
-        val thumbFraction = if (total > 0) {
-            (visible.size.toFloat() / total).coerceIn(0.05f, 1f)
-        } else {
-            0f
-        }
-        val topFraction = if (total > visible.size && visible.isNotEmpty()) {
-            (visible.first().index.toFloat() / (total - visible.size)).coerceIn(0f, 1f)
-        } else {
-            0f
-        }
-        val thumbPx = trackPx * thumbFraction
-        val offsetPx = topFraction * (trackPx - thumbPx)
+        val thumbPx = trackPx * metrics.thumbFraction
+        val offsetPx = metrics.topFraction * (trackPx - thumbPx)
         Box(
             Modifier
-                .fillMaxHeight(thumbFraction)
+                .fillMaxHeight(metrics.thumbFraction)
                 .width(4.dp)
                 .offset { IntOffset(0, offsetPx.roundToInt()) }
                 .clip(RoundedCornerShape(2.dp))
@@ -294,6 +299,11 @@ private fun LogScrollbar(
         )
     }
 }
+
+private data class ScrollbarMetrics(
+    val thumbFraction: Float,
+    val topFraction: Float,
+)
 
 private const val POLL_MS = 500L
 

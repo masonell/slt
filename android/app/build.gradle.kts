@@ -36,6 +36,22 @@ android {
             jniLibs.srcDir(rustJniLibsDir)
         }
     }
+
+    lint {
+        warningsAsErrors = true
+        enable += setOf(
+            "ComposableLambdaParameterNaming",
+            "ComposableLambdaParameterPosition",
+            "StopShip",
+        )
+
+        // API 36 is not installed in the local SDK yet; keep these visible in
+        // reports without making normal lint fail.
+        informational += setOf(
+            "GradleDependency",
+            "OldTargetApi",
+        )
+    }
 }
 
 val buildRustNative by tasks.registering(Exec::class) {

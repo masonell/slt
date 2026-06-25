@@ -29,10 +29,10 @@ import dev.slt.android.vpn.VpnStatus
 @Composable
 internal fun StatusLine(
     status: VpnStatus,
+    modifier: Modifier = Modifier,
     detail: String? = null,
     transport: String? = null,
     duration: String? = null,
-    modifier: Modifier = Modifier,
 ) {
     Column(
         modifier = modifier,
