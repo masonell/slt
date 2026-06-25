@@ -138,14 +138,18 @@ internal fun MainScreen(
                                     )
                                 }
                             }
-                            IconButton(
-                                onClick = onOpenProfiles,
-                                modifier = Modifier.size(40.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Settings,
-                                    contentDescription = "Manage profiles",
-                                )
+                            if (!stopping) {
+                                IconButton(
+                                    onClick = onOpenProfiles,
+                                    modifier = Modifier.size(40.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Settings,
+                                        contentDescription = "Manage profiles",
+                                    )
+                                }
+                            } else {
+                                Box(modifier = Modifier.size(width = 12.dp, height = 40.dp))
                             }
                         }
                     }
