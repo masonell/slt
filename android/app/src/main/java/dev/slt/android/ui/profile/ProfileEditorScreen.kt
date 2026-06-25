@@ -212,22 +212,13 @@ internal fun ProfileEditorScreen(
 
     if (editorState.activeNestedScreen == ProfileEditorNestedScreen.TestUrls) {
         TestUrlsEditorScreen(
-            testUrlsText = editorState.testUrlsText,
-            testUrlsMessage = editorState.testUrlsMessage,
-            onTestUrlsTextChange = {
+            initialText = editorState.testUrlsText,
+            onApply = { committed ->
                 editorState = editorState.copy(
-                    testUrlsText = it,
-                    testUrlsMessage = null,
+                    testUrlsText = committed,
+                    activeNestedScreen = null,
+                    message = null,
                 )
-            },
-            onApply = {
-                when (val result = parseProfileEditorTestUrlsForSave(editorState)) {
-                    is ProfileEditorActionResult.Success -> editorState = result.state.copy(
-                        activeNestedScreen = null,
-                        message = null,
-                    )
-                    is ProfileEditorActionResult.Failure -> editorState = result.state
-                }
             },
             onCancel = {
                 editorState = editorState.withClosedNestedScreen()

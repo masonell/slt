@@ -29,9 +29,9 @@ import androidx.compose.ui.unit.dp
 import dev.slt.android.ConfigValidationResult
 
 /**
- * Raw SLT client TOML editor. Edits a local buffer; the Save action validates it
- * and commits only if valid (otherwise the error is shown as a Snackbar), so the
- * committed TOML is always valid. Cancel discards the buffer.
+ * Raw SLT client TOML editor. Edits a local buffer; the Apply action validates
+ * it and commits only if valid (otherwise the error is shown as a Snackbar), so
+ * the committed TOML is always valid. Cancel discards the buffer.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -81,7 +81,7 @@ internal fun TomlEditorScreen(
                             error = result.error ?: "Invalid config"
                         }
                     }) {
-                        Text("Save")
+                        Text("Apply")
                     }
                 },
             )
