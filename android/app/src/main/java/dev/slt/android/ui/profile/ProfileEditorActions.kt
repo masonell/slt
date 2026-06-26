@@ -58,10 +58,9 @@ internal fun validateProfileEditorToml(
     return ProfileEditorValidationResult(
         state = state.copy(
             validation = result,
-            message = if (result.isValid) {
-                UiMessage.info("Config is valid")
-            } else {
-                UiMessage.error(result.error ?: "Invalid config")
+            message = when (result) {
+                is ConfigValidationResult.Valid -> UiMessage.info("Config is valid")
+                is ConfigValidationResult.Invalid -> UiMessage.error(result.message)
             },
         ),
         validation = result,
@@ -198,8 +197,9 @@ internal fun prepareProfileEditorSave(
 
     val validationResult = validateProfileEditorToml(state, validateClientConfig)
     var currentState = validationResult.state
-    if (!validationResult.validation.isValid) {
-        return ProfileEditorSaveResult.Blocked(currentState)
+    when (validationResult.validation) {
+        is ConfigValidationResult.Valid -> Unit
+        is ConfigValidationResult.Invalid -> return ProfileEditorSaveResult.Blocked(currentState)
     }
 
     val routes = when (val result = parseProfileEditorRoutesForSave(currentState)) {

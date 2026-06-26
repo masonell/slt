@@ -75,10 +75,9 @@ internal fun TomlEditorScreen(
                     }
                     TextButton(onClick = {
                         val result = validate(buffer)
-                        if (result.isValid) {
-                            onApply(buffer, result)
-                        } else {
-                            error = result.error ?: "Invalid config"
+                        when (result) {
+                            is ConfigValidationResult.Valid -> onApply(buffer, result)
+                            is ConfigValidationResult.Invalid -> error = result.message
                         }
                     }) {
                         Text("Apply")

@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.ParcelFileDescriptor
 import android.os.Looper
 import android.util.Log
+import dev.slt.android.ConfigValidationResult
 import dev.slt.android.SltNative
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
@@ -148,8 +149,10 @@ class SltVpnService : VpnService() {
         } ?: error("No active profile")
 
     private fun validateProfile(profile: SltProfile): ClientConfigSummary {
-        val result = SltNative.validateClientConfig(profile.clientToml)
-        return result.summary ?: error(result.error ?: "Invalid active profile config")
+        return when (val result = SltNative.validateClientConfig(profile.clientToml)) {
+            is ConfigValidationResult.Valid -> result.summary
+            is ConfigValidationResult.Invalid -> error(result.message)
+        }
     }
 
     private fun stopVpn(detail: String) {

@@ -1,6 +1,7 @@
 package dev.slt.android
 
 import dev.slt.android.uniffi.ClientConfigSummary
+import dev.slt.android.uniffi.SltInteropException
 import dev.slt.android.uniffi.validateClientConfig as validateClientConfigUniFfi
 
 object SltNative {
@@ -27,12 +28,11 @@ object SltNative {
 
     fun validateClientConfig(configToml: String): ConfigValidationResult =
         try {
-            ConfigValidationResult(
-                summary = validateClientConfigUniFfi(configToml),
-                error = null,
-            )
+            ConfigValidationResult.Valid(validateClientConfigUniFfi(configToml))
+        } catch (error: SltInteropException.InvalidConfig) {
+            ConfigValidationResult.Invalid(error.detail.ifBlank { "Invalid config" })
         } catch (error: Exception) {
-            ConfigValidationResult(summary = null, error = error.message ?: "Invalid config")
+            ConfigValidationResult.Invalid(error.message ?: "Invalid config")
         }
 
     interface NativeCallback {
@@ -58,10 +58,8 @@ object SltNative {
     private external fun nativeStop(handle: Long)
 }
 
-data class ConfigValidationResult(
-    val summary: ClientConfigSummary?,
-    val error: String?,
-) {
-    val isValid: Boolean
-        get() = summary != null
+sealed class ConfigValidationResult {
+    data class Valid(val summary: ClientConfigSummary) : ConfigValidationResult()
+
+    data class Invalid(val message: String) : ConfigValidationResult()
 }

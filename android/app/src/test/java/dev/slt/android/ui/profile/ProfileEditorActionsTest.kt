@@ -124,10 +124,7 @@ class ProfileEditorActionsTest {
             ),
             ownPackageName = "dev.slt.android",
             validateClientConfig = {
-                ConfigValidationResult(
-                    summary = null,
-                    error = "Invalid config",
-                )
+                ConfigValidationResult.Invalid("Invalid config")
             },
         )
 
@@ -170,14 +167,13 @@ class ProfileEditorActionsTest {
     }
 
     private fun validValidation(): ConfigValidationResult =
-        ConfigValidationResult(
-            summary = ClientConfigSummary(
+        ConfigValidationResult.Valid(
+            ClientConfigSummary(
                 assignedIpv4 = "10.0.0.2",
                 tunMtu = 1400,
                 serverHost = "vpn.example.com",
                 serverPort = 443,
                 clientId = "client-id",
             ),
-            error = null,
         )
 }

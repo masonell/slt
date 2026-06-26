@@ -39,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.slt.android.ConfigValidationResult
 import dev.slt.android.SltNative
 import dev.slt.android.profile.AppVpnMode
 import dev.slt.android.profile.DnsMode
@@ -337,7 +338,7 @@ private fun tomlCardSummary(state: ProfileEditorState): String {
     val validation = state.validation
     return when {
         state.toml.isBlank() -> "Not set"
-        validation?.summary != null ->
+        validation is ConfigValidationResult.Valid ->
             "Server ${validation.summary.serverHost}:${validation.summary.serverPort}"
         else -> "Not validated"
     }
