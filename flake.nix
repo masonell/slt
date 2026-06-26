@@ -50,6 +50,7 @@
             nasm
             openssl
             # misc tooling
+            android-tools
             fish
             tshark
             nssTools
