@@ -30,6 +30,7 @@ tracing-appender = "0.2"
 tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tun-rs = { version = "2.7", features = ["async_tokio"] }
+uniffi = { version = "=0.31.2", default-features = false }
 thiserror = "2.0"
 anyhow = "1.0"
 num_enum = "0.7"

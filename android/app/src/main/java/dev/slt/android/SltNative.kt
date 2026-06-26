@@ -1,6 +1,7 @@
 package dev.slt.android
 
-import org.json.JSONObject
+import dev.slt.android.uniffi.ClientConfigSummary
+import dev.slt.android.uniffi.validateClientConfig as validateClientConfigUniFfi
 
 object SltNative {
     init {
@@ -26,18 +27,11 @@ object SltNative {
 
     fun validateClientConfig(configToml: String): ConfigValidationResult =
         try {
-            val json = JSONObject(nativeValidateClientConfig(configToml))
             ConfigValidationResult(
-                summary = ClientConfigSummary(
-                    assignedIpv4 = json.getString("assignedIpv4"),
-                    tunMtu = json.getInt("tunMtu"),
-                    serverHost = json.getString("serverHost"),
-                    serverPort = json.getInt("serverPort"),
-                    clientId = json.getString("clientId"),
-                ),
+                summary = validateClientConfigUniFfi(configToml),
                 error = null,
             )
-        } catch (error: RuntimeException) {
+        } catch (error: Exception) {
             ConfigValidationResult(summary = null, error = error.message ?: "Invalid config")
         }
 
@@ -61,9 +55,6 @@ object SltNative {
     private external fun nativeInitLogSink(filePath: String): Boolean
 
     @JvmStatic
-    private external fun nativeValidateClientConfig(configToml: String): String
-
-    @JvmStatic
     private external fun nativeStop(handle: Long)
 }
 
@@ -74,11 +65,3 @@ data class ConfigValidationResult(
     val isValid: Boolean
         get() = summary != null
 }
-
-data class ClientConfigSummary(
-    val assignedIpv4: String,
-    val tunMtu: Int,
-    val serverHost: String,
-    val serverPort: Int,
-    val clientId: String,
-)

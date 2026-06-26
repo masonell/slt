@@ -2,9 +2,8 @@ use std::ffi::c_void;
 
 use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jstring};
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong};
 
-use super::config::validate_client_config;
 use super::session::{NativeHandle, start_native_session, stop_native_session};
 
 const JNI_VERSION_1_6: i32 = 0x0001_0006;
@@ -37,28 +36,6 @@ pub extern "system" fn Java_dev_slt_android_SltNative_nativeInitLogSink(
         JNI_TRUE
     } else {
         JNI_FALSE
-    }
-}
-
-/// Validate a client config and return a small non-secret JSON summary.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_slt_android_SltNative_nativeValidateClientConfig(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    config_toml: JString<'_>,
-) -> jstring {
-    match validate_client_config(&mut env, &config_toml) {
-        Ok(summary) => match env.new_string(summary) {
-            Ok(summary) => summary.into_raw(),
-            Err(err) => {
-                throw_runtime_exception(&mut env, &format!("create config summary: {err}"));
-                std::ptr::null_mut()
-            }
-        },
-        Err(err) => {
-            throw_runtime_exception(&mut env, &err);
-            std::ptr::null_mut()
-        }
     }
 }
 

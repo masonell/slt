@@ -11,6 +11,9 @@
 //! Android wraps a `VpnService` file descriptor.
 
 #[cfg(target_os = "android")]
+uniffi::setup_scaffolding!();
+
+#[cfg(target_os = "android")]
 mod android;
 mod auth;
 mod metrics;

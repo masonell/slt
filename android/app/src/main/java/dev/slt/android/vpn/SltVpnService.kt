@@ -9,10 +9,10 @@ import android.os.Handler
 import android.os.ParcelFileDescriptor
 import android.os.Looper
 import android.util.Log
-import dev.slt.android.ClientConfigSummary
 import dev.slt.android.SltNative
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
+import dev.slt.android.uniffi.ClientConfigSummary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob

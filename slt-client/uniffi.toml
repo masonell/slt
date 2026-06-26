@@ -1,0 +1,6 @@
+[bindings.kotlin]
+package_name = "dev.slt.android.uniffi"
+cdylib_name = "slt_client"
+android = true
+generate_immutable_records = true
+kotlin_target_version = "2.0.21"

@@ -5,6 +5,16 @@ plugins {
 }
 
 val rustJniLibsDir = layout.buildDirectory.dir("generated/jniLibs/rust")
+val generatedUniFfiDir = layout.buildDirectory.dir("generated/source/uniffi/main/kotlin")
+
+fun pinnedUniFfiVersion(workspaceDir: File): String {
+    val cargoToml = workspaceDir.resolve("Cargo.toml").readText()
+    return Regex("""(?m)^\s*uniffi\s*=\s*\{[^}]*version\s*=\s*"=([^"]+)"""")
+        .find(cargoToml)
+        ?.groupValues
+        ?.get(1)
+        ?: error("could not find exact pinned uniffi version in workspace Cargo.toml")
+}
 
 android {
     namespace = "dev.slt.android"
@@ -16,6 +26,10 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     compileOptions {
@@ -34,6 +48,7 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir(rustJniLibsDir)
+            java.srcDir(generatedUniFfiDir)
         }
     }
 
@@ -67,6 +82,7 @@ val buildRustNative by tasks.registering(Exec::class) {
     inputs.file(workspaceDir.resolve("Cargo.lock"))
     inputs.file(workspaceDir.resolve("Cargo.toml"))
     inputs.file(workspaceDir.resolve("slt-client/Cargo.toml"))
+    inputs.file(workspaceDir.resolve("slt-client/uniffi.toml"))
     inputs.dir(workspaceDir.resolve("slt-client/src"))
     inputs.file(workspaceDir.resolve("slt-core/Cargo.toml"))
     inputs.dir(workspaceDir.resolve("slt-core/src"))
@@ -116,8 +132,81 @@ val buildRustNative by tasks.registering(Exec::class) {
     }
 }
 
-tasks.named("preBuild") {
+val checkUniFfiBindgenVersion by tasks.registering {
+    val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
+
+    group = "verification"
+    description = "Check that uniffi-bindgen matches the pinned Rust UniFFI crate."
+
+    inputs.file(workspaceDir.resolve("Cargo.toml"))
+
+    doLast {
+        val expectedVersion = pinnedUniFfiVersion(workspaceDir)
+        val process = ProcessBuilder("uniffi-bindgen", "--version")
+            .redirectErrorStream(true)
+            .start()
+        val versionText = process.inputStream.bufferedReader().use { it.readText() }.trim()
+        val exitCode = process.waitFor()
+        if (exitCode != 0) {
+            error("uniffi-bindgen --version failed with exit code $exitCode: $versionText")
+        }
+        val actualVersion = Regex("""\buniffi-bindgen\s+(\S+)""")
+            .find(versionText)
+            ?.groupValues
+            ?.get(1)
+            ?: error("could not parse uniffi-bindgen version from: $versionText")
+
+        if (actualVersion != expectedVersion) {
+            error(
+                "uniffi-bindgen $actualVersion does not match pinned Rust uniffi $expectedVersion. " +
+                    "Install matching bindgen or update both versions together.",
+            )
+        }
+    }
+}
+
+val generateUniFfiBindings by tasks.registering(Exec::class) {
+    val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
+    val generatedDir = generatedUniFfiDir
+    val bindingLibrary = rustJniLibsDir.map { it.file("arm64-v8a/libslt_client.so") }
+
+    group = "build"
+    description = "Generate Kotlin bindings for the SLT Rust UniFFI API."
+    workingDir = workspaceDir
+
     dependsOn(buildRustNative)
+    dependsOn(checkUniFfiBindgenVersion)
+
+    inputs.file(bindingLibrary)
+    inputs.file(workspaceDir.resolve("Cargo.lock"))
+    inputs.file(workspaceDir.resolve("Cargo.toml"))
+    inputs.file(workspaceDir.resolve("slt-client/Cargo.toml"))
+    inputs.file(workspaceDir.resolve("slt-client/uniffi.toml"))
+    inputs.dir(workspaceDir.resolve("slt-client/src"))
+    outputs.dir(generatedDir)
+
+    doFirst {
+        generatedDir.get().asFile.deleteRecursively()
+    }
+
+    commandLine(
+        "uniffi-bindgen",
+        "generate",
+        "--library",
+        bindingLibrary.get().asFile.absolutePath,
+        "--language",
+        "kotlin",
+        "--out-dir",
+        generatedDir.get().asFile.absolutePath,
+    )
+}
+
+tasks.named("preBuild") {
+    dependsOn(generateUniFfiBindings)
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    dependsOn(generateUniFfiBindings)
 }
 
 dependencies {
@@ -135,6 +224,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("net.java.dev.jna:jna:5.19.1@aar")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
