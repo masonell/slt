@@ -8,12 +8,12 @@
   - `proto/`, `types/`, and `transport/` hold wire formats, domain types, and shared transport helpers.
   - `classifier.rs` implements TCP ClientHello classification.
 - `slt-client/src/` is the `client` binary (runtime loop, auth flow, transport switching, TUN I/O, metrics).
-  - `slt-client/src/android/` contains Rust Android native-library support: JNI entrypoints, session lifecycle, callback-backed socket protection/DNS resolution, config validation summaries, and file-backed logging.
+  - `slt-client/src/android/` contains Rust Android native-library support: UniFFI entrypoints, session lifecycle, callback-backed socket protection/DNS resolution, config validation summaries, and file-backed logging.
 - `slt-server/src/` provides the `server` binary plus server library modules (`auth`, `sessions`, `quic`, `tcp`, `tun`, `registry`, `router`, `udp_qsp`, `metrics`).
 - `slt-cli/src/` is the `slt` management binary (project init, key/cert generation, client add/remove/list/show, config validation).
 - `slt-tools/src/bin/` contains helper CLIs (`tcp_client_hello`, `quic_client_hello`).
 - `android/` contains the Android VPN client:
-  - `android/app/src/main/java/dev/slt/android/` holds the Kotlin/Compose UI, `VpnService`, and JNI bridge.
+  - `android/app/src/main/java/dev/slt/android/` holds the Kotlin/Compose UI, `VpnService`, and UniFFI bridge.
   - `android/app/src/main/java/dev/slt/android/ui/` contains the screen tree: `main/` (main screen + route + connection test), `profiles/` (profiles list), `profile/` (editor hub + sub-editors: TOML, routes, DNS, apps, test URLs), `log/` (log viewer), `components/` (shared StartStopButton, StatusLine), and `theme/` (Color/Type/Shape/Theme tokens).
   - `android/app/src/main/java/dev/slt/android/vpn/` contains `SltVpnService`, `VpnNotificationFactory`, `VpnProfileApplier`, `NetworkChangeWatcher`, and `VpnStatus`.
   - `android/app/src/main/java/dev/slt/android/connection/` contains `ConnectionTestRunner` (streaming concurrent URL tests via OkHttp).

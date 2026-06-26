@@ -4,6 +4,12 @@ use slt_core::config::ClientConfig;
 pub enum SltInteropError {
     #[error("invalid config: {detail}")]
     InvalidConfig { detail: String },
+    #[error("invalid argument: {detail}")]
+    InvalidArgument { detail: String },
+    #[error("session start failed: {detail}")]
+    SessionStart { detail: String },
+    #[error("platform callback failed: {detail}")]
+    Platform { detail: String },
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -29,6 +35,50 @@ impl TryFrom<&ClientConfig> for ClientConfigSummary {
     }
 }
 
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum SocketKind {
+    Tcp,
+    Udp,
+}
+
+impl From<crate::transport::socket_protector::SocketKind> for SocketKind {
+    fn from(kind: crate::transport::socket_protector::SocketKind) -> Self {
+        match kind {
+            crate::transport::socket_protector::SocketKind::Tcp => Self::Tcp,
+            crate::transport::socket_protector::SocketKind::Udp => Self::Udp,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum NativeEventKind {
+    Starting,
+    Ready,
+    Stopping,
+    Stopped,
+    Error,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct NativeEvent {
+    pub session_handle: i64,
+    pub seq: i64,
+    pub kind: NativeEventKind,
+    pub detail: Option<String>,
+}
+
+#[uniffi::export(with_foreign)]
+pub trait PlatformServices: Send + Sync {
+    fn protect_socket(&self, fd: i32, kind: SocketKind) -> bool;
+
+    fn resolve_host(&self, hostname: String) -> Result<Vec<String>, SltInteropError>;
+}
+
+#[uniffi::export(with_foreign)]
+pub trait NativeSessionCallback: Send + Sync {
+    fn on_event(&self, event: NativeEvent);
+}
+
 #[uniffi::export]
 pub fn validate_client_config(config_toml: String) -> Result<ClientConfigSummary, SltInteropError> {
     let config = ClientConfig::from_toml_str(&config_toml).map_err(|err| {
@@ -37,4 +87,20 @@ pub fn validate_client_config(config_toml: String) -> Result<ClientConfigSummary
         }
     })?;
     ClientConfigSummary::try_from(&config)
+}
+
+#[uniffi::export]
+pub fn init_log_sink(file_path: String) -> bool {
+    super::logging::init(&file_path)
+}
+
+#[uniffi::export]
+pub fn start_session(
+    config_toml: String,
+    tun_fd: i32,
+    mtu: i32,
+    platform_services: std::sync::Arc<dyn PlatformServices>,
+    callback: std::sync::Arc<dyn NativeSessionCallback>,
+) -> Result<std::sync::Arc<super::session::NativeSession>, SltInteropError> {
+    super::session::start_session(config_toml, tun_fd, mtu, platform_services, callback)
 }

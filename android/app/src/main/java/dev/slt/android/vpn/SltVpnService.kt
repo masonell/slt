@@ -14,6 +14,13 @@ import dev.slt.android.SltNative
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.uniffi.ClientConfigSummary
+import dev.slt.android.uniffi.NativeEvent
+import dev.slt.android.uniffi.NativeEventKind
+import dev.slt.android.uniffi.NativeSession
+import dev.slt.android.uniffi.NativeSessionCallback
+import dev.slt.android.uniffi.PlatformServices
+import dev.slt.android.uniffi.SltInteropException
+import dev.slt.android.uniffi.SocketKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,6 +33,7 @@ import kotlin.coroutines.coroutineContext
 
 class SltVpnService : VpnService() {
     @Volatile private var tunFd: ParcelFileDescriptor? = null
+    @Volatile private var nativeSession: NativeSession? = null
     @Volatile private var nativeHandle: Long = 0
     @Volatile private var sessionGeneration: Int = 0
     @Volatile private var reconnecting: Boolean = false
@@ -81,7 +89,7 @@ class SltVpnService : VpnService() {
                 SltVpnStatusBus.update(VpnStatus.Reconnecting, "Network changed")
                 updateNotification("Reconnecting")
             } else {
-                SltVpnStatusBus.update(VpnStatus.Running, "fd=${tunFd?.fd} native=$nativeHandle")
+                SltVpnStatusBus.update(VpnStatus.Running, "fd=${tunFd?.fd} native=${nativeHandle}")
                 updateNotification("Running")
             }
             return
@@ -113,7 +121,9 @@ class SltVpnService : VpnService() {
             }
 
             tunFd = fd
-            nativeHandle = startNativeSession(profile.clientToml, fd.fd, summary.tunMtu)
+            val session = startNativeSession(profile.clientToml, fd.fd, summary.tunMtu)
+            nativeSession = session
+            nativeHandle = session.handle()
             val detail = "profile=${profile.metadata.name} fd=${fd.fd} ${summary.assignedIpv4}/$CLIENT_ADDRESS_PREFIX"
             Log.i(TAG, "SLT VPN established: $detail")
             SltVpnStatusBus.update(VpnStatus.Running, "$detail native=$nativeHandle")
@@ -136,7 +146,7 @@ class SltVpnService : VpnService() {
 
     private fun publishUnderlyingNetwork(network: Network?) {
         synchronized(stateLock) {
-            if (tunFd == null && nativeHandle == 0L && !reconnecting) {
+            if (tunFd == null && nativeSession == null && !reconnecting) {
                 return
             }
             activeUnderlyingNetwork = network
@@ -184,14 +194,16 @@ class SltVpnService : VpnService() {
     }
 
     private fun stopNativeClient() {
+        val session = nativeSession
         val handle = nativeHandle
-        nativeHandle = 0
-        if (handle == 0L) {
+        nativeSession = null
+        nativeHandle = 0L
+        if (session == null) {
             return
         }
 
         try {
-            SltNative.stop(handle)
+            SltNative.stop(session)
             Log.i(TAG, "SLT native client stopped: handle=$handle")
         } catch (error: RuntimeException) {
             Log.w(TAG, "Failed to stop SLT native client: handle=$handle", error)
@@ -201,10 +213,11 @@ class SltVpnService : VpnService() {
     /// Start a fresh native client session, bumping the generation so stale
     /// callbacks from any previous session are ignored by the callback guard.
     /// Used for both the initial connect and reconnects. Returns the new handle.
-    private fun startNativeSession(configToml: String, tunFd: Int, mtu: Int): Long {
+    private fun startNativeSession(configToml: String, tunFd: Int, mtu: Int): NativeSession {
         sessionGeneration += 1
         val gen = sessionGeneration
-        return SltNative.start(configToml, tunFd, mtu, buildNativeCallback(gen))
+        val platformServices = buildPlatformServices()
+        return SltNative.start(configToml, tunFd, mtu, platformServices, buildNativeCallback(gen))
     }
 
     /// Reconnect over the existing TUN fd after the underlying network changed.
@@ -212,7 +225,7 @@ class SltVpnService : VpnService() {
     /// reconnect scope. The TUN interface, routes, and app rules are left intact.
     private fun reconnect(network: Network?) {
         synchronized(stateLock) {
-            if (tunFd == null || (nativeHandle == 0L && !reconnecting)) {
+            if (tunFd == null || (nativeSession == null && !reconnecting)) {
                 return
             }
             activeUnderlyingNetwork = network
@@ -246,11 +259,12 @@ class SltVpnService : VpnService() {
 
             val fd = tunFd ?: error("TUN fd closed during reconnect")
             val configToml = activeProfileToml ?: error("No active profile for reconnect")
-            val handle = startNativeSession(configToml, fd.fd, activeTunMtu)
-            nativeHandle = handle
+            val session = startNativeSession(configToml, fd.fd, activeTunMtu)
+            nativeSession = session
+            nativeHandle = session.handle()
 
-            // The new session reports "ready" (success) or "error" (failure)
-            // asynchronously via handleNativeStatus; this coroutine does not wait.
+            // The new session reports success or failure asynchronously via
+            // typed native events; this coroutine does not wait.
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             throw cancellation
         } catch (error: Exception) {
@@ -286,87 +300,93 @@ class SltVpnService : VpnService() {
         }
     }
 
-    private fun buildNativeCallback(gen: Int): SltNative.NativeCallback =
-        object : SltNative.NativeCallback {
-            override fun onStatus(status: String, detail: String?) {
-                // Capture gen by value and drop stale callbacks from any prior
-                // session before touching service state. This guard is what keeps
-                // an old session's "stopping"/"stopped"/"error" from tearing the
-                // service down during a reconnect.
-                mainHandler.post {
-                    if (gen != sessionGeneration) {
-                        return@post
-                    }
-                    handleNativeStatus(status, detail)
-                }
-            }
-
-            override fun protectSocket(fd: Int): Boolean =
+    private fun buildPlatformServices(): PlatformServices =
+        object : PlatformServices {
+            override fun protectSocket(fd: Int, kind: SocketKind): Boolean =
                 try {
                     val protected = protect(fd)
                     if (!protected) {
-                        Log.w(TAG, "Android refused to protect SLT socket: fd=$fd")
+                        Log.w(TAG, "Android refused to protect SLT socket: fd=$fd kind=$kind")
                     }
                     protected
                 } catch (error: RuntimeException) {
-                    Log.w(TAG, "Failed to protect SLT socket: fd=$fd", error)
+                    Log.w(TAG, "Failed to protect SLT socket: fd=$fd kind=$kind", error)
                     false
                 }
 
-            override fun resolveHost(hostname: String): Array<String> {
+            override fun resolveHost(hostname: String): List<String> {
                 val network = activeUnderlyingNetwork
-                    ?: throw IllegalStateException("No underlying network available for DNS")
+                    ?: throw SltInteropException.Platform("No underlying network available for DNS")
                 return try {
                     val addresses = network.getAllByName(hostname)
                         .mapNotNull { it.hostAddress }
-                        .toTypedArray()
                     if (addresses.isEmpty()) {
-                        throw IllegalStateException("No addresses returned for $hostname")
+                        throw SltInteropException.Platform("No addresses returned for $hostname")
                     }
                     addresses
                 } catch (error: Exception) {
                     Log.w(TAG, "Failed to resolve $hostname on underlying network", error)
-                    throw RuntimeException("Failed to resolve $hostname on underlying network", error)
+                    throw SltInteropException.Platform(
+                        "Failed to resolve $hostname on underlying network: ${error.message}",
+                    )
                 }
             }
         }
 
-    private fun handleNativeStatus(status: String, detail: String?) {
-        when (status) {
-            "starting" -> {
+    private fun buildNativeCallback(gen: Int): NativeSessionCallback =
+        object : NativeSessionCallback {
+            override fun onEvent(event: NativeEvent) {
+                mainHandler.post {
+                    val currentHandle = nativeHandle
+                    if (
+                        gen != sessionGeneration ||
+                        (currentHandle != 0L && event.sessionHandle != currentHandle)
+                    ) {
+                        return@post
+                    }
+                    handleNativeEvent(event)
+                }
+            }
+        }
+
+    private fun handleNativeEvent(event: NativeEvent) {
+        when (event.kind) {
+            NativeEventKind.STARTING -> {
                 // During a reconnect keep the Reconnecting state rather than
                 // flickering back to Starting while the new session comes up.
                 if (!reconnecting) {
-                    SltVpnStatusBus.update(VpnStatus.Starting, detail)
+                    SltVpnStatusBus.update(VpnStatus.Starting, event.detail)
                     updateNotification("Starting")
                 }
             }
-            "ready" -> {
+            NativeEventKind.READY -> {
                 reconnecting = false
-                SltVpnStatusBus.update(VpnStatus.Running, detail)
+                SltVpnStatusBus.update(VpnStatus.Running, event.detail)
                 updateNotification("Running")
             }
-            "stopping" -> {
+            NativeEventKind.STOPPING -> {
                 if (nativeHandle != 0L) {
                     updateNotification("Stopping")
                 }
             }
-            "stopped" -> {
+            NativeEventKind.STOPPED -> {
                 if (nativeHandle != 0L) {
-                    stopVpn(detail ?: "Native client stopped")
+                    stopVpn(event.detail ?: "Native client stopped")
                     stopSelf()
                 }
             }
-            "error" -> {
+            NativeEventKind.ERROR -> {
                 if (reconnecting) {
-                    handleReconnectFailureOnMain(reconnectAttempt, detail ?: "Reconnect attempt failed")
+                    handleReconnectFailureOnMain(
+                        reconnectAttempt,
+                        event.detail ?: "Reconnect attempt failed",
+                    )
                 } else if (nativeHandle != 0L || tunFd != null) {
-                    failVpn(detail ?: "Native client failed")
+                    failVpn(event.detail ?: "Native client failed")
                 } else {
-                    SltVpnStatusBus.update(VpnStatus.Error, detail)
+                    SltVpnStatusBus.update(VpnStatus.Error, event.detail)
                 }
             }
-            else -> Log.w(TAG, "Unknown native status: $status ${detail.orEmpty()}")
         }
     }
 

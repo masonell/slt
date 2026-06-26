@@ -1,7 +1,5 @@
-//! Android native library entrypoints and JNI bridge.
+//! Android native library entrypoints and UniFFI bridge.
 
-mod entrypoints;
-mod event_sink;
 mod logging;
-mod session;
+pub mod session;
 pub mod uniffi_api;

@@ -1,7 +1,12 @@
 package dev.slt.android
 
 import dev.slt.android.uniffi.ClientConfigSummary
+import dev.slt.android.uniffi.NativeSession
+import dev.slt.android.uniffi.NativeSessionCallback
+import dev.slt.android.uniffi.PlatformServices
 import dev.slt.android.uniffi.SltInteropException
+import dev.slt.android.uniffi.initLogSink as initLogSinkUniFfi
+import dev.slt.android.uniffi.startSession as startSessionUniFfi
 import dev.slt.android.uniffi.validateClientConfig as validateClientConfigUniFfi
 
 object SltNative {
@@ -11,19 +16,19 @@ object SltNative {
 
     fun load() = Unit
 
-    fun initLogSink(filePath: String): Boolean = nativeInitLogSink(filePath)
+    fun initLogSink(filePath: String): Boolean = initLogSinkUniFfi(filePath)
 
     fun start(
         configToml: String,
         tunFd: Int,
         mtu: Int,
-        callback: NativeCallback,
-    ): Long = nativeStart(configToml, tunFd, mtu, callback)
+        platformServices: PlatformServices,
+        callback: NativeSessionCallback,
+    ): NativeSession = startSessionUniFfi(configToml, tunFd, mtu, platformServices, callback)
 
-    fun stop(handle: Long) {
-        if (handle != 0L) {
-            nativeStop(handle)
-        }
+    fun stop(session: NativeSession?) {
+        session?.stop()
+        session?.destroy()
     }
 
     fun validateClientConfig(configToml: String): ConfigValidationResult =
@@ -34,28 +39,6 @@ object SltNative {
         } catch (error: Exception) {
             ConfigValidationResult.Invalid(error.message ?: "Invalid config")
         }
-
-    interface NativeCallback {
-        fun onStatus(status: String, detail: String?)
-
-        fun protectSocket(fd: Int): Boolean
-
-        fun resolveHost(hostname: String): Array<String>
-    }
-
-    @JvmStatic
-    private external fun nativeStart(
-        configToml: String,
-        tunFd: Int,
-        mtu: Int,
-        callback: NativeCallback,
-    ): Long
-
-    @JvmStatic
-    private external fun nativeInitLogSink(filePath: String): Boolean
-
-    @JvmStatic
-    private external fun nativeStop(handle: Long)
 }
 
 sealed class ConfigValidationResult {
