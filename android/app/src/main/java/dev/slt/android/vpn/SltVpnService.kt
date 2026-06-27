@@ -14,13 +14,14 @@ import dev.slt.android.SltNative
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.uniffi.ClientConfigSummary
-import dev.slt.android.uniffi.NativeEvent
-import dev.slt.android.uniffi.NativeEventKind
+import dev.slt.android.uniffi.ClientEvent
+import dev.slt.android.uniffi.ClientEventKind
 import dev.slt.android.uniffi.NativeSession
 import dev.slt.android.uniffi.NativeSessionCallback
 import dev.slt.android.uniffi.PlatformServices
 import dev.slt.android.uniffi.SltInteropException
 import dev.slt.android.uniffi.SocketKind
+import dev.slt.android.uniffi.Transport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -124,10 +125,14 @@ class SltVpnService : VpnService() {
             val session = startNativeSession(profile.clientToml, fd.fd, summary.tunMtu)
             nativeSession = session
             nativeHandle = session.handle()
-            val detail = "profile=${profile.metadata.name} fd=${fd.fd} ${summary.assignedIpv4}/$CLIENT_ADDRESS_PREFIX"
-            Log.i(TAG, "SLT VPN established: $detail")
-            SltVpnStatusBus.update(VpnStatus.Running, "$detail native=$nativeHandle")
-            updateNotification("Running")
+            Log.i(
+                TAG,
+                "SLT VPN tunnel established; awaiting native auth: " +
+                    "profile=${profile.metadata.name} fd=${fd.fd} " +
+                    "${summary.assignedIpv4}/$CLIENT_ADDRESS_PREFIX native=$nativeHandle",
+            )
+            // Stay Starting until the runtime emits Authenticated (-> Running).
+            updateNotification("Starting")
 
             startNetworkWatcher(initialUnderlyingNetwork)
         } catch (error: Exception) {
@@ -335,12 +340,12 @@ class SltVpnService : VpnService() {
 
     private fun buildNativeCallback(gen: Int): NativeSessionCallback =
         object : NativeSessionCallback {
-            override fun onEvent(event: NativeEvent) {
+            override fun onEvent(event: ClientEvent) {
                 mainHandler.post {
                     val currentHandle = nativeHandle
                     if (
                         gen != sessionGeneration ||
-                        (currentHandle != 0L && event.sessionHandle != currentHandle)
+                        (currentHandle != 0L && event.handle.toLong() != currentHandle)
                     ) {
                         return@post
                     }
@@ -349,46 +354,100 @@ class SltVpnService : VpnService() {
             }
         }
 
-    private fun handleNativeEvent(event: NativeEvent) {
+    /// Map a typed native event to VPN UI/service state. Lifecycle, auth, and
+    /// reconnect events drive [VpnStatus]; connected-phase events (UDP upgrade,
+    /// transport switches, handoff probes) only refine the transport indicator
+    /// while the session stays Running.
+    private fun handleNativeEvent(event: ClientEvent) {
         when (event.kind) {
-            NativeEventKind.STARTING -> {
+            is ClientEventKind.Starting -> {
                 // During a reconnect keep the Reconnecting state rather than
                 // flickering back to Starting while the new session comes up.
                 if (!reconnecting) {
-                    SltVpnStatusBus.update(VpnStatus.Starting, event.detail)
+                    SltVpnStatusBus.update(VpnStatus.Starting)
                     updateNotification("Starting")
                 }
             }
-            NativeEventKind.READY -> {
+            is ClientEventKind.TunReady,
+            is ClientEventKind.Connecting,
+            is ClientEventKind.ConnectedTcp,
+            is ClientEventKind.Authenticating -> {
+                // Still establishing the session. Hold the current status
+                // (Starting for a fresh connect, Reconnecting during recovery).
+                if (!reconnecting &&
+                    SltVpnStatusBus.state.value.status == VpnStatus.Idle
+                ) {
+                    SltVpnStatusBus.update(VpnStatus.Starting)
+                }
+            }
+            is ClientEventKind.Authenticated -> {
                 reconnecting = false
-                SltVpnStatusBus.update(VpnStatus.Running, event.detail)
+                SltVpnStatusBus.update(VpnStatus.Running, transport = transportLabel(event.transport))
                 updateNotification("Running")
             }
-            NativeEventKind.STOPPING -> {
+            is ClientEventKind.ReconnectScheduled -> {
+                if (!reconnecting) {
+                    SltVpnStatusBus.update(
+                        VpnStatus.Reconnecting,
+                        "Reconnect in ${event.kind.delayMs}ms (attempt ${event.kind.attempt})",
+                    )
+                }
+            }
+            is ClientEventKind.ReconnectFailed -> {
+                if (!reconnecting) {
+                    SltVpnStatusBus.update(
+                        VpnStatus.Reconnecting,
+                        "Attempt ${event.kind.attempt} failed",
+                    )
+                }
+            }
+            is ClientEventKind.TransportChanged -> {
+                SltVpnStatusBus.updateTransport(transportLabel(event.transport))
+            }
+            is ClientEventKind.UdpDiscoveryStarted,
+            is ClientEventKind.UdpDiscoveryFailed,
+            is ClientEventKind.UdpRegisterStarted,
+            is ClientEventKind.UdpRegistered,
+            is ClientEventKind.UdpRegisterFailed,
+            is ClientEventKind.UdpUpgradeStarted,
+            is ClientEventKind.UdpPathValidated,
+            is ClientEventKind.UdpSwitchCommitted,
+            is ClientEventKind.NetworkChanged,
+            is ClientEventKind.UdpPathRefreshStarted,
+            is ClientEventKind.UdpPathRefreshSucceeded,
+            is ClientEventKind.UdpPathRefreshFailed -> {
+                // Connected-phase detail; status stays Running. Logged via Rust.
+            }
+            is ClientEventKind.Stopping -> {
                 if (nativeHandle != 0L) {
                     updateNotification("Stopping")
                 }
             }
-            NativeEventKind.STOPPED -> {
+            is ClientEventKind.Stopped -> {
                 if (nativeHandle != 0L) {
-                    stopVpn(event.detail ?: "Native client stopped")
+                    stopVpn("Native client stopped")
                     stopSelf()
                 }
             }
-            NativeEventKind.ERROR -> {
+            is ClientEventKind.Error -> {
+                val errorDetail = event.kind.detail
                 if (reconnecting) {
-                    handleReconnectFailureOnMain(
-                        reconnectAttempt,
-                        event.detail ?: "Reconnect attempt failed",
-                    )
+                    handleReconnectFailureOnMain(reconnectAttempt, errorDetail)
                 } else if (nativeHandle != 0L || tunFd != null) {
-                    failVpn(event.detail ?: "Native client failed")
+                    failVpn(errorDetail)
                 } else {
-                    SltVpnStatusBus.update(VpnStatus.Error, event.detail)
+                    SltVpnStatusBus.update(VpnStatus.Error, errorDetail)
                 }
             }
         }
     }
+
+    private fun transportLabel(transport: Transport?): String? =
+        when (transport) {
+            Transport.TCP -> "TCP"
+            Transport.UDP_QSP -> "UDP-QSP"
+            null -> null
+        }
 
     private fun closeTunFd() {
         val fd = tunFd ?: return

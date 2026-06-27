@@ -63,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         cancel,
         slt_client::noop_socket_protector(),
         slt_client::default_host_resolver(),
+        slt_client::ObserverSink::noop(),
     ))
     .await
 }

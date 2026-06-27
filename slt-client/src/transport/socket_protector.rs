@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 /// Transport socket type passed to [`SocketProtector`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "android", derive(uniffi::Enum))]
 pub enum SocketKind {
     /// TCP control/data socket.
     Tcp,

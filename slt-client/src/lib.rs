@@ -28,6 +28,10 @@ mod test_support;
 #[cfg(test)]
 mod test_integration;
 
+pub use runtime::observer::{
+    ClientEvent, ClientEventKind, ClientObserver, NoopObserver, ObserverSink, SharedClientObserver,
+    Transport, TransportChangeReason, noop_observer,
+};
 pub use runtime::run_client;
 pub use transport::host_resolver::{
     HostResolver, SharedHostResolver, TokioHostResolver, default_host_resolver,

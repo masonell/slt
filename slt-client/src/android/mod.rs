@@ -1,4 +1,4 @@
-//! Android native library entrypoints and UniFFI bridge.
+//! Android native library entrypoints and `UniFFI` bridge.
 
 mod logging;
 pub mod session;

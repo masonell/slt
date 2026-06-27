@@ -8,6 +8,7 @@ use slt_core::proto::{
 use tracing::{info, trace, warn};
 
 use super::{ClientSession, SessionControl, SessionExit};
+use crate::runtime::observer::{Transport, TransportChangeReason};
 use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
 
@@ -113,10 +114,15 @@ impl ClientSession<'_> {
             error = %err,
             "udp-qsp io error; falling back to tcp and scheduling retry"
         );
+        self.active_transport = ActiveTransport::Tcp;
         if was_udp_active {
             self.metrics.inc_transport_udp_to_tcp();
+            self.note_transport_change(
+                Transport::UdpQsp,
+                Transport::Tcp,
+                TransportChangeReason::UdpError,
+            );
         }
-        self.active_transport = ActiveTransport::Tcp;
         self.note_tcp_activity();
 
         // Transition to NeedDiscovery state to re-discover quic_ids

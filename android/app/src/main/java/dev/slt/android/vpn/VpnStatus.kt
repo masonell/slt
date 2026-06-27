@@ -17,6 +17,9 @@ enum class VpnStatus {
 data class VpnUiState(
     val status: VpnStatus = VpnStatus.Idle,
     val detail: String? = null,
+    /// Active transport label ("TCP" / "UDP-QSP") surfaced from typed
+    /// `TransportChanged` events while the session is Running.
+    val transport: String? = null,
 )
 
 object SltVpnStatusBus {
@@ -24,7 +27,20 @@ object SltVpnStatusBus {
 
     val state: StateFlow<VpnUiState> = mutableState.asStateFlow()
 
-    fun update(status: VpnStatus, detail: String? = null) {
-        mutableState.value = VpnUiState(status, detail)
+    /// Update status and optional detail. The transport indicator is preserved
+    /// across updates while Running and cleared on any other status unless an
+    /// explicit `transport` is supplied.
+    fun update(status: VpnStatus, detail: String? = null, transport: String? = null) {
+        val resolvedTransport = when {
+            transport != null -> transport
+            status == VpnStatus.Running -> mutableState.value.transport
+            else -> null
+        }
+        mutableState.value = VpnUiState(status, detail, resolvedTransport)
+    }
+
+    /// Refine only the transport indicator, leaving status/detail untouched.
+    fun updateTransport(transport: String?) {
+        mutableState.value = mutableState.value.copy(transport = transport)
     }
 }

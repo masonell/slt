@@ -9,6 +9,7 @@ use tracing::{debug, info, trace};
 
 use super::{ClientSession, SessionControl, SessionExit};
 use crate::metrics::Metrics;
+use crate::runtime::observer::{Transport, TransportChangeReason};
 use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
 
@@ -78,6 +79,11 @@ impl ClientSession<'_> {
                 self.metrics.as_ref(),
                 "data",
             ) {
+                self.note_transport_change(
+                    Transport::UdpQsp,
+                    Transport::Tcp,
+                    TransportChangeReason::ServerInitiated,
+                );
                 self.note_tcp_activity();
                 self.schedule_discovery_retry();
             }
@@ -99,6 +105,11 @@ impl ClientSession<'_> {
                     self.metrics.as_ref(),
                     "ping",
                 ) {
+                    self.note_transport_change(
+                        Transport::UdpQsp,
+                        Transport::Tcp,
+                        TransportChangeReason::ServerInitiated,
+                    );
                     self.note_tcp_activity();
                     self.schedule_discovery_retry();
                 }

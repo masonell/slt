@@ -10,12 +10,10 @@ use slt_core::config::ClientConfig;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
-use super::uniffi_api::{
-    NativeEvent, NativeEventKind, NativeSessionCallback, PlatformServices, SltInteropError,
-    SocketKind as UniFfiSocketKind,
-};
+use super::uniffi_api::{NativeSessionCallback, PlatformServices, SltInteropError};
+use crate::runtime::observer::{ClientEvent, ClientEventKind, ClientObserver, ObserverSink};
 use crate::transport::host_resolver::{HostResolver, HostResolverFuture, ensure_non_empty};
-use crate::transport::socket_protector::{SocketKind as RuntimeSocketKind, SocketProtector};
+use crate::transport::socket_protector::{SocketKind, SocketProtector};
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -43,21 +41,34 @@ pub(super) fn start_session(
         });
     }
 
-    let sink = EventSink::new(handle, callback, platform_services);
+    let observer = Arc::new(AndroidObserver::new(callback)) as Arc<dyn ClientObserver>;
+    let sink = ObserverSink::new(handle, observer);
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
     let worker_sink = sink;
     let worker = thread::Builder::new()
         .name(format!("slt-android-{handle}"))
         .spawn(move || {
-            run_native_session(
-                &config_toml,
-                tun_fd,
-                mtu,
-                worker_cancel,
-                &worker_sink,
-                handle,
-            );
+            // Catch panics inside the worker so a runtime bug still produces a
+            // terminal event instead of leaving Android with no Stopped/Error.
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_native_session(
+                    &config_toml,
+                    tun_fd,
+                    mtu,
+                    worker_cancel,
+                    &worker_sink,
+                    handle,
+                    platform_services,
+                );
+            }))
+            .is_err();
+            if panicked {
+                error!("native client worker panicked; handle={handle}");
+                worker_sink.emit(ClientEventKind::Error {
+                    detail: "native client worker panicked".to_string(),
+                });
+            }
         })
         .map_err(|err| SltInteropError::SessionStart {
             detail: format!("spawn native client thread: {err}"),
@@ -106,68 +117,46 @@ impl Drop for NativeSession {
     }
 }
 
-#[derive(Clone)]
-struct EventSink {
-    inner: Arc<EventSinkInner>,
-}
-
-struct EventSinkInner {
-    handle: NativeHandle,
-    seq: AtomicU64,
+/// Bridges typed [`ClientEvent`]s from the runtime to the `UniFFI` foreign callback.
+///
+/// The runtime (via [`ObserverSink`]) owns the session handle, monotonic
+/// sequence counter, and tracked transport; this observer only forwards each
+/// fully-formed event to Kotlin.
+struct AndroidObserver {
     callback: Arc<dyn NativeSessionCallback>,
-    platform_services: Arc<dyn PlatformServices>,
 }
 
-impl EventSink {
-    fn new(
-        handle: NativeHandle,
-        callback: Arc<dyn NativeSessionCallback>,
-        platform_services: Arc<dyn PlatformServices>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(EventSinkInner {
-                handle,
-                seq: AtomicU64::new(1),
-                callback,
-                platform_services,
-            }),
-        }
+impl AndroidObserver {
+    fn new(callback: Arc<dyn NativeSessionCallback>) -> Self {
+        Self { callback }
     }
+}
 
-    fn event(&self, kind: NativeEventKind, detail: Option<String>) {
-        let event = NativeEvent {
-            session_handle: i64::try_from(self.inner.handle).unwrap_or(i64::MAX),
-            seq: i64::try_from(self.inner.seq.fetch_add(1, Ordering::Relaxed)).unwrap_or(i64::MAX),
-            kind,
-            detail,
-        };
-        self.inner.callback.on_event(event);
+impl ClientObserver for AndroidObserver {
+    fn on_event(&self, event: &ClientEvent) {
+        self.callback.on_event(event.clone());
     }
 }
 
 struct AndroidSocketProtector {
-    sink: EventSink,
+    platform_services: Arc<dyn PlatformServices>,
 }
 
 impl AndroidSocketProtector {
-    fn new(sink: EventSink) -> Self {
-        Self { sink }
+    fn new(platform_services: Arc<dyn PlatformServices>) -> Self {
+        Self { platform_services }
     }
 }
 
 impl SocketProtector for AndroidSocketProtector {
-    fn protect(&self, fd: RawFd, kind: RuntimeSocketKind) -> io::Result<()> {
+    fn protect(&self, fd: RawFd, kind: SocketKind) -> io::Result<()> {
         let fd = i32::try_from(fd).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("socket fd out of Android int range: {fd}"),
             )
         })?;
-        let protected = self
-            .sink
-            .inner
-            .platform_services
-            .protect_socket(fd, UniFfiSocketKind::from(kind));
+        let protected = self.platform_services.protect_socket(fd, kind);
         if protected {
             debug!(fd, kind = ?kind, "Android socket protected");
             Ok(())
@@ -181,53 +170,53 @@ impl SocketProtector for AndroidSocketProtector {
 }
 
 struct AndroidHostResolver {
-    sink: EventSink,
+    platform_services: Arc<dyn PlatformServices>,
 }
 
 impl AndroidHostResolver {
-    fn new(sink: EventSink) -> Self {
-        Self { sink }
+    fn new(platform_services: Arc<dyn PlatformServices>) -> Self {
+        Self { platform_services }
     }
 }
 
 impl HostResolver for AndroidHostResolver {
     fn resolve<'a>(&'a self, hostname: &'a str, port: u16) -> HostResolverFuture<'a> {
-        let sink = self.sink.clone();
+        let platform_services = self.platform_services.clone();
         let hostname = hostname.to_string();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || sink.resolve_host(&hostname, port))
+            tokio::task::spawn_blocking(move || resolve_host(&platform_services, &hostname, port))
                 .await
                 .map_err(|err| io::Error::other(format!("Android DNS task failed: {err}")))?
         })
     }
 }
 
-impl EventSink {
-    fn resolve_host(&self, hostname: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
-        let resolved = self
-            .inner
-            .platform_services
-            .resolve_host(hostname.to_string())
-            .map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("call Android resolveHost for {hostname}: {err}"),
-                )
-            })?;
+fn resolve_host(
+    platform_services: &Arc<dyn PlatformServices>,
+    hostname: &str,
+    port: u16,
+) -> io::Result<Vec<SocketAddr>> {
+    let resolved = platform_services
+        .resolve_host(hostname.to_string())
+        .map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("call Android resolveHost for {hostname}: {err}"),
+            )
+        })?;
 
-        let mut addrs = Vec::with_capacity(resolved.len());
-        for address in resolved {
-            let ip = address.parse::<IpAddr>().map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Android resolveHost returned non-IP address {address}: {err}"),
-                )
-            })?;
-            addrs.push(SocketAddr::new(ip, port));
-        }
-
-        ensure_non_empty(addrs)
+    let mut addrs = Vec::with_capacity(resolved.len());
+    for address in resolved {
+        let ip = address.parse::<IpAddr>().map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Android resolveHost returned non-IP address {address}: {err}"),
+            )
+        })?;
+        addrs.push(SocketAddr::new(ip, port));
     }
+
+    ensure_non_empty(addrs)
 }
 
 fn run_native_session(
@@ -235,23 +224,22 @@ fn run_native_session(
     tun_fd: i32,
     mtu: i32,
     cancel: CancellationToken,
-    sink: &EventSink,
+    sink: &ObserverSink,
     handle: NativeHandle,
+    platform_services: Arc<dyn PlatformServices>,
 ) {
-    let startup_detail = format!("handle={handle} fd={tun_fd} android_mtu={mtu}");
-    info!("[session start] handle={handle}");
-    sink.event(NativeEventKind::Starting, Some(startup_detail));
-
-    match run_native_client(raw_config, tun_fd, mtu, cancel, sink, handle) {
-        Ok(stop_detail) => {
+    info!("[session start] handle={handle} fd={tun_fd} android_mtu={mtu}");
+    // The runtime (run_client) owns the lifecycle event stream: Starting..
+    // Stopped/Error. Only pre-run_client setup failures (config parse, mtu,
+    // runtime creation, TUN spawn) are reported here as Error.
+    match run_native_client(raw_config, tun_fd, mtu, cancel, sink, platform_services) {
+        Ok(()) => {
             info!("[session stop] handle={handle}");
-            sink.event(NativeEventKind::Stopping, Some(stop_detail.clone()));
-            sink.event(NativeEventKind::Stopped, Some(stop_detail));
         }
         Err(err) => {
-            error!("Android client runtime failed: {err}");
+            error!("Android client setup failed: {err}");
             info!("[session stop reason=error] handle={handle}");
-            sink.event(NativeEventKind::Error, Some(err));
+            sink.emit(ClientEventKind::Error { detail: err });
         }
     }
 }
@@ -261,13 +249,12 @@ fn run_native_client(
     tun_fd: i32,
     mtu: i32,
     cancel: CancellationToken,
-    sink: &EventSink,
-    handle: NativeHandle,
-) -> Result<String, String> {
+    sink: &ObserverSink,
+    platform_services: Arc<dyn PlatformServices>,
+) -> Result<(), String> {
     let config = ClientConfig::from_toml_str(raw_config)
         .map_err(|err| format!("parse Android client config: {err}"))?;
-    let android_mtu = validate_android_mtu(mtu, config.tun.tun_mtu)?;
-    let summary = SessionSummary::new(handle, tun_fd, android_mtu, &config);
+    validate_android_mtu(mtu, config.tun.tun_mtu)?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -275,35 +262,37 @@ fn run_native_client(
         .build()
         .map_err(|err| format!("create Android client runtime: {err}"))?;
 
-    let detail = summary.detail.clone();
-    let stop_detail = summary.handle_detail();
-    let result = runtime.block_on(async move {
+    // Returns Err only for pre-run_client setup (TUN spawn) failures, which the
+    // bridge reports as Error. run_client owns its own terminal events, so its
+    // result is logged here but not propagated (avoiding a double Error).
+    let setup_result = runtime.block_on(async move {
         let (tun_handles, tun_channels) =
             crate::tun::spawn_from_fd(&config, tun_fd, cancel.clone())
                 .map_err(|err| format!("start Android TUN backend: {err}"))?;
         info!("Android TUN backend started");
-        sink.event(NativeEventKind::Ready, Some(detail));
 
-        let socket_protector = Arc::new(AndroidSocketProtector::new(sink.clone()));
-        let host_resolver = Arc::new(AndroidHostResolver::new(sink.clone()));
-        crate::run_client(
+        let socket_protector = Arc::new(AndroidSocketProtector::new(platform_services.clone()));
+        let host_resolver = Arc::new(AndroidHostResolver::new(platform_services));
+        if let Err(err) = crate::run_client(
             config,
             tun_handles,
             tun_channels,
             cancel,
             socket_protector,
             host_resolver,
+            sink.clone(),
         )
         .await
-        .map_err(|err| format!("client runtime exited with error: {err}"))
+        {
+            error!("client runtime exited with error: {err}");
+        }
+        Ok::<(), String>(())
     });
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
-    result?;
-
-    Ok(stop_detail)
+    setup_result
 }
 
-fn validate_android_mtu(mtu: i32, config_mtu: u16) -> Result<u16, String> {
+fn validate_android_mtu(mtu: i32, config_mtu: u16) -> Result<(), String> {
     let Ok(mtu) = u16::try_from(mtu) else {
         return Err(format!("invalid Android TUN mtu: {mtu}"));
     };
@@ -315,29 +304,5 @@ fn validate_android_mtu(mtu: i32, config_mtu: u16) -> Result<u16, String> {
             "Android TUN mtu {mtu} does not match config tun_mtu {config_mtu}"
         ));
     }
-    Ok(mtu)
-}
-
-struct SessionSummary {
-    handle: NativeHandle,
-    detail: String,
-}
-
-impl SessionSummary {
-    fn new(handle: NativeHandle, tun_fd: i32, mtu: u16, config: &ClientConfig) -> Self {
-        Self {
-            handle,
-            detail: format!(
-                "handle={handle} fd={tun_fd} mtu={mtu} client_id={} assigned_ipv4={} server={}:{}",
-                config.identity.client_id,
-                config.identity.assigned_ipv4,
-                config.network.hostname,
-                config.network.port
-            ),
-        }
-    }
-
-    fn handle_detail(&self) -> String {
-        format!("handle={}", self.handle)
-    }
+    Ok(())
 }

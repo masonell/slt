@@ -199,7 +199,7 @@ internal fun MainScreen(
                     onStart = onStart,
                     onStop = onStop,
                 )
-                StatusLine(status = status, detail = vpnState.detail)
+                StatusLine(status = status, detail = vpnState.detail, transport = vpnState.transport)
             }
         }
     }

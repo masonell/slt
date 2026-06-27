@@ -1,5 +1,8 @@
 use slt_core::config::ClientConfig;
 
+use crate::runtime::observer::ClientEvent;
+use crate::transport::socket_protector::SocketKind;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum SltInteropError {
     #[error("invalid config: {detail}")]
@@ -35,38 +38,6 @@ impl TryFrom<&ClientConfig> for ClientConfigSummary {
     }
 }
 
-#[derive(Clone, Copy, Debug, uniffi::Enum)]
-pub enum SocketKind {
-    Tcp,
-    Udp,
-}
-
-impl From<crate::transport::socket_protector::SocketKind> for SocketKind {
-    fn from(kind: crate::transport::socket_protector::SocketKind) -> Self {
-        match kind {
-            crate::transport::socket_protector::SocketKind::Tcp => Self::Tcp,
-            crate::transport::socket_protector::SocketKind::Udp => Self::Udp,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, uniffi::Enum)]
-pub enum NativeEventKind {
-    Starting,
-    Ready,
-    Stopping,
-    Stopped,
-    Error,
-}
-
-#[derive(Clone, Debug, uniffi::Record)]
-pub struct NativeEvent {
-    pub session_handle: i64,
-    pub seq: i64,
-    pub kind: NativeEventKind,
-    pub detail: Option<String>,
-}
-
 #[uniffi::export(with_foreign)]
 pub trait PlatformServices: Send + Sync {
     fn protect_socket(&self, fd: i32, kind: SocketKind) -> bool;
@@ -74,9 +45,15 @@ pub trait PlatformServices: Send + Sync {
     fn resolve_host(&self, hostname: String) -> Result<Vec<String>, SltInteropError>;
 }
 
+/// Foreign callback delivering typed [`ClientEvent`]s from the Rust runtime.
+///
+/// The event payload is the runtime-owned `ClientEvent` (`handle`, monotonic
+/// `seq`, active transport, and a typed `kind`). Kotlin implementations should
+/// marshal delivery to the UI/service thread and reject stale events by
+/// `handle` / `seq`.
 #[uniffi::export(with_foreign)]
 pub trait NativeSessionCallback: Send + Sync {
-    fn on_event(&self, event: NativeEvent);
+    fn on_event(&self, event: ClientEvent);
 }
 
 #[uniffi::export]

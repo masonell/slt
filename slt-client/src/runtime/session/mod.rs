@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::ReconnectBackoff;
+use super::observer::{ClientEventKind, ObserverSink, Transport, TransportChangeReason};
 use crate::metrics::Metrics;
 use crate::transport::host_resolver::SharedHostResolver;
 use crate::transport::quic_discovery as quic;
@@ -60,6 +61,7 @@ pub(super) struct ClientSession<'a> {
     metrics: Arc<Metrics>,
     socket_protector: SharedSocketProtector,
     host_resolver: SharedHostResolver,
+    observer: ObserverSink,
     /// Whether the TCP connection is still usable. Set to false when TCP closes
     /// while UDP-QSP is active, allowing the session to continue on UDP alone.
     tcp_alive: bool,
@@ -71,6 +73,7 @@ impl<'a> ClientSession<'a> {
     /// Initializes the session with the given TCP transport, configuration,
     /// TUN channels, and cancellation token. UDP state is initialized based
     /// on the effective upgrade policy (`enable_upgrade || require_udp`).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         config: &'a ClientConfig,
         tcp: TcpSession,
@@ -79,6 +82,7 @@ impl<'a> ClientSession<'a> {
         metrics: Arc<Metrics>,
         socket_protector: SharedSocketProtector,
         host_resolver: SharedHostResolver,
+        observer: ObserverSink,
     ) -> Self {
         let now = Instant::now();
         let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
@@ -121,6 +125,7 @@ impl<'a> ClientSession<'a> {
             metrics,
             socket_protector,
             host_resolver,
+            observer,
             tcp_alive: true,
         }
     }
@@ -178,6 +183,14 @@ impl<'a> ClientSession<'a> {
             io::ErrorKind::PermissionDenied => SessionExit::PermissionDenied,
             _ => SessionExit::ConnectionError,
         }
+    }
+
+    /// Records an active-transport change: updates the tracked transport on the
+    /// observer sink and emits a typed [`ClientEventKind::TransportChanged`].
+    fn note_transport_change(&self, from: Transport, to: Transport, reason: TransportChangeReason) {
+        self.observer.set_transport(to);
+        self.observer
+            .emit(ClientEventKind::TransportChanged { from, to, reason });
     }
 
     /// Polls for the next session event.
@@ -360,6 +373,11 @@ impl<'a> ClientSession<'a> {
                     self.metrics.inc_transport_udp_to_tcp();
                     self.flush_pending_udp_transport_best_effort().await;
                     self.active_transport = ActiveTransport::Tcp;
+                    self.note_transport_change(
+                        Transport::UdpQsp,
+                        Transport::Tcp,
+                        TransportChangeReason::IdleTimeout,
+                    );
                     self.note_tcp_activity();
                     self.schedule_discovery_retry();
                     Ok(SessionControl::Continue)
@@ -369,6 +387,7 @@ impl<'a> ClientSession<'a> {
                 match &self.udp_state {
                     UdpState::NeedDiscovery { .. } => {
                         debug!("udp reconnect tick; spawning quic discovery task");
+                        self.observer.emit(ClientEventKind::UdpDiscoveryStarted);
                         self.discovery_task = Some(self.spawn_quic_discovery());
                     }
                     UdpState::Pending { .. } => {
