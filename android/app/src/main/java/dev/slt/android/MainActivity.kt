@@ -12,7 +12,6 @@ import dev.slt.android.ui.SltApp
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.vpn.SltVpnService
 import dev.slt.android.vpn.SltVpnStatusBus
-import dev.slt.android.vpn.VpnStatus
 
 class MainActivity : ComponentActivity() {
     private lateinit var profileRepository: ProfileRepository
@@ -22,7 +21,7 @@ class MainActivity : ComponentActivity() {
             if (result.resultCode == RESULT_OK) {
                 startVpnService()
             } else {
-                SltVpnStatusBus.update(VpnStatus.PermissionRequired, "VPN permission denied")
+                SltVpnStatusBus.markPermissionRequired("VPN permission denied")
             }
         }
 
@@ -58,7 +57,7 @@ class MainActivity : ComponentActivity() {
     private fun prepareVpnAndStart() {
         val permissionIntent = VpnService.prepare(this)
         if (permissionIntent != null) {
-            SltVpnStatusBus.update(VpnStatus.PermissionRequired)
+            SltVpnStatusBus.markPermissionRequired(null)
             vpnPermissionLauncher.launch(permissionIntent)
             return
         }

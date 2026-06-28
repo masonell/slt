@@ -26,7 +26,7 @@ type NativeHandle = u64;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn start_session(
-    config_toml: String,
+    config_toml: &str,
     tun_fd: i32,
     mtu: i32,
     platform_services: Arc<dyn PlatformServices>,
@@ -37,6 +37,27 @@ pub(super) fn start_session(
             detail: format!("invalid Android TUN fd: {tun_fd}"),
         });
     }
+
+    // Validate config + mtu and build the runtime synchronously, before
+    // spawning the worker, so these setup failures are returned as a
+    // `SltInteropError` instead of a worker-emitted `Error` event. This leaves
+    // only TUN-spawn failure as a worker-emitted pre-`run_client` error, which
+    // lets Kotlin rely on the event `handle` as the sole identity source (`seq`
+    // is reserved for future ordering) — no separate generation guard. See
+    // `docs/architecture/android-control-boundary.md`.
+    let config =
+        ClientConfig::from_toml_str(config_toml).map_err(|err| SltInteropError::InvalidConfig {
+            detail: format!("parse Android client config: {err}"),
+        })?;
+    validate_android_mtu(mtu, config.tun.tun_mtu)
+        .map_err(|detail| SltInteropError::InvalidArgument { detail })?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|err| SltInteropError::SessionStart {
+            detail: format!("create Android client runtime: {err}"),
+        })?;
 
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
     if handle == 0 {
@@ -49,7 +70,6 @@ pub(super) fn start_session(
     let cancel = CancellationToken::new();
     let (command_tx, command_rx) = client_command_channel();
     let worker_cancel = cancel.clone();
-    let worker_sink = sink;
     let worker = thread::Builder::new()
         .name(format!("slt-android-{handle}"))
         .spawn(move || {
@@ -57,20 +77,19 @@ pub(super) fn start_session(
             // terminal event instead of leaving Android with no Stopped/Error.
             let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 run_native_session(
-                    &config_toml,
+                    runtime,
+                    config,
                     tun_fd,
-                    mtu,
                     worker_cancel,
                     command_rx,
-                    &worker_sink,
-                    handle,
+                    &sink,
                     platform_services,
                 );
             }))
             .is_err();
             if panicked {
                 error!("native client worker panicked; handle={handle}");
-                worker_sink.emit(ClientEventKind::Error {
+                sink.emit(ClientEventKind::Error {
                     detail: "native client worker panicked".to_string(),
                 });
             }
@@ -278,23 +297,23 @@ fn resolve_host(
 }
 
 fn run_native_session(
-    raw_config: &str,
+    runtime: tokio::runtime::Runtime,
+    config: ClientConfig,
     tun_fd: i32,
-    mtu: i32,
     cancel: CancellationToken,
     control_rx: ClientCommandReceiver,
     sink: &ObserverSink<AndroidObserver>,
-    handle: NativeHandle,
     platform_services: Arc<dyn PlatformServices>,
 ) {
-    info!("[session start] handle={handle} fd={tun_fd} android_mtu={mtu}");
-    // The runtime (run_client) owns the lifecycle event stream: Starting..
-    // Stopped/Error. Only pre-run_client setup failures (config parse, mtu,
-    // runtime creation, TUN spawn) are reported here as Error.
+    let handle = sink.handle();
+    info!("[session start] handle={handle} fd={tun_fd}");
+    // Config, mtu, and the runtime were validated/created synchronously in
+    // `start_session`, so only TUN-spawn can fail here. run_client owns its own
+    // terminal events; the bridge reports only this pre-`run_client` failure.
     match run_native_client(
-        raw_config,
+        runtime,
+        config,
         tun_fd,
-        mtu,
         cancel,
         control_rx,
         sink,
@@ -312,27 +331,17 @@ fn run_native_session(
 }
 
 fn run_native_client(
-    raw_config: &str,
+    runtime: tokio::runtime::Runtime,
+    config: ClientConfig,
     tun_fd: i32,
-    mtu: i32,
     cancel: CancellationToken,
     control_rx: ClientCommandReceiver,
     sink: &ObserverSink<AndroidObserver>,
     platform_services: Arc<dyn PlatformServices>,
 ) -> Result<(), String> {
-    let config = ClientConfig::from_toml_str(raw_config)
-        .map_err(|err| format!("parse Android client config: {err}"))?;
-    validate_android_mtu(mtu, config.tun.tun_mtu)?;
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|err| format!("create Android client runtime: {err}"))?;
-
-    // Returns Err only for pre-run_client setup (TUN spawn) failures, which the
-    // bridge reports as Error. run_client owns its own terminal events, so its
-    // result is logged here but not propagated (avoiding a double Error).
+    // Returns Err only for TUN-spawn failure, which the bridge reports as Error.
+    // run_client owns its own terminal events, so its result is logged here but
+    // not propagated (avoiding a double Error).
     let setup_result = runtime.block_on(async move {
         let (tun_handles, tun_channels) =
             crate::tun::spawn_from_fd(&config, tun_fd, cancel.clone())

@@ -7,6 +7,7 @@ This section covers the high-level system design of SLT, a VPN implementation th
 - [Overview](overview.md) - High-level design and traffic flow
 - [Traffic Classification](traffic-classification.md) - How TCP/UDP traffic is classified and routed
 - [Transport Security](transport-security.md) - TLS and UDP-QSP security model
+- [Android / Rust Control Boundary](android-control-boundary.md) - Ownership split and UniFFI surface between the Android client and the Rust runtime
 
 ## Related Documentation
 

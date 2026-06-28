@@ -72,7 +72,7 @@ pub fn init_log_sink(file_path: &str) -> bool {
 
 #[uniffi::export]
 pub fn start_session(
-    config_toml: String,
+    config_toml: &str,
     tun_fd: i32,
     mtu: i32,
     platform_services: std::sync::Arc<dyn PlatformServices>,
