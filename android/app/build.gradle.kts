@@ -16,6 +16,27 @@ fun pinnedUniFfiVersion(workspaceDir: File): String {
         ?: error("could not find exact pinned uniffi version in workspace Cargo.toml")
 }
 
+// The app version's single source of truth is `[workspace.package] version` in
+// the workspace Cargo.toml; gradle reads it here so the APK versionName agrees
+// with the Rust crate. The package version is the only line-anchored
+// `version = "..."` key in Cargo.toml (dependency versions nest under their
+// crate key, e.g. `clap = { version = ... }`), so this singles it out.
+fun cargoWorkspaceVersion(workspaceDir: File): String {
+    val cargoToml = workspaceDir.resolve("Cargo.toml").readText()
+    return Regex("""(?m)^\s*version\s*=\s*"([^"]+)"""")
+        .find(cargoToml)
+        ?.groupValues
+        ?.get(1)
+        ?: error("could not find workspace package version in workspace Cargo.toml")
+}
+
+val appVersion = cargoWorkspaceVersion(rootProject.layout.projectDirectory.asFile.parentFile)
+val gitSha = runCatching {
+    providers.exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+    }.standardOutput.asText.get().trim()
+}.getOrDefault("").ifBlank { "unknown" }
+
 android {
     namespace = "dev.slt.android"
     compileSdk = 35
@@ -25,7 +46,8 @@ android {
         minSdk = 33
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = appVersion
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -43,6 +65,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     sourceSets {

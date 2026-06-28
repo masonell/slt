@@ -4,6 +4,9 @@
     <string name="vpn_notification_channel">SLT VPN</string>
     <string name="vpn_action_stop">Stop</string>
 
+    <!-- Main screen footer: app version + commit -->
+    <string name="app_version_footer">%1$s (%2$s)</string>
+
     <!-- Status line: status words (the dot label) -->
     <string name="status_disconnected">Disconnected</string>
     <string name="status_connecting">Connecting…</string>

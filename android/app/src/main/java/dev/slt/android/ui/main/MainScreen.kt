@@ -35,8 +35,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.slt.android.BuildConfig
+import dev.slt.android.R
 import dev.slt.android.profile.ProfileStoreState
 import dev.slt.android.ui.UiMessage
 import dev.slt.android.ui.components.StartStopButton
@@ -210,6 +214,20 @@ internal fun MainScreen(
                 )
                 StatusLine(state = vpnState)
             }
+
+            Text(
+                text = stringResource(
+                    R.string.app_version_footer,
+                    BuildConfig.VERSION_NAME,
+                    BuildConfig.GIT_SHA,
+                ),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+            )
         }
     }
 }
