@@ -1,3 +1,4 @@
+pub mod control;
 pub mod observer;
 mod register;
 pub mod services;
@@ -7,6 +8,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use control::{ClientCommand, ClientCommandReceiver};
 use observer::{ClientEventKind, ClientObserver, ObserverSink, Transport};
 use services::ClientRuntimeServices;
 use slt_core::config::ClientConfig;
@@ -33,6 +35,7 @@ pub async fn run_client<S>(
     mut tun_channels: tun::TunChannels,
     cancel: CancellationToken,
     services: S,
+    mut control_rx: Option<ClientCommandReceiver>,
 ) -> anyhow::Result<()>
 where
     S: ClientRuntimeServices,
@@ -48,7 +51,15 @@ where
     observer.emit(ClientEventKind::Starting);
     observer.emit(ClientEventKind::TunReady);
 
-    let result = run_sessions(&config, &cancel, &metrics, &mut tun_channels, &services).await;
+    let result = run_sessions(
+        &config,
+        &cancel,
+        &metrics,
+        &mut tun_channels,
+        &services,
+        &mut control_rx,
+    )
+    .await;
 
     cancel.cancel();
     tun_handles.shutdown().await;
@@ -80,6 +91,7 @@ async fn run_sessions<S>(
     metrics: &Arc<Metrics>,
     tun_channels: &mut tun::TunChannels,
     services: &S,
+    control_rx: &mut Option<ClientCommandReceiver>,
 ) -> io::Result<()>
 where
     S: ClientRuntimeServices,
@@ -96,6 +108,7 @@ where
             &mut backoff,
             &mut attempt,
             services,
+            control_rx,
         )
         .await
         {
@@ -108,14 +121,22 @@ where
                     cancel.clone(),
                     metrics.clone(),
                     services,
+                    control_rx.as_mut(),
                 );
                 match handle_session_exit(session.run().await, cancel) {
                     SessionAction::Break => break Ok(()),
                     SessionAction::Fatal(err) => break Err(err),
                     SessionAction::Reconnect => {
-                        schedule_reconnect(cancel, &mut backoff, services.observer(), attempt + 1)
-                            .await;
+                        schedule_reconnect(
+                            cancel,
+                            &mut backoff,
+                            services.observer(),
+                            attempt + 1,
+                            control_rx,
+                        )
+                        .await;
                     }
+                    SessionAction::ReconnectNow => {}
                 }
             }
             ConnectOutcome::Reconnect => {} // backoff already handled in try_connect
@@ -145,6 +166,8 @@ enum SessionAction {
     Fatal(io::Error),
     /// Reconnect to the server (caller should sleep backoff).
     Reconnect,
+    /// Reconnect to the server immediately.
+    ReconnectNow,
 }
 
 /// Attempt to connect and authenticate with the server.
@@ -155,6 +178,7 @@ async fn try_connect<S>(
     backoff: &mut ReconnectBackoff,
     attempt: &mut u64,
     services: &S,
+    control_rx: &mut Option<ClientCommandReceiver>,
 ) -> ConnectOutcome
 where
     S: ClientRuntimeServices,
@@ -173,7 +197,16 @@ where
         .observer()
         .emit(ClientEventKind::Connecting { attempt: *attempt });
 
-    match connect_authenticated(config, cancel, metrics, services).await {
+    let connect = connect_authenticated(config, cancel, metrics, services);
+    tokio::pin!(connect);
+    let result = tokio::select! {
+        result = &mut connect => result,
+        command = recv_control(control_rx) => {
+            return handle_connect_command(command, cancel, services.observer());
+        }
+    };
+
+    match result {
         Ok(tcp) => ConnectOutcome::Connected(tcp),
         Err(err) => {
             if cancel.is_cancelled() {
@@ -203,8 +236,37 @@ where
                 attempt: *attempt,
                 detail: err.to_string(),
             });
-            schedule_reconnect(cancel, backoff, services.observer(), *attempt + 1).await;
+            schedule_reconnect(
+                cancel,
+                backoff,
+                services.observer(),
+                *attempt + 1,
+                control_rx,
+            )
+            .await;
             ConnectOutcome::Reconnect
+        }
+    }
+}
+
+fn handle_connect_command<O>(
+    command: Option<ClientCommand>,
+    cancel: &CancellationToken,
+    observer: &ObserverSink<O>,
+) -> ConnectOutcome
+where
+    O: ClientObserver,
+{
+    match command {
+        Some(ClientCommand::NetworkChanged) => {
+            observer.emit(ClientEventKind::NetworkChanged {
+                detail: "underlying network changed".to_string(),
+            });
+            ConnectOutcome::Reconnect
+        }
+        Some(ClientCommand::Stop) | None => {
+            cancel.cancel();
+            ConnectOutcome::Shutdown
         }
     }
 }
@@ -245,6 +307,10 @@ fn handle_session_exit(exit: session::SessionExit, cancel: &CancellationToken) -
         | session::SessionExit::ConnectionError => {
             warn!(reason = ?exit, "session ended; reconnecting");
             SessionAction::Reconnect
+        }
+        session::SessionExit::NetworkChanged => {
+            info!(reason = ?exit, "underlying network changed; reconnecting immediately");
+            SessionAction::ReconnectNow
         }
     }
 }
@@ -303,6 +369,7 @@ async fn schedule_reconnect<O>(
     backoff: &mut ReconnectBackoff,
     observer: &ObserverSink<O>,
     next_attempt: u64,
+    control_rx: &mut Option<ClientCommandReceiver>,
 ) where
     O: ClientObserver,
 {
@@ -314,6 +381,31 @@ async fn schedule_reconnect<O>(
     tokio::select! {
         () = cancel.cancelled() => {}
         () = time::sleep(delay) => {}
+        command = recv_control(control_rx) => {
+            match command {
+                Some(ClientCommand::NetworkChanged) => {
+                    observer.emit(ClientEventKind::NetworkChanged {
+                        detail: "underlying network changed".to_string(),
+                    });
+                }
+                Some(ClientCommand::Stop) | None => {
+                    cancel.cancel();
+                }
+            }
+        }
+    }
+}
+
+async fn recv_control(control_rx: &mut Option<ClientCommandReceiver>) -> Option<ClientCommand> {
+    match control_rx {
+        Some(rx) => {
+            let command = rx.recv().await;
+            if command.is_none() {
+                *control_rx = None;
+            }
+            command
+        }
+        None => std::future::pending().await,
     }
 }
 

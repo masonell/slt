@@ -5,6 +5,7 @@ use std::io;
 use slt_core::proto::{CloseCode, OwnedMessageBuf};
 
 use super::quic;
+use crate::runtime::control::ClientCommand;
 
 /// Session termination reason used by the runtime to decide reconnect behavior.
 ///
@@ -55,6 +56,11 @@ pub enum SessionExit {
     /// Runtime action: reconnect (transient network issue).
     ConnectionError,
 
+    /// Host reported that the underlying network changed.
+    ///
+    /// Runtime action: reconnect immediately.
+    NetworkChanged,
+
     /// UDP upgrade timed out while `require_udp` policy is enabled.
     ///
     /// Runtime action: fatal exit (required transport unavailable).
@@ -88,6 +94,8 @@ pub(super) enum SessionEvent {
     DiscoveryResult(Option<quic::QuicIds>),
     /// UDP upgrade timer expired (probe retry/deadline/cooldown).
     UdpUpgradeTick,
+    /// Host control command.
+    Control(ClientCommand),
 }
 
 /// Control flow decision after handling an event.

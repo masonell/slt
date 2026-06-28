@@ -31,6 +31,10 @@ object SltNative {
         session?.destroy()
     }
 
+    fun networkChanged(session: NativeSession?) {
+        session?.networkChanged()
+    }
+
     fun validateClientConfig(configToml: String): ConfigValidationResult =
         try {
             ConfigValidationResult.Valid(validateClientConfigUniFfi(configToml))

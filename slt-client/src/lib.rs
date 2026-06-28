@@ -42,6 +42,9 @@ mod test_support;
 #[cfg(test)]
 mod test_integration;
 
+pub use runtime::control::{
+    ClientCommand, ClientCommandReceiver, ClientCommandSender, client_command_channel,
+};
 pub use runtime::observer::{
     ClientEvent, ClientEventKind, ClientObserver, NoopObserver, ObserverSink, Transport,
     TransportChangeReason,

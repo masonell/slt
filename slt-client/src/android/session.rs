@@ -11,6 +11,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 use super::uniffi_api::{NativeSessionCallback, PlatformServices, SltInteropError};
+use crate::runtime::control::{
+    ClientCommand, ClientCommandReceiver, ClientCommandSender, client_command_channel,
+};
 use crate::runtime::observer::{ClientEvent, ClientEventKind, ClientObserver, ObserverSink};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::transport::host_resolver::{HostResolver, HostResolverFuture, ensure_non_empty};
@@ -44,6 +47,7 @@ pub(super) fn start_session(
 
     let sink = ObserverSink::new(handle, AndroidObserver::new(callback));
     let cancel = CancellationToken::new();
+    let (command_tx, command_rx) = client_command_channel();
     let worker_cancel = cancel.clone();
     let worker_sink = sink;
     let worker = thread::Builder::new()
@@ -57,6 +61,7 @@ pub(super) fn start_session(
                     tun_fd,
                     mtu,
                     worker_cancel,
+                    command_rx,
                     &worker_sink,
                     handle,
                     platform_services,
@@ -77,6 +82,7 @@ pub(super) fn start_session(
     Ok(Arc::new(NativeSession {
         handle,
         cancel,
+        command_tx,
         worker: Mutex::new(Some(worker)),
     }))
 }
@@ -85,6 +91,7 @@ pub(super) fn start_session(
 pub struct NativeSession {
     handle: NativeHandle,
     cancel: CancellationToken,
+    command_tx: ClientCommandSender,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -97,10 +104,25 @@ impl NativeSession {
     pub fn stop(&self) {
         self.stop_inner();
     }
+
+    pub fn network_changed(&self) {
+        if self.command_tx.send(ClientCommand::NetworkChanged).is_err() {
+            debug!(
+                handle = self.handle,
+                "network_changed command dropped; runtime already stopped"
+            );
+        }
+    }
 }
 
 impl NativeSession {
     fn stop_inner(&self) {
+        if self.command_tx.send(ClientCommand::Stop).is_err() {
+            debug!(
+                handle = self.handle,
+                "stop command dropped; runtime already stopped"
+            );
+        }
         self.cancel.cancel();
         let Ok(mut worker) = self.worker.lock() else {
             return;
@@ -260,6 +282,7 @@ fn run_native_session(
     tun_fd: i32,
     mtu: i32,
     cancel: CancellationToken,
+    control_rx: ClientCommandReceiver,
     sink: &ObserverSink<AndroidObserver>,
     handle: NativeHandle,
     platform_services: Arc<dyn PlatformServices>,
@@ -268,7 +291,15 @@ fn run_native_session(
     // The runtime (run_client) owns the lifecycle event stream: Starting..
     // Stopped/Error. Only pre-run_client setup failures (config parse, mtu,
     // runtime creation, TUN spawn) are reported here as Error.
-    match run_native_client(raw_config, tun_fd, mtu, cancel, sink, platform_services) {
+    match run_native_client(
+        raw_config,
+        tun_fd,
+        mtu,
+        cancel,
+        control_rx,
+        sink,
+        platform_services,
+    ) {
         Ok(()) => {
             info!("[session stop] handle={handle}");
         }
@@ -285,6 +316,7 @@ fn run_native_client(
     tun_fd: i32,
     mtu: i32,
     cancel: CancellationToken,
+    control_rx: ClientCommandReceiver,
     sink: &ObserverSink<AndroidObserver>,
     platform_services: Arc<dyn PlatformServices>,
 ) -> Result<(), String> {
@@ -308,8 +340,15 @@ fn run_native_client(
         info!("Android TUN backend started");
 
         let services = AndroidServices::new(platform_services, sink.clone());
-        if let Err(err) =
-            crate::run_client(config, tun_handles, tun_channels, cancel, services).await
+        if let Err(err) = crate::run_client(
+            config,
+            tun_handles,
+            tun_channels,
+            cancel,
+            services,
+            Some(control_rx),
+        )
+        .await
         {
             error!("client runtime exited with error: {err}");
         }

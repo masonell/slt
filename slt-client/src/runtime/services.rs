@@ -48,9 +48,9 @@ pub trait ClientRuntimeServices: Send + Sync + 'static {
 // borrows of cloneable hooks. Putting a receiver behind the trait would force
 // interior mutability (a `Mutex`) just to poll it from the `&S` the session
 // borrows. Instead the channel lives as a separate owned argument to
-// `run_sessions` — wired in a later phase — keeping the trait about cloneable
-// platform hooks. (This does mean `run_client`/`run_sessions` gain one param
-// when the channel lands; that is accepted as the cleaner split.)
+// `run_sessions`, keeping the trait about cloneable platform hooks. This means
+// `run_client`/`run_sessions` take one explicit command-channel argument; that
+// is accepted as the cleaner split.
 
 /// Desktop (CLI) platform services: no-op socket protection, Tokio DNS, and a
 /// no-op observer.

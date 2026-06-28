@@ -22,33 +22,20 @@ import dev.slt.android.uniffi.PlatformServices
 import dev.slt.android.uniffi.SltInteropException
 import dev.slt.android.uniffi.SocketKind
 import dev.slt.android.uniffi.Transport
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlin.coroutines.coroutineContext
 
 class SltVpnService : VpnService() {
     @Volatile private var tunFd: ParcelFileDescriptor? = null
     @Volatile private var nativeSession: NativeSession? = null
     @Volatile private var nativeHandle: Long = 0
     @Volatile private var sessionGeneration: Int = 0
-    @Volatile private var reconnecting: Boolean = false
-    @Volatile private var reconnectAttempt: Int = 0
     @Volatile private var activeUnderlyingNetwork: Network? = null
     private var terminalStatusReported = false
-    private var activeProfileToml: String? = null
-    private var activeTunMtu: Int = 0
 
     private val stateLock = Any()
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val profileApplier by lazy { VpnProfileApplier(this, TAG) }
     private val notificationFactory by lazy { VpnNotificationFactory(this) }
-    private var reconnectScope = newReconnectScope()
     private var networkWatcher: NetworkChangeWatcher? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -81,32 +68,29 @@ class SltVpnService : VpnService() {
 
     private fun startVpn() {
         terminalStatusReported = false
-        SltVpnStatusBus.update(VpnStatus.Starting)
         notificationFactory.ensureChannel()
-        startForeground(VpnNotificationFactory.NOTIFICATION_ID, notificationFactory.build("Starting"))
 
         if (tunFd != null) {
-            if (reconnecting) {
-                SltVpnStatusBus.update(VpnStatus.Reconnecting, "Network changed")
-                updateNotification("Reconnecting")
-            } else {
-                SltVpnStatusBus.update(VpnStatus.Running, "fd=${tunFd?.fd} native=${nativeHandle}")
-                updateNotification("Running")
+            when (SltVpnStatusBus.state.value.status) {
+                VpnStatus.Reconnecting -> updateNotification("Reconnecting")
+                VpnStatus.Starting -> updateNotification("Starting")
+                else -> {
+                    SltVpnStatusBus.update(VpnStatus.Running, "fd=${tunFd?.fd} native=${nativeHandle}")
+                    updateNotification("Running")
+                }
             }
             return
         }
 
         try {
-            reconnectScope = newReconnectScope()
+            SltVpnStatusBus.update(VpnStatus.Starting)
+            startForeground(VpnNotificationFactory.NOTIFICATION_ID, notificationFactory.build("Starting"))
             SltNative.load()
             val profile = loadActiveProfile()
             val summary = validateProfile(profile)
             val initialUnderlyingNetwork =
                 getSystemService(ConnectivityManager::class.java)?.activeNetwork
             activeUnderlyingNetwork = initialUnderlyingNetwork
-
-            activeProfileToml = profile.clientToml
-            activeTunMtu = summary.tunMtu
 
             val builder = Builder()
                 .setSession(profile.metadata.name)
@@ -145,13 +129,13 @@ class SltVpnService : VpnService() {
             this,
             initialNetwork,
             ::publishUnderlyingNetwork,
-        ) { network -> reconnect(network) }
+        ) { network -> notifyNetworkChanged(network) }
         networkWatcher?.start()
     }
 
     private fun publishUnderlyingNetwork(network: Network?) {
         synchronized(stateLock) {
-            if (tunFd == null && nativeSession == null && !reconnecting) {
+            if (tunFd == null && nativeSession == null) {
                 return
             }
             activeUnderlyingNetwork = network
@@ -180,15 +164,10 @@ class SltVpnService : VpnService() {
         networkWatcher?.stop()
         networkWatcher = null
         activeUnderlyingNetwork = null
-        reconnectScope.cancel()
-        synchronized(stateLock) { reconnecting = false }
         stopNativeClient()
         closeTunFd()
         stopForegroundCompat()
     }
-
-    private fun newReconnectScope(): CoroutineScope =
-        CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
 
     private fun failVpn(message: String) {
         Log.e(TAG, "SLT VPN failed: $message")
@@ -217,7 +196,6 @@ class SltVpnService : VpnService() {
 
     /// Start a fresh native client session, bumping the generation so stale
     /// callbacks from any previous session are ignored by the callback guard.
-    /// Used for both the initial connect and reconnects. Returns the new handle.
     private fun startNativeSession(configToml: String, tunFd: Int, mtu: Int): NativeSession {
         sessionGeneration += 1
         val gen = sessionGeneration
@@ -225,84 +203,19 @@ class SltVpnService : VpnService() {
         return SltNative.start(configToml, tunFd, mtu, platformServices, buildNativeCallback(gen))
     }
 
-    /// Reconnect over the existing TUN fd after the underlying network changed.
-    /// Guards run on the main thread; the blocking stop/start runs on the
-    /// reconnect scope. The TUN interface, routes, and app rules are left intact.
-    private fun reconnect(network: Network?) {
-        synchronized(stateLock) {
-            if (tunFd == null || (nativeSession == null && !reconnecting)) {
+    /// Notify Rust that the underlying network changed. Rust owns reconnect and
+    /// path recovery policy; Kotlin only maintains Android platform state.
+    private fun notifyNetworkChanged(network: Network?) {
+        val session = synchronized(stateLock) {
+            val current = nativeSession ?: return
+            if (tunFd == null) {
                 return
             }
             activeUnderlyingNetwork = network
-            if (reconnecting) {
-                return
-            }
-            if (SltVpnStatusBus.state.value.status != VpnStatus.Running) {
-                return
-            }
-            reconnecting = true
+            current
         }
-
-        Log.i(TAG, "Underlying network changed; reconnecting")
-        SltVpnStatusBus.update(VpnStatus.Reconnecting, "Network changed")
-        updateNotification("Reconnecting")
-        startReconnectAttempt(RECONNECT_FIRST_ATTEMPT)
-    }
-
-    /// Launch a reconnect attempt on the background scope, recording its number so
-    /// an asynchronous native "error" attributes the failure to the right attempt.
-    private fun startReconnectAttempt(attempt: Int) {
-        reconnectAttempt = attempt
-        reconnectScope.launch { runReconnectAttempt(attempt) }
-    }
-
-    private suspend fun runReconnectAttempt(attempt: Int) {
-        try {
-            // Stop any prior session but keep the TUN fd open.
-            stopNativeClient()
-            coroutineContext.ensureActive()
-
-            val fd = tunFd ?: error("TUN fd closed during reconnect")
-            val configToml = activeProfileToml ?: error("No active profile for reconnect")
-            val session = startNativeSession(configToml, fd.fd, activeTunMtu)
-            nativeSession = session
-            nativeHandle = session.handle()
-
-            // The new session reports success or failure asynchronously via
-            // typed native events; this coroutine does not wait.
-        } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            throw cancellation
-        } catch (error: Exception) {
-            Log.w(TAG, "Reconnect attempt $attempt failed: ${error.message}")
-            handleReconnectFailureOnMain(attempt, error.message ?: error::class.java.simpleName)
-        }
-    }
-
-    /// Route reconnect-failure handling to the main thread so attempt accounting
-    /// and terminal teardown stay single-threaded. Called from background
-    /// coroutines (synchronous start failure) and from the main thread (async
-    /// native "error" during reconnect).
-    private fun handleReconnectFailureOnMain(attempt: Int, reason: String) {
-        mainHandler.post {
-            if (!reconnecting || attempt != reconnectAttempt) {
-                return@post
-            }
-
-            if (attempt < MAX_RECONNECT_ATTEMPTS) {
-                reconnectAttempt = attempt + 1
-                val backoffMs = RECONNECT_BACKOFF_MS
-                    .getOrElse(attempt - RECONNECT_FIRST_ATTEMPT) { RECONNECT_BACKOFF_MS.last() }
-                Log.i(TAG, "Scheduling reconnect attempt ${attempt + 1} in ${backoffMs}ms")
-                reconnectScope.launch {
-                    delay(backoffMs)
-                    ensureActive()
-                    startReconnectAttempt(attempt + 1)
-                }
-            } else {
-                reconnecting = false
-                failVpn("Reconnect failed after $attempt attempts: $reason")
-            }
-        }
+        Log.i(TAG, "Underlying network changed; notifying native runtime")
+        SltNative.networkChanged(session)
     }
 
     private fun buildPlatformServices(): PlatformServices =
@@ -361,48 +274,43 @@ class SltVpnService : VpnService() {
     private fun handleNativeEvent(event: ClientEvent) {
         when (event.kind) {
             is ClientEventKind.Starting -> {
-                // During a reconnect keep the Reconnecting state rather than
-                // flickering back to Starting while the new session comes up.
-                if (!reconnecting) {
-                    SltVpnStatusBus.update(VpnStatus.Starting)
-                    updateNotification("Starting")
-                }
+                SltVpnStatusBus.update(VpnStatus.Starting)
+                updateNotification("Starting")
             }
             is ClientEventKind.TunReady,
             is ClientEventKind.Connecting,
             is ClientEventKind.ConnectedTcp,
             is ClientEventKind.Authenticating -> {
-                // Still establishing the session. Hold the current status
-                // (Starting for a fresh connect, Reconnecting during recovery).
-                if (!reconnecting &&
-                    SltVpnStatusBus.state.value.status == VpnStatus.Idle
-                ) {
+                // Still establishing the session. Hold Reconnecting if Rust is
+                // in backoff/recovery; otherwise show Starting from Idle.
+                if (SltVpnStatusBus.state.value.status == VpnStatus.Idle) {
                     SltVpnStatusBus.update(VpnStatus.Starting)
                 }
             }
             is ClientEventKind.Authenticated -> {
-                reconnecting = false
                 SltVpnStatusBus.update(VpnStatus.Running, transport = transportLabel(event.transport))
                 updateNotification("Running")
             }
             is ClientEventKind.ReconnectScheduled -> {
-                if (!reconnecting) {
-                    SltVpnStatusBus.update(
-                        VpnStatus.Reconnecting,
-                        "Reconnect in ${event.kind.delayMs}ms (attempt ${event.kind.attempt})",
-                    )
-                }
+                SltVpnStatusBus.update(
+                    VpnStatus.Reconnecting,
+                    "Reconnect in ${event.kind.delayMs}ms (attempt ${event.kind.attempt})",
+                )
+                updateNotification("Reconnecting")
             }
             is ClientEventKind.ReconnectFailed -> {
-                if (!reconnecting) {
-                    SltVpnStatusBus.update(
-                        VpnStatus.Reconnecting,
-                        "Attempt ${event.kind.attempt} failed",
-                    )
-                }
+                SltVpnStatusBus.update(
+                    VpnStatus.Reconnecting,
+                    "Attempt ${event.kind.attempt} failed",
+                )
+                updateNotification("Reconnecting")
             }
             is ClientEventKind.TransportChanged -> {
                 SltVpnStatusBus.updateTransport(transportLabel(event.transport))
+            }
+            is ClientEventKind.NetworkChanged -> {
+                SltVpnStatusBus.update(VpnStatus.Reconnecting, "Network changed")
+                updateNotification("Reconnecting")
             }
             is ClientEventKind.UdpDiscoveryStarted,
             is ClientEventKind.UdpDiscoveryFailed,
@@ -412,7 +320,6 @@ class SltVpnService : VpnService() {
             is ClientEventKind.UdpUpgradeStarted,
             is ClientEventKind.UdpPathValidated,
             is ClientEventKind.UdpSwitchCommitted,
-            is ClientEventKind.NetworkChanged,
             is ClientEventKind.UdpPathRefreshStarted,
             is ClientEventKind.UdpPathRefreshSucceeded,
             is ClientEventKind.UdpPathRefreshFailed -> {
@@ -431,9 +338,7 @@ class SltVpnService : VpnService() {
             }
             is ClientEventKind.Error -> {
                 val errorDetail = event.kind.detail
-                if (reconnecting) {
-                    handleReconnectFailureOnMain(reconnectAttempt, errorDetail)
-                } else if (nativeHandle != 0L || tunFd != null) {
+                if (nativeHandle != 0L || tunFd != null) {
                     failVpn(errorDetail)
                 } else {
                     SltVpnStatusBus.update(VpnStatus.Error, errorDetail)
@@ -475,13 +380,6 @@ class SltVpnService : VpnService() {
 
         private const val TAG = "SltVpnService"
         private const val CLIENT_ADDRESS_PREFIX = 32
-
-        private const val RECONNECT_FIRST_ATTEMPT = 1
-        private const val MAX_RECONNECT_ATTEMPTS = 5
-
-        /// Backoff before retries 2..N (1s, 2s, 4s, 8s); total wait ~15s, under the
-        /// design's 30s ceiling.
-        private val RECONNECT_BACKOFF_MS = longArrayOf(1_000, 2_000, 4_000, 8_000)
 
         fun startIntent(context: Context): Intent =
             Intent(context, SltVpnService::class.java).setAction(ACTION_START)

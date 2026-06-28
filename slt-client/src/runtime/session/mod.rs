@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::ReconnectBackoff;
+use super::control::{ClientCommand, ClientCommandReceiver};
 use super::observer::{ClientEventKind, Transport, TransportChangeReason};
 use super::services::ClientRuntimeServices;
 use crate::metrics::Metrics;
@@ -62,6 +63,7 @@ pub(super) struct ClientSession<'a, S: ClientRuntimeServices> {
     /// Whether the TCP connection is still usable. Set to false when TCP closes
     /// while UDP-QSP is active, allowing the session to continue on UDP alone.
     tcp_alive: bool,
+    control_rx: Option<&'a mut ClientCommandReceiver>,
 }
 
 /// Classifies an I/O error into the appropriate [`SessionExit`] variant.
@@ -96,6 +98,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
         cancel: CancellationToken,
         metrics: Arc<Metrics>,
         services: &'a S,
+        control_rx: Option<&'a mut ClientCommandReceiver>,
     ) -> Self {
         let now = Instant::now();
         let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
@@ -138,6 +141,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             metrics,
             services,
             tcp_alive: true,
+            control_rx,
         }
     }
 
@@ -227,6 +231,9 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             biased;
 
             () = self.cancel.cancelled() => Ok(SessionEvent::Shutdown),
+            command = recv_control(&mut self.control_rx) => {
+                Ok(command.map_or(SessionEvent::Shutdown, SessionEvent::Control))
+            }
             res = self.tcp.read_more(), if self.tcp_alive => Ok(SessionEvent::TcpRead(res?)),
             maybe = self.tun_channels.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
             udp_res = async {
@@ -290,6 +297,24 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                     debug!(error = %err, "failed to send close on shutdown");
                 }
                 Ok(SessionControl::Close(SessionExit::Shutdown))
+            }
+            SessionEvent::Control(ClientCommand::Stop) => {
+                info!("stop command received");
+                self.cancel.cancel();
+                self.metrics.inc_disconnect_shutdown();
+                if let Err(err) = self.send_close(CloseCode::Normal).await {
+                    debug!(error = %err, "failed to send close on stop");
+                }
+                Ok(SessionControl::Close(SessionExit::Shutdown))
+            }
+            SessionEvent::Control(ClientCommand::NetworkChanged) => {
+                info!("underlying network changed; reconnecting");
+                self.services
+                    .observer()
+                    .emit(ClientEventKind::NetworkChanged {
+                        detail: "underlying network changed".to_string(),
+                    });
+                Ok(SessionControl::Close(SessionExit::NetworkChanged))
             }
             SessionEvent::TcpRead(n) => {
                 if n == 0 {
@@ -462,5 +487,20 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                 .await?;
         }
         Ok(SessionControl::Continue)
+    }
+}
+
+async fn recv_control(
+    control_rx: &mut Option<&mut ClientCommandReceiver>,
+) -> Option<ClientCommand> {
+    match control_rx {
+        Some(rx) => {
+            let command = rx.recv().await;
+            if command.is_none() {
+                *control_rx = None;
+            }
+            command
+        }
+        None => std::future::pending().await,
     }
 }
