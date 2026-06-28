@@ -355,6 +355,22 @@ impl<I: SessionIo> QuicQspSession<I> {
         self.io.has_pending_flush()
     }
 
+    /// Replace the underlying packet I/O backend, preserving all UDP-QSP
+    /// cryptographic, packet-number, rekey, and replay state.
+    ///
+    /// Any send/receive queues owned by the old I/O backend are discarded with
+    /// the returned value unless the caller keeps or drains it separately.
+    #[must_use]
+    pub const fn replace_io(&mut self, new_io: I) -> I {
+        std::mem::replace(&mut self.io, new_io)
+    }
+
+    /// Return a reference to the underlying I/O backend.
+    #[must_use]
+    pub const fn io(&self) -> &I {
+        &self.io
+    }
+
     /// Update the UDP peer address through the underlying I/O backend.
     pub fn set_peer(&mut self, peer: SocketAddr)
     where
@@ -519,6 +535,7 @@ const fn next_rekey_after(pn: u64, interval: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
     use tokio::sync::mpsc;
@@ -629,6 +646,49 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct QueueIo {
+        sent: Arc<Mutex<Vec<Vec<u8>>>>,
+        recv: VecDeque<Vec<u8>>,
+    }
+
+    impl QueueIo {
+        fn new(recv: Vec<Vec<u8>>) -> (Self, Arc<Mutex<Vec<Vec<u8>>>>) {
+            let sent = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    sent: sent.clone(),
+                    recv: recv.into(),
+                },
+                sent,
+            )
+        }
+    }
+
+    impl SessionIo for QueueIo {
+        async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.sent
+                .lock()
+                .expect("QueueIo sent lock")
+                .push(bytes.to_vec());
+            Ok(())
+        }
+
+        async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let packet = self.recv.pop_front().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "QueueIo receive queue empty")
+            })?;
+            if packet.len() > buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "packet too large",
+                ));
+            }
+            buf[..packet.len()].copy_from_slice(&packet);
+            Ok(packet.len())
+        }
+    }
+
     fn encode_ping_frame(nonce: u64) -> Vec<u8> {
         let payload = PingPayload { nonce };
         let mut payload_buf = Vec::new();
@@ -673,6 +733,75 @@ mod tests {
         session.rx_next_rekey_pn = next_rekey_after(session.expected_pn(), interval);
         session.previous_rx = None;
         session.consecutive_decrypt_failures = 0;
+    }
+
+    fn symmetric_keys() -> UdpQspKeys {
+        UdpQspKeys::new(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],
+            [0x11; HP_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x55; AEAD_IV_LEN],
+            [0x55; AEAD_IV_LEN],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn replace_io_preserves_packet_numbers_replay_window_and_rekey_state() {
+        let keys = symmetric_keys();
+        let scid = Cid::from([0xCD; 20]);
+        let dcid = Cid::from([0xAB; 20]);
+        let scid_len = scid.len();
+        let replayed_packet = keys.protect(dcid.as_slice(), 0, false, b"inbound").unwrap();
+        let (io, _old_sent) = QueueIo::new(vec![replayed_packet.clone()]);
+        let mut session = QuicQspSession::new(io, scid, dcid, keys.clone(), 1, 0, false);
+        set_rekey_policy(
+            &mut session,
+            2,
+            KEY_UPDATE_LATE_MARGIN,
+            DEAD_CHANNEL_FAILURE_THRESHOLD,
+        );
+
+        let mut packet_buf = vec![0u8; 2048];
+        let opened = session.recv(&mut packet_buf).await.unwrap();
+        assert_eq!(opened.pn, 0);
+        assert_eq!(opened.payload, b"inbound");
+        assert_eq!(session.expected_pn(), 1);
+        assert_eq!(session.next_pn(), 1);
+        assert!(!session.tx_key_phase());
+
+        let (replacement_io, replacement_sent) = QueueIo::new(vec![replayed_packet]);
+        let _old_io = session.replace_io(replacement_io);
+        assert_eq!(session.expected_pn(), 1);
+        assert_eq!(session.next_pn(), 1);
+        assert!(!session.tx_key_phase());
+
+        assert!(matches!(
+            session.recv(&mut packet_buf).await,
+            Err(QspSessionError::Replay)
+        ));
+
+        session.send(b"first-after-replace").await.unwrap();
+        assert_eq!(session.next_pn(), 2);
+        assert!(!session.tx_key_phase());
+
+        let first_sent = {
+            let sent = replacement_sent.lock().expect("replacement sent lock");
+            assert_eq!(sent.len(), 1);
+            sent[0].clone()
+        };
+        let mut opened_payload = Vec::new();
+        let opened = keys
+            .open_into(scid_len, &first_sent, 1, &mut opened_payload)
+            .unwrap();
+        assert_eq!(opened.pn, 1);
+        assert_eq!(opened.payload, b"first-after-replace");
+
+        session.send(b"second-after-replace").await.unwrap();
+        assert_eq!(session.next_pn(), 3);
+        assert!(session.tx_key_phase());
     }
 
     #[test]

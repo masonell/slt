@@ -28,6 +28,13 @@ impl ClientUdpIo {
     pub const fn new(socket: Arc<UdpSocket>, peer: SocketAddr) -> Self {
         Self { socket, peer }
     }
+
+    #[cfg(not(unix))]
+    /// Return the accepted receive peer and outbound transmit destination.
+    #[must_use]
+    pub const fn peer(&self) -> SocketAddr {
+        self.peer
+    }
 }
 
 #[cfg(unix)]
@@ -96,6 +103,20 @@ impl<I: SessionIo> UdpQspTransport<I> {
     #[must_use]
     pub fn has_pending_flush(&self) -> bool {
         self.session.has_pending_flush()
+    }
+
+    /// Replace the underlying UDP-QSP I/O backend after a best-effort flush.
+    ///
+    /// Flush failures during network handoff are logged and ignored: any packet
+    /// already assigned a packet number may be lost, but the session's packet
+    /// number, replay, and key-phase state remain monotonic.
+    pub async fn replace_io(&mut self, new_io: I) -> I {
+        if self.session.has_pending_flush()
+            && let Err(err) = self.session.flush().await
+        {
+            warn!(error = %err, "failed to flush udp-qsp packets before io replacement");
+        }
+        self.session.replace_io(new_io)
     }
 
     /// Encode and send a VPN protocol message over UDP-QSP.
@@ -252,6 +273,14 @@ impl<I: SessionIo> UdpQspTransport<I> {
                 ))
             }
         }
+    }
+}
+
+impl UdpQspTransport<ClientUdpQspIo> {
+    /// Return the current UDP peer address for client-side socket recreation.
+    #[must_use]
+    pub const fn peer(&self) -> SocketAddr {
+        self.session.io().peer()
     }
 }
 

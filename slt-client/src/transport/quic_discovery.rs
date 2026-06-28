@@ -212,7 +212,20 @@ where
     }
 }
 
-fn bind_protected_udp_socket<SP>(peer: SocketAddr, socket_protector: &SP) -> io::Result<UdpSocket>
+/// Bind a UDP socket for `peer`, apply platform socket protection, and make it nonblocking.
+///
+/// The socket is protected before conversion to Tokio so Android can both
+/// exclude it from the VPN route and bind it to the active underlying network
+/// before any packet is sent.
+///
+/// # Errors
+///
+/// Returns an error if binding, platform socket protection, nonblocking setup,
+/// or Tokio conversion fails.
+pub fn bind_protected_udp_socket<SP>(
+    peer: SocketAddr,
+    socket_protector: &SP,
+) -> io::Result<UdpSocket>
 where
     SP: SocketProtector,
 {

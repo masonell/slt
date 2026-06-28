@@ -222,13 +222,12 @@ class SltVpnService : VpnService() {
         object : PlatformServices {
             override fun protectSocket(fd: Int, kind: SocketKind): Boolean =
                 try {
-                    val protected = protect(fd)
-                    if (!protected) {
-                        Log.w(TAG, "Android refused to protect SLT socket: fd=$fd kind=$kind")
-                    }
-                    protected
+                    protectAndBindSocket(fd, kind)
                 } catch (error: RuntimeException) {
                     Log.w(TAG, "Failed to protect SLT socket: fd=$fd kind=$kind", error)
+                    false
+                } catch (error: Exception) {
+                    Log.w(TAG, "Failed to bind SLT socket: fd=$fd kind=$kind", error)
                     false
                 }
 
@@ -250,6 +249,25 @@ class SltVpnService : VpnService() {
                 }
             }
         }
+
+    private fun protectAndBindSocket(fd: Int, kind: SocketKind): Boolean {
+        val protected = protect(fd)
+        if (!protected) {
+            Log.w(TAG, "Android refused to protect SLT socket: fd=$fd kind=$kind")
+            return false
+        }
+
+        val network = activeUnderlyingNetwork
+        if (network == null) {
+            Log.w(TAG, "No underlying network available for SLT socket binding: fd=$fd kind=$kind")
+            return false
+        }
+
+        ParcelFileDescriptor.fromFd(fd).use { dup ->
+            network.bindSocket(dup.fileDescriptor)
+        }
+        return true
+    }
 
     private fun buildNativeCallback(gen: Int): NativeSessionCallback =
         object : NativeSessionCallback {

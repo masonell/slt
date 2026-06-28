@@ -70,6 +70,12 @@ impl UdpQspIo {
         })
     }
 
+    /// Return the accepted receive peer and outbound transmit destination.
+    #[must_use]
+    pub const fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+
     /// Update the accepted receive peer and outbound transmit destination.
     ///
     /// Already-queued receive datagrams are kept: they matched the previously

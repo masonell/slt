@@ -1,6 +1,7 @@
 //! UDP-QSP message handling for `ClientSession`.
 
 use std::io;
+use std::sync::Arc;
 use std::time::Instant;
 
 use slt_core::proto::{
@@ -13,6 +14,8 @@ use super::{ClientSession, SessionControl, SessionExit};
 use crate::runtime::observer::{ClientEventKind, Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
+use crate::transport::quic_discovery;
+use crate::transport::udp_qsp::client_udp_qsp_io;
 use crate::wire;
 
 impl<S: ClientRuntimeServices> ClientSession<'_, S> {
@@ -37,15 +40,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         self.services
             .observer()
             .emit(ClientEventKind::UdpPathRefreshStarted);
-        match self.refresh_udp_path().await {
-            Ok(SessionControl::Continue) => {
-                self.note_udp_activity();
-                self.services
-                    .observer()
-                    .emit(ClientEventKind::UdpPathRefreshSucceeded);
-                info!("udp-qsp path refresh succeeded");
-                Ok(SessionControl::Continue)
-            }
+        match self.refresh_udp_path_with_replacement_fallback().await {
+            Ok(SessionControl::Continue) => Ok(self.note_udp_path_refresh_succeeded()),
             Ok(SessionControl::Close(exit)) => Ok(SessionControl::Close(exit)),
             Err(err) => {
                 let detail = err.to_string();
@@ -70,6 +66,46 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 Ok(SessionControl::Continue)
             }
         }
+    }
+
+    async fn refresh_udp_path_with_replacement_fallback(&mut self) -> io::Result<SessionControl> {
+        match self.refresh_udp_path().await {
+            Ok(control) => return Ok(control),
+            Err(err) => {
+                warn!(error = %err, "udp-qsp path refresh failed on existing socket");
+            }
+        }
+
+        info!("recreating udp-qsp socket after path refresh failure");
+        self.recreate_udp_io().await?;
+        self.refresh_udp_path().await
+    }
+
+    async fn recreate_udp_io(&mut self) -> io::Result<()> {
+        let peer = self
+            .udp_state
+            .as_active()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing"))?
+            .peer();
+        let socket = Arc::new(quic_discovery::bind_protected_udp_socket(
+            peer,
+            self.services.socket_protector(),
+        )?);
+        let new_io = client_udp_qsp_io(&socket, peer)?;
+        let udp = self.udp_state.as_active_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+        })?;
+        let _old_io = udp.replace_io(new_io).await;
+        Ok(())
+    }
+
+    fn note_udp_path_refresh_succeeded(&mut self) -> SessionControl {
+        self.note_udp_activity();
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpPathRefreshSucceeded);
+        info!("udp-qsp path refresh succeeded");
+        SessionControl::Continue
     }
 
     fn emit_network_changed_reconnect(&self) {
