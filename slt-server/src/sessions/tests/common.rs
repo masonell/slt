@@ -31,6 +31,18 @@ pub(super) type SpawnSessionResult = (
     Arc<SessionRegistry>,
 );
 
+pub(super) type SpawnSessionWithPeerCaptureResult = (
+    tokio::task::JoinHandle<io::Result<()>>,
+    TlsDuplexStream,
+    SessionTx,
+    mpsc::Receiver<Vec<u8>>,
+    mpsc::Receiver<Vec<u8>>,
+    mpsc::Receiver<SocketAddr>,
+    MessageLimits,
+    AssignedIp,
+    Arc<SessionRegistry>,
+);
+
 pub(super) async fn spawn_session() -> SpawnSessionResult {
     spawn_session_with_timeouts(default_session_timeouts()).await
 }
@@ -64,6 +76,46 @@ pub(super) async fn spawn_session_with_timeouts(timeouts: SessionTimeouts) -> Sp
     let join = tokio::spawn(async move { session.run().await });
     (
         join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
+    )
+}
+
+pub(super) async fn spawn_session_with_peer_capture() -> SpawnSessionWithPeerCaptureResult {
+    let (server_tls, client_tls) = tls_pair().await;
+    let (tun, tun_rx) = TestTun::new(8);
+    let (udp, udp_rx, udp_peer_rx) = TestUdpSocket::new_with_peer_capture(16);
+    let registry = Arc::new(SessionRegistry::new());
+    let metrics = Arc::new(Metrics::default());
+    let (tx, rx) = mpsc::channel(8);
+    let client_id = ClientId([0xA5; 16]);
+    let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
+    let (handle, _old) = registry.register_session(client_id, assigned, tx.clone());
+    let limits = MessageLimits::from_mtu(1500);
+    let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
+    let session = ClientSessionBase::new(
+        handle.session_id,
+        client_id,
+        assigned,
+        TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
+        tun,
+        udp_io_factory,
+        registry.clone(),
+        metrics,
+        tx.clone(),
+        rx,
+        limits,
+        default_session_timeouts(),
+    );
+    let join = tokio::spawn(async move { session.run().await });
+    (
+        join,
+        client_tls,
+        tx,
+        tun_rx,
+        udp_rx,
+        udp_peer_rx,
+        limits,
+        assigned,
+        registry,
     )
 }
 

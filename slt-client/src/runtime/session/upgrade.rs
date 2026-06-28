@@ -159,6 +159,28 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         debug!(delay_ms = delay.as_millis(), "scheduled quic discovery");
     }
 
+    /// Schedules immediate QUIC discovery without applying retry backoff.
+    ///
+    /// Used after an Android network handoff when the existing UDP-QSP path
+    /// cannot be refreshed but the TCP control channel is still alive.
+    pub(super) fn schedule_discovery_now(&mut self) {
+        if !(self.config.enable_upgrade || self.config.require_udp) {
+            self.udp_state = UdpState::Disabled;
+            self.udp_upgrade = UdpUpgradeState::Disabled;
+            return;
+        }
+
+        self.udp_upgrade = UdpUpgradeState::Idle;
+        self.udp_state = UdpState::NeedDiscovery {
+            backoff: ReconnectBackoff::new(
+                self.config.timing.reconnect_min,
+                self.config.timing.reconnect_max,
+            ),
+            reconnect_at: Instant::now(),
+        };
+        debug!("scheduled immediate quic discovery");
+    }
+
     /// Schedules a UDP registration retry with backoff.
     ///
     /// Clears any in-flight registration, advances the backoff, and sets

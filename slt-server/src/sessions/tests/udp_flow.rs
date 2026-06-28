@@ -1,7 +1,9 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
-use slt_core::proto::{CipherSuite, Message, decode_message, encode_message};
+use slt_core::proto::{
+    CipherSuite, Message, PingPayload, PongPayload, decode_message, encode_message,
+};
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
@@ -9,7 +11,7 @@ use tokio::time::{Duration, timeout};
 use super::super::*;
 use super::common::{
     complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session,
+    spawn_session, spawn_session_with_peer_capture,
 };
 use crate::quic::UdpClaim;
 
@@ -212,6 +214,112 @@ async fn session_handles_udp_pong() {
         .unwrap()
         .unwrap();
     assert_eq!(received, uplink_packet2);
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    let _ = join.await.unwrap();
+}
+
+#[tokio::test]
+async fn valid_udp_packet_from_new_peer_updates_reply_peer() {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, mut udp_peer_rx, limits, _assigned, _registry) =
+        spawn_session_with_peer_capture().await;
+
+    let dcid = Cid::from([0xC1; MAX_DCID_LEN]);
+    let scid = Cid::from([0xC2; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut reg_buf = Vec::new();
+    register.encode(&mut reg_buf).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let old_peer = SocketAddr::from(([127, 0, 0, 1], 45678));
+    let new_peer = SocketAddr::from(([127, 0, 0, 1], 45679));
+
+    let server_expected_pn = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        old_peer,
+        0x1203,
+    )
+    .await;
+    let first_reply_peer = timeout(Duration::from_secs(1), udp_peer_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_reply_peer, old_peer);
+
+    let ping = PingPayload {
+        nonce: 0xCAFE_BABE_1234_5678,
+    };
+    let mut ping_payload = Vec::with_capacity(8);
+    ping.encode(&mut ping_payload);
+    let mut ping_frame = Vec::new();
+    encode_message(
+        Message::Ping {
+            payload: &ping_payload,
+        },
+        &mut ping_frame,
+    )
+    .unwrap();
+    let ping_packet = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx + 1,
+            register.key_phase,
+            &ping_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer: new_peer,
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: ping_packet,
+    }))
+    .await
+    .unwrap();
+
+    let pong_packet = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let reply_peer = timeout(Duration::from_secs(1), udp_peer_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply_peer, new_peer);
+
+    let opened = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &pong_packet,
+            server_expected_pn,
+        )
+        .unwrap();
+    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+    assert_eq!(consumed, opened.payload.len());
+    match message {
+        Message::Pong { payload } => {
+            let pong = PongPayload::decode(payload).unwrap();
+            assert_eq!(pong.nonce, ping.nonce);
+        }
+        _ => panic!("expected pong from migrated peer refresh"),
+    }
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();

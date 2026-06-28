@@ -308,13 +308,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                 Ok(SessionControl::Close(SessionExit::Shutdown))
             }
             SessionEvent::Control(ClientCommand::NetworkChanged) => {
-                info!("underlying network changed; reconnecting");
-                self.services
-                    .observer()
-                    .emit(ClientEventKind::NetworkChanged {
-                        detail: "underlying network changed".to_string(),
-                    });
-                Ok(SessionControl::Close(SessionExit::NetworkChanged))
+                self.handle_network_changed().await
             }
             SessionEvent::TcpRead(n) => {
                 if n == 0 {

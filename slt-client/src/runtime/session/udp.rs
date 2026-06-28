@@ -1,19 +1,85 @@
 //! UDP-QSP message handling for `ClientSession`.
 
 use std::io;
+use std::time::Instant;
 
 use slt_core::proto::{
     ClosePayload, Message, MessageType, OwnedMessageBuf, PingPayload, PongPayload,
 };
+use tokio::time;
 use tracing::{info, trace, warn};
 
 use super::{ClientSession, SessionControl, SessionExit};
-use crate::runtime::observer::{Transport, TransportChangeReason};
+use crate::runtime::observer::{ClientEventKind, Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
 
 impl<S: ClientRuntimeServices> ClientSession<'_, S> {
+    /// Handles a host-reported network change.
+    ///
+    /// If UDP-QSP is the active data path, first tries to validate the existing
+    /// UDP socket by sending an authenticated ping and waiting for the matching
+    /// pong. A successful round trip proves the server accepted the client's
+    /// current source address and updated its peer. On refresh failure, a live
+    /// TCP channel is used to rediscover QUIC IDs and register a fresh UDP path;
+    /// if TCP is unavailable the session exits so the runtime reconnects TCP.
+    pub(super) async fn handle_network_changed(&mut self) -> io::Result<SessionControl> {
+        info!("underlying network changed");
+
+        if self.active_transport != ActiveTransport::UdpQsp || self.udp_state.as_active().is_none()
+        {
+            info!("no active udp-qsp path to refresh; reconnecting");
+            self.emit_network_changed_reconnect();
+            return Ok(SessionControl::Close(SessionExit::NetworkChanged));
+        }
+
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpPathRefreshStarted);
+        match self.refresh_udp_path().await {
+            Ok(SessionControl::Continue) => {
+                self.note_udp_activity();
+                self.services
+                    .observer()
+                    .emit(ClientEventKind::UdpPathRefreshSucceeded);
+                info!("udp-qsp path refresh succeeded");
+                Ok(SessionControl::Continue)
+            }
+            Ok(SessionControl::Close(exit)) => Ok(SessionControl::Close(exit)),
+            Err(err) => {
+                let detail = err.to_string();
+                warn!(error = %err, "udp-qsp path refresh failed");
+                self.services
+                    .observer()
+                    .emit(ClientEventKind::UdpPathRefreshFailed { detail });
+                if !self.tcp_alive {
+                    self.emit_network_changed_reconnect();
+                    return Ok(SessionControl::Close(SessionExit::NetworkChanged));
+                }
+
+                self.active_transport = ActiveTransport::Tcp;
+                self.metrics.inc_transport_udp_to_tcp();
+                self.note_transport_change(
+                    Transport::UdpQsp,
+                    Transport::Tcp,
+                    TransportChangeReason::UdpError,
+                );
+                self.note_tcp_activity();
+                self.schedule_discovery_now();
+                Ok(SessionControl::Continue)
+            }
+        }
+    }
+
+    fn emit_network_changed_reconnect(&self) {
+        self.services
+            .observer()
+            .emit(ClientEventKind::NetworkChanged {
+                detail: "underlying network changed".to_string(),
+            });
+    }
+
     /// Handles a UDP-QSP message.
     ///
     /// Dispatches the message to the appropriate handler based on its type.
@@ -88,6 +154,64 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         }
     }
 
+    async fn refresh_udp_path(&mut self) -> io::Result<SessionControl> {
+        let nonce = fastrand::u64(..);
+        let ping = PingPayload { nonce };
+        let mut ping_buf = Vec::with_capacity(8);
+        ping.encode(&mut ping_buf);
+        self.write_udp_message_and_flush(Message::Ping { payload: &ping_buf })
+            .await?;
+
+        let deadline = Instant::now() + self.config.timing.register_timeout;
+        loop {
+            let cancel = self.cancel.clone();
+            let udp = self.udp_state.as_active_mut().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+            })?;
+            let msg_buf = tokio::select! {
+                biased;
+
+                () = cancel.cancelled() => return Ok(SessionControl::Close(SessionExit::Shutdown)),
+                result = time::timeout_at(deadline.into(), udp.read_next_message(self.limits)) => match result {
+                    Ok(Ok(msg_buf)) => msg_buf,
+                    Ok(Err(err)) if should_drop_refresh_udp_error(&err) => {
+                        trace!(error = %err, "dropping udp-qsp packet during path refresh");
+                        continue;
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "udp-qsp path refresh timed out",
+                        ));
+                    }
+                }
+            };
+
+            match is_matching_pong(&msg_buf, nonce) {
+                Ok(true) => return Ok(SessionControl::Continue),
+                Ok(false) => {}
+                Err(err) if should_drop_refresh_udp_error(&err) => {
+                    trace!(error = %err, "dropping udp-qsp pong during path refresh");
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+
+            let control = match self.handle_udp_message(msg_buf).await {
+                Ok(control) => control,
+                Err(err) if should_drop_refresh_udp_error(&err) => {
+                    trace!(error = %err, "dropping udp-qsp message during path refresh");
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            if !matches!(control, SessionControl::Continue) {
+                return Ok(control);
+            }
+        }
+    }
+
     /// Handle UDP-QSP transport errors.
     ///
     /// Returns `true` if the session can continue (TCP fallback available),
@@ -132,9 +256,85 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     }
 }
 
+fn is_matching_pong(msg_buf: &OwnedMessageBuf, nonce: u64) -> io::Result<bool> {
+    let Message::Pong { payload } = msg_buf.message() else {
+        return Ok(false);
+    };
+    let pong = PongPayload::decode(payload).map_err(wire::map_payload_error)?;
+    Ok(pong.nonce == nonce)
+}
+
+fn should_drop_refresh_udp_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::InvalidData
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
+
+    use slt_core::proto::{OwnedMessageBuf, encode_message};
+
+    use super::*;
+
+    fn pong_message(nonce: u64) -> OwnedMessageBuf {
+        let payload = nonce.to_be_bytes();
+        let mut frame = Vec::new();
+        encode_message(Message::Pong { payload: &payload }, &mut frame).unwrap();
+        OwnedMessageBuf::new(MessageType::Pong, frame)
+    }
+
+    fn ping_message(nonce: u64) -> OwnedMessageBuf {
+        let payload = nonce.to_be_bytes();
+        let mut frame = Vec::new();
+        encode_message(Message::Ping { payload: &payload }, &mut frame).unwrap();
+        OwnedMessageBuf::new(MessageType::Ping, frame)
+    }
+
+    #[test]
+    fn matching_pong_is_accepted_for_refresh_nonce() {
+        let msg = pong_message(0x1234);
+        assert!(is_matching_pong(&msg, 0x1234).unwrap());
+    }
+
+    #[test]
+    fn nonmatching_pong_is_not_accepted_for_refresh_nonce() {
+        let msg = pong_message(0x1234);
+        assert!(!is_matching_pong(&msg, 0x5678).unwrap());
+    }
+
+    #[test]
+    fn non_pong_message_is_not_accepted_for_refresh_nonce() {
+        let msg = ping_message(0x1234);
+        assert!(!is_matching_pong(&msg, 0x1234).unwrap());
+    }
+
+    #[test]
+    fn malformed_pong_fails_refresh_probe() {
+        let mut frame = Vec::new();
+        encode_message(Message::Pong { payload: &[] }, &mut frame).unwrap();
+        let msg = OwnedMessageBuf::new(MessageType::Pong, frame);
+        let err = is_matching_pong(&msg, 0x1234).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn refresh_drops_invalid_udp_errors() {
+        let err = io::Error::new(io::ErrorKind::InvalidData, "replay");
+        assert!(should_drop_refresh_udp_error(&err));
+    }
+
+    #[test]
+    fn refresh_does_not_drop_io_errors() {
+        for kind in [
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+        ] {
+            let err = io::Error::new(kind, "transport failure");
+            assert!(!should_drop_refresh_udp_error(&err));
+        }
+    }
 
     /// Test unexpected `register_ok` error properties.
     #[test]
