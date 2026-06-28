@@ -57,18 +57,17 @@ pub trait NativeSessionCallback: Send + Sync {
 }
 
 #[uniffi::export]
-pub fn validate_client_config(config_toml: String) -> Result<ClientConfigSummary, SltInteropError> {
-    let config = ClientConfig::from_toml_str(&config_toml).map_err(|err| {
-        SltInteropError::InvalidConfig {
+pub fn validate_client_config(config_toml: &str) -> Result<ClientConfigSummary, SltInteropError> {
+    let config =
+        ClientConfig::from_toml_str(config_toml).map_err(|err| SltInteropError::InvalidConfig {
             detail: err.to_string(),
-        }
-    })?;
+        })?;
     ClientConfigSummary::try_from(&config)
 }
 
 #[uniffi::export]
-pub fn init_log_sink(file_path: String) -> bool {
-    super::logging::init(&file_path)
+pub fn init_log_sink(file_path: &str) -> bool {
+    super::logging::init(file_path)
 }
 
 #[uniffi::export]

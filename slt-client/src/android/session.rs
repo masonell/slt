@@ -151,12 +151,8 @@ impl AndroidSocketProtector {
 
 impl SocketProtector for AndroidSocketProtector {
     fn protect(&self, fd: RawFd, kind: SocketKind) -> io::Result<()> {
-        let fd = i32::try_from(fd).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("socket fd out of Android int range: {fd}"),
-            )
-        })?;
+        // `RawFd` is `i32` on Android, so it maps directly to the UniFFI
+        // `protect_socket(fd: i32)` signature — no range conversion needed.
         let protected = self.platform_services.protect_socket(fd, kind);
         if protected {
             debug!(fd, kind = ?kind, "Android socket protected");
