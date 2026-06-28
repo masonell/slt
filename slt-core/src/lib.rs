@@ -1,8 +1,30 @@
+// Test code is exempt from clippy's code-quality groups (`style`, `complexity`,
+// `perf`, `pedantic`, `nursery`); the bug-catching `correctness`/`suspicious`
+// groups stay enforced under `#[cfg(test)]`.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::style,
+        clippy::complexity,
+        clippy::perf,
+        clippy::pedantic,
+        clippy::nursery,
+    )
+)]
+
 /// TCP `ClientHello` classifier and verdicts.
 pub mod classifier;
 
 pub mod crypto;
+/// Test-only fixtures; exempt from clippy's code-quality groups like other test code.
 #[cfg(any(test, feature = "testing"))]
+#[allow(
+    clippy::style,
+    clippy::complexity,
+    clippy::perf,
+    clippy::pedantic,
+    clippy::nursery
+)]
 mod test_support;
 
 /// Test support utilities for generating test fixtures.

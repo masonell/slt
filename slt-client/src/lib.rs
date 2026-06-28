@@ -10,6 +10,20 @@
 //! (Linux only); other platforms provide their own spawn function — for example
 //! Android wraps a `VpnService` file descriptor.
 
+// Test code is exempt from clippy's code-quality groups (`style`, `complexity`,
+// `perf`, `pedantic`, `nursery`); the bug-catching `correctness`/`suspicious`
+// groups stay enforced under `#[cfg(test)]`.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::style,
+        clippy::complexity,
+        clippy::perf,
+        clippy::pedantic,
+        clippy::nursery,
+    )
+)]
+
 #[cfg(target_os = "android")]
 uniffi::setup_scaffolding!();
 

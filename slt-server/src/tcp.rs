@@ -550,7 +550,6 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..3 {
             let addr = listen_addr;
-            let secret = secret;
             let handle = tokio::spawn(async move {
                 let mut stream = TcpStream::connect(addr).await.unwrap();
                 let client_hello = generate_client_hello_tls_record(secret);

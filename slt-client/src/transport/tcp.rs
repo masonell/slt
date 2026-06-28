@@ -278,10 +278,13 @@ mod tests {
             .unwrap();
         assert_eq!(stream.peer_addr().unwrap(), addr);
 
-        let calls = protector.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].1, SocketKind::Tcp);
-        assert!(calls[0].0 >= 0);
+        // Scope the guard so it isn't held across the `.await` below.
+        {
+            let calls = protector.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].1, SocketKind::Tcp);
+            assert!(calls[0].0 >= 0);
+        }
 
         drop(stream);
         accept.await.unwrap();
