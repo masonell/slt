@@ -17,7 +17,11 @@ import org.junit.Test
 class VpnStatusReducerTest {
     @Before
     fun resetState() {
-        SltVpnStatusBus.applyEvent(event(ClientEventKind.Starting))
+        // A platform reset (not an applyEvent) so the terminal-sticky guard in
+        // `applyEvent` does not block setup after a prior test left a terminal
+        // status. Mirrors production, where a new session clears terminal state
+        // via `markStarting`.
+        SltVpnStatusBus.markStarting()
     }
 
     @Test
@@ -149,6 +153,36 @@ class VpnStatusReducerTest {
         assertEquals(VpnStatus.Running, state.status)
         assertEquals(VpnPhase.Connected, state.phase)
         assertEquals("rejected", state.lastError)
+    }
+
+    @Test
+    fun stopped_status_rejects_late_non_terminal_event() {
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.Authenticated, transport = Transport.TCP))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.Stopped))
+
+        // A late in-flight event must not resurrect a non-terminal status or
+        // surface a stale transport.
+        val terminal =
+            SltVpnStatusBus.applyEvent(
+                event(ClientEventKind.ReconnectScheduled(attempt = 1UL, delayMs = 100UL)),
+            )
+        val state = SltVpnStatusBus.state.value
+
+        assertEquals(VpnStatus.Stopped, state.status)
+        assertEquals(VpnPhase.Stopped, state.phase)
+        assertNull(state.transport)
+        assertEquals(NativeTerminal.None, terminal)
+    }
+
+    @Test
+    fun udpRegistered_advances_to_upgrading_phase() {
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.Authenticated, transport = Transport.TCP))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpRegisterStarted))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpRegistered))
+
+        val state = SltVpnStatusBus.state.value
+        assertEquals(VpnStatus.Running, state.status)
+        assertEquals(VpnPhase.UdpUpgrading, state.phase)
     }
 
     private fun event(kind: ClientEventKind, transport: Transport? = null): ClientEvent =

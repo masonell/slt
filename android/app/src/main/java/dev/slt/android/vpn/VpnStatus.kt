@@ -95,6 +95,15 @@ object SltVpnStatusBus {
     fun applyEvent(event: ClientEvent): NativeTerminal {
         val current = mutableState.value
         val kind = event.kind
+        // Terminal status is sticky: a stale in-flight non-terminal event (e.g.
+        // `TransportChanged`, `UdpRegistered`) arriving after `Stopped`/`Error`
+        // must not resurrect a non-terminal status. The handle guard in
+        // [SltVpnService] already rejects cross-session staleness; this makes
+        // terminal sticky within a session too. A new session clears terminal
+        // status via [markStarting], not through this reducer.
+        if (current.status == VpnStatus.Stopped || current.status == VpnStatus.Error) {
+            return NativeTerminal.None
+        }
         mutableState.value = when (kind) {
             is ClientEventKind.Starting -> current.reset(VpnStatus.Starting, VpnPhase.Starting)
             is ClientEventKind.TunReady ->
@@ -147,7 +156,10 @@ object SltVpnStatusBus {
                 current.copy(phase = VpnPhase.Connected, lastError = kind.detail)
             is ClientEventKind.UdpRegisterStarted ->
                 current.copy(phase = VpnPhase.UdpRegistering)
-            is ClientEventKind.UdpRegistered -> current.copy(phase = VpnPhase.UdpRegistering)
+            // Registration succeeded (`REGISTER_OK`); the upgrade attempt
+            // starts immediately after, so advance to the upgrading phase
+            // instead of holding the now-stale "registering" step.
+            is ClientEventKind.UdpRegistered -> current.copy(phase = VpnPhase.UdpUpgrading)
             is ClientEventKind.UdpRegisterFailed ->
                 // Same as UdpDiscoveryFailed: optional registration failure
                 // schedules a retry while staying on TCP.

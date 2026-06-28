@@ -28,6 +28,7 @@ class SltVpnService : VpnService() {
     @Volatile private var nativeHandle: Long = 0
     @Volatile private var activeUnderlyingNetwork: Network? = null
     private var terminalStatusReported = false
+    private var tornDown = false
 
     private val stateLock = Any()
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
@@ -159,9 +160,16 @@ class SltVpnService : VpnService() {
         terminalStatusReported = true
     }
 
-    /// Tear down all platform resources without touching UI state. The store
+    /// Tear down all platform resources without touching UI state. Idempotent:
+    /// the terminal-event path, `stopVpn`, and `onDestroy` can all drive a tear
+    /// down, so the first call does the work and later calls are no-ops (rather
+    /// than relying on every sub-helper being null-safe). The store
     /// ([SltVpnStatusBus]) owns status; this owns the VPN/TUN/native lifecycle.
     private fun teardown() {
+        if (tornDown) {
+            return
+        }
+        tornDown = true
         networkWatcher?.stop()
         networkWatcher = null
         activeUnderlyingNetwork = null
