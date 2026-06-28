@@ -3,26 +3,35 @@ package dev.slt.android.ui.components
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
+import dev.slt.android.R
 import dev.slt.android.vpn.VpnStatus
 
 /**
- * Hero Start/Stop toggle — a wide pill. Renders "Stop" (and runs [onStop])
- * while the VPN is connecting or running so a stuck connect is always
- * abortable, and "Start" (running [onStart]) otherwise. The container color
- * animates between primary (Start) and error (Stop), and a spinner shows during
- * connecting.
+ * Hero Start/Stop toggle — a wide pill that always states what pressing it will
+ * do. Renders "Stop" (and runs [onStop]) for the entire time the session is
+ * coming up or up — [VpnStatus.Starting], [VpnStatus.Reconnecting],
+ * [VpnStatus.Handoff], [VpnStatus.Running] — so a stuck connect is always
+ * abortable, and "Start" (running [onStart]) otherwise.
+ *
+ * The label is always shown: progress (connecting, handoff, reconnect backoff)
+ * is the status line's job, not this button's. A bare spinner here would read as
+ * "busy, don't touch" — the opposite of the cancel affordance a hung connect
+ * needs. The container color animates between primary (Start) and error (Stop).
+ *
+ * Enabled whenever there is a valid action: always while stopping, and while
+ * [canStart] holds otherwise. [VpnStatus.PermissionRequired] keeps it enabled
+ * (pressing Start re-runs the Android VPN consent flow) unless there is no
+ * active profile.
  */
 @Composable
 internal fun StartStopButton(
@@ -34,9 +43,8 @@ internal fun StartStopButton(
 ) {
     val stopping = status == VpnStatus.Starting ||
         status == VpnStatus.Running ||
-        status == VpnStatus.Reconnecting
-    val connecting = status == VpnStatus.Starting ||
-        status == VpnStatus.Reconnecting
+        status == VpnStatus.Reconnecting ||
+        status == VpnStatus.Handoff
 
     val containerColor by animateColorAsState(
         targetValue = if (stopping) {
@@ -67,18 +75,10 @@ internal fun StartStopButton(
         ),
         modifier = modifier.fillMaxWidth(),
     ) {
-        if (connecting) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(20.dp),
-                strokeWidth = 2.dp,
-                color = contentColor,
-            )
-        } else {
-            Text(
-                text = if (stopping) "Stop" else "Start",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
+        Text(
+            text = stringResource(if (stopping) R.string.action_stop else R.string.action_start),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }

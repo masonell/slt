@@ -3,6 +3,7 @@ package dev.slt.android.vpn
 import dev.slt.android.uniffi.ClientEvent
 import dev.slt.android.uniffi.ClientEventKind
 import dev.slt.android.uniffi.Transport
+import dev.slt.android.uniffi.TransportChangeReason
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
@@ -183,6 +184,74 @@ class VpnStatusReducerTest {
         val state = SltVpnStatusBus.state.value
         assertEquals(VpnStatus.Running, state.status)
         assertEquals(VpnPhase.UdpUpgrading, state.phase)
+    }
+
+    @Test
+    fun networkChanged_transitions_to_handoff_and_keeps_transport() {
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.Authenticated, transport = Transport.UDP_QSP))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.NetworkChanged(detail = "wi-fi -> cellular")))
+
+        val state = SltVpnStatusBus.state.value
+        // Handoff is distinct from Reconnecting (calm, not a failure), and the
+        // transport is preserved so the badge stays visible while the path refreshes.
+        assertEquals(VpnStatus.Handoff, state.status)
+        assertEquals(VpnPhase.NetworkHandoff, state.phase)
+        assertEquals(Transport.UDP_QSP, state.transport)
+    }
+
+    @Test
+    fun udpPathRefresh_recovers_to_running() {
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.Authenticated, transport = Transport.UDP_QSP))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.NetworkChanged(detail = "changed")))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpPathRefreshStarted))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpPathRefreshFailed(detail = "no reply")))
+        // A second refresh attempt then succeeds.
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpPathRefreshStarted))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpPathRefreshSucceeded))
+
+        val state = SltVpnStatusBus.state.value
+        assertEquals(VpnStatus.Running, state.status)
+        assertEquals(VpnPhase.Connected, state.phase)
+    }
+
+    @Test
+    fun udpPathRefreshFailure_falls_back_to_tcp_and_recovers_to_running() {
+        // Active UDP session hits a network change; the UDP path refresh fails but
+        // TCP survives, so the runtime falls back via TransportChanged. That must
+        // clear the stuck Handoff — otherwise the UI stays on "Switching network…"
+        // and profile controls remain disabled.
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.Authenticated, transport = Transport.UDP_QSP))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.NetworkChanged(detail = "changed")))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpPathRefreshStarted))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpPathRefreshFailed(detail = "no reply")))
+        SltVpnStatusBus.applyEvent(
+            event(
+                ClientEventKind.TransportChanged(
+                    from = Transport.UDP_QSP,
+                    to = Transport.TCP,
+                    reason = TransportChangeReason.UDP_ERROR,
+                ),
+                transport = Transport.TCP,
+            ),
+        )
+
+        val state = SltVpnStatusBus.state.value
+        assertEquals(VpnStatus.Running, state.status)
+        assertEquals(Transport.TCP, state.transport)
+    }
+
+    @Test
+    fun udpPathRefreshFailure_then_udp_rediscovery_recovers_to_running() {
+        // Same start, but the runtime re-discovers UDP over the surviving TCP
+        // connection instead of a direct transport change.
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.Authenticated, transport = Transport.UDP_QSP))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.NetworkChanged(detail = "changed")))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpPathRefreshFailed(detail = "no reply")))
+        SltVpnStatusBus.applyEvent(event(ClientEventKind.UdpDiscoveryStarted))
+
+        val state = SltVpnStatusBus.state.value
+        assertEquals(VpnStatus.Running, state.status)
+        assertEquals(VpnPhase.UdpDiscovering, state.phase)
     }
 
     private fun event(kind: ClientEventKind, transport: Transport? = null): ClientEvent =

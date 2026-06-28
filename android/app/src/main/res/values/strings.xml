@@ -3,4 +3,35 @@
     <string name="app_name">slt</string>
     <string name="vpn_notification_channel">SLT VPN</string>
     <string name="vpn_action_stop">Stop</string>
+
+    <!-- Status line: status words (the dot label) -->
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_switching_network">Switching network…</string>
+    <string name="status_reconnecting">Reconnecting…</string>
+    <string name="status_error">Connection error</string>
+    <string name="status_stopped">Stopped</string>
+    <string name="status_permission_required">VPN permission required</string>
+
+    <!-- Status line: subtitles (shown only while active) -->
+    <string name="sub_permission">Grant permission to start the tunnel.</string>
+    <string name="sub_link">Establishing secure link…</string>
+    <string name="sub_auth">Authenticating…</string>
+    <string name="sub_udp_discovering">Discovering UDP path…</string>
+    <string name="sub_udp_registering">Registering UDP path…</string>
+    <string name="sub_udp_upgrading">Upgrading to UDP…</string>
+    <string name="sub_handoff">Re-establishing UDP path…</string>
+
+    <!-- Status line: reconnect (formatted; the reason arrives raw from Rust) -->
+    <string name="reconnect_retry">Attempt %1$d · retry in %2$d s</string>
+    <string name="reconnect_attempt">Attempt %1$d</string>
+
+    <!-- Status line: transport badges -->
+    <string name="transport_tcp">TCP</string>
+    <string name="transport_udp_qsp">UDP-QSP</string>
+
+    <!-- Start/Stop hero button -->
+    <string name="action_start">Start</string>
+    <string name="action_stop">Stop</string>
 </resources>

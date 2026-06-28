@@ -70,9 +70,13 @@ class SltVpnService : VpnService() {
 
         if (tunFd != null) {
             // Tunnel is already established; refresh the foreground notification
-            // and stay in the current (possibly Reconnecting/Starting) status.
+            // and stay in the current (possibly Reconnecting/Starting/Handoff) status.
             val status = SltVpnStatusBus.state.value.status
-            if (status != VpnStatus.Reconnecting && status != VpnStatus.Starting) {
+            if (
+                status != VpnStatus.Reconnecting &&
+                status != VpnStatus.Starting &&
+                status != VpnStatus.Handoff
+            ) {
                 SltVpnStatusBus.markRunningForeground()
             }
             updateNotification()
@@ -352,6 +356,7 @@ class SltVpnService : VpnService() {
             VpnStatus.Starting -> "Starting"
             VpnStatus.Running -> "Running"
             VpnStatus.Reconnecting -> "Reconnecting"
+            VpnStatus.Handoff -> "Switching network"
             VpnStatus.Stopped -> "Stopped"
             VpnStatus.Error -> "Error"
         }

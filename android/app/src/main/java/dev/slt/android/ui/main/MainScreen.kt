@@ -63,7 +63,8 @@ internal fun MainScreen(
     val status = vpnState.status
     val stopping = status == VpnStatus.Starting ||
         status == VpnStatus.Running ||
-        status == VpnStatus.Reconnecting
+        status == VpnStatus.Reconnecting ||
+        status == VpnStatus.Handoff
     val canStart = activeProfile != null && !stopping
     val canTest = activeProfile != null && !connectionTestInProgress
     val otherProfiles = remember(profiles) { profiles.filter { !it.isActive } }

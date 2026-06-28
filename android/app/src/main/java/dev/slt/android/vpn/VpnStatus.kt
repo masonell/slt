@@ -13,6 +13,7 @@ enum class VpnStatus {
     Starting,
     Running,
     Reconnecting,
+    Handoff,
     Stopped,
     Error,
 }
@@ -23,20 +24,20 @@ enum class VpnStatus {
  * is doing right now (connecting, authenticating, upgrading to UDP, ...). The UI
  * surfaces it as the connection's current step.
  */
-enum class VpnPhase(val label: String) {
-    Idle("Idle"),
-    Starting("Starting"),
-    ConnectingTcp("Connecting to server"),
-    Authenticating("Authenticating"),
-    Connected("Connected"),
-    UdpDiscovering("Discovering UDP path"),
-    UdpRegistering("Registering UDP"),
-    UdpUpgrading("Upgrading to UDP"),
-    Reconnecting("Reconnecting"),
-    NetworkHandoff("Network changed"),
-    Stopping("Stopping"),
-    Stopped("Stopped"),
-    Error("Error"),
+enum class VpnPhase {
+    Idle,
+    Starting,
+    ConnectingTcp,
+    Authenticating,
+    Connected,
+    UdpDiscovering,
+    UdpRegistering,
+    UdpUpgrading,
+    Reconnecting,
+    NetworkHandoff,
+    Stopping,
+    Stopped,
+    Error,
 }
 
 /**
@@ -44,8 +45,8 @@ enum class VpnPhase(val label: String) {
  *
  * `status` is the coarse lifecycle (drives button state / color); `phase` is the
  * fine runtime step (drives the subtitle). They are independent: `phase` may
- * advance while `status` is held — e.g. `status = Reconnecting` with
- * `phase = UdpDiscovering`, or `status = Running` with `phase = UdpUpgrading`.
+ * advance while `status` is held — e.g. `status = Handoff` with
+ * `phase = NetworkHandoff`, or `status = Running` with `phase = UdpUpgrading`.
  */
 data class VpnUiState(
     val status: VpnStatus = VpnStatus.Idle,
@@ -138,42 +139,71 @@ object SltVpnStatusBus {
                     reconnectAttempt = kind.attempt,
                     lastError = kind.detail,
                 )
-            is ClientEventKind.TransportChanged -> current.copy(transport = event.transport)
+            is ClientEventKind.TransportChanged ->
+                // A working transport is active again. This is also the fallback
+                // path when a UDP path refresh fails but TCP survives: recover any
+                // stuck Handoff via recoveredStatus().
+                current.copy(status = current.recoveredStatus(), transport = event.transport)
             is ClientEventKind.NetworkChanged ->
+                // Distinct from Reconnecting: the tunnel is merely re-establishing its
+                // UDP path on a new underlying network, not failing. Keep the transport so
+                // the badge stays visible (faded) while the path refreshes. If recovery
+                // later fails outright, a subsequent ReconnectScheduled flips this to
+                // Reconnecting; if TCP survives, a follow-on operating event below
+                // (TransportChanged / UdpDiscovery* / UdpSwitchCommitted / ...) promotes
+                // the Handoff back to Running via recoveredStatus().
                 current.copy(
-                    status = VpnStatus.Reconnecting,
+                    status = VpnStatus.Handoff,
                     phase = VpnPhase.NetworkHandoff,
-                    transport = null,
                 )
             is ClientEventKind.UdpDiscoveryStarted ->
-                current.copy(phase = VpnPhase.UdpDiscovering)
+                current.copy(status = current.recoveredStatus(), phase = VpnPhase.UdpDiscovering)
             is ClientEventKind.UdpDiscoveryFailed ->
                 // Optional failure (require_udp=false): a retry is scheduled and
                 // the session continues on TCP, so drop the in-progress step back
                 // to Connected instead of leaving a stale "discovering" phase
                 // through the backoff. (With require_udp=true the session closes
                 // after this event, so the terminal event overrides the phase.)
-                current.copy(phase = VpnPhase.Connected, lastError = kind.detail)
+                current.copy(
+                    status = current.recoveredStatus(),
+                    phase = VpnPhase.Connected,
+                    lastError = kind.detail,
+                )
             is ClientEventKind.UdpRegisterStarted ->
-                current.copy(phase = VpnPhase.UdpRegistering)
+                current.copy(status = current.recoveredStatus(), phase = VpnPhase.UdpRegistering)
             // Registration succeeded (`REGISTER_OK`); the upgrade attempt
             // starts immediately after, so advance to the upgrading phase
             // instead of holding the now-stale "registering" step.
-            is ClientEventKind.UdpRegistered -> current.copy(phase = VpnPhase.UdpUpgrading)
+            is ClientEventKind.UdpRegistered ->
+                current.copy(status = current.recoveredStatus(), phase = VpnPhase.UdpUpgrading)
             is ClientEventKind.UdpRegisterFailed ->
                 // Same as UdpDiscoveryFailed: optional registration failure
                 // schedules a retry while staying on TCP.
-                current.copy(phase = VpnPhase.Connected, lastError = kind.detail)
-            is ClientEventKind.UdpUpgradeStarted -> current.copy(phase = VpnPhase.UdpUpgrading)
-            is ClientEventKind.UdpPathValidated -> current.copy(phase = VpnPhase.UdpUpgrading)
+                current.copy(
+                    status = current.recoveredStatus(),
+                    phase = VpnPhase.Connected,
+                    lastError = kind.detail,
+                )
+            is ClientEventKind.UdpUpgradeStarted ->
+                current.copy(status = current.recoveredStatus(), phase = VpnPhase.UdpUpgrading)
+            is ClientEventKind.UdpPathValidated ->
+                current.copy(status = current.recoveredStatus(), phase = VpnPhase.UdpUpgrading)
             is ClientEventKind.UdpSwitchCommitted ->
-                current.copy(phase = VpnPhase.Connected, transport = event.transport)
+                current.copy(
+                    status = current.recoveredStatus(),
+                    phase = VpnPhase.Connected,
+                    transport = event.transport,
+                )
             is ClientEventKind.UdpPathRefreshStarted ->
-                current.copy(phase = VpnPhase.NetworkHandoff)
+                current.copy(status = VpnStatus.Handoff, phase = VpnPhase.NetworkHandoff)
             is ClientEventKind.UdpPathRefreshSucceeded ->
-                current.copy(phase = VpnPhase.Connected)
+                current.copy(status = VpnStatus.Running, phase = VpnPhase.Connected)
             is ClientEventKind.UdpPathRefreshFailed ->
-                current.copy(phase = VpnPhase.NetworkHandoff, lastError = kind.detail)
+                current.copy(
+                    status = VpnStatus.Handoff,
+                    phase = VpnPhase.NetworkHandoff,
+                    lastError = kind.detail,
+                )
             is ClientEventKind.Stopping -> current.copy(phase = VpnPhase.Stopping)
             is ClientEventKind.Stopped ->
                 current.reset(VpnStatus.Stopped, VpnPhase.Stopped).copy(transport = null)
@@ -243,3 +273,15 @@ private fun VpnUiState.reset(status: VpnStatus, phase: VpnPhase): VpnUiState =
  */
 private fun VpnUiState.withStatusHeld(): VpnUiState =
     if (status == VpnStatus.Idle) copy(status = VpnStatus.Starting) else this
+
+/**
+ * Status to apply on an event that resumes ordinary connected operation
+ * (transport fallback, UDP rediscovery / registration / upgrade / commit). A
+ * UDP path refresh that fails while TCP survives is followed by exactly these
+ * events, none of which would otherwise change status — leaving the UI stuck on
+ * "Switching network…" and profile controls disabled. Any such event promotes a
+ * stuck [VpnStatus.Handoff] back to [VpnStatus.Running]; every other status is
+ * held as-is, so this is a no-op outside the post-handoff fallback path.
+ */
+private fun VpnUiState.recoveredStatus(): VpnStatus =
+    if (status == VpnStatus.Handoff) VpnStatus.Running else status
