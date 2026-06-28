@@ -65,13 +65,14 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
   - Use `.context()` and `.with_context()` to add error context
   - Use `bail!` for early returns with an error
   - Avoid `map_err(|e| anyhow!(...))` - prefer `with_context`
+- **Clippy**: workspace lints (see `[workspace.lints]` in `Cargo.toml`) deny rustc warnings and clippy `all`, with `pedantic`/`nursery`/`cargo` at warn. Test code (`#[cfg(test)]`) is exempt from the code-quality groups `style`/`complexity`/`perf`/`pedantic`/`nursery` via a per-crate `#![cfg_attr(test, allow(...))]` at each crate root; the bug-catching `correctness`/`suspicious` groups still apply to tests. `slt-core`'s `test_support` module (gated `cfg(any(test, feature = "testing"))`) carries a matching module-level `#[allow]` because it also compiles under the `testing` feature. Extend the crate-level allow rather than adding per-function `#[allow]` in tests.
 
 ## Commit Guidelines
 
 - Use Conventional Commit messages: `<type>(<scope>): <subject>` (e.g., `feat(slt-core): add udp-qsp key phase tracking`).
 - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
-- Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy/test).
-- Run `cargo build`, `cargo test`, and `cargo clippy` before finalizing
+- Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy --all-targets/test).
+- Run `cargo build`, `cargo test`, and `cargo clippy --all-targets` before finalizing
 - For Android changes, run `gradle assembleDebug` and `gradle testDebugUnitTest lintDebug` from `android/`.
 - For Rust Android smoke checks, run `cargo ndk -t x86_64-linux-android build -p slt-client --lib`.
 - Changes under `vendor/` must be in a separate commit

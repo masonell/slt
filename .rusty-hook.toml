@@ -1,5 +1,5 @@
 [hooks]
-pre-commit = "cargo fmt --all --check -- --config imports_granularity=Module,group_imports=StdExternalCrate && cargo clippy && cargo test"
+pre-commit = "cargo fmt --all --check -- --config imports_granularity=Module,group_imports=StdExternalCrate && cargo clippy --all-targets && cargo test"
 
 [logging]
 verbose = true

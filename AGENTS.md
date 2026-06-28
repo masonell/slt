@@ -34,6 +34,7 @@
 - Rust 2024 workspace; format with `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate`.
 - Android code is Kotlin + Jetpack Compose; keep Kotlin/XML formatted with Android Studio defaults until a checked-in formatter is added.
 - Workspace lints are strict: rustc warnings are denied, clippy `all` is denied, and `pedantic`/`nursery` run at warn level.
+- Test code (`#[cfg(test)]`) is exempt from clippy's code-quality groups (`style`/`complexity`/`perf`/`pedantic`/`nursery`) via a per-crate `#![cfg_attr(test, allow(...))]` at each crate root; the bug-catching `correctness`/`suspicious` groups still apply to tests. `slt-core`'s `test_support` module (gated `cfg(any(test, feature = "testing"))`) carries a matching module-level `#[allow]`. Extend the crate-level allow rather than adding per-function `#[allow]` in tests.
 - Keep shared protocol/config/crypto logic in `slt-core`; keep runtime/orchestration logic in `slt-client` and `slt-server`.
 - Prefer small, focused modules and descriptive names (`configure_client_chrome_ssl`, `message_limits_from_mtu`).
 - Public library APIs (`pub`) should include doc comments and clear error behavior.
@@ -46,7 +47,7 @@
 - Run checks from workspace root:
   - `cargo build --workspace`
   - `cargo test --workspace`
-  - `cargo clippy --workspace`
+  - `cargo clippy --workspace --all-targets`
 - Run Android checks from `android/`:
   - `gradle assembleDebug`
   - `gradle testDebugUnitTest lintDebug`
@@ -58,10 +59,10 @@
 ## Commit & Pull Request Guidelines
 - Use Conventional Commit messages: `<type>(<scope>): <subject>` (e.g., `feat(slt-core): add udp-qsp key phase tracking`).
 - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
-- Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy/test).
+- Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy --all-targets/test).
 - Commit hooks run tests and may need capabilities unavailable in the sandbox (for example local socket binds). Agents should perform `git commit` outside the sandbox so hooks can run successfully.
 - Do not bypass hooks with `--no-verify` unless explicitly requested by the user.
-- Run `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace` and fix errors before the final response.
+- Run `cargo build --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets` and fix errors before the final response.
 - For Android changes, also run `gradle assembleDebug` and `gradle testDebugUnitTest lintDebug` from `android/`.
 - Changes under `vendor/` must be in a separate commit.
 - Separate vendor updates from project changes when possible.
