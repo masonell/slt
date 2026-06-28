@@ -73,8 +73,11 @@ pub(super) fn start_session(
     let worker = thread::Builder::new()
         .name(format!("slt-android-{handle}"))
         .spawn(move || {
-            // Catch panics inside the worker so a runtime bug still produces a
-            // terminal event instead of leaving Android with no Stopped/Error.
+            // Catch panics on the worker's foreground stack (TUN spawn or a
+            // panic before `run_client` reaches an `.await`) so a runtime bug
+            // still produces a terminal event instead of leaving Android with no
+            // Stopped/Error. Panics inside spawned tokio tasks are isolated by
+            // the JoinHandle and cancel that task without unwinding the worker.
             let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 run_native_session(
                     runtime,
@@ -147,7 +150,22 @@ impl NativeSession {
             return;
         };
         if let Some(worker) = worker.take() {
-            let _ = worker.join();
+            // Join the worker on a detached thread rather than the caller's
+            // thread. `stop()` is a UniFFI call invoked synchronously from
+            // Kotlin (the main thread); joining inline would block it for up to
+            // `RUNTIME_SHUTDOWN_TIMEOUT` while the worker drains and shuts its
+            // runtime down — an ANR risk. The worker owns a duplicated TUN fd
+            // and its own callback `Arc` clones, so letting it finish
+            // independently is safe: any stale post-stop callback is rejected by
+            // handle in Kotlin, and the `Stop` command + cancel bound its life.
+            // If spawning the joiner fails the `JoinHandle` is dropped, which
+            // detaches the worker just the same.
+            thread::Builder::new()
+                .name(format!("slt-android-stop-{}", self.handle))
+                .spawn(move || {
+                    let _ = worker.join();
+                })
+                .ok();
         }
     }
 }
