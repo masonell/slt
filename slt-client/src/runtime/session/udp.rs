@@ -9,10 +9,11 @@ use tracing::{info, trace, warn};
 
 use super::{ClientSession, SessionControl, SessionExit};
 use crate::runtime::observer::{Transport, TransportChangeReason};
+use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
 
-impl ClientSession<'_> {
+impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// Handles a UDP-QSP message.
     ///
     /// Dispatches the message to the appropriate handler based on its type.

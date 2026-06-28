@@ -29,16 +29,13 @@ mod test_support;
 mod test_integration;
 
 pub use runtime::observer::{
-    ClientEvent, ClientEventKind, ClientObserver, NoopObserver, ObserverSink, SharedClientObserver,
-    Transport, TransportChangeReason, noop_observer,
+    ClientEvent, ClientEventKind, ClientObserver, NoopObserver, ObserverSink, Transport,
+    TransportChangeReason,
 };
 pub use runtime::run_client;
-pub use transport::host_resolver::{
-    HostResolver, SharedHostResolver, TokioHostResolver, default_host_resolver,
-};
-pub use transport::socket_protector::{
-    NoopSocketProtector, SharedSocketProtector, SocketKind, SocketProtector, noop_socket_protector,
-};
+pub use runtime::services::{ClientRuntimeServices, DesktopServices};
+pub use transport::host_resolver::{HostResolver, TokioHostResolver};
+pub use transport::socket_protector::{NoopSocketProtector, SocketKind, SocketProtector};
 #[cfg(target_os = "linux")]
 pub use tun::spawn_desktop;
 #[cfg(target_os = "android")]

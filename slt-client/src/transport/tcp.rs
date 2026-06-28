@@ -21,8 +21,8 @@ use tokio_boring::HandshakeError;
 use tracing::{debug, trace};
 
 use crate::metrics::Metrics;
-use crate::transport::host_resolver::{HostResolver, SharedHostResolver};
-use crate::transport::socket_protector::{SharedSocketProtector, SocketKind, SocketProtector};
+use crate::transport::host_resolver::HostResolver;
+use crate::transport::socket_protector::{SocketKind, SocketProtector};
 
 /// Maximum time allowed for TCP connect + TLS handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -88,17 +88,21 @@ pub struct TcpSession {
 /// - Hostname configuration is empty
 /// - CA certificate configuration fails
 /// - Hostname verification fails
-pub async fn connect(
+pub async fn connect<SP, HR>(
     config: &ClientConfig,
     metrics: Arc<Metrics>,
-    socket_protector: SharedSocketProtector,
-    host_resolver: SharedHostResolver,
-) -> io::Result<TcpSession> {
+    socket_protector: &SP,
+    host_resolver: &HR,
+) -> io::Result<TcpSession>
+where
+    SP: SocketProtector,
+    HR: HostResolver,
+{
     metrics.inc_tcp_connections();
 
     let stream = timeout(
         CONNECT_TIMEOUT,
-        connect_stream(config, socket_protector.as_ref(), host_resolver.as_ref()),
+        connect_stream(config, socket_protector, host_resolver),
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tcp connect timeout"))??;
@@ -169,11 +173,15 @@ pub async fn connect(
     })
 }
 
-async fn connect_stream(
+async fn connect_stream<SP, HR>(
     config: &ClientConfig,
-    socket_protector: &dyn SocketProtector,
-    host_resolver: &dyn HostResolver,
-) -> io::Result<TcpStream> {
+    socket_protector: &SP,
+    host_resolver: &HR,
+) -> io::Result<TcpStream>
+where
+    SP: SocketProtector,
+    HR: HostResolver,
+{
     if let Some(ip) = config.network.ip {
         return connect_addr(SocketAddr::new(ip, config.network.port), socket_protector).await;
     }
@@ -193,10 +201,10 @@ async fn connect_stream(
     Err(last_err.unwrap_or_else(|| io::Error::other("tcp connect failed")))
 }
 
-async fn connect_addr(
-    addr: SocketAddr,
-    socket_protector: &dyn SocketProtector,
-) -> io::Result<TcpStream> {
+async fn connect_addr<SP>(addr: SocketAddr, socket_protector: &SP) -> io::Result<TcpStream>
+where
+    SP: SocketProtector,
+{
     let socket = match addr {
         SocketAddr::V4(_) => TcpSocket::new_v4()?,
         SocketAddr::V6(_) => TcpSocket::new_v6()?,

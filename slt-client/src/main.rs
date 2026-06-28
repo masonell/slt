@@ -56,14 +56,14 @@ async fn main() -> anyhow::Result<()> {
 
     let (tun_handles, tun_channels) = slt_client::spawn_desktop(&config, cancel.clone())?;
 
+    let services = slt_client::DesktopServices::new();
+
     Box::pin(slt_client::run_client(
         config,
         tun_handles,
         tun_channels,
         cancel,
-        slt_client::noop_socket_protector(),
-        slt_client::default_host_resolver(),
-        slt_client::ObserverSink::noop(),
+        services,
     ))
     .await
 }

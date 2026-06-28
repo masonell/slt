@@ -12,6 +12,7 @@ use tracing::{debug, info, trace, warn};
 
 use super::{ClientSession, SessionControl, SessionExit, UdpState};
 use crate::runtime::observer::{ClientEventKind, Transport, TransportChangeReason};
+use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::{ActiveTransport, PendingUdpQspRegistration, UdpUpgradeState};
 use crate::runtime::{ReconnectBackoff, register};
 use crate::transport::quic_discovery as quic;
@@ -40,7 +41,7 @@ const fn barrier_upgrade_id_for_nonce(state: &UdpUpgradeState, nonce: u64) -> Op
     }
 }
 
-impl ClientSession<'_> {
+impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// Spawns a QUIC discovery task.
     ///
     /// Returns a `JoinHandle` for the background task that will resolve to
@@ -50,13 +51,13 @@ impl ClientSession<'_> {
         let config = self.config.clone();
         let cancel = self.cancel.clone();
         let peer = self.peer;
-        let socket_protector = self.socket_protector.clone();
-        let host_resolver = self.host_resolver.clone();
+        let socket_protector = self.services.socket_protector().clone();
+        let host_resolver = self.services.host_resolver().clone();
 
         tokio::spawn(async move {
             let result = tokio::select! {
                 () = cancel.cancelled() => return None,
-                result = quic::discover_quic_ids(&config, &cancel, peer, socket_protector, host_resolver) => result,
+                result = quic::discover_quic_ids(&config, &cancel, peer, &socket_protector, &host_resolver) => result,
             };
 
             match result {
@@ -104,7 +105,9 @@ impl ClientSession<'_> {
                     *registration =
                         Some(Box::new(PendingUdpQspRegistration { prepared, deadline }));
                 }
-                self.observer.emit(ClientEventKind::UdpRegisterStarted);
+                self.services
+                    .observer()
+                    .emit(ClientEventKind::UdpRegisterStarted);
             }
             Err(err) => {
                 warn!(error = %err, "register_cid failed");
@@ -112,9 +115,11 @@ impl ClientSession<'_> {
                     warn!("register_cid failed with require_udp=true");
                     return SessionControl::Close(SessionExit::UdpUpgradeRequired);
                 }
-                self.observer.emit(ClientEventKind::UdpRegisterFailed {
-                    detail: err.to_string(),
-                });
+                self.services
+                    .observer()
+                    .emit(ClientEventKind::UdpRegisterFailed {
+                        detail: err.to_string(),
+                    });
                 self.schedule_registration_retry();
             }
         }
@@ -201,7 +206,8 @@ impl ClientSession<'_> {
                 self.config.timing.reconnect_max,
             ),
         };
-        self.observer
+        self.services
+            .observer()
             .emit(ClientEventKind::UdpUpgradeStarted { upgrade_id });
         info!(upgrade_id, "starting udp upgrade attempt");
     }
@@ -259,7 +265,9 @@ impl ClientSession<'_> {
             self.metrics.clone(),
         )));
         self.last_udp_rx = Instant::now();
-        self.observer.emit(ClientEventKind::UdpRegistered);
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpRegistered);
         self.start_udp_upgrade_attempt(Instant::now());
         Ok(SessionControl::Continue)
     }
@@ -293,9 +301,11 @@ impl ClientSession<'_> {
             warn!(code = ?fail.code, "register_cid rejected with require_udp=true");
             return Ok(SessionControl::Close(SessionExit::UdpUpgradeRequired));
         }
-        self.observer.emit(ClientEventKind::UdpRegisterFailed {
-            detail: format!("register_cid rejected: {:?}", fail.code),
-        });
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpRegisterFailed {
+                detail: format!("register_cid rejected: {:?}", fail.code),
+            });
         self.schedule_registration_retry();
         Ok(SessionControl::Continue)
     }
@@ -320,9 +330,11 @@ impl ClientSession<'_> {
             warn!("register_cid timed out with require_udp=true");
             return SessionControl::Close(SessionExit::UdpUpgradeRequired);
         }
-        self.observer.emit(ClientEventKind::UdpRegisterFailed {
-            detail: "register_cid timed out".to_string(),
-        });
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpRegisterFailed {
+                detail: "register_cid timed out".to_string(),
+            });
         self.schedule_registration_retry();
         SessionControl::Continue
     }
@@ -349,9 +361,11 @@ impl ClientSession<'_> {
         }
 
         self.metrics.inc_udp_discovery_failure();
-        self.observer.emit(ClientEventKind::UdpDiscoveryFailed {
-            detail: "quic dcid discovery failed".to_string(),
-        });
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpDiscoveryFailed {
+                detail: "quic dcid discovery failed".to_string(),
+            });
         if self.config.require_udp {
             warn!("quic dcid discovery failed with require_udp=true");
             return SessionControl::Close(SessionExit::UdpUpgradeRequired);
@@ -538,9 +552,11 @@ impl ClientSession<'_> {
         if let UdpUpgradeState::Upgrading { ready_sent, .. } = &mut self.udp_upgrade {
             *ready_sent = true;
         }
-        self.observer.emit(ClientEventKind::UdpPathValidated {
-            upgrade_id: ack.upgrade_id,
-        });
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpPathValidated {
+                upgrade_id: ack.upgrade_id,
+            });
         info!(
             upgrade_id = ack.upgrade_id,
             "udp path validated; sent udp_ready"
@@ -640,7 +656,8 @@ impl ClientSession<'_> {
         self.last_udp_rx = Instant::now();
         self.udp_upgrade = UdpUpgradeState::Idle;
         self.udp_upgrade_backoff.reset();
-        self.observer
+        self.services
+            .observer()
             .emit(ClientEventKind::UdpSwitchCommitted { upgrade_id });
         info!(upgrade_id, "udp upgrade committed");
         true

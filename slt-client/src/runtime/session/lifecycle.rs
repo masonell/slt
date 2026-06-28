@@ -7,9 +7,10 @@ use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload};
 use tracing::{debug, trace, warn};
 
 use super::ClientSession;
+use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 
-impl ClientSession<'_> {
+impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// Sends a ping on the active transport.
     ///
     /// Generates a random nonce, encodes a `PING` message, and writes it

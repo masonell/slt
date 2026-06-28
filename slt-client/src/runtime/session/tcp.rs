@@ -10,6 +10,7 @@ use tracing::{debug, info, trace};
 use super::{ClientSession, SessionControl, SessionExit};
 use crate::metrics::Metrics;
 use crate::runtime::observer::{Transport, TransportChangeReason};
+use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 use crate::wire;
 
@@ -31,7 +32,7 @@ fn switch_to_tcp_on_server_traffic(
     true
 }
 
-impl ClientSession<'_> {
+impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// Processes buffered TCP data and dispatches messages.
     ///
     /// Repeatedly pops messages from the TCP transport buffer and handles
@@ -285,13 +286,13 @@ mod tests {
     mod classify_error {
         use std::io;
 
-        use super::super::super::ClientSession;
+        use super::super::super::classify_error;
 
         /// Test that `InvalidData` maps to `ProtocolError`.
         #[test]
         fn invalid_data_maps_to_protocol_error() {
             let err = io::Error::new(io::ErrorKind::InvalidData, "test");
-            let exit = ClientSession::classify_error(&err);
+            let exit = classify_error(&err);
             assert_eq!(exit, super::SessionExit::ProtocolError);
         }
 
@@ -299,7 +300,7 @@ mod tests {
         #[test]
         fn invalid_input_maps_to_protocol_error() {
             let err = io::Error::new(io::ErrorKind::InvalidInput, "test");
-            let exit = ClientSession::classify_error(&err);
+            let exit = classify_error(&err);
             assert_eq!(exit, super::SessionExit::ProtocolError);
         }
 
@@ -307,7 +308,7 @@ mod tests {
         #[test]
         fn permission_denied_maps_to_permission_denied() {
             let err = io::Error::new(io::ErrorKind::PermissionDenied, "test");
-            let exit = ClientSession::classify_error(&err);
+            let exit = classify_error(&err);
             assert_eq!(exit, super::SessionExit::PermissionDenied);
         }
 
@@ -315,7 +316,7 @@ mod tests {
         #[test]
         fn connection_reset_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::ConnectionReset, "test");
-            let exit = ClientSession::classify_error(&err);
+            let exit = classify_error(&err);
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
@@ -323,7 +324,7 @@ mod tests {
         #[test]
         fn broken_pipe_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::BrokenPipe, "test");
-            let exit = ClientSession::classify_error(&err);
+            let exit = classify_error(&err);
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
@@ -331,7 +332,7 @@ mod tests {
         #[test]
         fn timed_out_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::TimedOut, "test");
-            let exit = ClientSession::classify_error(&err);
+            let exit = classify_error(&err);
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
@@ -339,7 +340,7 @@ mod tests {
         #[test]
         fn unexpected_eof_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::UnexpectedEof, "test");
-            let exit = ClientSession::classify_error(&err);
+            let exit = classify_error(&err);
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
@@ -347,7 +348,7 @@ mod tests {
         #[test]
         fn interrupted_maps_to_connection_error() {
             let err = io::Error::new(io::ErrorKind::Interrupted, "test");
-            let exit = ClientSession::classify_error(&err);
+            let exit = classify_error(&err);
             assert_eq!(exit, super::SessionExit::ConnectionError);
         }
 
@@ -366,7 +367,7 @@ mod tests {
 
             for kind in other_kinds {
                 let err = io::Error::new(kind, "test");
-                let exit = ClientSession::classify_error(&err);
+                let exit = classify_error(&err);
                 assert_eq!(
                     exit,
                     super::SessionExit::ConnectionError,

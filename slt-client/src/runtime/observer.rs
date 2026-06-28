@@ -180,32 +180,25 @@ pub struct ClientEvent {
 
 /// Receiver of typed client events.
 ///
-/// Implementations must be cheap to clone (wrapped in [`SharedClientObserver`]
-/// as an `Arc`). The runtime calls [`ClientObserver::on_event`] from worker
-/// threads; implementors are responsible for thread-safe delivery (e.g.
-/// marshalling to a UI thread on Android).
+/// Stored by value inside [`ObserverSink`], which shares it via its inner
+/// `Arc`, so implementations need only be `Send + Sync` (not `Clone`). The
+/// runtime calls [`ClientObserver::on_event`] from worker threads;
+/// implementors are responsible for thread-safe delivery (e.g. marshalling to
+/// a UI thread on Android).
 pub trait ClientObserver: Send + Sync {
     /// Handle one typed client event.
     fn on_event(&self, event: &ClientEvent);
 }
 
-/// Shared observer handle used by the client runtime.
-pub type SharedClientObserver = Arc<dyn ClientObserver>;
-
 /// Observer that discards every event.
 ///
-/// Used by the CLI, which has no foreign callback to forward to.
-#[derive(Debug, Default)]
+/// Used by the desktop services bundle, which has no foreign callback to
+/// forward to.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct NoopObserver;
 
 impl ClientObserver for NoopObserver {
     fn on_event(&self, _event: &ClientEvent) {}
-}
-
-/// Construct a shared no-op observer.
-#[must_use]
-pub fn noop_observer() -> SharedClientObserver {
-    Arc::new(NoopObserver)
 }
 
 const TRANSPORT_NONE: u8 = 0;
@@ -229,27 +222,37 @@ const fn transport_from_u8(value: u8) -> Option<Transport> {
 }
 
 /// Per-session event emitter owning the handle, monotonic sequence counter,
-/// tracked active transport, and the underlying [`SharedClientObserver`].
+/// tracked active transport, and the underlying [`ClientObserver`].
 ///
-/// Cheaply clonable (inner `Arc`); clones share the same sequence counter and
-/// transport state so events emitted across the connect flow and the session
-/// loop stay ordered and consistent.
-#[derive(Clone)]
-pub struct ObserverSink {
-    inner: Arc<ObserverSinkInner>,
+/// Generic over the observer type `O` so the runtime is monomorphized per
+/// concrete observer (no `dyn` dispatch). Cheaply clonable (inner `Arc`);
+/// clones share the same sequence counter and transport state so events
+/// emitted across the connect flow and the session loop stay ordered and
+/// consistent. The observer is shared via the inner `Arc`, so `O` need not be
+/// `Clone`.
+pub struct ObserverSink<O: ClientObserver> {
+    inner: Arc<ObserverSinkInner<O>>,
 }
 
-struct ObserverSinkInner {
+struct ObserverSinkInner<O: ClientObserver> {
     handle: u64,
     seq: AtomicU64,
     transport: AtomicU8,
-    observer: SharedClientObserver,
+    observer: O,
 }
 
-impl ObserverSink {
+impl<O: ClientObserver> Clone for ObserverSink<O> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<O: ClientObserver> ObserverSink<O> {
     /// Create a sink for session `handle` that forwards events to `observer`.
     #[must_use]
-    pub fn new(handle: u64, observer: SharedClientObserver) -> Self {
+    pub fn new(handle: u64, observer: O) -> Self {
         Self {
             inner: Arc::new(ObserverSinkInner {
                 handle,
@@ -258,13 +261,6 @@ impl ObserverSink {
                 observer,
             }),
         }
-    }
-
-    /// Create a no-op sink (handle `0`, [`NoopObserver`]) for runtimes without
-    /// a foreign callback, such as the CLI.
-    #[must_use]
-    pub fn noop() -> Self {
-        Self::new(0, noop_observer())
     }
 
     /// Native session handle carried by every emitted event.
@@ -292,16 +288,28 @@ impl ObserverSink {
     }
 }
 
+impl ObserverSink<NoopObserver> {
+    /// Create a no-op sink (handle `0`, [`NoopObserver`]) for runtimes without
+    /// a foreign callback, such as the desktop CLI.
+    #[must_use]
+    pub fn noop() -> Self {
+        Self::new(0, NoopObserver)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
     /// Recording observer that snapshots every event it receives.
-    #[derive(Default)]
+    ///
+    /// `Clone` shares the underlying event buffer (via `Arc<Mutex<…>>`) so a
+    /// test can hold a clone to read events while the sink owns another.
+    #[derive(Default, Clone)]
     struct RecordingObserver {
-        events: Mutex<Vec<ClientEvent>>,
+        events: Arc<Mutex<Vec<ClientEvent>>>,
     }
 
     impl RecordingObserver {
@@ -317,8 +325,8 @@ mod tests {
         }
     }
 
-    fn recording() -> (ObserverSink, Arc<RecordingObserver>) {
-        let observer = Arc::new(RecordingObserver::default());
+    fn recording() -> (ObserverSink<RecordingObserver>, RecordingObserver) {
+        let observer = RecordingObserver::default();
         let sink = ObserverSink::new(42, observer.clone());
         (sink, observer)
     }

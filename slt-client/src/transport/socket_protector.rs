@@ -3,7 +3,6 @@
 use std::io;
 #[cfg(unix)]
 use std::os::fd::RawFd;
-use std::sync::Arc;
 
 /// Transport socket type passed to [`SocketProtector`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,11 +29,8 @@ pub trait SocketProtector: Send + Sync {
     fn protect(&self, fd: RawFd, kind: SocketKind) -> io::Result<()>;
 }
 
-/// Shared socket protector handle used by the client runtime.
-pub type SharedSocketProtector = Arc<dyn SocketProtector>;
-
 /// Socket protector that leaves sockets unchanged.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct NoopSocketProtector;
 
 impl SocketProtector for NoopSocketProtector {
@@ -42,10 +38,4 @@ impl SocketProtector for NoopSocketProtector {
     fn protect(&self, _fd: RawFd, _kind: SocketKind) -> io::Result<()> {
         Ok(())
     }
-}
-
-/// Construct a shared no-op socket protector.
-#[must_use]
-pub fn noop_socket_protector() -> SharedSocketProtector {
-    Arc::new(NoopSocketProtector)
 }

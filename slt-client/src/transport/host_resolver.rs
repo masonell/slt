@@ -4,7 +4,6 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use tokio::net::lookup_host;
 
@@ -22,11 +21,8 @@ pub trait HostResolver: Send + Sync {
     fn resolve<'a>(&'a self, hostname: &'a str, port: u16) -> HostResolverFuture<'a>;
 }
 
-/// Shared host resolver handle used by the client runtime.
-pub type SharedHostResolver = Arc<dyn HostResolver>;
-
 /// Default resolver backed by Tokio/system DNS.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct TokioHostResolver;
 
 impl HostResolver for TokioHostResolver {
@@ -36,12 +32,6 @@ impl HostResolver for TokioHostResolver {
             ensure_non_empty(addrs)
         })
     }
-}
-
-/// Construct a shared default host resolver.
-#[must_use]
-pub fn default_host_resolver() -> SharedHostResolver {
-    Arc::new(TokioHostResolver)
 }
 
 /// Return `addrs` if it contains at least one address.

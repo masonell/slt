@@ -1,20 +1,20 @@
 pub mod observer;
 mod register;
+pub mod services;
 mod session;
 
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use observer::{ClientEventKind, ObserverSink, Transport};
+use observer::{ClientEventKind, ClientObserver, ObserverSink, Transport};
+use services::ClientRuntimeServices;
 use slt_core::config::ClientConfig;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::metrics::Metrics;
-use crate::transport::host_resolver::SharedHostResolver;
-use crate::transport::socket_protector::SharedSocketProtector;
 use crate::{auth, transport, tun};
 
 /// Run the client runtime until shutdown.
@@ -27,33 +27,28 @@ use crate::{auth, transport, tun};
 ///
 /// Returns `Ok(())` on clean shutdown: cancellation requested, the TUN device
 /// closed, or the remote end closed the session.
-pub async fn run_client(
+pub async fn run_client<S>(
     config: ClientConfig,
     tun_handles: tun::TunHandles,
     mut tun_channels: tun::TunChannels,
     cancel: CancellationToken,
-    socket_protector: SharedSocketProtector,
-    host_resolver: SharedHostResolver,
-    observer: ObserverSink,
-) -> anyhow::Result<()> {
+    services: S,
+) -> anyhow::Result<()>
+where
+    S: ClientRuntimeServices,
+{
     let metrics = Arc::new(Metrics::default());
     let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
 
     // The runtime owns the full lifecycle event stream: Starting..Stopped/Error.
     // The bridge no longer emits these (only pre-run_client setup failures).
+    // Keep a cheap clone of the observer sink for the terminal events emitted
+    // after `run_sessions` borrows `services`.
+    let observer = services.observer().clone();
     observer.emit(ClientEventKind::Starting);
     observer.emit(ClientEventKind::TunReady);
 
-    let result = run_sessions(
-        &config,
-        &cancel,
-        &metrics,
-        &mut tun_channels,
-        socket_protector,
-        host_resolver,
-        &observer,
-    )
-    .await;
+    let result = run_sessions(&config, &cancel, &metrics, &mut tun_channels, &services).await;
 
     cancel.cancel();
     tun_handles.shutdown().await;
@@ -79,15 +74,16 @@ pub async fn run_client(
 }
 
 /// Run the session loop until shutdown or fatal error.
-async fn run_sessions(
+async fn run_sessions<S>(
     config: &ClientConfig,
     cancel: &CancellationToken,
     metrics: &Arc<Metrics>,
     tun_channels: &mut tun::TunChannels,
-    socket_protector: SharedSocketProtector,
-    host_resolver: SharedHostResolver,
-    observer: &ObserverSink,
-) -> io::Result<()> {
+    services: &S,
+) -> io::Result<()>
+where
+    S: ClientRuntimeServices,
+{
     let mut backoff =
         ReconnectBackoff::new(config.timing.reconnect_min, config.timing.reconnect_max);
     let mut attempt: u64 = 0;
@@ -99,9 +95,7 @@ async fn run_sessions(
             metrics,
             &mut backoff,
             &mut attempt,
-            socket_protector.clone(),
-            host_resolver.clone(),
-            observer,
+            services,
         )
         .await
         {
@@ -113,15 +107,14 @@ async fn run_sessions(
                     tun_channels,
                     cancel.clone(),
                     metrics.clone(),
-                    socket_protector.clone(),
-                    host_resolver.clone(),
-                    observer.clone(),
+                    services,
                 );
                 match handle_session_exit(session.run().await, cancel) {
                     SessionAction::Break => break Ok(()),
                     SessionAction::Fatal(err) => break Err(err),
                     SessionAction::Reconnect => {
-                        schedule_reconnect(cancel, &mut backoff, observer, attempt + 1).await;
+                        schedule_reconnect(cancel, &mut backoff, services.observer(), attempt + 1)
+                            .await;
                     }
                 }
             }
@@ -155,17 +148,17 @@ enum SessionAction {
 }
 
 /// Attempt to connect and authenticate with the server.
-#[allow(clippy::too_many_arguments)]
-async fn try_connect(
+async fn try_connect<S>(
     config: &ClientConfig,
     cancel: &CancellationToken,
     metrics: &Arc<Metrics>,
     backoff: &mut ReconnectBackoff,
     attempt: &mut u64,
-    socket_protector: SharedSocketProtector,
-    host_resolver: SharedHostResolver,
-    observer: &ObserverSink,
-) -> ConnectOutcome {
+    services: &S,
+) -> ConnectOutcome
+where
+    S: ClientRuntimeServices,
+{
     if cancel.is_cancelled() {
         return ConnectOutcome::Shutdown;
     }
@@ -175,19 +168,12 @@ async fn try_connect(
     // Each attempt begins on TCP (ClientSession starts on ActiveTransport::Tcp).
     // Reset the tracked transport so a reconnect after a UDP-committed session
     // does not report stale UdpQsp for the fresh TCP connection.
-    observer.set_transport(Transport::Tcp);
-    observer.emit(ClientEventKind::Connecting { attempt: *attempt });
+    services.observer().set_transport(Transport::Tcp);
+    services
+        .observer()
+        .emit(ClientEventKind::Connecting { attempt: *attempt });
 
-    match connect_authenticated(
-        config,
-        cancel,
-        metrics,
-        socket_protector,
-        host_resolver,
-        observer,
-    )
-    .await
-    {
+    match connect_authenticated(config, cancel, metrics, services).await {
         Ok(tcp) => ConnectOutcome::Connected(tcp),
         Err(err) => {
             if cancel.is_cancelled() {
@@ -213,11 +199,11 @@ async fn try_connect(
                 error = %err,
                 "connect/auth failed; retrying"
             );
-            observer.emit(ClientEventKind::ReconnectFailed {
+            services.observer().emit(ClientEventKind::ReconnectFailed {
                 attempt: *attempt,
                 detail: err.to_string(),
             });
-            schedule_reconnect(cancel, backoff, observer, *attempt + 1).await;
+            schedule_reconnect(cancel, backoff, services.observer(), *attempt + 1).await;
             ConnectOutcome::Reconnect
         }
     }
@@ -312,12 +298,14 @@ fn should_reconnect(err: &io::Error) -> bool {
     )
 }
 
-async fn schedule_reconnect(
+async fn schedule_reconnect<O>(
     cancel: &CancellationToken,
     backoff: &mut ReconnectBackoff,
-    observer: &ObserverSink,
+    observer: &ObserverSink<O>,
     next_attempt: u64,
-) {
+) where
+    O: ClientObserver,
+{
     let delay = backoff.next_delay();
     observer.emit(ClientEventKind::ReconnectScheduled {
         attempt: next_attempt,
@@ -379,34 +367,40 @@ impl ReconnectBackoff {
     }
 }
 
-async fn connect_authenticated(
+async fn connect_authenticated<S>(
     config: &ClientConfig,
     cancel: &CancellationToken,
     metrics: &Arc<Metrics>,
-    socket_protector: SharedSocketProtector,
-    host_resolver: SharedHostResolver,
-    observer: &ObserverSink,
-) -> io::Result<transport::tcp::TcpSession> {
+    services: &S,
+) -> io::Result<transport::tcp::TcpSession>
+where
+    S: ClientRuntimeServices,
+{
     let mut tcp = tokio::select! {
         () = cancel.cancelled() => {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "connect cancelled"));
         }
-        res = transport::tcp::connect(config, metrics.clone(), socket_protector, host_resolver) => res,
+        res = transport::tcp::connect(
+            config,
+            metrics.clone(),
+            services.socket_protector(),
+            services.host_resolver(),
+        ) => res,
     }?;
 
     info!(peer = ?tcp.peer, sni = ?tcp.sni, "tcp handshake complete");
-    observer.emit(ClientEventKind::ConnectedTcp {
+    services.observer().emit(ClientEventKind::ConnectedTcp {
         peer: tcp.peer.map(|peer| peer.to_string()),
     });
 
-    observer.emit(ClientEventKind::Authenticating);
+    services.observer().emit(ClientEventKind::Authenticating);
     tokio::select! {
         () = cancel.cancelled() => {
             Err(io::Error::new(io::ErrorKind::Interrupted, "auth cancelled"))
         }
         res = auth::authenticate(&mut tcp.transport, config, metrics) => res,
     }?;
-    observer.emit(ClientEventKind::Authenticated);
+    services.observer().emit(ClientEventKind::Authenticated);
 
     if tcp.transport.has_buffered_input() {
         debug!("preserved auth leftovers");

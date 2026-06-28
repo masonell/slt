@@ -13,8 +13,8 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
-use crate::transport::host_resolver::SharedHostResolver;
-use crate::transport::socket_protector::{SharedSocketProtector, SocketKind, SocketProtector};
+use crate::transport::host_resolver::HostResolver;
+use crate::transport::socket_protector::{SocketKind, SocketProtector};
 
 const QUIC_MAX_DATAGRAM: usize = 1350;
 const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,13 +46,17 @@ pub struct QuicIds {
 /// - UDP socket bind fails
 /// - QUIC handshake fails, times out (5s), or is cancelled
 /// - Connection ID generation fails
-pub async fn discover_quic_ids(
+pub async fn discover_quic_ids<SP, HR>(
     config: &ClientConfig,
     cancel: &CancellationToken,
     peer_override: Option<SocketAddr>,
-    socket_protector: SharedSocketProtector,
-    host_resolver: SharedHostResolver,
-) -> io::Result<QuicIds> {
+    socket_protector: &SP,
+    host_resolver: &HR,
+) -> io::Result<QuicIds>
+where
+    SP: SocketProtector,
+    HR: HostResolver,
+{
     if config.network.hostname.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -60,14 +64,14 @@ pub async fn discover_quic_ids(
         ));
     }
 
-    let peers = resolve_peers(config, peer_override, host_resolver.as_ref()).await?;
+    let peers = resolve_peers(config, peer_override, host_resolver).await?;
     let mut last_err = None;
     for peer in peers {
         match Box::pin(discover_quic_ids_for_peer(
             config,
             cancel,
             peer,
-            socket_protector.as_ref(),
+            socket_protector,
         ))
         .await
         {
@@ -83,11 +87,14 @@ pub async fn discover_quic_ids(
         .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no quic peers available")))
 }
 
-async fn resolve_peers(
+async fn resolve_peers<HR>(
     config: &ClientConfig,
     peer_override: Option<SocketAddr>,
-    host_resolver: &dyn crate::transport::host_resolver::HostResolver,
-) -> io::Result<Vec<SocketAddr>> {
+    host_resolver: &HR,
+) -> io::Result<Vec<SocketAddr>>
+where
+    HR: HostResolver,
+{
     if let Some(peer) = peer_override {
         return Ok(vec![peer]);
     }
@@ -101,12 +108,15 @@ async fn resolve_peers(
         .await
 }
 
-async fn discover_quic_ids_for_peer(
+async fn discover_quic_ids_for_peer<SP>(
     config: &ClientConfig,
     cancel: &CancellationToken,
     peer: SocketAddr,
-    socket_protector: &dyn SocketProtector,
-) -> io::Result<QuicIds> {
+    socket_protector: &SP,
+) -> io::Result<QuicIds>
+where
+    SP: SocketProtector,
+{
     let socket = Arc::new(bind_protected_udp_socket(peer, socket_protector)?);
     let local = socket.local_addr()?;
 
@@ -202,10 +212,10 @@ async fn discover_quic_ids_for_peer(
     }
 }
 
-fn bind_protected_udp_socket(
-    peer: SocketAddr,
-    socket_protector: &dyn SocketProtector,
-) -> io::Result<UdpSocket> {
+fn bind_protected_udp_socket<SP>(peer: SocketAddr, socket_protector: &SP) -> io::Result<UdpSocket>
+where
+    SP: SocketProtector,
+{
     let bind_addr = match peer {
         SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),

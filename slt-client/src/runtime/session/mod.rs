@@ -31,11 +31,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::ReconnectBackoff;
-use super::observer::{ClientEventKind, ObserverSink, Transport, TransportChangeReason};
+use super::observer::{ClientEventKind, Transport, TransportChangeReason};
+use super::services::ClientRuntimeServices;
 use crate::metrics::Metrics;
-use crate::transport::host_resolver::SharedHostResolver;
 use crate::transport::quic_discovery as quic;
-use crate::transport::socket_protector::SharedSocketProtector;
 use crate::transport::tcp::{TcpSession, TcpTransport};
 use crate::transport::udp_qsp::ClientTransport;
 use crate::tun::TunChannels;
@@ -44,11 +43,12 @@ use crate::tun::TunChannels;
 ///
 /// Handles the complete lifecycle of a VPN session including TCP/UDP transport
 /// management, message handling, transport upgrades, and idle timeout detection.
-pub(super) struct ClientSession<'a> {
+pub(super) struct ClientSession<'a, S: ClientRuntimeServices> {
     config: &'a ClientConfig,
     tcp: TcpTransport,
     peer: Option<SocketAddr>,
     tun_channels: &'a mut TunChannels,
+    services: &'a S,
     active_transport: ActiveTransport,
     cancel: CancellationToken,
     limits: MessageLimits,
@@ -59,30 +59,43 @@ pub(super) struct ClientSession<'a> {
     udp_upgrade_backoff: ReconnectBackoff,
     discovery_task: Option<JoinHandle<Option<quic::QuicIds>>>,
     metrics: Arc<Metrics>,
-    socket_protector: SharedSocketProtector,
-    host_resolver: SharedHostResolver,
-    observer: ObserverSink,
     /// Whether the TCP connection is still usable. Set to false when TCP closes
     /// while UDP-QSP is active, allowing the session to continue on UDP alone.
     tcp_alive: bool,
 }
 
-impl<'a> ClientSession<'a> {
+/// Classifies an I/O error into the appropriate [`SessionExit`] variant.
+///
+/// A free function (not a method) because it does not depend on the services
+/// type parameter `S`; this keeps tests from having to name a concrete
+/// `ClientSession<…>` type.
+///
+/// Maps `io::ErrorKind` to session exit reasons:
+/// - `InvalidData` / `InvalidInput` → `ProtocolError`
+/// - `PermissionDenied` → `PermissionDenied`
+/// - All other kinds → `ConnectionError`
+pub(super) fn classify_error(err: &io::Error) -> SessionExit {
+    match err.kind() {
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => SessionExit::ProtocolError,
+        io::ErrorKind::PermissionDenied => SessionExit::PermissionDenied,
+        _ => SessionExit::ConnectionError,
+    }
+}
+
+impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
     /// Creates a new session from an authenticated TCP connection.
     ///
     /// Initializes the session with the given TCP transport, configuration,
-    /// TUN channels, and cancellation token. UDP state is initialized based
-    /// on the effective upgrade policy (`enable_upgrade || require_udp`).
-    #[allow(clippy::too_many_arguments)]
+    /// TUN channels, cancellation token, and a borrow of the platform services
+    /// (socket protector, host resolver, observer). UDP state is initialized
+    /// based on the effective upgrade policy (`enable_upgrade || require_udp`).
     pub(super) fn new(
         config: &'a ClientConfig,
         tcp: TcpSession,
         tun_channels: &'a mut TunChannels,
         cancel: CancellationToken,
         metrics: Arc<Metrics>,
-        socket_protector: SharedSocketProtector,
-        host_resolver: SharedHostResolver,
-        observer: ObserverSink,
+        services: &'a S,
     ) -> Self {
         let now = Instant::now();
         let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
@@ -123,9 +136,7 @@ impl<'a> ClientSession<'a> {
             ),
             discovery_task: None,
             metrics,
-            socket_protector,
-            host_resolver,
-            observer,
+            services,
             tcp_alive: true,
         }
     }
@@ -144,7 +155,7 @@ impl<'a> ClientSession<'a> {
                     Ok(SessionControl::Close(exit)) => break exit,
                     Err(err) => {
                         self.metrics.inc_disconnect_error();
-                        break Self::classify_error(&err);
+                        break classify_error(&err);
                     }
                 }
             }
@@ -153,7 +164,7 @@ impl<'a> ClientSession<'a> {
                 Ok(event) => event,
                 Err(err) => {
                     self.metrics.inc_disconnect_error();
-                    break Self::classify_error(&err);
+                    break classify_error(&err);
                 }
             };
             match self.handle_event(event, &mut next_ping_at).await {
@@ -161,7 +172,7 @@ impl<'a> ClientSession<'a> {
                 Ok(SessionControl::Close(exit)) => break exit,
                 Err(err) => {
                     self.metrics.inc_disconnect_error();
-                    break Self::classify_error(&err);
+                    break classify_error(&err);
                 }
             }
         };
@@ -171,26 +182,12 @@ impl<'a> ClientSession<'a> {
         result
     }
 
-    /// Classifies an I/O error into the appropriate [`SessionExit`] variant.
-    ///
-    /// Maps `io::ErrorKind` to session exit reasons:
-    /// - `InvalidData` / `InvalidInput` → `ProtocolError`
-    /// - `PermissionDenied` → `PermissionDenied`
-    /// - All other kinds → `ConnectionError`
-    pub(super) fn classify_error(err: &io::Error) -> SessionExit {
-        match err.kind() {
-            io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => SessionExit::ProtocolError,
-            io::ErrorKind::PermissionDenied => SessionExit::PermissionDenied,
-            _ => SessionExit::ConnectionError,
-        }
-    }
-
     /// Records an active-transport change: updates the tracked transport on the
     /// observer sink and emits a typed [`ClientEventKind::TransportChanged`].
     fn note_transport_change(&self, from: Transport, to: Transport, reason: TransportChangeReason) {
-        self.observer.set_transport(to);
-        self.observer
-            .emit(ClientEventKind::TransportChanged { from, to, reason });
+        let observer = self.services.observer();
+        observer.set_transport(to);
+        observer.emit(ClientEventKind::TransportChanged { from, to, reason });
     }
 
     /// Polls for the next session event.
@@ -387,7 +384,9 @@ impl<'a> ClientSession<'a> {
                 match &self.udp_state {
                     UdpState::NeedDiscovery { .. } => {
                         debug!("udp reconnect tick; spawning quic discovery task");
-                        self.observer.emit(ClientEventKind::UdpDiscoveryStarted);
+                        self.services
+                            .observer()
+                            .emit(ClientEventKind::UdpDiscoveryStarted);
                         self.discovery_task = Some(self.spawn_quic_discovery());
                     }
                     UdpState::Pending { .. } => {

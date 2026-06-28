@@ -12,6 +12,7 @@ use tracing::{debug, error, info};
 
 use super::uniffi_api::{NativeSessionCallback, PlatformServices, SltInteropError};
 use crate::runtime::observer::{ClientEvent, ClientEventKind, ClientObserver, ObserverSink};
+use crate::runtime::services::ClientRuntimeServices;
 use crate::transport::host_resolver::{HostResolver, HostResolverFuture, ensure_non_empty};
 use crate::transport::socket_protector::{SocketKind, SocketProtector};
 
@@ -41,8 +42,7 @@ pub(super) fn start_session(
         });
     }
 
-    let observer = Arc::new(AndroidObserver::new(callback)) as Arc<dyn ClientObserver>;
-    let sink = ObserverSink::new(handle, observer);
+    let sink = ObserverSink::new(handle, AndroidObserver::new(callback));
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
     let worker_sink = sink;
@@ -138,6 +138,7 @@ impl ClientObserver for AndroidObserver {
     }
 }
 
+#[derive(Clone)]
 struct AndroidSocketProtector {
     platform_services: Arc<dyn PlatformServices>,
 }
@@ -169,6 +170,7 @@ impl SocketProtector for AndroidSocketProtector {
     }
 }
 
+#[derive(Clone)]
 struct AndroidHostResolver {
     platform_services: Arc<dyn PlatformServices>,
 }
@@ -188,6 +190,44 @@ impl HostResolver for AndroidHostResolver {
                 .await
                 .map_err(|err| io::Error::other(format!("Android DNS task failed: {err}")))?
         })
+    }
+}
+
+/// Android [`ClientRuntimeServices`] bundle: socket protection and DNS through
+/// the active underlying network, plus the typed event sink forwarding to the
+/// foreign callback.
+struct AndroidServices {
+    socket_protector: AndroidSocketProtector,
+    host_resolver: AndroidHostResolver,
+    observer: ObserverSink<AndroidObserver>,
+}
+
+impl AndroidServices {
+    fn new(
+        platform_services: Arc<dyn PlatformServices>,
+        observer: ObserverSink<AndroidObserver>,
+    ) -> Self {
+        Self {
+            socket_protector: AndroidSocketProtector::new(platform_services.clone()),
+            host_resolver: AndroidHostResolver::new(platform_services),
+            observer,
+        }
+    }
+}
+
+impl ClientRuntimeServices for AndroidServices {
+    type SocketProtector = AndroidSocketProtector;
+    type HostResolver = AndroidHostResolver;
+    type Observer = AndroidObserver;
+
+    fn socket_protector(&self) -> &Self::SocketProtector {
+        &self.socket_protector
+    }
+    fn host_resolver(&self) -> &Self::HostResolver {
+        &self.host_resolver
+    }
+    fn observer(&self) -> &ObserverSink<Self::Observer> {
+        &self.observer
     }
 }
 
@@ -224,7 +264,7 @@ fn run_native_session(
     tun_fd: i32,
     mtu: i32,
     cancel: CancellationToken,
-    sink: &ObserverSink,
+    sink: &ObserverSink<AndroidObserver>,
     handle: NativeHandle,
     platform_services: Arc<dyn PlatformServices>,
 ) {
@@ -249,7 +289,7 @@ fn run_native_client(
     tun_fd: i32,
     mtu: i32,
     cancel: CancellationToken,
-    sink: &ObserverSink,
+    sink: &ObserverSink<AndroidObserver>,
     platform_services: Arc<dyn PlatformServices>,
 ) -> Result<(), String> {
     let config = ClientConfig::from_toml_str(raw_config)
@@ -271,18 +311,9 @@ fn run_native_client(
                 .map_err(|err| format!("start Android TUN backend: {err}"))?;
         info!("Android TUN backend started");
 
-        let socket_protector = Arc::new(AndroidSocketProtector::new(platform_services.clone()));
-        let host_resolver = Arc::new(AndroidHostResolver::new(platform_services));
-        if let Err(err) = crate::run_client(
-            config,
-            tun_handles,
-            tun_channels,
-            cancel,
-            socket_protector,
-            host_resolver,
-            sink.clone(),
-        )
-        .await
+        let services = AndroidServices::new(platform_services, sink.clone());
+        if let Err(err) =
+            crate::run_client(config, tun_handles, tun_channels, cancel, services).await
         {
             error!("client runtime exited with error: {err}");
         }
