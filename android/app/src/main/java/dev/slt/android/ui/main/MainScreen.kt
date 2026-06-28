@@ -113,7 +113,11 @@ internal fun MainScreen(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Row(
+                                // Weighted (fill = false) so a long profile name
+                                // ellipsizes inside the island instead of pushing the
+                                // gear past the edge; the gear keeps a fixed slot.
                                 modifier = Modifier
+                                    .weight(1f, fill = false)
                                     .clickable(enabled = switchable) { showProfileMenu = true }
                                     .padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -126,6 +130,10 @@ internal fun MainScreen(
                                 )
                                 Text(
                                     text = activeName,
+                                    // Weighted (fill = false) so the name yields to the
+                                    // fixed "Profile" label and dropdown arrow, trimming
+                                    // with an ellipsis rather than hiding them.
+                                    modifier = Modifier.weight(1f, fill = false),
                                     style = MaterialTheme.typography.labelLarge,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
