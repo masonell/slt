@@ -1,5 +1,6 @@
 //! Client session tracking and lifecycle helpers.
 
+mod error;
 mod lifecycle;
 mod register;
 mod tcp;
@@ -9,15 +10,13 @@ mod udp_io;
 mod upgrade;
 
 use std::collections::VecDeque;
-use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession};
 use slt_core::proto::{
-    CloseCode, ClosePayload, FrameError, Message, MessageError, MessageLimits, PayloadError,
-    PingPayload, encode_message,
+    CloseCode, ClosePayload, Message, MessageLimits, PingPayload, encode_message,
 };
 use slt_core::transport::UdpQspIo;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -25,6 +24,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, info, trace};
 use tun_rs::AsyncDevice;
 
+pub use self::error::{SessionError, UdpQspError};
 use self::types::SessionControl;
 pub use self::types::{
     ActiveTransport, SessionEvent, SessionKeyUpdater, SessionRx, SessionTcpChannel,
@@ -155,7 +155,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         }
     }
 
-    async fn handle_tun_packet(&mut self, packet: Vec<u8>) -> io::Result<SessionControl> {
+    async fn handle_tun_packet(&mut self, packet: Vec<u8>) -> Result<SessionControl, SessionError> {
         if packet.len() > self.limits.max_data_len {
             trace!(
                 session_id = self.session_id,
@@ -188,8 +188,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         PacketRouter::validate_packet_src(self, packet)
     }
 
-    fn pong_payload_for_ping(payload: &[u8]) -> io::Result<[u8; 8]> {
-        let ping = PingPayload::decode(payload).map_err(map_payload_error)?;
+    fn pong_payload_for_ping(payload: &[u8]) -> Result<[u8; 8], SessionError> {
+        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        let ping = PingPayload::decode(payload)?;
         Ok(ping.nonce.to_be_bytes())
     }
 
@@ -237,15 +238,18 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         self.active_transport = transport;
     }
 
-    async fn send_message(&mut self, message: Message<'_>) -> io::Result<()> {
+    async fn send_message(&mut self, message: Message<'_>) -> Result<(), SessionError> {
         match self.active_transport {
             ActiveTransport::Tcp => self.send_tcp_message(message).await,
             ActiveTransport::UdpQsp => self.send_udp_message_and_flush(message).await,
         }
     }
 
-    async fn send_tcp_message(&mut self, message: Message<'_>) -> io::Result<()> {
-        self.tcp.write_message(message).await
+    async fn send_tcp_message(&mut self, message: Message<'_>) -> Result<(), SessionError> {
+        self.tcp
+            .write_message(message)
+            .await
+            .map_err(|source| SessionError::Connection { source })
     }
 
     /// Send a message via UDP-QSP.
@@ -256,13 +260,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// In both cases, the session's peer has already been set by `handle_udp_claim`,
     /// so we can safely send without checking for a valid peer address.
-    async fn send_udp_message(&mut self, message: Message<'_>) -> io::Result<()> {
+    async fn send_udp_message(&mut self, message: Message<'_>) -> Result<(), UdpQspError> {
         let Some(session) = self.udp_session.as_mut() else {
             return Ok(());
         };
 
         self.udp_write_buf.clear();
-        encode_message(message, &mut self.udp_write_buf).map_err(map_frame_error)?;
+        // FrameError flows via #[from]; MessageError via the manual From.
+        encode_message(message, &mut self.udp_write_buf)?;
         let tx_phase_before = session.tx_key_phase();
         match session.send(&self.udp_write_buf).await {
             Ok(()) => {
@@ -277,27 +282,24 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 }
                 Ok(())
             }
-            Err(QspSessionError::Io(err)) => Err(err),
             Err(QspSessionError::DeadChannel) => {
                 self.metrics.inc_udp_qsp_dead_channel();
-                Err(io::Error::new(
-                    io::ErrorKind::ConnectionAborted,
-                    "udp-qsp channel dead",
-                ))
+                Err(UdpQspError::Qsp(QspSessionError::DeadChannel))
             }
-            Err(err) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("udp-qsp send failed: {err:?}"),
-            )),
+            // QspSessionError (other variants) flows via `#[from]`.
+            Err(err) => Err(UdpQspError::Qsp(err)),
         }
     }
 
-    async fn send_udp_message_and_flush(&mut self, message: Message<'_>) -> io::Result<()> {
+    async fn send_udp_message_and_flush(
+        &mut self,
+        message: Message<'_>,
+    ) -> Result<(), SessionError> {
         self.send_udp_message(message).await?;
         self.flush_udp_session().await
     }
 
-    async fn flush_udp_session(&mut self) -> io::Result<()> {
+    async fn flush_udp_session(&mut self) -> Result<(), SessionError> {
         if let Some(session) = self.udp_session.as_mut() {
             session.flush().await?;
         }
@@ -329,7 +331,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 .is_some_and(QuicQspSession::has_pending_flush)
     }
 
-    async fn send_close(&mut self, code: CloseCode) -> io::Result<()> {
+    async fn send_close(&mut self, code: CloseCode) -> Result<(), SessionError> {
         let payload = ClosePayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
@@ -348,39 +350,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         self.registry
             .remove_session(self.session_id, self.client_id, self.assigned_ipv4);
     }
-}
-
-/// Converts a [`MessageError`] into an [`io::Error`].
-///
-/// Wraps the message error with an `InvalidData` kind for consistent
-/// error handling across the session layer.
-#[must_use]
-pub fn map_message_error(err: MessageError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("message error: {err:?}"),
-    )
-}
-
-/// Converts a [`FrameError`] into an [`io::Error`].
-///
-/// Wraps the frame error with an `InvalidData` kind for consistent
-/// error handling across the session layer.
-#[must_use]
-pub fn map_frame_error(err: FrameError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
-}
-
-/// Converts a [`PayloadError`] into an [`io::Error`].
-///
-/// Wraps the payload error with an `InvalidData` kind for consistent
-/// error handling across the session layer.
-#[must_use]
-pub fn map_payload_error(err: PayloadError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("payload error: {err:?}"),
-    )
 }
 
 #[cfg(test)]

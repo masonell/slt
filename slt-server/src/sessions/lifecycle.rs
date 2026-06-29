@@ -1,6 +1,5 @@
 //! Session lifecycle loop and scheduling.
 
-use std::io;
 use std::time::{Duration, Instant};
 
 use fastrand;
@@ -9,6 +8,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time;
 use tracing::{debug, error, info};
 
+use super::error::SessionError;
 use super::types::{SessionControl, SessionEvent};
 use super::{ActiveTransport, ClientSessionBase, UdpSessionIo};
 use crate::tun::TunDeviceIo;
@@ -20,8 +20,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// # Errors
     ///
-    /// Returns an error if the TCP stream or TUN device fails.
-    pub async fn run(mut self) -> io::Result<()> {
+    /// Returns a typed `SessionError` if the TCP stream, UDP-QSP transport,
+    /// TUN device, or a protocol decode fails. The structured failure flows to
+    /// the caller unchanged (the session's terminal log renders `{:#}` with the
+    /// preserved source chain).
+    pub async fn run(mut self) -> Result<(), SessionError> {
         info!(
             session_id = self.session_id,
             client_id = %self.client_id,
@@ -30,12 +33,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         );
         let result = self.run_inner().await;
         self.flush_pending_udp_session_best_effort().await;
-        if result.is_err() {
+        if let Err(err) = result.as_ref() {
             self.metrics.inc_disconnect_error();
             error!(
                 session_id = self.session_id,
                 client_id = %self.client_id,
-                error = ?result.as_ref().err(),
+                error = %err,
                 "session terminated with error"
             );
         } else {
@@ -49,7 +52,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         result
     }
 
-    async fn run_inner(&mut self) -> io::Result<()> {
+    async fn run_inner(&mut self) -> Result<(), SessionError> {
         let mut next_ping_at = self.schedule_next_ping();
 
         loop {
@@ -70,7 +73,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 biased;
 
                 res = self.tcp.read_more(), if self.tcp_alive => {
-                    let n = res?;
+                    let n = res.map_err(|source| SessionError::Connection { source })?;
                     if n == 0 {
                         if self.active_transport == ActiveTransport::UdpQsp {
                             info!(
@@ -119,15 +122,15 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     if let Some(session) = self.udp_session.as_mut() {
                         session.flush().await?;
                     }
-                    Ok::<(), io::Error>(())
+                    Ok::<(), std::io::Error>(())
                 }, if should_flush_udp => {
-                    res?;
+                    res.map_err(|source| SessionError::Connection { source })?;
                 }
             }
         }
     }
 
-    async fn handle_event(&mut self, event: SessionEvent) -> io::Result<SessionControl> {
+    async fn handle_event(&mut self, event: SessionEvent) -> Result<SessionControl, SessionError> {
         self.note_activity();
         match event {
             SessionEvent::TunPacket(packet) => self.handle_tun_packet(packet).await,
@@ -145,7 +148,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         }
     }
 
-    async fn handle_ping_tick(&mut self) -> io::Result<()> {
+    async fn handle_ping_tick(&mut self) -> Result<(), SessionError> {
         let nonce = fastrand::u64(..);
         let ping = PingPayload { nonce };
         let mut buf = Vec::new();

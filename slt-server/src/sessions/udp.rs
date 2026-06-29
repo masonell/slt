@@ -1,16 +1,13 @@
 //! UDP message handling for client sessions.
 
-use std::io;
-
 use slt_core::crypto::udp_qsp::QspSessionError;
 use slt_core::proto::{Message, PongPayload, decode_message};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace, warn};
 
+use super::error::SessionError;
 use super::types::SessionControl;
-use super::{
-    ActiveTransport, ClientSessionBase, UdpSessionIo, map_message_error, map_payload_error,
-};
+use super::{ActiveTransport, ClientSessionBase, UdpSessionIo};
 use crate::quic::UdpClaim;
 use crate::tun::TunDeviceIo;
 
@@ -32,8 +29,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// * `Ok(SessionControl::Continue)` if the packet was processed or dropped
     /// * `Ok(SessionControl::Close)` if the message requested session termination
-    /// * `Err(io::Error)` if a non-recoverable error occurs
-    pub(super) async fn handle_udp_claim(&mut self, claim: UdpClaim) -> io::Result<SessionControl> {
+    /// * `Err(SessionError)` if a non-recoverable error occurs
+    pub(super) async fn handle_udp_claim(
+        &mut self,
+        claim: UdpClaim,
+    ) -> Result<SessionControl, SessionError> {
         let peer = claim.peer;
 
         trace!(
@@ -180,9 +180,13 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// * `Ok(Some(message))` - A valid message was decoded
     /// * `Ok(None)` - The payload was empty or incomplete
-    /// * `Err(io::Error)` - The message was malformed
-    fn decode_udp_message<'a>(&self, payload: &'a [u8]) -> io::Result<Option<Message<'a>>> {
-        let decoded = decode_message(payload, self.limits).map_err(map_message_error)?;
+    /// * `Err(SessionError)` - The message was malformed
+    fn decode_udp_message<'a>(
+        &self,
+        payload: &'a [u8],
+    ) -> Result<Option<Message<'a>>, SessionError> {
+        // MessageError flows via the manual From impl, replacing map_message_error.
+        let decoded = decode_message(payload, self.limits)?;
         let Some((message, _consumed)) = decoded else {
             return Ok(None);
         };
@@ -208,8 +212,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// * `Ok(SessionControl::Continue)` for most messages
     /// * `Ok(SessionControl::Close)` if the message requested termination
-    /// * `Err(io::Error)` if message handling fails
-    async fn dispatch_udp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
+    /// * `Err(SessionError)` if message handling fails
+    async fn dispatch_udp_message(
+        &mut self,
+        message: Message<'_>,
+    ) -> Result<SessionControl, SessionError> {
         match message {
             Message::Ping { payload } => {
                 let payload = Self::pong_payload_for_ping(payload)?;
@@ -218,7 +225,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 Ok(SessionControl::Continue)
             }
             Message::Pong { payload } => {
-                let pong_in = PongPayload::decode(payload).map_err(map_payload_error)?;
+                // PayloadError flows via the manual From impl, replacing map_payload_error.
+                let pong_in = PongPayload::decode(payload)?;
                 trace!(
                     session_id = self.session_id,
                     client_id = %self.client_id,

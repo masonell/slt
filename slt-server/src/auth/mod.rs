@@ -12,7 +12,7 @@
 //! - [`SessionManager`]: Manages session creation and lifecycle resources.
 
 mod authenticator;
-mod errors;
+mod error;
 mod handler;
 mod session_manager;
 mod types;

@@ -1,7 +1,5 @@
 //! UDP upgrade control-message handlers.
 
-use std::io;
-
 use slt_core::proto::{
     Message, SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
     UpgradeProbePayload,
@@ -9,7 +7,8 @@ use slt_core::proto::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
-use super::{ClientSessionBase, SessionControl, UdpSessionIo, map_payload_error};
+use super::error::SessionError;
+use super::{ClientSessionBase, SessionControl, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
 const MAX_STALE_UPGRADE_IDS: usize = 16;
@@ -88,8 +87,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     pub(super) async fn handle_upgrade_probe(
         &mut self,
         payload: &[u8],
-    ) -> io::Result<SessionControl> {
-        let probe = UpgradeProbePayload::decode(payload).map_err(map_payload_error)?;
+    ) -> Result<SessionControl, SessionError> {
+        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        let probe = UpgradeProbePayload::decode(payload)?;
         if !self.note_upgrade_id(probe.upgrade_id, "upgrade_probe") {
             return Ok(SessionControl::Continue);
         }
@@ -108,8 +108,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         Ok(SessionControl::Continue)
     }
 
-    pub(super) async fn handle_udp_ready(&mut self, payload: &[u8]) -> io::Result<SessionControl> {
-        let ready = UdpReadyPayload::decode(payload).map_err(map_payload_error)?;
+    pub(super) async fn handle_udp_ready(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<SessionControl, SessionError> {
+        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        let ready = UdpReadyPayload::decode(payload)?;
         if !self.note_upgrade_id(ready.upgrade_id, "udp_ready") {
             return Ok(SessionControl::Continue);
         }
@@ -119,8 +123,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         Ok(SessionControl::Continue)
     }
 
-    pub(super) fn handle_switch_ack(&mut self, payload: &[u8]) -> io::Result<SessionControl> {
-        let ack = SwitchAckPayload::decode(payload).map_err(map_payload_error)?;
+    pub(super) fn handle_switch_ack(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<SessionControl, SessionError> {
+        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        let ack = SwitchAckPayload::decode(payload)?;
         let Some(expected_upgrade_id) = self.udp_upgrade.upgrade_id else {
             debug!(
                 session_id = self.session_id,
@@ -162,7 +170,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         Ok(SessionControl::Continue)
     }
 
-    async fn maybe_send_switch_to_udp(&mut self) -> io::Result<()> {
+    async fn maybe_send_switch_to_udp(&mut self) -> Result<(), SessionError> {
         if self.udp_upgrade.switch_to_udp_sent
             || !self.udp_upgrade.probe_seen
             || !self.udp_upgrade.ready_seen

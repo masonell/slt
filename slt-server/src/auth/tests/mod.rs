@@ -15,7 +15,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, timeout};
 
 use super::authenticator::verify_auth_payload;
-use super::errors::{map_message_error, map_payload_error};
 use super::*;
 use crate::AssignedIp;
 use crate::sessions::SessionEvent;

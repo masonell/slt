@@ -132,6 +132,75 @@ async fn auth_phase_rejects_unexpected_message_with_auth_fail() {
     let _ = handle.await.unwrap();
 }
 
+/// Regression test for the message-parse-error path (`auth/handler.rs`):
+/// a malformed frame (unknown message type) makes `try_pop_message` return
+/// `Err(MessageError)`, which the handler must still answer with
+/// `AUTH_FAIL(Unknown)` on the wire before returning the typed error.
+///
+/// This path is security-relevant (the server must *respond* rather than drop
+/// the connection on a parse error) and carries a silent `ErrorKind`
+/// reclassification at the binary boundary: the message-parse failure now
+/// surfaces as `io::ErrorKind::InvalidData` via `AuthError::io_kind()` (it was
+/// previously flattened through `AuthPhaseResult::Failed` →
+/// `ErrorKind::PermissionDenied`). The test pins both the on-wire response and
+/// the failure-metric count.
+#[tokio::test]
+async fn auth_phase_responds_with_auth_fail_on_malformed_frame() {
+    let (handler, _registry, metrics) = TestAuthHandler::builder()
+        .with_auth_timeout(Duration::from_secs(5))
+        .build_async()
+        .await;
+
+    let (server_tls, mut client_tls) = tls_pair().await;
+    let limits = MessageLimits::from_mtu(1500);
+
+    let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+    // Craft a frame with an unknown message type byte (0xFF) and a zero
+    // payload length. `try_pop_message` decodes this as
+    // `MessageError::Frame(FrameError::UnknownType(0xFF))`.
+    let malformed_frame = [0xFF, 0x00, 0x00, 0x00, 0x00];
+    client_tls.write_all(&malformed_frame).await.unwrap();
+
+    // The server must still respond on-protocol with AUTH_FAIL(Unknown).
+    let buf = timeout(
+        Duration::from_secs(2),
+        read_message(&mut client_tls, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (message, _) = slt_core::proto::decode_message(&buf, limits)
+        .unwrap()
+        .unwrap();
+    match message {
+        Message::AuthFail { payload } => {
+            let fail = AuthFailPayload::decode(payload).unwrap();
+            assert_eq!(fail.code, AuthFailCode::Unknown);
+        }
+        _ => panic!("expected auth fail for malformed frame, got {message:?}"),
+    }
+
+    // The handler returns Err(AuthError) (a MessageError, surfaced as
+    // io::ErrorKind::InvalidData at the boundary, not the old
+    // PermissionDenied) — recorded as an auth failure.
+    let result = handle.await.unwrap();
+    assert!(
+        result.is_err(),
+        "malformed frame should surface as an io::Error at the boundary"
+    );
+    assert_eq!(
+        result.unwrap_err().kind(),
+        io::ErrorKind::InvalidData,
+        "message-parse failure must classify as InvalidData at the boundary"
+    );
+    assert_eq!(
+        metrics.snapshot().auth_failures,
+        1,
+        "malformed frame must increment auth_failures"
+    );
+}
+
 #[tokio::test]
 async fn auth_phase_successful_authentication() {
     let signing_key = SigningKey::from_bytes(&[0x42; 32]);

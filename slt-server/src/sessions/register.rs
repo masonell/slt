@@ -1,6 +1,5 @@
 //! `RegisterCid` handling for client sessions.
 
-use std::io;
 use std::net::SocketAddr;
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
@@ -10,8 +9,9 @@ use slt_core::proto::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, warn};
 
+use super::error::SessionError;
 use super::types::SessionControl;
-use super::{ClientSessionBase, UdpSessionIo, map_payload_error};
+use super::{ClientSessionBase, UdpSessionIo};
 use crate::registry::CidInsertError;
 use crate::tun::TunDeviceIo;
 
@@ -36,7 +36,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     /// # Returns
     ///
     /// * `Ok(SessionControl::Continue)` if registration succeeds or fails gracefully
-    /// * `Err(io::Error)` if sending the response fails
+    /// * `Err(SessionError)` if sending the response fails
     ///
     /// # Behavior
     ///
@@ -48,7 +48,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     pub(super) async fn handle_register_cid(
         &mut self,
         payload: &[u8],
-    ) -> io::Result<SessionControl> {
+    ) -> Result<SessionControl, SessionError> {
         let Ok(register) = RegisterCidPayload::decode(payload) else {
             warn!(
                 session_id = self.session_id,
@@ -116,7 +116,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         // 2. `send_udp_message` is only called when `active_transport == UdpQsp`
         // 3. Therefore, we never send to this placeholder address pre-commit
         let placeholder_peer = SocketAddr::from(([0, 0, 0, 0], 0));
-        let io = self.udp_io_factory.create(placeholder_peer)?;
+        let io = self
+            .udp_io_factory
+            .create(placeholder_peer)
+            .map_err(|source| SessionError::Connection { source })?;
         let udp = slt_core::crypto::udp_qsp::QuicQspSession::new(
             io,
             register.client_to_server_cid,
@@ -144,7 +147,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             client_to_server_cid: register.client_to_server_cid,
         };
         let mut ok_buf = Vec::new();
-        ok.encode(&mut ok_buf).map_err(map_payload_error)?;
+        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        ok.encode(&mut ok_buf)?;
         self.send_message(Message::RegisterOk { payload: &ok_buf })
             .await?;
 
@@ -163,8 +167,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     /// # Returns
     ///
     /// * `Ok(())` if the message was sent successfully
-    /// * `Err(io::Error)` if sending fails
-    async fn send_register_fail(&mut self, code: RegisterFailCode) -> io::Result<()> {
+    /// * `Err(SessionError)` if sending fails
+    async fn send_register_fail(&mut self, code: RegisterFailCode) -> Result<(), SessionError> {
         let payload = RegisterFailPayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);

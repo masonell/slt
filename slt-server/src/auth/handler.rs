@@ -16,7 +16,7 @@ use tracing::{debug, info, trace, warn};
 use tun_rs::AsyncDevice;
 
 use super::authenticator::{Authenticator, verify_auth_payload};
-use super::errors::map_payload_error;
+use super::error::{AuthError, TlsError};
 use super::session_manager::SessionManager;
 use super::types::{AuthPhaseResult, AuthStep};
 use crate::AssignedIp;
@@ -27,16 +27,16 @@ use crate::tun::TunDeviceIo;
 ///
 /// # Errors
 ///
-/// Returns an error with `ErrorKind::Other` if the channel is missing.
+/// Returns [`AuthError::Connection`] if the channel is missing.
 fn as_tcp_channel<S>(
     channel: &mut Option<SessionTcpChannel<S>>,
-) -> io::Result<&mut SessionTcpChannel<S>>
+) -> Result<&mut SessionTcpChannel<S>, AuthError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
-    channel
-        .as_mut()
-        .ok_or_else(|| io::Error::other("tcp channel missing"))
+    channel.as_mut().ok_or_else(|| AuthError::Connection {
+        source: io::Error::other("tcp channel missing"),
+    })
 }
 
 /// TLS + AUTH handler that creates client sessions.
@@ -77,27 +77,33 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
     /// Perform TLS + AUTH and spawn a client session on success.
     ///
+    /// This is the binary entry-point boundary: the typed `AuthError` from the
+    /// internal auth flow is converted to `io::Error` here (via its `From` impl)
+    /// so the historical `handle()` -> `io::Result<()>` contract is preserved
+    /// for the TCP front-door task and the metrics tests that assert on
+    /// `ErrorKind`. The structured error is preserved as the `io::Error`'s inner
+    /// source, so the cause chain survives for `{:#}` and the log.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the TLS handshake, exporter, or socket IO fails.
-    /// Returns `ErrorKind::TimedOut` if the auth phase times out.
-    /// Returns `ErrorKind::ConnectionReset` if the connection is closed.
+    /// Returns an `io::Error` whose kind is derived from the `AuthError`
+    /// variant: `TimedOut` for auth/TLS timeouts, `ConnectionReset` for a peer
+    /// disconnect, `InvalidData` for protocol decode failures, `Other` for TLS
+    /// handshake / keying-material export faults, and the underlying kind for
+    /// connection I/O.
     pub async fn handle(&self, stream: TcpStream) -> io::Result<()> {
         let peer_addr = stream.peer_addr().ok();
-        let result = self.handle_stream(stream, peer_addr.as_ref()).await?;
-        self.record_result(result);
-        result.into_io_result()
+        let result = self.handle_stream(stream, peer_addr.as_ref()).await;
+        self.record_result(&result);
+        result.map(|_outcome| ()).map_err(AuthError::into)
     }
 
     async fn handle_stream(
         &self,
         stream: TcpStream,
         peer_addr: Option<&SocketAddr>,
-    ) -> io::Result<AuthPhaseResult> {
-        let tls = match self.tls_handshake(stream, peer_addr).await {
-            Ok(stream) => stream,
-            Err(result) => return Ok(result),
-        };
+    ) -> Result<AuthPhaseResult, AuthError> {
+        let tls = self.tls_handshake(stream, peer_addr).await?;
 
         let mut tcp = Some(TcpChannel::with_key_updater(
             tls,
@@ -120,7 +126,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         &self,
         stream: TcpStream,
         peer_addr: Option<&SocketAddr>,
-    ) -> Result<tokio_boring::SslStream<TcpStream>, AuthPhaseResult> {
+    ) -> Result<tokio_boring::SslStream<TcpStream>, AuthError> {
         debug!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "starting TLS handshake");
 
         match time::timeout(self.auth_timeout, tls_accept(&self.acceptor, stream)).await {
@@ -129,12 +135,14 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 Ok(stream)
             }
             Ok(Err(err)) => {
-                warn!(peer_addr = ?peer_addr, error = ?err, "TLS handshake failed");
-                Err(AuthPhaseResult::TlsHandshakeFailed)
+                warn!(peer_addr = ?peer_addr, error = %err, "TLS handshake failed");
+                Err(AuthError::TlsHandshake {
+                    source: TlsError::from_handshake_error(&err),
+                })
             }
             Err(_) => {
                 warn!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "TLS handshake timed out");
-                Err(AuthPhaseResult::TlsHandshakeTimeout)
+                Err(AuthError::TlsHandshakeTimeout)
             }
         }
     }
@@ -143,15 +151,18 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     ///
     /// # Errors
     ///
-    /// Returns `ErrorKind::Other` if keying material export fails.
-    fn generate_challenge<S>(tcp: &SessionTcpChannel<S>) -> io::Result<[u8; AUTH_CHALLENGE_LEN]>
+    /// Returns [`AuthError::ChallengeExport`] if keying material export fails.
+    /// The boring `ErrorStack` is preserved rather than stringified.
+    fn generate_challenge<S>(
+        tcp: &SessionTcpChannel<S>,
+    ) -> Result<[u8; AUTH_CHALLENGE_LEN], AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
         let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
         tcp.ssl()
             .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-            .map_err(|err| io::Error::other(format!("{err:?}")))?;
+            .map_err(|source| AuthError::ChallengeExport { source })?;
         Ok(challenge)
     }
 
@@ -160,7 +171,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         tcp: &mut Option<SessionTcpChannel<S>>,
         peer_addr: Option<&SocketAddr>,
         create_session: &mut F,
-    ) -> io::Result<AuthPhaseResult>
+    ) -> Result<AuthPhaseResult, AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
@@ -174,14 +185,16 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     ///
     /// # Errors
     ///
-    /// Returns IO errors from socket operations.
+    /// Returns `AuthError` for transport failures (timeout, peer disconnect,
+    /// I/O) and protocol decode errors. On-protocol auth outcomes
+    /// (success / `AUTH_FAIL` sent) are returned as `Ok(AuthPhaseResult)`.
     async fn run_auth_loop<S, F>(
         &self,
         tcp: &mut Option<SessionTcpChannel<S>>,
         challenge: &[u8; AUTH_CHALLENGE_LEN],
         peer_addr: Option<&SocketAddr>,
         create_session: &mut F,
-    ) -> io::Result<AuthPhaseResult>
+    ) -> Result<AuthPhaseResult, AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
@@ -195,15 +208,18 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             tokio::select! {
                 () = timeout_fut.as_mut() => {
                     warn!(peer_addr = ?peer_addr, "auth phase timed out waiting for message");
-                    return Ok(AuthPhaseResult::Timeout);
+                    return Err(AuthError::Timeout);
                 },
                 res = async {
                     as_tcp_channel(tcp)?.read_more().await
                 } => {
-                    let n = res?;
+                    // read_more returns io::Result<usize>; the channel-missing
+                    // case is already typed via as_tcp_channel. Map the raw
+                    // socket I/O into AuthError::Connection, preserving source.
+                    let n = res.map_err(|source| AuthError::Connection { source })?;
                     if n == 0 {
                         trace!(peer_addr = ?peer_addr, "connection closed during auth phase");
-                        return Ok(AuthPhaseResult::ConnectionClosed);
+                        return Err(AuthError::ConnectionClosed);
                     }
                     trace!(bytes_read = n, peer_addr = ?peer_addr, "received data during auth phase");
                 }
@@ -213,12 +229,14 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 let msg_buf = match as_tcp_channel(tcp)?.try_pop_message(self.sessions.limits()) {
                     Ok(Some(buf)) => buf,
                     Ok(None) => break,
+                    // FrameError flows via #[from]; MessageError via manual From.
                     Err(err) => {
+                        // MessageError is not Display; render via Debug.
                         warn!(error = ?err, peer_addr = ?peer_addr, "message parse error");
                         if let Ok(channel) = as_tcp_channel(tcp) {
                             let _ = self.send_auth_fail(channel, AuthFailCode::Unknown).await;
                         }
-                        return Ok(AuthPhaseResult::Failed(AuthFailCode::Unknown));
+                        return Err(err.into());
                     }
                 };
 
@@ -239,7 +257,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         tcp: &mut Option<SessionTcpChannel<S>>,
         challenge: &[u8; AUTH_CHALLENGE_LEN],
         create_session: &mut F,
-    ) -> io::Result<AuthStep>
+    ) -> Result<AuthStep, AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
@@ -265,12 +283,13 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         tcp: &mut Option<SessionTcpChannel<S>>,
         challenge: &[u8; AUTH_CHALLENGE_LEN],
         create_session: &mut F,
-    ) -> io::Result<AuthStep>
+    ) -> Result<AuthStep, AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
     {
-        let auth = AuthPayload::decode(payload).map_err(map_payload_error)?;
+        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        let auth = AuthPayload::decode(payload)?;
         trace!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, "processing auth message");
 
         match self.verify_auth(&auth, challenge) {
@@ -282,7 +301,8 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 self.send_message(as_tcp_channel(tcp)?, Message::AuthOk { payload: &ok_buf })
                     .await?;
 
-                create_session(auth.client_id, assigned_ip, tcp)?;
+                create_session(auth.client_id, assigned_ip, tcp)
+                    .map_err(|source| AuthError::Connection { source })?;
                 Ok(AuthStep::Done(AuthPhaseResult::Authenticated))
             }
             Err(code) => {
@@ -298,11 +318,12 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         &self,
         payload: &[u8],
         tcp: &mut Option<SessionTcpChannel<S>>,
-    ) -> io::Result<AuthStep>
+    ) -> Result<AuthStep, AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
-        let ping_in = PingPayload::decode(payload).map_err(map_payload_error)?;
+        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        let ping_in = PingPayload::decode(payload)?;
         trace!(nonce = ping_in.nonce, "received ping during auth phase");
 
         let mut pong_buf = Vec::with_capacity(8);
@@ -320,7 +341,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         &self,
         message: Message<'_>,
         tcp: &mut Option<SessionTcpChannel<S>>,
-    ) -> io::Result<AuthStep>
+    ) -> Result<AuthStep, AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
@@ -332,12 +353,40 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         )))
     }
 
-    fn record_result(&self, result: AuthPhaseResult) {
-        if result.is_authenticated() {
-            self.sessions.metrics().inc_auth_successes();
-        }
-        if result.is_failure() {
-            self.sessions.metrics().inc_auth_failures();
+    /// Record auth-phase metrics from the typed outcome.
+    ///
+    /// Both the success outcomes (`Ok(AuthPhaseResult)`) and the failure path
+    /// (`Err(AuthError)`) can represent an auth attempt whose result should be
+    /// counted: an on-protocol `Rejected(code)` increments failures the same way
+    /// a transport/decode failure does (preserving the historical metric
+    /// semantics where every `is_failure()` outcome counted).
+    fn record_result(&self, result: &Result<AuthPhaseResult, AuthError>) {
+        match result {
+            Ok(outcome) => {
+                if outcome.is_authenticated() {
+                    self.sessions.metrics().inc_auth_successes();
+                }
+                if outcome.is_failure() {
+                    self.sessions.metrics().inc_auth_failures();
+                }
+            }
+            // Every transport/decode failure (TLS handshake/timeout, auth-phase
+            // timeout, peer disconnect, socket I/O, proto decode) increments the
+            // auth-failures counter, matching the historical behaviour where
+            // the failure variants of AuthPhaseResult were all counted via
+            // is_failure().
+            //
+            // TODO(phase-minor): these transport/decode failures are now
+            // distinguishable from a genuine on-protocol `Rejected(code)` (an
+            // `Ok(Rejected(_))` outcome — the server chose to send AUTH_FAIL),
+            // but they share the single `auth_failures` counter. A future
+            // `inc_auth_transport_failure()` could split them so the metric
+            // distinguishes "credential/config rejection" from "the auth
+            // exchange never completed". Out of scope for phase 4 (would change
+            // the metric contract); tracked here so the conflation is visible.
+            Err(_) => {
+                self.sessions.metrics().inc_auth_failures();
+            }
         }
     }
 
@@ -353,18 +402,20 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         &self,
         tcp: &mut SessionTcpChannel<S>,
         message: Message<'_>,
-    ) -> io::Result<()>
+    ) -> Result<(), AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
-        tcp.write_message(message).await
+        tcp.write_message(message)
+            .await
+            .map_err(|source| AuthError::Connection { source })
     }
 
     async fn send_auth_fail<S>(
         &self,
         tcp: &mut SessionTcpChannel<S>,
         code: AuthFailCode,
-    ) -> io::Result<()>
+    ) -> Result<(), AuthError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
@@ -384,6 +435,9 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// Test-only method to handle auth with a pre-established TLS stream.
     ///
     /// This bypasses the TLS accept step and uses the provided stream directly.
+    /// Mirrors [`Self::handle`]'s boundary conversion for test ergonomics: the
+    /// typed `AuthError` is converted to `io::Error` so the test helpers that
+    /// assert on `ErrorKind` continue to work.
     #[cfg(test)]
     pub async fn handle_with_tls<S>(&self, tls: tokio_boring::SslStream<S>) -> io::Result<()>
     where
@@ -404,8 +458,8 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
 
         let result = self
             .run_auth_flow(&mut tcp, None, &mut create_session)
-            .await?;
-        self.record_result(result);
-        result.into_io_result()
+            .await;
+        self.record_result(&result);
+        result.map(|_outcome| ()).map_err(AuthError::into)
     }
 }

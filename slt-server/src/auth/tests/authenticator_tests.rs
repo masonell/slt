@@ -133,31 +133,10 @@ fn verify_auth_rejects_bad_signature() {
     );
 }
 
-#[test]
-fn map_message_error_converts_to_io_error() {
-    use slt_core::proto::{FrameError, MessageError};
-
-    let err = map_message_error(MessageError::DataTooLarge { len: 100, max: 50 });
-    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    assert!(err.to_string().contains("message error"));
-
-    let err = map_message_error(MessageError::Frame(FrameError::UnknownType(0xFF)));
-    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    assert!(err.to_string().contains("message error"));
-}
-
-#[test]
-fn map_payload_error_converts_to_io_error() {
-    use slt_core::proto::PayloadError;
-
-    let err = map_payload_error(PayloadError::LengthMismatch {
-        expected: 32,
-        actual: 16,
-    });
-    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    assert!(err.to_string().contains("payload error"));
-
-    let err = map_payload_error(PayloadError::InvalidCipher(99));
-    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    assert!(err.to_string().contains("payload error"));
-}
+// The `map_message_error` / `map_payload_error` flattening tests were removed
+// in phase 4: those helpers are deleted, and proto decode errors now flow via
+// `From` into the typed `AuthError` (`AuthError::Message` / `AuthError::Payload`
+// / `AuthError::Frame`). The preservation + boundary-kind behaviour is covered
+// by the `AuthError` unit tests in `auth/error.rs`:
+// `proto_sources_are_preserved_in_display`, `manual_from_impls_preserve_proto_errors`,
+// and `io_kind_and_from_agree_for_every_variant`.

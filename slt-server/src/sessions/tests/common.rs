@@ -21,7 +21,7 @@ use crate::test_support::{
 };
 
 pub(super) type SpawnSessionResult = (
-    tokio::task::JoinHandle<io::Result<()>>,
+    tokio::task::JoinHandle<Result<(), SessionError>>,
     TlsDuplexStream,
     SessionTx,
     mpsc::Receiver<Vec<u8>>,
@@ -32,7 +32,7 @@ pub(super) type SpawnSessionResult = (
 );
 
 pub(super) type SpawnSessionWithPeerCaptureResult = (
-    tokio::task::JoinHandle<io::Result<()>>,
+    tokio::task::JoinHandle<Result<(), SessionError>>,
     TlsDuplexStream,
     SessionTx,
     mpsc::Receiver<Vec<u8>>,

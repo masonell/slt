@@ -1,13 +1,12 @@
 //! TCP message handling for client sessions.
 
-use std::io;
-
 use slt_core::proto::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::trace;
 
+use super::error::SessionError;
 use super::types::SessionControl;
-use super::{ActiveTransport, ClientSessionBase, UdpSessionIo, map_message_error};
+use super::{ActiveTransport, ClientSessionBase, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
@@ -23,14 +22,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// * `Ok(SessionControl::Continue)` if all messages were processed successfully
     /// * `Ok(SessionControl::Close)` if any message requested session termination
-    /// * `Err(io::Error)` if reading from the TCP buffer fails
-    pub(super) async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
+    /// * `Err(SessionError)` if reading from the TCP buffer fails
+    pub(super) async fn handle_tcp_read(&mut self) -> Result<SessionControl, SessionError> {
         loop {
-            let Some(msg_buf) = self
-                .tcp
-                .try_pop_message(self.limits)
-                .map_err(map_message_error)?
-            else {
+            // MessageError flows via the manual From impl, replacing map_message_error.
+            let Some(msg_buf) = self.tcp.try_pop_message(self.limits)? else {
                 return Ok(SessionControl::Continue);
             };
 
@@ -54,8 +50,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// * `Ok(SessionControl::Continue)` for most messages
     /// * `Ok(SessionControl::Close)` if the peer sent a close message
-    /// * `Err(io::Error)` if message handling fails (e.g., unexpected message type)
-    async fn handle_tcp_message(&mut self, message: Message<'_>) -> io::Result<SessionControl> {
+    /// * `Err(SessionError)` if message handling fails (e.g., unexpected message type)
+    async fn handle_tcp_message(
+        &mut self,
+        message: Message<'_>,
+    ) -> Result<SessionControl, SessionError> {
         match message {
             Message::Auth { .. }
             | Message::AuthOk { .. }
@@ -64,10 +63,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             | Message::RegisterFail { .. }
             | Message::UpgradeProbe { .. }
             | Message::UpgradeProbeAck { .. }
-            | Message::SwitchToUdp { .. } => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected control message on established session",
-            )),
+            | Message::SwitchToUdp { .. } => Err(SessionError::ProtocolViolation),
             Message::UdpReady { payload } => self.handle_udp_ready(payload).await,
             Message::SwitchAck { payload } => self.handle_switch_ack(payload),
             Message::Data { packet } => {

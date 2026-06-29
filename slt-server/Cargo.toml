@@ -17,6 +17,7 @@ parking_lot = { workspace = true }
 quinn-udp = { workspace = true }
 slt-core = { workspace = true, features = ["udp-io"] }
 socket2 = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-boring = { workspace = true }
 tokio-util = { workspace = true }

@@ -103,7 +103,7 @@ impl UdpSessionIoFactory<BufferingUdpIo> for BufferingUdpIoFactory {
 }
 
 type BufferingSpawnResult = (
-    tokio::task::JoinHandle<io::Result<()>>,
+    tokio::task::JoinHandle<Result<(), SessionError>>,
     TlsDuplexStream,
     SessionTx,
     mpsc::Receiver<Vec<u8>>,

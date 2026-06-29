@@ -121,7 +121,7 @@ impl QuicRecv {
 /// Maintains per-peer NAT state for passthrough traffic.
 ///
 /// The socket is held in two forms sharing one kernel socket: `socket` (a tokio
-/// `UdpSocket`) is used for sends (VPN replies via [`SessionManager`] and passthrough
+/// `UdpSocket`) is used for sends (VPN replies via `SessionManager` and passthrough
 /// replies from upstream-reader tasks), and `recv` drives the batched receive path
 /// (`recvmmsg` + `UDP_GRO`) via an `AsyncFd` over a duplicated descriptor.
 pub struct QuicEndpoint {
