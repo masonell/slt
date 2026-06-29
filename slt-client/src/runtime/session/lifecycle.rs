@@ -44,14 +44,19 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            if let Some(io_err) = err.as_io() {
-                if !self.handle_udp_error(io_err) {
+            if err.is_udp_path_transport_error() {
+                // A UDP-QSP transport condition (typed UdpQspError, or a raw
+                // socket I/O error from flush): hand it to `handle_udp_error`,
+                // which drops recoverable failures and falls back to TCP (or
+                // closes if TCP is also dead) for the rest.
+                if !self.handle_udp_error(&err) {
                     return Err(SessionError::Connection {
                         source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
                     });
                 }
             } else {
-                // Typed non-I/O error from the UDP path; propagate.
+                // Typed non-transport session error (proto decode failure,
+                // protocol violation, crypto) from the UDP path; propagate.
                 return Err(err);
             }
             self.tcp
@@ -91,8 +96,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            if let Some(io_err) = err.as_io() {
-                if !self.handle_udp_error(io_err) {
+            if err.is_udp_path_transport_error() {
+                if !self.handle_udp_error(&err) {
                     return Err(SessionError::Connection {
                         source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
                     });
@@ -127,12 +132,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 .await
                 .map_err(SessionError::from),
             ActiveTransport::UdpQsp => {
-                let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-                    SessionError::Io(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "udp-qsp transport missing",
-                    ))
-                })?;
+                let udp =
+                    self.udp_state
+                        .as_active_mut()
+                        .ok_or(SessionError::ProtocolViolation {
+                            detail: "udp-qsp transport missing",
+                        })?;
                 udp.write_message(message).await.map_err(SessionError::from)
             }
         }
@@ -150,12 +155,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         &mut self,
         message: Message<'_>,
     ) -> Result<(), SessionError> {
-        let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-            SessionError::Io(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "udp-qsp transport missing",
-            ))
-        })?;
+        let udp = self
+            .udp_state
+            .as_active_mut()
+            .ok_or(SessionError::ProtocolViolation {
+                detail: "udp-qsp transport missing",
+            })?;
         udp.write_message(message).await?;
         udp.flush().await.map_err(SessionError::from)
     }
@@ -166,12 +171,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     ///
     /// Returns an error if UDP-QSP is inactive or the socket backend fails.
     pub(super) async fn flush_udp_transport(&mut self) -> Result<(), SessionError> {
-        let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-            SessionError::Io(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "udp-qsp transport missing",
-            ))
-        })?;
+        let udp = self
+            .udp_state
+            .as_active_mut()
+            .ok_or(SessionError::ProtocolViolation {
+                detail: "udp-qsp transport missing",
+            })?;
         udp.flush().await.map_err(SessionError::from)
     }
 

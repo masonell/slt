@@ -19,6 +19,79 @@ use crate::transport::socket_protector::{SocketKind, SocketProtector};
 const QUIC_MAX_DATAGRAM: usize = 1350;
 const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A failure from QUIC DCID discovery (the client's UDP-QSP registration
+/// precursor).
+///
+/// The variant is the source of truth and preserves the original error via
+/// `#[source]`/`#[from]`. This replaces the old `map_quic_error`/`map_cid_error`
+/// flattening to `io::ErrorKind::InvalidData`, which destroyed the `quiche::Error`
+/// code and `CidError` detail before they reached the caller.
+///
+/// The discovery path's public surface stays `io::Result` because its callers
+/// (the session layer's discovery task) treat discovery as opaque pass/fail and
+/// do not branch on the inner variant — but within the discovery module the
+/// typed error carries the structured source, and [`Self::into_io`] re-encodes
+/// it to `io::Error` exactly once at the module boundary rather than flattening
+/// it piecemeal at every call site.
+#[derive(Debug, thiserror::Error)]
+pub enum QuicDiscoveryError {
+    /// QUIC handshake / config failure from `quiche`, preserved via `#[from]`.
+    #[error("quic error: {0}")]
+    Quiche(#[from] quiche::Error),
+
+    /// Connection-ID construction failure, preserved via `#[from]`.
+    #[error("cid error: {0}")]
+    Cid(#[from] CidError),
+
+    /// Network-level I/O error from socket bind/protect/send/recv. Preserved.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    /// QUIC handshake did not complete within the discovery timeout.
+    #[error("quic handshake timed out")]
+    Timeout,
+
+    /// QUIC connection closed before the server DCID could be discovered.
+    #[error("quic connection closed")]
+    ConnectionClosed,
+
+    /// Discovery was cancelled before completing.
+    #[error("quic discovery cancelled")]
+    Cancelled,
+
+    /// No peers were available to attempt discovery against (e.g. empty
+    /// resolution result with no per-peer error).
+    #[error("no quic peers available")]
+    NoPeers,
+
+    /// Client configuration has an empty hostname.
+    #[error("hostname is empty")]
+    EmptyHostname,
+}
+
+impl QuicDiscoveryError {
+    /// Re-encode the typed discovery error to `io::Error` at the module
+    /// boundary.
+    ///
+    /// The discovery callers do not branch on the variant, so the typed error is
+    /// collapsed to `io::Error` here — once, preserving the original via the
+    /// `Display` message — rather than being flattened piecemeal at every call
+    /// site by the deleted `map_quic_error`/`map_cid_error`. An `Io` source
+    /// round-trips unchanged.
+    #[must_use]
+    pub fn into_io(self) -> io::Error {
+        match self {
+            Self::Io(err) => err,
+            Self::Timeout => io::Error::new(io::ErrorKind::TimedOut, self),
+            Self::ConnectionClosed => io::Error::new(io::ErrorKind::ConnectionAborted, self),
+            Self::Cancelled => io::Error::new(io::ErrorKind::Interrupted, self),
+            Self::NoPeers => io::Error::new(io::ErrorKind::NotFound, self),
+            Self::EmptyHostname => io::Error::new(io::ErrorKind::InvalidInput, self),
+            Self::Quiche(_) | Self::Cid(_) => io::Error::new(io::ErrorKind::InvalidData, self),
+        }
+    }
+}
+
 /// QUIC connection IDs needed for UDP-QSP registration.
 #[derive(Debug, Clone)]
 pub struct QuicIds {
@@ -58,10 +131,7 @@ where
     HR: HostResolver,
 {
     if config.network.hostname.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "hostname is empty",
-        ));
+        return Err(QuicDiscoveryError::EmptyHostname.into_io());
     }
 
     let peers = resolve_peers(config, peer_override, host_resolver).await?;
@@ -83,8 +153,7 @@ where
         }
     }
 
-    Err(last_err
-        .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no quic peers available")))
+    Err(last_err.unwrap_or(QuicDiscoveryError::NoPeers).into_io())
 }
 
 async fn resolve_peers<HR>(
@@ -113,15 +182,14 @@ async fn discover_quic_ids_for_peer<SP>(
     cancel: &CancellationToken,
     peer: SocketAddr,
     socket_protector: &SP,
-) -> io::Result<QuicIds>
+) -> Result<QuicIds, QuicDiscoveryError>
 where
     SP: SocketProtector,
 {
     let socket = Arc::new(bind_protected_udp_socket(peer, socket_protector)?);
     let local = socket.local_addr()?;
 
-    let mut quic_config =
-        quic_client_chrome_config_with_ca(config.tls.quic_ca.as_ref()).map_err(map_quic_error)?;
+    let mut quic_config = quic_client_chrome_config_with_ca(config.tls.quic_ca.as_ref())?;
     quic_config.verify_peer(true);
 
     // Use empty SCID (Chrome behavior)
@@ -133,8 +201,7 @@ where
         local,
         peer,
         &mut quic_config,
-    )
-    .map_err(map_quic_error)?;
+    )?;
 
     let mut recv_buf = vec![0u8; 65535];
     let mut out_buf = vec![0u8; QUIC_MAX_DATAGRAM];
@@ -153,11 +220,11 @@ where
                 let mut padded = [0u8; MAX_DCID_LEN];
                 padded[..dcid_bytes.len()].copy_from_slice(&dcid_bytes);
                 fill_random(&mut padded[dcid_bytes.len()..]);
-                Cid::new(&padded).map_err(map_cid_error)?
+                Cid::new(&padded)?
             } else {
-                Cid::new(&dcid_bytes).map_err(map_cid_error)?
+                Cid::new(&dcid_bytes)?
             };
-            let scid = Cid::new(conn.source_id().as_ref()).map_err(map_cid_error)?;
+            let scid = Cid::new(conn.source_id().as_ref())?;
             discovered_ids = Some(QuicIds {
                 dcid,
                 scid,
@@ -168,17 +235,12 @@ where
         }
 
         if conn.is_closed() {
-            return discovered_ids.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::ConnectionAborted, "quic connection closed")
-            });
+            return discovered_ids.ok_or(QuicDiscoveryError::ConnectionClosed);
         }
 
         let now = Instant::now();
         if now >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "quic handshake timed out",
-            ));
+            return Err(QuicDiscoveryError::Timeout);
         }
 
         let timeout = conn.timeout().unwrap_or(Duration::from_millis(50));
@@ -186,10 +248,7 @@ where
 
         tokio::select! {
             () = cancel.cancelled() => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "quic discovery cancelled",
-                ));
+                return Err(QuicDiscoveryError::Cancelled);
             }
             res = socket.recv_from(&mut recv_buf) => {
                 let (len, from) = res?;
@@ -247,14 +306,6 @@ fn fill_random(buf: &mut [u8]) {
         buf[offset..offset + take].copy_from_slice(&chunk[..take]);
         offset += take;
     }
-}
-
-fn map_quic_error(err: quiche::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("quic error: {err:?}"))
-}
-
-fn map_cid_error(err: CidError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, err.to_string())
 }
 
 #[cfg(test)]

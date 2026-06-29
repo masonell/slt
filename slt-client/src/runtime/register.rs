@@ -1,5 +1,3 @@
-use std::io;
-
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
 use slt_core::proto::{
@@ -35,7 +33,7 @@ pub(super) struct PreparedUdpQspRegistration {
 /// # Errors
 ///
 /// Returns an error if:
-/// - Random bytes generation fails
+/// - Random bytes generation fails (preserved as [`SessionError::Crypto`])
 /// - Key derivation fails (invalid cipher parameters)
 /// - Payload encoding fails
 pub(super) fn prepare_udp_qsp_registration(
@@ -126,9 +124,15 @@ pub(super) async fn start_udp_qsp_registration(
     Ok(prepared)
 }
 
+/// Fill a fixed-size array with cryptographically secure random bytes.
+///
+/// The boring `ErrorStack` from `RAND_bytes` is preserved via
+/// [`SessionError::Crypto`] rather than stringified into a generic `io::Error`,
+/// so the cause chain survives to the terminal report.
 fn random_array<const N: usize>() -> Result<[u8; N], SessionError> {
     let mut bytes = [0u8; N];
-    rand_bytes(&mut bytes).map_err(|err| SessionError::Io(io::Error::other(format!("{err:?}"))))?;
+    // ErrorStack flows via `#[from]` on `SessionError::Crypto`.
+    rand_bytes(&mut bytes)?;
     Ok(bytes)
 }
 

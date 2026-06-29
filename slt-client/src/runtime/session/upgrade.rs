@@ -492,8 +492,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 Ok(())
             }
             Err(err) => {
-                if let Some(io_err) = err.as_io() {
-                    if !self.handle_udp_error(io_err) {
+                if err.is_udp_path_transport_error() {
+                    if !self.handle_udp_error(&err) {
                         return Err(SessionError::Connection {
                             source: io::Error::new(
                                 io::ErrorKind::NotConnected,
@@ -502,7 +502,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                         });
                     }
                 } else {
-                    // Typed non-I/O session error from the UDP path; propagate.
+                    // Typed non-transport session error from the UDP path; propagate.
                     return Err(err);
                 }
                 warn!(error = %err, "failed to send udp upgrade probe; retry via rediscovery");

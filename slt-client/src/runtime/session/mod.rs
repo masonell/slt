@@ -39,7 +39,7 @@ use super::services::ClientRuntimeServices;
 use crate::metrics::Metrics;
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::{TcpSession, TcpTransport};
-use crate::transport::udp_qsp::ClientTransport;
+use crate::transport::udp_qsp::{ClientTransport, UdpQspError};
 use crate::tun::TunChannels;
 
 /// Session managing a single VPN connection.
@@ -262,8 +262,25 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             res = self.tcp.read_more(), if self.tcp_alive => Ok(SessionEvent::TcpRead(res?)),
             maybe = self.tun_channels.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
             udp_res = async {
+                // Defensive: this arm is gated by `udp_enabled` (which checks
+                // `as_active().is_some()`), so `as_active_mut()` being `None`
+                // here would be a client-state inconsistency that should never
+                // happen. Unlike the 6 other "transport missing" sites (which
+                // return `SessionError::ProtocolViolation`), this arm's type is
+                // `Result<_, UdpQspError>` because it returns through
+                // `SessionEvent::UdpResult`; routing it to `ProtocolViolation`
+                // would require restructuring the select arm for no behavioral
+                // gain (the branch is unreachable in practice). The error
+                // surfaces as `UdpQspError::Io(BrokenPipe)`. `BrokenPipe` is
+                // not a transient kind, so `is_recoverable()` is false and the
+                // `UdpResult(Err)` handler propagates it to TCP fallback (or
+                // close if TCP is dead) — the same routing a real `BrokenPipe`
+                // gets. Moot either way: the branch never fires.
                 let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+                    UdpQspError::from(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "udp-qsp transport missing",
+                    ))
                 })?;
                 udp.read_next_message(self.limits).await
             }, if udp_enabled => Ok(SessionEvent::UdpResult(udp_res)),
@@ -366,14 +383,14 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                     let control = match result {
                         Ok(control) => control,
                         Err(err) => {
-                            // UDP-QSP transport dead-channel signal: the
-                            // phase-3 UDP-QSP transport still surfaces this as
-                            // an io kind on the wrapped source.
-                            if err.io_kind() == Some(io::ErrorKind::ConnectionAborted) {
+                            // UDP-QSP transport dead-channel signal (the one
+                            // fatal non-I/O condition on the UDP path):
+                            // propagate so the session exits / reconnects.
+                            if err.is_udp_qsp_dead_channel() {
                                 return Err(err);
                             }
-                            if let Some(io_err) = err.as_io() {
-                                if !self.handle_udp_error(io_err) {
+                            if err.is_udp_path_transport_error() {
+                                if !self.handle_udp_error(&err) {
                                     self.metrics.inc_disconnect_error();
                                     return Ok(SessionControl::Close(SessionExit::ConnectionError));
                                 }
@@ -389,20 +406,34 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                     Ok(control)
                 }
                 Err(err) => {
-                    // Raw UDP-QSP transport io::Error (phase 3). Wrap and
-                    // classify at this boundary until the transport is typed.
+                    // Typed UDP-QSP transport error (phase 3): the slt-core
+                    // QspSessionError/QspCryptoError and proto encode errors
+                    // are preserved here, not flattened. `err` is always a
+                    // `UdpQspError` (the sole error type `read_next_message`
+                    // returns), so `SessionError::from(err)` is always
+                    // `SessionError::UdpQsp(_)`, which `is_udp_path_transport_error()`
+                    // always returns true for. The dead-channel check above
+                    // handles the fatal shape; everything else is recoverable or
+                    // fallback, handled by `handle_udp_error`.
                     let err = SessionError::from(err);
-                    if err.io_kind() == Some(io::ErrorKind::ConnectionAborted) {
+                    if err.is_udp_qsp_dead_channel() {
                         return Err(err);
                     }
-                    if let Some(io_err) = err.as_io() {
-                        if !self.handle_udp_error(io_err) {
+                    if err.is_udp_path_transport_error() {
+                        if !self.handle_udp_error(&err) {
                             self.metrics.inc_disconnect_error();
                             return Ok(SessionControl::Close(SessionExit::ConnectionError));
                         }
                         return Ok(SessionControl::Continue);
                     }
-                    Ok(SessionControl::Continue)
+                    // Unreachable: `UdpResult`'s error is always a `UdpQspError`,
+                    // which maps to `SessionError::UdpQsp(_)` (a UDP-path
+                    // transport error). Reached only if `read_next_message`'s
+                    // error type gains a non-`UdpQspError` shape without
+                    // updating this arm.
+                    unreachable!(
+                        "UdpResult error must be a UdpQspError (UDP-path transport error): {err:?}"
+                    )
                 }
             },
             SessionEvent::PingTick => {
@@ -464,12 +495,10 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             SessionEvent::UdpUpgradeTick => self.handle_udp_upgrade_tick().await,
             SessionEvent::UdpFlushReady => {
                 if let Err(err) = self.flush_udp_transport().await {
-                    if err.io_kind() == Some(io::ErrorKind::ConnectionAborted) {
+                    if err.is_udp_qsp_dead_channel() {
                         return Err(err);
                     }
-                    if let Some(io_err) = err.as_io()
-                        && !self.handle_udp_error(io_err)
-                    {
+                    if err.is_udp_path_transport_error() && !self.handle_udp_error(&err) {
                         self.metrics.inc_disconnect_error();
                         return Ok(SessionControl::Close(SessionExit::ConnectionError));
                     }
@@ -510,14 +539,14 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            if let Some(io_err) = err.as_io() {
-                if !self.handle_udp_error(io_err) {
+            if err.is_udp_path_transport_error() {
+                if !self.handle_udp_error(&err) {
                     return Err(SessionError::Connection {
                         source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
                     });
                 }
             } else {
-                // Typed non-I/O session error from the UDP path; propagate.
+                // Typed non-transport session error from the UDP path; propagate.
                 return Err(err);
             }
             self.tcp

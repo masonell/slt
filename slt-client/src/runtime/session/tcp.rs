@@ -293,18 +293,23 @@ mod tests {
         }
     }
 
-    /// `SessionError::Io` wrapping an `io::Error` of an arbitrary kind must
-    /// still expose the underlying kind to the UDP-QSP transport boundary
-    /// (which classifies by kind pending phase 3).
+    /// A TCP-path `SessionError::Io` wrapping an `io::Error` preserves the
+    /// underlying error via the variant (phase 3 retired the kind-based
+    /// `io_kind()`/`as_io()` bridge that the UDP path no longer needs; the TCP
+    /// path's `SessionError::Io` keeps the source intact for the terminal
+    /// cause chain).
     #[test]
-    fn io_error_kind_is_preserved_through_session_error() {
+    fn io_error_source_is_preserved_through_session_error() {
         let err = SessionError::from(io::Error::from(io::ErrorKind::ConnectionAborted));
-        assert_eq!(err.io_kind(), Some(io::ErrorKind::ConnectionAborted));
-        assert!(err.as_io().is_some());
+        match err {
+            SessionError::Io(io_err) => {
+                assert_eq!(io_err.kind(), io::ErrorKind::ConnectionAborted);
+            }
+            other => panic!("expected SessionError::Io, got {other:?}"),
+        }
 
-        // A typed (non-I/O) variant exposes no io kind.
+        // A typed (non-I/O) variant is distinct from the I/O variant.
         let proto = SessionError::ProtocolViolation { detail: "x" };
-        assert_eq!(proto.io_kind(), None);
-        assert!(proto.as_io().is_none());
+        assert!(!matches!(proto, SessionError::Io(_)));
     }
 }

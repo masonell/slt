@@ -1,11 +1,10 @@
 //! Session event and control types.
 
-use std::io;
-
 use slt_core::proto::{CloseCode, OwnedMessageBuf};
 
 use super::quic;
 use crate::runtime::control::ClientCommand;
+use crate::transport::udp_qsp::UdpQspError;
 
 /// Session termination reason used by the runtime to decide reconnect behavior.
 ///
@@ -79,7 +78,11 @@ pub(super) enum SessionEvent {
     /// TUN packet received (None means channel closed).
     TunPacket(Option<Vec<u8>>),
     /// UDP-QSP message read result.
-    UdpResult(io::Result<OwnedMessageBuf>),
+    ///
+    /// The error side is the typed [`UdpQspError`] from the UDP-QSP transport
+    /// (phase 3), preserving the slt-core `QspSessionError`/`QspCryptoError`
+    /// and proto encode errors rather than a flattened `io::Error`.
+    UdpResult(Result<OwnedMessageBuf, UdpQspError>),
     /// UDP-QSP buffered send flush should be driven.
     UdpFlushReady,
     /// Ping timer expired.
