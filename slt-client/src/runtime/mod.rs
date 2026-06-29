@@ -16,6 +16,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::error::ConnectError;
 use crate::metrics::Metrics;
 use crate::{auth, transport, tun};
 
@@ -92,7 +93,7 @@ async fn run_sessions<S>(
     tun_channels: &mut tun::TunChannels,
     services: &S,
     control_rx: &mut Option<ClientCommandReceiver>,
-) -> io::Result<()>
+) -> Result<(), ConnectError>
 where
     S: ClientRuntimeServices,
 {
@@ -125,7 +126,20 @@ where
                 );
                 match handle_session_exit(session.run().await, cancel) {
                     SessionAction::Break => break Ok(()),
-                    SessionAction::Fatal(err) => break Err(err),
+                    // The session path (out of scope for phase 1) still produces
+                    // io::Error; wrap it into the connect-path error type at this
+                    // boundary. Phase 2 will replace the SessionExit -> io::Error
+                    // round-trip with a typed SessionError.
+                    //
+                    // TODO(phase-2): these session `Fatal`s must NOT be fed to
+                    // `ConnectError::is_retriable()`. `ConnectError::Io` (the
+                    // variant produced by `ConnectError::from(io::Error)`) is
+                    // retriable by default, which is wrong for a session fatal
+                    // (e.g. PermissionDenied). This is harmless today only
+                    // because nothing on this path consults `is_retriable()` —
+                    // `SessionAction::Fatal` always breaks the loop. Phase 2's
+                    // typed `SessionError` removes the round-trip entirely.
+                    SessionAction::Fatal(err) => break Err(ConnectError::from(err)),
                     SessionAction::Reconnect => {
                         schedule_reconnect(
                             cancel,
@@ -153,7 +167,7 @@ enum ConnectOutcome {
     /// Connection failed; retry after backoff (already slept).
     Reconnect,
     /// Fatal error; exit the runtime.
-    FatalError(io::Error),
+    FatalError(ConnectError),
     /// Shutdown requested.
     Shutdown,
 }
@@ -209,17 +223,18 @@ where
     match result {
         Ok(tcp) => ConnectOutcome::Connected(tcp),
         Err(err) => {
+            // err: ConnectError — a typed failure whose variant carries the
+            // site and detail. The runtime reads the variant's policy directly;
+            // the old blanket "PermissionDenied => authentication rejected"
+            // branch is deleted because it misclassified a socket-create
+            // PermissionDenied as an auth rejection.
             if cancel.is_cancelled() {
                 return ConnectOutcome::Shutdown;
             }
-            if err.kind() == io::ErrorKind::PermissionDenied {
-                warn!(error = %err, "authentication rejected");
-                return ConnectOutcome::FatalError(err);
-            }
-            if !should_reconnect(&err) {
+            if !err.is_retriable() {
                 warn!(
                     attempt,
-                    kind = ?err.kind(),
+                    stage = ?err.stage(),
                     error = %err,
                     "connect/auth failed (non-recoverable)"
                 );
@@ -228,7 +243,7 @@ where
 
             warn!(
                 attempt,
-                kind = ?err.kind(),
+                stage = ?err.stage(),
                 error = %err,
                 "connect/auth failed; retrying"
             );
@@ -357,13 +372,6 @@ fn spawn_metrics_task(
     })
 }
 
-fn should_reconnect(err: &io::Error) -> bool {
-    !matches!(
-        err.kind(),
-        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied
-    )
-}
-
 async fn schedule_reconnect<O>(
     cancel: &CancellationToken,
     backoff: &mut ReconnectBackoff,
@@ -464,13 +472,13 @@ async fn connect_authenticated<S>(
     cancel: &CancellationToken,
     metrics: &Arc<Metrics>,
     services: &S,
-) -> io::Result<transport::tcp::TcpSession>
+) -> Result<transport::tcp::TcpSession, ConnectError>
 where
     S: ClientRuntimeServices,
 {
     let mut tcp = tokio::select! {
         () = cancel.cancelled() => {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "connect cancelled"));
+            return Err(ConnectError::Cancelled);
         }
         res = transport::tcp::connect(
             config,
@@ -488,7 +496,7 @@ where
     services.observer().emit(ClientEventKind::Authenticating);
     tokio::select! {
         () = cancel.cancelled() => {
-            Err(io::Error::new(io::ErrorKind::Interrupted, "auth cancelled"))
+            Err(ConnectError::Cancelled)
         }
         res = auth::authenticate(&mut tcp.transport, config, metrics) => res,
     }?;

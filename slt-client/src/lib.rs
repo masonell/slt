@@ -30,6 +30,7 @@ uniffi::setup_scaffolding!();
 #[cfg(target_os = "android")]
 mod android;
 mod auth;
+mod error;
 mod metrics;
 mod runtime;
 mod transport;

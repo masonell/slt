@@ -1,4 +1,3 @@
-use std::io;
 use std::time::Instant;
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -12,16 +11,27 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time;
 use tracing::{debug, info, trace, warn};
 
+use crate::error::ConnectError;
 use crate::metrics::Metrics;
 
 const AUTH_MAX_FRAME: usize = 16 * 1024;
 
 /// Perform TLS exporter auth and wait for [`AUTH_OK`](slt_core::proto::Message::AuthOk).
+///
+/// # Errors
+///
+/// Returns a [`ConnectError`] describing the auth failure:
+/// - [`ConnectError::AuthRejected`] carries the server's [`slt_core::proto::AuthFailCode`],
+///   the client id, and the assigned IPv4 (closing the decode-then-discard hole).
+/// - [`ConnectError::AuthTimeout`] if `AUTH_OK`/`AUTH_FAIL` does not arrive in time.
+/// - [`ConnectError::AuthDisconnected`] if the server closes the connection.
+/// - [`ConnectError::AuthTlsExport`] if the TLS keying-material export fails.
+/// - Protocol decode errors flow through via `#[from]`.
 pub async fn authenticate(
     tcp: &mut crate::transport::tcp::TcpTransport,
     config: &ClientConfig,
     metrics: &Metrics,
-) -> io::Result<()> {
+) -> Result<(), ConnectError> {
     authenticate_with_channel_impl(tcp, config, metrics).await
 }
 
@@ -30,7 +40,7 @@ async fn authenticate_with_channel_impl<S, K>(
     tcp: &mut TcpChannel<S, K>,
     config: &ClientConfig,
     metrics: &Metrics,
-) -> io::Result<()>
+) -> Result<(), ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     K: KeyUpdater,
@@ -46,40 +56,40 @@ where
         let timeout = time::sleep_until(deadline.into());
         tokio::select! {
             () = timeout => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "auth timed out"));
+                return Err(ConnectError::AuthTimeout);
             }
             res = tcp.read_more() => {
-                let n = res?;
-                if n == 0 {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "auth connection closed"));
+                // read_more returns io::Result<usize>; a 0-byte read is EOF
+                // (server closed), any other I/O failure flows through via the
+                // generic Io variant. Both are surfaced as AuthDisconnected
+                // only for the EOF case — a genuine I/O error stays generic so
+                // its kind survives for the retry policy.
+                match res {
+                    Ok(0) => return Err(ConnectError::AuthDisconnected),
+                    Ok(n) => trace!(bytes_read = n, "received auth data"),
+                    Err(e) => return Err(ConnectError::Io(e)),
                 }
-                trace!(bytes_read = n, "received auth data");
             }
         }
 
-        while let Some(msg_buf) = tcp
-            .try_pop_message(limits)
-            .map_err(crate::wire::map_message_error)?
-        {
-            match handle_auth_message(tcp, msg_buf.message()).await? {
-                AuthResult::Continue => {}
-                AuthResult::Accepted => {
+        while let Some(msg_buf) = tcp.try_pop_message(limits)? {
+            match handle_auth_message(tcp, msg_buf.message(), config).await {
+                Ok(AuthResult::Continue) => {}
+                Ok(AuthResult::Accepted) => {
                     metrics.inc_auth_successes();
                     return Ok(());
                 }
-                AuthResult::Rejected => {
+                Ok(AuthResult::Disconnected) => {
+                    return Err(ConnectError::AuthDisconnected);
+                }
+                // The rejection path: handle_auth_message decoded the
+                // AuthFailCode and returned it as Err. Bump the metric here
+                // (the channel does not own the Metrics handle) and propagate.
+                Err(err @ ConnectError::AuthRejected { .. }) => {
                     metrics.inc_auth_failures();
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "auth failed",
-                    ));
+                    return Err(err);
                 }
-                AuthResult::Disconnected => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::ConnectionReset,
-                        "server closed during auth",
-                    ));
-                }
+                Err(other) => return Err(other),
             }
         }
     }
@@ -98,17 +108,17 @@ where
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - TLS key export fails
-/// - Connection times out during authentication
-/// - Server rejects authentication
-/// - Connection is closed unexpectedly
+/// Returns a [`ConnectError`] if:
+/// - TLS key export fails ([`ConnectError::AuthTlsExport`])
+/// - Connection times out during authentication ([`ConnectError::AuthTimeout`])
+/// - Server rejects authentication ([`ConnectError::AuthRejected`], code preserved)
+/// - Connection is closed unexpectedly ([`ConnectError::AuthDisconnected`])
 #[cfg(test)]
 pub async fn authenticate_with_channel<S, K>(
     tcp: &mut TcpChannel<S, K>,
     config: &ClientConfig,
     metrics: &Metrics,
-) -> io::Result<()>
+) -> Result<(), ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     K: KeyUpdater,
@@ -116,15 +126,16 @@ where
     authenticate_with_channel_impl(tcp, config, metrics).await
 }
 
-fn export_challenge<S, K>(tcp: &TcpChannel<S, K>) -> io::Result<[u8; AUTH_CHALLENGE_LEN]>
+fn export_challenge<S, K>(tcp: &TcpChannel<S, K>) -> Result<[u8; AUTH_CHALLENGE_LEN], ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     K: KeyUpdater,
 {
     let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
+    // `?` preserves the boring `ErrorStack` via `#[from]` on `AuthTlsExport`,
+    // rather than stringifying it into an `io::Error`.
     tcp.ssl()
-        .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-        .map_err(|err| io::Error::other(format!("tls key export failed: {err}")))?;
+        .export_keying_material(&mut challenge, "slt-auth-challenge", None)?;
     Ok(challenge)
 }
 
@@ -162,7 +173,10 @@ pub fn build_auth_payload(
     }
 }
 
-async fn send_auth<S, K>(tcp: &mut TcpChannel<S, K>, payload: &AuthPayload) -> io::Result<()>
+async fn send_auth<S, K>(
+    tcp: &mut TcpChannel<S, K>,
+    payload: &AuthPayload,
+) -> Result<(), ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     K: KeyUpdater,
@@ -172,30 +186,41 @@ where
     tcp.write_message(Message::Auth {
         payload: &payload_buf,
     })
-    .await
+    .await?;
+    Ok(())
 }
 
 async fn handle_auth_message<S, K>(
     tcp: &mut TcpChannel<S, K>,
     message: Message<'_>,
-) -> io::Result<AuthResult>
+    config: &ClientConfig,
+) -> Result<AuthResult, ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     K: KeyUpdater,
 {
     match message {
         Message::AuthOk { payload } => {
-            AuthOkPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+            AuthOkPayload::decode(payload)?;
             info!("authentication accepted");
             Ok(AuthResult::Accepted)
         }
         Message::AuthFail { payload } => {
-            let fail = AuthFailPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+            // Decode the AuthFailCode, then carry it to the caller instead of
+            // discarding it. This closes the decode-then-discard hole at the
+            // auth boundary. The auth-failure metric is bumped by the outer
+            // `authenticate_with_channel_impl` loop when it observes the
+            // rejection (it owns the `Metrics` handle; the channel does not).
+            let fail = AuthFailPayload::decode(payload)?;
             warn!(code = ?fail.code, "authentication rejected");
-            Ok(AuthResult::Rejected)
+            Err(ConnectError::AuthRejected {
+                code: fail.code,
+                client_id: config.identity.client_id,
+                assigned_ipv4: config.identity.assigned_ipv4,
+            })
         }
         Message::Ping { payload } => {
-            let ping = PingPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+            let ping = PingPayload::decode(payload)?;
             debug!(nonce = ping.nonce, "received ping during auth");
             let pong_payload = PongPayload { nonce: ping.nonce };
             let mut pong_buf = Vec::with_capacity(8);
@@ -210,7 +235,10 @@ where
         }
         other => {
             warn!(message = ?other, "unexpected message during auth");
-            Ok(AuthResult::Rejected)
+            // Client-detected protocol violation, not a server-sent AUTH_FAIL.
+            // `AuthRejected` is reserved for codes the server actually sent;
+            // use `AuthUnexpectedMessage` so the distinction survives.
+            Err(ConnectError::AuthUnexpectedMessage)
         }
     }
 }
@@ -219,7 +247,6 @@ where
 enum AuthResult {
     Continue,
     Accepted,
-    Rejected,
     Disconnected,
 }
 
@@ -455,7 +482,6 @@ mod tests {
         // Test Debug trait
         assert_eq!(format!("{:?}", AuthResult::Continue), "Continue");
         assert_eq!(format!("{:?}", AuthResult::Accepted), "Accepted");
-        assert_eq!(format!("{:?}", AuthResult::Rejected), "Rejected");
         assert_eq!(format!("{:?}", AuthResult::Disconnected), "Disconnected");
 
         // Test Clone trait
@@ -464,10 +490,10 @@ mod tests {
         assert!(matches!(cloned, AuthResult::Accepted));
 
         // Test Copy trait
-        let original = AuthResult::Rejected;
+        let original = AuthResult::Disconnected;
         let copied = original;
-        assert!(matches!(original, AuthResult::Rejected)); // still valid due to Copy
-        assert!(matches!(copied, AuthResult::Rejected));
+        assert!(matches!(original, AuthResult::Disconnected)); // still valid due to Copy
+        assert!(matches!(copied, AuthResult::Disconnected));
     }
 
     #[test]
@@ -475,7 +501,7 @@ mod tests {
         assert_eq!(AuthResult::Continue, AuthResult::Continue);
         assert_eq!(AuthResult::Accepted, AuthResult::Accepted);
         assert_ne!(AuthResult::Continue, AuthResult::Accepted);
-        assert_ne!(AuthResult::Rejected, AuthResult::Disconnected);
+        assert_ne!(AuthResult::Accepted, AuthResult::Disconnected);
     }
 }
 
@@ -535,7 +561,19 @@ mod integration_tests {
         server_result.expect("server should complete without error");
 
         let err = client_result.expect_err("client auth should fail");
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        // The server's AuthFailCode must survive to the caller — this is the
+        // decode-then-discard hole being closed. A kind-based assertion would
+        // pass even if the code were dropped.
+        assert!(
+            matches!(
+                err,
+                crate::error::ConnectError::AuthRejected {
+                    code: AuthFailCode::BadSignature,
+                    ..
+                }
+            ),
+            "expected AuthRejected {{ code: BadSignature, .. }}, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -550,7 +588,10 @@ mod integration_tests {
 
         let result = authenticate_with_channel(&mut client, &config, &metrics).await;
         let err = result.expect_err("client auth should timeout");
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            matches!(err, crate::error::ConnectError::AuthTimeout),
+            "expected AuthTimeout, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -604,6 +645,44 @@ mod integration_tests {
         server_result.expect("server should complete without error");
 
         let err = client_result.expect_err("client auth should fail on CLOSE");
-        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(
+            matches!(err, crate::error::ConnectError::AuthDisconnected),
+            "expected AuthDisconnected, got {err:?}"
+        );
+    }
+
+    /// An unsolicited non-auth message during the auth exchange must be
+    /// classified as a client-detected protocol violation
+    /// (`AuthUnexpectedMessage`), not a synthesized `AuthRejected` — so
+    /// `AuthRejected` stays reserved for codes the server actually sent inside
+    /// a decoded `AUTH_FAIL`.
+    #[tokio::test]
+    async fn auth_unexpected_message_during_auth() {
+        let config = test_config();
+        let (mut client, server) = mock_transport_pair().await;
+        let mut server = MockTlsServer::new(server);
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+
+        // After receiving AUTH, send an unsolicited Pong (not
+        // AUTH_OK/AUTH_FAIL/PING/CLOSE). An 8-byte frame is a valid encoded
+        // `PongPayload` (u64 nonce); the client never decodes it — the `other`
+        // arm returns before any payload decode.
+        let server_fut = async {
+            server.recv_auth_verify(&config).await?;
+            server
+                .write_message(slt_core::proto::Message::Pong { payload: &[0u8; 8] })
+                .await
+        };
+
+        let client_fut = authenticate_with_channel(&mut client, &config, &metrics);
+
+        let (client_result, server_result) = tokio::join!(client_fut, server_fut);
+        server_result.expect("server should complete without error");
+
+        let err = client_result.expect_err("client auth should fail on unexpected message");
+        assert!(
+            matches!(err, crate::error::ConnectError::AuthUnexpectedMessage),
+            "expected AuthUnexpectedMessage, got {err:?}"
+        );
     }
 }
