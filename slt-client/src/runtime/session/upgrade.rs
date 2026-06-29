@@ -10,6 +10,7 @@ use slt_core::proto::{
 use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 
+use super::error::SessionError;
 use super::{ClientSession, SessionControl, SessionExit, UdpState};
 use crate::runtime::observer::{ClientEventKind, Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
@@ -246,7 +247,10 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// - Payload decoding fails
     /// - DCID in response doesn't match expected DCID
     /// - Pre-built session is missing (double-take bug)
-    pub(super) fn handle_register_ok(&mut self, payload: &[u8]) -> io::Result<SessionControl> {
+    pub(super) fn handle_register_ok(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<SessionControl, SessionError> {
         let (quic_ids, session) = {
             let UdpState::Pending {
                 quic_ids,
@@ -262,17 +266,21 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 return Ok(SessionControl::Continue);
             };
 
-            let ok = RegisterOkPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+            let ok = RegisterOkPayload::decode(payload)?;
             if ok.client_to_server_cid != quic_ids.dcid {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "register_ok client_to_server_cid mismatch",
-                ));
+                return Err(SessionError::ProtocolViolation {
+                    detail: "register_ok client_to_server_cid mismatch",
+                });
             }
 
-            let session = in_flight.prepared.session.take().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "udp-qsp session missing")
-            })?;
+            let session =
+                in_flight
+                    .prepared
+                    .session
+                    .take()
+                    .ok_or(SessionError::ProtocolViolation {
+                        detail: "udp-qsp session missing",
+                    })?;
             (quic_ids, session)
         };
 
@@ -303,7 +311,10 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// # Errors
     ///
     /// Returns an error if payload decoding fails.
-    pub(super) fn handle_register_fail(&mut self, payload: &[u8]) -> io::Result<SessionControl> {
+    pub(super) fn handle_register_fail(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<SessionControl, SessionError> {
         let has_in_flight_registration = matches!(
             &self.udp_state,
             UdpState::Pending {
@@ -316,7 +327,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             return Ok(SessionControl::Continue);
         }
 
-        let fail = RegisterFailPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+        let fail = RegisterFailPayload::decode(payload)?;
         warn!(code = ?fail.code, "register_cid rejected");
         self.metrics.inc_udp_register_failure();
         if self.config.require_udp {
@@ -396,7 +407,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         SessionControl::Continue
     }
 
-    pub(super) async fn handle_udp_upgrade_tick(&mut self) -> io::Result<SessionControl> {
+    pub(super) async fn handle_udp_upgrade_tick(&mut self) -> Result<SessionControl, SessionError> {
         let now = Instant::now();
         match &self.udp_upgrade {
             UdpUpgradeState::Disabled | UdpUpgradeState::Idle => Ok(SessionControl::Continue),
@@ -444,7 +455,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         }
     }
 
-    async fn send_upgrade_probe(&mut self, now: Instant) -> io::Result<()> {
+    async fn send_upgrade_probe(&mut self, now: Instant) -> Result<(), SessionError> {
         let (upgrade_id, nonce, attempts) = {
             let UdpUpgradeState::Upgrading {
                 upgrade_id,
@@ -481,11 +492,18 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 Ok(())
             }
             Err(err) => {
-                if !self.handle_udp_error(&err) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotConnected,
-                        "both transports dead",
-                    ));
+                if let Some(io_err) = err.as_io() {
+                    if !self.handle_udp_error(io_err) {
+                        return Err(SessionError::Connection {
+                            source: io::Error::new(
+                                io::ErrorKind::NotConnected,
+                                "both transports dead",
+                            ),
+                        });
+                    }
+                } else {
+                    // Typed non-I/O session error from the UDP path; propagate.
+                    return Err(err);
                 }
                 warn!(error = %err, "failed to send udp upgrade probe; retry via rediscovery");
                 Ok(())
@@ -521,9 +539,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     pub(super) async fn handle_upgrade_probe_ack(
         &mut self,
         payload: &[u8],
-    ) -> io::Result<SessionControl> {
-        let ack =
-            UpgradeProbeAckPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+    ) -> Result<SessionControl, SessionError> {
+        let ack = UpgradeProbeAckPayload::decode(payload)?;
         let should_send_ready = if let UdpUpgradeState::Upgrading {
             upgrade_id,
             probe_acked,
@@ -589,8 +606,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     pub(super) async fn handle_switch_to_udp(
         &mut self,
         payload: &[u8],
-    ) -> io::Result<SessionControl> {
-        let switch = SwitchToUdpPayload::decode(payload).map_err(crate::wire::map_payload_error)?;
+    ) -> Result<SessionControl, SessionError> {
+        let switch = SwitchToUdpPayload::decode(payload)?;
 
         let deadline = if let UdpUpgradeState::Upgrading {
             upgrade_id,
@@ -688,7 +705,6 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
     use std::time::Duration;
 
     use super::*;
@@ -776,12 +792,15 @@ mod tests {
         }
 
         #[test]
-        fn decode_error_maps_to_io_error() {
+        fn decode_error_preserved_as_session_error() {
             let result = RegisterFailPayload::decode(&[]);
             assert!(result.is_err());
 
-            let io_err = crate::wire::map_payload_error(result.unwrap_err());
-            assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+            // The payload decode error is preserved as a typed `SessionError`
+            // (not flattened to an io::Error kind), carrying the proto detail.
+            let err = SessionError::from(result.unwrap_err());
+            assert!(matches!(err, SessionError::Payload(_)));
+            assert_eq!(err.exit(), super::super::SessionExit::ProtocolError);
         }
 
         #[test]
@@ -825,35 +844,39 @@ mod tests {
         }
 
         #[test]
-        fn decode_error_maps_to_io_error() {
+        fn decode_error_preserved_as_session_error() {
             let result = RegisterOkPayload::decode(&[]);
             assert!(result.is_err());
 
-            let io_err = crate::wire::map_payload_error(result.unwrap_err());
-            assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
+            let err = SessionError::from(result.unwrap_err());
+            assert!(matches!(err, SessionError::Payload(_)));
+            assert_eq!(err.exit(), super::super::SessionExit::ProtocolError);
         }
     }
 
-    mod cid_mismatch_error {
-        use super::*;
+    /// The DCID-mismatch and missing-session branches in `handle_register_ok`
+    /// emit `SessionError::ProtocolViolation` with specific `detail` strings
+    /// (the variants the producer builds, not synthetic io::Errors). Each must
+    /// project to the fatal `ProtocolError` exit and render its detail.
+    #[test]
+    fn register_ok_failure_variants_are_typed_protocol_violations() {
+        use crate::runtime::session::SessionExit;
 
-        #[test]
-        fn cid_mismatch_is_invalid_data() {
-            let err = io::Error::new(
-                io::ErrorKind::InvalidData,
-                "register_ok client_to_server_cid mismatch",
+        for detail in [
+            "register_ok client_to_server_cid mismatch",
+            "udp-qsp session missing",
+        ] {
+            let err = SessionError::ProtocolViolation { detail };
+            assert_eq!(err.exit(), SessionExit::ProtocolError);
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("session protocol violation"),
+                "missing stage framing: {rendered:?}"
             );
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        }
-    }
-
-    mod session_missing_error {
-        use super::*;
-
-        #[test]
-        fn session_missing_is_invalid_data() {
-            let err = io::Error::new(io::ErrorKind::InvalidData, "udp-qsp session missing");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                rendered.contains(detail),
+                "missing producer detail: {rendered:?}"
+            );
         }
     }
 
@@ -968,8 +991,6 @@ mod tests {
     mod unexpected_message_handling {
         use slt_core::proto::{RegisterFailCode, RegisterFailPayload};
 
-        use super::*;
-
         #[test]
         fn register_fail_without_in_flight_returns_continue() {
             // This tests the logic: if no in-flight registration, we just continue
@@ -983,13 +1004,6 @@ mod tests {
             // This tests the logic: if no in-flight registration, we just continue
             let has_in_flight = false;
             assert!(!has_in_flight);
-        }
-
-        #[test]
-        fn register_ok_with_wrong_dcid_returns_error() {
-            // dcid mismatch should return InvalidData error
-            let err = io::Error::new(io::ErrorKind::InvalidData, "register_ok dcid mismatch");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         }
 
         #[test]

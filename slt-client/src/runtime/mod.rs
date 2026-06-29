@@ -4,14 +4,20 @@ mod register;
 pub mod services;
 mod session;
 
-use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
 use control::{ClientCommand, ClientCommandReceiver};
 use observer::{ClientEventKind, ClientObserver, ObserverSink, Transport};
 use services::ClientRuntimeServices;
+// `pub` re-export so tests can assert structure on session-path errors; the
+// effective visibility is bounded by `runtime` (a private module of the crate
+// root), so this is crate-internal in practice. The re-export also brings
+// `SessionError` into scope within this module.
+pub use session::SessionError;
+use session::SessionOutcome;
 use slt_core::config::ClientConfig;
+use thiserror::Error;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -19,6 +25,25 @@ use tracing::{debug, info, warn};
 use crate::error::ConnectError;
 use crate::metrics::Metrics;
 use crate::{auth, transport, tun};
+
+/// A non-recoverable runtime failure.
+///
+/// Composes the two typed failure types at the `run_sessions` boundary: a
+/// connect-path failure ([`ConnectError`]) or a session-path failure
+/// ([`SessionError`]). Both preserve their sources, so the terminal
+/// `{:#}` rendering carries the full cause chain. The terminal does not branch
+/// on the variant, so this is converted to `anyhow::Error` once at the
+/// [`run_client`] boundary — the design rule "typed where the caller branches;
+/// anyhow where it doesn't".
+#[derive(Debug, Error)]
+pub enum RuntimeError {
+    /// Fatal failure from the connect/auth sequence.
+    #[error(transparent)]
+    Connect(#[from] ConnectError),
+    /// Fatal failure from an established session.
+    #[error(transparent)]
+    Session(#[from] SessionError),
+}
 
 /// Run the client runtime until shutdown.
 ///
@@ -86,6 +111,11 @@ where
 }
 
 /// Run the session loop until shutdown or fatal error.
+///
+/// Composes the connect path ([`ConnectError`]) and the session path
+/// ([`SessionError`]) into [`RuntimeError`]; the terminal does not branch on
+/// which path failed, so `RuntimeError` is the typed composition that converts
+/// to `anyhow` once at the [`run_client`] boundary.
 async fn run_sessions<S>(
     config: &ClientConfig,
     cancel: &CancellationToken,
@@ -93,7 +123,7 @@ async fn run_sessions<S>(
     tun_channels: &mut tun::TunChannels,
     services: &S,
     control_rx: &mut Option<ClientCommandReceiver>,
-) -> Result<(), ConnectError>
+) -> Result<(), RuntimeError>
 where
     S: ClientRuntimeServices,
 {
@@ -126,20 +156,12 @@ where
                 );
                 match handle_session_exit(session.run().await, cancel) {
                     SessionAction::Break => break Ok(()),
-                    // The session path (out of scope for phase 1) still produces
-                    // io::Error; wrap it into the connect-path error type at this
-                    // boundary. Phase 2 will replace the SessionExit -> io::Error
-                    // round-trip with a typed SessionError.
-                    //
-                    // TODO(phase-2): these session `Fatal`s must NOT be fed to
-                    // `ConnectError::is_retriable()`. `ConnectError::Io` (the
-                    // variant produced by `ConnectError::from(io::Error)`) is
-                    // retriable by default, which is wrong for a session fatal
-                    // (e.g. PermissionDenied). This is harmless today only
-                    // because nothing on this path consults `is_retriable()` —
-                    // `SessionAction::Fatal` always breaks the loop. Phase 2's
-                    // typed `SessionError` removes the round-trip entirely.
-                    SessionAction::Fatal(err) => break Err(ConnectError::from(err)),
+                    // The session path now flows a typed `SessionError` to the
+                    // terminal directly; the `SessionExit -> io::Error`
+                    // round-trip is gone. The error carries its preserved
+                    // source (proto error, io::Error, etc.) and renders useful,
+                    // stage-specific detail via `{:#}`.
+                    SessionAction::Fatal(err) => break Err(RuntimeError::from(err)),
                     SessionAction::Reconnect => {
                         schedule_reconnect(
                             cancel,
@@ -154,7 +176,7 @@ where
                 }
             }
             ConnectOutcome::Reconnect => {} // backoff already handled in try_connect
-            ConnectOutcome::FatalError(err) => break Err(err),
+            ConnectOutcome::FatalError(err) => break Err(RuntimeError::from(err)),
             ConnectOutcome::Shutdown => break Ok(()),
         }
     }
@@ -176,8 +198,8 @@ enum ConnectOutcome {
 enum SessionAction {
     /// Break the main loop and exit.
     Break,
-    /// Fatal error; exit with error.
-    Fatal(io::Error),
+    /// Fatal error; exit with the typed session error.
+    Fatal(SessionError),
     /// Reconnect to the server (caller should sleep backoff).
     Reconnect,
     /// Reconnect to the server immediately.
@@ -286,35 +308,59 @@ where
     }
 }
 
-/// Determine what action to take based on session exit result.
-fn handle_session_exit(exit: session::SessionExit, cancel: &CancellationToken) -> SessionAction {
+/// Determine what action to take based on a session outcome.
+///
+/// Reads the [`SessionOutcome::exit`] control-flow reason to decide reconnect
+/// policy (the policy is unchanged from before phase 2 — only the type of what
+/// flows to the terminal changed). For the fatal exits, the preserved
+/// [`SessionError`] is carried through `SessionAction::Fatal`; no
+/// `SessionExit -> io::Error::new(...)` round-trip is performed, so the source
+/// chain survives to the terminal `{:#}` rendering.
+fn handle_session_exit(outcome: SessionOutcome, cancel: &CancellationToken) -> SessionAction {
     if cancel.is_cancelled() {
         return SessionAction::Break;
     }
 
+    let SessionOutcome { exit, error } = outcome;
     match exit {
         session::SessionExit::Shutdown => SessionAction::Break,
         session::SessionExit::TunClosed => {
             warn!("tun tasks stopped; shutting down");
             SessionAction::Break
         }
+        // Fatal exits. `error` is `Some` only for exits produced via
+        // `SessionOutcome::from_error` (i.e. `SessionError::exit()`):
+        // `ProtocolError` (proto decode failure / protocol violation) and
+        // `PermissionDenied`. Exits produced via `from_exit` carry `error:
+        // None` — notably `UdpUpgradeRequired` (emitted directly from the
+        // upgrade FSM at five sites when `require_udp` fails, with no
+        // underlying `SessionError`) and `ConnectionError` (emitted from the
+        // UDP transport-loss branches). For those, the `unwrap_or_else`
+        // fallbacks below are LIVE and synthesize the matching variant; this is
+        // correct — `UdpUpgradeRequired` has no source to lose, and
+        // `ConnectionError` is a reconnect exit that never reaches the terminal
+        // fatal arm (it is matched by the `Reconnect` arm below).
         session::SessionExit::ProtocolError => {
-            warn!(reason = ?exit, "protocol error; exiting");
-            SessionAction::Fatal(io::Error::new(io::ErrorKind::InvalidData, "protocol error"))
+            let err = error.unwrap_or_else(|| {
+                debug!("ProtocolError exit without a typed SessionError; synthesizing fallback");
+                SessionError::ProtocolViolation {
+                    detail: "protocol error",
+                }
+            });
+            warn!(reason = ?exit, error = %err, "protocol error; exiting");
+            SessionAction::Fatal(err)
         }
         session::SessionExit::PermissionDenied => {
-            warn!(reason = ?exit, "permission denied; exiting");
-            SessionAction::Fatal(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "permission denied",
-            ))
+            let err = error.unwrap_or_else(|| SessionError::PermissionDenied {
+                source: std::io::Error::other("permission denied"),
+            });
+            warn!(reason = ?exit, error = %err, "permission denied; exiting");
+            SessionAction::Fatal(err)
         }
         session::SessionExit::UdpUpgradeRequired => {
-            warn!(reason = ?exit, "required udp upgrade failed; exiting");
-            SessionAction::Fatal(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "required udp upgrade failed",
-            ))
+            let err = error.unwrap_or(SessionError::UdpUpgradeRequired);
+            warn!(reason = ?exit, error = %err, "required udp upgrade failed; exiting");
+            SessionAction::Fatal(err)
         }
         session::SessionExit::TcpClosed
         | session::SessionExit::IdleTimeout

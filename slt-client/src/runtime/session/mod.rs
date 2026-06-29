@@ -8,6 +8,7 @@
 //! - `upgrade`: Discovery, registration, and UDP upgrade FSM
 //! - `lifecycle`: Ping/pong, shutdown, write helpers
 
+mod error;
 mod event;
 mod lifecycle;
 mod state;
@@ -20,6 +21,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+pub use error::SessionError;
 pub(super) use event::SessionExit;
 use event::{SessionControl, SessionEvent};
 use slt_core::config::ClientConfig;
@@ -66,21 +68,44 @@ pub(super) struct ClientSession<'a, S: ClientRuntimeServices> {
     control_rx: Option<&'a mut ClientCommandReceiver>,
 }
 
-/// Classifies an I/O error into the appropriate [`SessionExit`] variant.
+/// Outcome of running a session to completion.
 ///
-/// A free function (not a method) because it does not depend on the services
-/// type parameter `S`; this keeps tests from having to name a concrete
-/// `ClientSession<…>` type.
-///
-/// Maps `io::ErrorKind` to session exit reasons:
-/// - `InvalidData` / `InvalidInput` → `ProtocolError`
-/// - `PermissionDenied` → `PermissionDenied`
-/// - All other kinds → `ConnectionError`
-pub(super) fn classify_error(err: &io::Error) -> SessionExit {
-    match err.kind() {
-        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => SessionExit::ProtocolError,
-        io::ErrorKind::PermissionDenied => SessionExit::PermissionDenied,
-        _ => SessionExit::ConnectionError,
+/// The control-flow reason ([`SessionExit`]) is always present so the runtime
+/// can decide reconnect policy; the typed [`SessionError`] is present only for
+/// the error exits, carrying the source-preserving failure that produced them.
+/// This replaces the old `SessionExit -> io::Error::new(...)` round-trip: the
+/// error flows to the terminal unchanged.
+pub(super) struct SessionOutcome {
+    /// Reconnect-policy reason derived from the failure (or the clean-exit
+    /// reason). Always present.
+    pub(super) exit: SessionExit,
+    /// Typed source-preserving failure. `Some` for outcomes built via
+    /// `from_error` (the exit is derived from a `SessionError`, which is carried
+    /// here as the source); `None` for outcomes built via `from_exit` and for
+    /// clean exits (`Shutdown`, `TcpClosed`, `TunClosed`, `IdleTimeout`,
+    /// `RemoteClose`, `NetworkChanged`).
+    pub(super) error: Option<SessionError>,
+}
+
+impl SessionOutcome {
+    /// Builds an outcome from a typed session error: the exit reason is
+    /// derived from the error via [`SessionError::exit`], and the error is
+    /// carried as the source.
+    // Not `const`-stable: moving `SessionError` (which owns a non-const-`Drop`
+    // `io::Error`) into the `Option` is not allowed in a `const fn` on stable
+    // Rust, even though the body is otherwise a pure derivation.
+    #[allow(clippy::missing_const_for_fn)]
+    fn from_error(err: SessionError) -> Self {
+        let exit = err.exit();
+        Self {
+            exit,
+            error: Some(err),
+        }
+    }
+
+    /// Builds a clean (no-source) outcome from a control-flow exit reason.
+    const fn from_exit(exit: SessionExit) -> Self {
+        Self { exit, error: None }
     }
 }
 
@@ -150,16 +175,16 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
     /// Polls for events from TCP, UDP, TUN, timers, and the cancellation token.
     /// Dispatches each event to the appropriate handler and continues until
     /// the session exits for any reason.
-    pub(super) async fn run(&mut self) -> SessionExit {
+    pub(super) async fn run(&mut self) -> SessionOutcome {
         let mut next_ping_at = self.schedule_next_ping();
-        let result = loop {
+        let outcome = loop {
             if self.tcp_alive && self.tcp.has_buffered_input() {
                 match self.handle_tcp_read().await {
                     Ok(SessionControl::Continue) => {}
-                    Ok(SessionControl::Close(exit)) => break exit,
+                    Ok(SessionControl::Close(exit)) => break SessionOutcome::from_exit(exit),
                     Err(err) => {
                         self.metrics.inc_disconnect_error();
-                        break classify_error(&err);
+                        break SessionOutcome::from_error(err);
                     }
                 }
             }
@@ -168,22 +193,22 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                 Ok(event) => event,
                 Err(err) => {
                     self.metrics.inc_disconnect_error();
-                    break classify_error(&err);
+                    break SessionOutcome::from_error(err);
                 }
             };
             match self.handle_event(event, &mut next_ping_at).await {
                 Ok(SessionControl::Continue) => {}
-                Ok(SessionControl::Close(exit)) => break exit,
+                Ok(SessionControl::Close(exit)) => break SessionOutcome::from_exit(exit),
                 Err(err) => {
                     self.metrics.inc_disconnect_error();
-                    break classify_error(&err);
+                    break SessionOutcome::from_error(err);
                 }
             }
         };
 
         self.flush_pending_udp_transport_best_effort().await;
         self.shutdown_background_tasks().await;
-        result
+        outcome
     }
 
     /// Records an active-transport change: updates the tracked transport on the
@@ -206,7 +231,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
     /// - UDP reconnect timer (if waiting)
     /// - Registration timeout (if in-flight registration)
     /// - Discovery task completion (if discovery is running)
-    async fn poll_event(&mut self, next_ping_at: Instant) -> io::Result<SessionEvent> {
+    async fn poll_event(&mut self, next_ping_at: Instant) -> Result<SessionEvent, SessionError> {
         let idle_deadline = match self.active_transport {
             ActiveTransport::Tcp => self.last_tcp_rx + self.config.timing.idle_timeout,
             ActiveTransport::UdpQsp => self.last_udp_rx + self.config.timing.idle_timeout,
@@ -288,7 +313,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
         &mut self,
         event: SessionEvent,
         next_ping_at: &mut Instant,
-    ) -> io::Result<SessionControl> {
+    ) -> Result<SessionControl, SessionError> {
         match event {
             SessionEvent::Shutdown => {
                 info!("shutdown requested");
@@ -341,26 +366,41 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                     let control = match result {
                         Ok(control) => control,
                         Err(err) => {
-                            if err.kind() == io::ErrorKind::ConnectionAborted {
+                            // UDP-QSP transport dead-channel signal: the
+                            // phase-3 UDP-QSP transport still surfaces this as
+                            // an io kind on the wrapped source.
+                            if err.io_kind() == Some(io::ErrorKind::ConnectionAborted) {
                                 return Err(err);
                             }
-                            if !self.handle_udp_error(&err) {
-                                self.metrics.inc_disconnect_error();
-                                return Ok(SessionControl::Close(SessionExit::ConnectionError));
+                            if let Some(io_err) = err.as_io() {
+                                if !self.handle_udp_error(io_err) {
+                                    self.metrics.inc_disconnect_error();
+                                    return Ok(SessionControl::Close(SessionExit::ConnectionError));
+                                }
+                                return Ok(SessionControl::Continue);
                             }
-                            return Ok(SessionControl::Continue);
+                            // Typed (non-I/O) session error from the UDP
+                            // message handler: a proto decode failure or
+                            // protocol violation. Propagate.
+                            return Err(err);
                         }
                     };
                     self.note_udp_activity();
                     Ok(control)
                 }
                 Err(err) => {
-                    if err.kind() == io::ErrorKind::ConnectionAborted {
+                    // Raw UDP-QSP transport io::Error (phase 3). Wrap and
+                    // classify at this boundary until the transport is typed.
+                    let err = SessionError::from(err);
+                    if err.io_kind() == Some(io::ErrorKind::ConnectionAborted) {
                         return Err(err);
                     }
-                    if !self.handle_udp_error(&err) {
-                        self.metrics.inc_disconnect_error();
-                        return Ok(SessionControl::Close(SessionExit::ConnectionError));
+                    if let Some(io_err) = err.as_io() {
+                        if !self.handle_udp_error(io_err) {
+                            self.metrics.inc_disconnect_error();
+                            return Ok(SessionControl::Close(SessionExit::ConnectionError));
+                        }
+                        return Ok(SessionControl::Continue);
                     }
                     Ok(SessionControl::Continue)
                 }
@@ -424,10 +464,12 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             SessionEvent::UdpUpgradeTick => self.handle_udp_upgrade_tick().await,
             SessionEvent::UdpFlushReady => {
                 if let Err(err) = self.flush_udp_transport().await {
-                    if err.kind() == io::ErrorKind::ConnectionAborted {
+                    if err.io_kind() == Some(io::ErrorKind::ConnectionAborted) {
                         return Err(err);
                     }
-                    if !self.handle_udp_error(&err) {
+                    if let Some(io_err) = err.as_io()
+                        && !self.handle_udp_error(io_err)
+                    {
                         self.metrics.inc_disconnect_error();
                         return Ok(SessionControl::Close(SessionExit::ConnectionError));
                     }
@@ -444,7 +486,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
     /// Later UDP flush failures are handled as transport loss; individual TUN
     /// packets already accepted by the UDP batching layer are not replayed.
     /// Drops oversized packets and updates metrics.
-    async fn handle_tun_packet(&mut self, packet: Vec<u8>) -> io::Result<SessionControl> {
+    async fn handle_tun_packet(&mut self, packet: Vec<u8>) -> Result<SessionControl, SessionError> {
         if packet.is_empty() {
             return Ok(SessionControl::Continue);
         }
@@ -468,11 +510,15 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            if !self.handle_udp_error(&err) {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "both transports dead",
-                ));
+            if let Some(io_err) = err.as_io() {
+                if !self.handle_udp_error(io_err) {
+                    return Err(SessionError::Connection {
+                        source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
+                    });
+                }
+            } else {
+                // Typed non-I/O session error from the UDP path; propagate.
+                return Err(err);
             }
             self.tcp
                 .write_message(Message::Data {

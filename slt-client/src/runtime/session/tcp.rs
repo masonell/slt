@@ -1,18 +1,16 @@
 //! TCP message handling for `ClientSession`.
 
-use std::io;
-
 use slt_core::proto::{
     ClosePayload, Message, MessageType, OwnedMessageBuf, PingPayload, PongPayload,
 };
 use tracing::{debug, info, trace};
 
+use super::error::SessionError;
 use super::{ClientSession, SessionControl, SessionExit};
 use crate::metrics::Metrics;
 use crate::runtime::observer::{Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
-use crate::wire;
 
 fn switch_to_tcp_on_server_traffic(
     active_transport: &mut ActiveTransport,
@@ -45,13 +43,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// Returns an error if:
     /// - Message parsing fails (invalid wire format)
     /// - Payload decoding fails (invalid payload data)
-    pub(super) async fn handle_tcp_read(&mut self) -> io::Result<SessionControl> {
+    pub(super) async fn handle_tcp_read(&mut self) -> Result<SessionControl, SessionError> {
         loop {
-            let Some(msg_buf) = self
-                .tcp
-                .try_pop_message(self.limits)
-                .map_err(wire::map_message_error)?
-            else {
+            // MessageError flows via the manual `From<MessageError> for
+            // SessionError` impl, preserving the proto detail instead of
+            // flattening to `io::ErrorKind::InvalidData`.
+            let Some(msg_buf) = self.tcp.try_pop_message(self.limits)? else {
                 return Ok(SessionControl::Continue);
             };
 
@@ -73,7 +70,10 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// - Payload decoding fails
     /// - An unexpected control message is received (e.g., AUTH on established session)
     /// - TUN channel send fails
-    async fn handle_tcp_message(&mut self, msg_buf: OwnedMessageBuf) -> io::Result<SessionControl> {
+    async fn handle_tcp_message(
+        &mut self,
+        msg_buf: OwnedMessageBuf,
+    ) -> Result<SessionControl, SessionError> {
         if msg_buf.message().ty() == MessageType::Data {
             if switch_to_tcp_on_server_traffic(
                 &mut self.active_transport,
@@ -100,7 +100,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             Message::RegisterFail { payload } => self.handle_register_fail(payload),
             Message::Data { .. } => unreachable!("data handled by fast-path above"),
             Message::Ping { payload } => {
-                let ping_in = PingPayload::decode(payload).map_err(wire::map_payload_error)?;
+                let ping_in = PingPayload::decode(payload)?;
                 if switch_to_tcp_on_server_traffic(
                     &mut self.active_transport,
                     self.metrics.as_ref(),
@@ -125,7 +125,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 Ok(SessionControl::Continue)
             }
             Message::Pong { payload } => {
-                let pong_in = PongPayload::decode(payload).map_err(wire::map_payload_error)?;
+                let pong_in = PongPayload::decode(payload)?;
                 if self.maybe_commit_udp_upgrade_on_barrier_pong(pong_in.nonce) {
                     return Ok(SessionControl::Continue);
                 }
@@ -133,7 +133,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 Ok(SessionControl::Continue)
             }
             Message::Close { payload } => {
-                let close = ClosePayload::decode(payload).map_err(wire::map_payload_error)?;
+                let close = ClosePayload::decode(payload)?;
                 info!(code = ?close.code, "received close");
                 self.metrics.inc_disconnect_close();
                 Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
@@ -146,10 +146,9 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             | Message::UpgradeProbe { .. }
             | Message::UpgradeProbeAck { .. }
             | Message::UdpReady { .. }
-            | Message::SwitchAck { .. } => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected control message on established session",
-            )),
+            | Message::SwitchAck { .. } => Err(SessionError::ProtocolViolation {
+                detail: "unexpected control message on established session",
+            }),
         }
     }
 }
@@ -158,40 +157,47 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
 mod tests {
     use std::io;
 
-    use super::*;
+    use slt_core::proto::PayloadError;
 
-    /// Test that ping payload decoding error is mapped correctly.
+    use super::*;
+    use crate::runtime::session::SessionExit;
+
+    /// A ping payload decode failure is preserved as a typed `SessionError`
+    /// carrying the `PayloadError`, not flattened to an `io::Error` kind — the
+    /// proto error survives to the caller.
     #[test]
-    fn ping_payload_decode_error_maps_to_invalid_data() {
-        // Empty payload should fail decode
+    fn ping_payload_decode_error_preserved_as_session_error() {
         let result = PingPayload::decode(&[]);
         assert!(result.is_err());
 
-        // Verify the error maps to InvalidData
-        let err = wire::map_payload_error(result.unwrap_err());
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = SessionError::from(result.unwrap_err());
+        assert!(matches!(err, SessionError::Payload(_)));
+        assert_eq!(err.exit(), SessionExit::ProtocolError);
     }
 
-    /// Test that pong payload decoding error is mapped correctly.
+    /// A pong payload decode failure is preserved as a typed `SessionError`.
     #[test]
-    fn pong_payload_decode_error_maps_to_invalid_data() {
-        // Wrong length payload should fail decode
+    fn pong_payload_decode_error_preserved_as_session_error() {
         let result = PongPayload::decode(&[0x01, 0x02, 0x03]); // 3 bytes instead of 8
         assert!(result.is_err());
 
-        let err = wire::map_payload_error(result.unwrap_err());
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = SessionError::from(result.unwrap_err());
+        assert!(matches!(
+            err,
+            SessionError::Payload(PayloadError::LengthMismatch { .. })
+        ));
+        assert_eq!(err.exit(), SessionExit::ProtocolError);
     }
 
-    /// Test that close payload decoding error is mapped correctly.
+    /// A close payload decode failure (invalid close code) is preserved.
     #[test]
-    fn close_payload_decode_error_maps_to_invalid_data() {
-        // Invalid close code should fail decode
+    fn close_payload_decode_error_preserved_as_session_error() {
         let result = ClosePayload::decode(&[0xFF]); // Invalid code
         assert!(result.is_err());
 
-        let err = wire::map_payload_error(result.unwrap_err());
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = SessionError::from(result.unwrap_err());
+        assert!(matches!(err, SessionError::Payload(_)));
+        assert_eq!(err.exit(), SessionExit::ProtocolError);
     }
 
     /// Test valid ping payload roundtrip.
@@ -231,14 +237,18 @@ mod tests {
         assert_eq!(decoded.code, CloseCode::Normal);
     }
 
-    /// Test unexpected control message error properties.
+    /// An unexpected control message is reported as a typed protocol violation
+    /// (client-detected), not an `io::Error` kind. It must project to the
+    /// fatal `ProtocolError` exit.
     #[test]
-    fn unexpected_control_message_error_kind() {
-        let err = io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unexpected control message on established session",
-        );
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    fn unexpected_control_message_is_typed_protocol_violation() {
+        let err = SessionError::ProtocolViolation {
+            detail: "unexpected control message on established session",
+        };
+        assert_eq!(err.exit(), SessionExit::ProtocolError);
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("session protocol violation"));
+        assert!(rendered.contains("unexpected control message"));
     }
 
     mod server_initiated_fallback {
@@ -283,97 +293,18 @@ mod tests {
         }
     }
 
-    mod classify_error {
-        use std::io;
+    /// `SessionError::Io` wrapping an `io::Error` of an arbitrary kind must
+    /// still expose the underlying kind to the UDP-QSP transport boundary
+    /// (which classifies by kind pending phase 3).
+    #[test]
+    fn io_error_kind_is_preserved_through_session_error() {
+        let err = SessionError::from(io::Error::from(io::ErrorKind::ConnectionAborted));
+        assert_eq!(err.io_kind(), Some(io::ErrorKind::ConnectionAborted));
+        assert!(err.as_io().is_some());
 
-        use super::super::super::classify_error;
-
-        /// Test that `InvalidData` maps to `ProtocolError`.
-        #[test]
-        fn invalid_data_maps_to_protocol_error() {
-            let err = io::Error::new(io::ErrorKind::InvalidData, "test");
-            let exit = classify_error(&err);
-            assert_eq!(exit, super::SessionExit::ProtocolError);
-        }
-
-        /// Test that `InvalidInput` maps to `ProtocolError`.
-        #[test]
-        fn invalid_input_maps_to_protocol_error() {
-            let err = io::Error::new(io::ErrorKind::InvalidInput, "test");
-            let exit = classify_error(&err);
-            assert_eq!(exit, super::SessionExit::ProtocolError);
-        }
-
-        /// Test that `PermissionDenied` maps to `PermissionDenied`.
-        #[test]
-        fn permission_denied_maps_to_permission_denied() {
-            let err = io::Error::new(io::ErrorKind::PermissionDenied, "test");
-            let exit = classify_error(&err);
-            assert_eq!(exit, super::SessionExit::PermissionDenied);
-        }
-
-        /// Test that `ConnectionReset` maps to `ConnectionError`.
-        #[test]
-        fn connection_reset_maps_to_connection_error() {
-            let err = io::Error::new(io::ErrorKind::ConnectionReset, "test");
-            let exit = classify_error(&err);
-            assert_eq!(exit, super::SessionExit::ConnectionError);
-        }
-
-        /// Test that `BrokenPipe` maps to `ConnectionError`.
-        #[test]
-        fn broken_pipe_maps_to_connection_error() {
-            let err = io::Error::new(io::ErrorKind::BrokenPipe, "test");
-            let exit = classify_error(&err);
-            assert_eq!(exit, super::SessionExit::ConnectionError);
-        }
-
-        /// Test that `TimedOut` maps to `ConnectionError`.
-        #[test]
-        fn timed_out_maps_to_connection_error() {
-            let err = io::Error::new(io::ErrorKind::TimedOut, "test");
-            let exit = classify_error(&err);
-            assert_eq!(exit, super::SessionExit::ConnectionError);
-        }
-
-        /// Test that `UnexpectedEof` maps to `ConnectionError`.
-        #[test]
-        fn unexpected_eof_maps_to_connection_error() {
-            let err = io::Error::new(io::ErrorKind::UnexpectedEof, "test");
-            let exit = classify_error(&err);
-            assert_eq!(exit, super::SessionExit::ConnectionError);
-        }
-
-        /// Test that Interrupted maps to `ConnectionError`.
-        #[test]
-        fn interrupted_maps_to_connection_error() {
-            let err = io::Error::new(io::ErrorKind::Interrupted, "test");
-            let exit = classify_error(&err);
-            assert_eq!(exit, super::SessionExit::ConnectionError);
-        }
-
-        /// Test that other error kinds map to `ConnectionError`.
-        #[test]
-        fn other_errors_map_to_connection_error() {
-            let other_kinds = [
-                io::ErrorKind::NotFound,
-                io::ErrorKind::AddrInUse,
-                io::ErrorKind::AddrNotAvailable,
-                io::ErrorKind::AlreadyExists,
-                io::ErrorKind::WouldBlock,
-                io::ErrorKind::WriteZero,
-                io::ErrorKind::Other,
-            ];
-
-            for kind in other_kinds {
-                let err = io::Error::new(kind, "test");
-                let exit = classify_error(&err);
-                assert_eq!(
-                    exit,
-                    super::SessionExit::ConnectionError,
-                    "{kind:?} should map to ConnectionError"
-                );
-            }
-        }
+        // A typed (non-I/O) variant exposes no io kind.
+        let proto = SessionError::ProtocolViolation { detail: "x" };
+        assert_eq!(proto.io_kind(), None);
+        assert!(proto.as_io().is_none());
     }
 }

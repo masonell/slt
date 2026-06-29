@@ -6,6 +6,7 @@ use slt_core::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, RegisterCidPayload,
 };
 
+use crate::runtime::session::SessionError;
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::udp_qsp::{ClientUdpQspIo, client_udp_qsp_io};
@@ -39,7 +40,7 @@ pub(super) struct PreparedUdpQspRegistration {
 /// - Payload encoding fails
 pub(super) fn prepare_udp_qsp_registration(
     ids: &quic::QuicIds,
-) -> io::Result<PreparedUdpQspRegistration> {
+) -> Result<PreparedUdpQspRegistration, SessionError> {
     let cipher = CipherSuite::Aes128Gcm;
     let hp_c2s = random_array::<HP_KEY_LEN>()?;
     let hp_s2c = random_array::<HP_KEY_LEN>()?;
@@ -67,9 +68,9 @@ pub(super) fn prepare_udp_qsp_registration(
     };
 
     let mut payload_buf = Vec::new();
-    payload
-        .encode(&mut payload_buf)
-        .map_err(crate::wire::map_payload_error)?;
+    // PayloadError flows via the manual `From<PayloadError> for SessionError`
+    // impl, preserving the proto detail instead of flattening to an io::Error.
+    payload.encode(&mut payload_buf)?;
 
     // Reverse key directions: the payload is expressed in the server's (tx/rx) terms.
     let keys = UdpQspKeys::new(
@@ -81,7 +82,9 @@ pub(super) fn prepare_udp_qsp_registration(
         payload.iv_rx,
         payload.iv_tx,
     )
-    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "udp-qsp keys invalid"))?;
+    .map_err(|_| SessionError::ProtocolViolation {
+        detail: "udp-qsp keys invalid",
+    })?;
 
     let io = client_udp_qsp_io(&ids.socket, ids.peer)?;
     let session = QuicQspSession::new(
@@ -114,7 +117,7 @@ pub(super) fn prepare_udp_qsp_registration(
 pub(super) async fn start_udp_qsp_registration(
     tcp: &mut TcpTransport,
     ids: &quic::QuicIds,
-) -> io::Result<PreparedUdpQspRegistration> {
+) -> Result<PreparedUdpQspRegistration, SessionError> {
     let prepared = prepare_udp_qsp_registration(ids)?;
     tcp.write_message(Message::RegisterCid {
         payload: &prepared.payload_buf,
@@ -123,9 +126,9 @@ pub(super) async fn start_udp_qsp_registration(
     Ok(prepared)
 }
 
-fn random_array<const N: usize>() -> io::Result<[u8; N]> {
+fn random_array<const N: usize>() -> Result<[u8; N], SessionError> {
     let mut bytes = [0u8; N];
-    rand_bytes(&mut bytes).map_err(|err| io::Error::other(format!("{err:?}")))?;
+    rand_bytes(&mut bytes).map_err(|err| SessionError::Io(io::Error::other(format!("{err:?}"))))?;
     Ok(bytes)
 }
 
@@ -292,7 +295,7 @@ mod tests {
 
     #[test]
     fn random_array_produces_correct_length() {
-        let result: io::Result<[u8; 16]> = random_array();
+        let result: Result<[u8; 16], SessionError> = random_array();
         assert!(result.is_ok());
         let arr = result.unwrap();
         assert_eq!(arr.len(), 16);

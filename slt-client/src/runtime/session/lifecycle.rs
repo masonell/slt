@@ -7,6 +7,7 @@ use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload};
 use tracing::{debug, trace, warn};
 
 use super::ClientSession;
+use super::error::SessionError;
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 
@@ -23,7 +24,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// - Active transport write fails
     /// - TCP fallback also fails
     /// - Both transports are dead
-    pub(super) async fn handle_ping_tick(&mut self) -> io::Result<()> {
+    pub(super) async fn handle_ping_tick(&mut self) -> Result<(), SessionError> {
         let nonce = fastrand::u64(..);
         let ping = PingPayload { nonce };
         let mut buf = Vec::with_capacity(8);
@@ -37,16 +38,21 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             self.tcp
                 .write_message(Message::Ping { payload: &buf })
                 .await
+                .map_err(SessionError::from)
         };
         if let Err(err) = result {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            if !self.handle_udp_error(&err) {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "both transports dead",
-                ));
+            if let Some(io_err) = err.as_io() {
+                if !self.handle_udp_error(io_err) {
+                    return Err(SessionError::Connection {
+                        source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
+                    });
+                }
+            } else {
+                // Typed non-I/O error from the UDP path; propagate.
+                return Err(err);
             }
             self.tcp
                 .write_message(Message::Ping { payload: &buf })
@@ -67,7 +73,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// - Active transport write fails
     /// - TCP fallback also fails
     /// - Both transports are dead
-    pub(super) async fn send_close(&mut self, code: CloseCode) -> io::Result<()> {
+    pub(super) async fn send_close(&mut self, code: CloseCode) -> Result<(), SessionError> {
         let payload = ClosePayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
@@ -79,16 +85,20 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             self.tcp
                 .write_message(Message::Close { payload: &buf })
                 .await
+                .map_err(SessionError::from)
         };
         if let Err(err) = result {
             if active != ActiveTransport::UdpQsp {
                 return Err(err);
             }
-            if !self.handle_udp_error(&err) {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "both transports dead",
-                ));
+            if let Some(io_err) = err.as_io() {
+                if !self.handle_udp_error(io_err) {
+                    return Err(SessionError::Connection {
+                        source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
+                    });
+                }
+            } else {
+                return Err(err);
             }
             self.tcp
                 .write_message(Message::Close { payload: &buf })
@@ -106,14 +116,24 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// Returns an error if:
     /// - UDP-QSP is active but transport is missing
     /// - Transport write fails
-    pub(super) async fn write_active_message(&mut self, message: Message<'_>) -> io::Result<()> {
+    pub(super) async fn write_active_message(
+        &mut self,
+        message: Message<'_>,
+    ) -> Result<(), SessionError> {
         match self.active_transport {
-            ActiveTransport::Tcp => self.tcp.write_message(message).await,
+            ActiveTransport::Tcp => self
+                .tcp
+                .write_message(message)
+                .await
+                .map_err(SessionError::from),
             ActiveTransport::UdpQsp => {
                 let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+                    SessionError::Io(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "udp-qsp transport missing",
+                    ))
                 })?;
-                udp.write_message(message).await
+                udp.write_message(message).await.map_err(SessionError::from)
             }
         }
     }
@@ -129,12 +149,15 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     pub(super) async fn write_udp_message_and_flush(
         &mut self,
         message: Message<'_>,
-    ) -> io::Result<()> {
+    ) -> Result<(), SessionError> {
         let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+            SessionError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "udp-qsp transport missing",
+            ))
         })?;
         udp.write_message(message).await?;
-        udp.flush().await
+        udp.flush().await.map_err(SessionError::from)
     }
 
     /// Flushes any pending UDP-QSP socket backend packets.
@@ -142,11 +165,14 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// # Errors
     ///
     /// Returns an error if UDP-QSP is inactive or the socket backend fails.
-    pub(super) async fn flush_udp_transport(&mut self) -> io::Result<()> {
+    pub(super) async fn flush_udp_transport(&mut self) -> Result<(), SessionError> {
         let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+            SessionError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "udp-qsp transport missing",
+            ))
         })?;
-        udp.flush().await
+        udp.flush().await.map_err(SessionError::from)
     }
 
     /// Flushes pending UDP-QSP packets without changing the session exit reason.

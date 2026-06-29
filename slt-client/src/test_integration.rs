@@ -19,8 +19,8 @@ mod tests {
     use tokio::io::DuplexStream;
     use tokio_boring::SslStream;
 
+    use crate::runtime::SessionError;
     use crate::test_support::{MockTlsServer, test_config, tls_server_pair};
-    use crate::wire;
 
     const MAX_FRAME: usize = 16 * 1024;
 
@@ -238,9 +238,10 @@ mod tests {
             let result = PongPayload::decode(&[0x01, 0x02, 0x03, 0x04]);
             assert!(result.is_err());
 
-            // Error maps to InvalidData
-            let err = wire::map_payload_error(result.unwrap_err());
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            // Decode error is preserved as a typed SessionError::Payload (not
+            // flattened to an io::Error kind).
+            let err = SessionError::from(result.unwrap_err());
+            assert!(matches!(err, SessionError::Payload(_)));
         }
 
         /// Test PING payload decode error handling.
@@ -250,9 +251,8 @@ mod tests {
             let result = PingPayload::decode(&[]);
             assert!(result.is_err());
 
-            // Error maps to InvalidData
-            let err = wire::map_payload_error(result.unwrap_err());
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            let err = SessionError::from(result.unwrap_err());
+            assert!(matches!(err, SessionError::Payload(_)));
         }
     }
 
@@ -437,9 +437,9 @@ mod tests {
             let result = RegisterOkPayload::decode(&[0x01, 0x02, 0x03, 0x04]);
             assert!(result.is_err());
 
-            // Error maps to InvalidData
-            let err = wire::map_payload_error(result.unwrap_err());
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            // Decode error is preserved as a typed SessionError::Payload.
+            let err = SessionError::from(result.unwrap_err());
+            assert!(matches!(err, SessionError::Payload(_)));
         }
 
         /// Test `REGISTER_FAIL` decode errors.
@@ -808,8 +808,9 @@ mod tests {
             let result = PingPayload::decode(&[0x01, 0x02, 0x03]); // Too short
             assert!(result.is_err());
 
-            let err = wire::map_payload_error(result.unwrap_err());
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            // Preserved as a typed SessionError::Payload.
+            let err = SessionError::from(result.unwrap_err());
+            assert!(matches!(err, SessionError::Payload(_)));
         }
 
         /// Test that malformed CLOSE payload returns correct error.
@@ -818,8 +819,8 @@ mod tests {
             let result = slt_core::proto::ClosePayload::decode(&[0xFF]); // Invalid code
             assert!(result.is_err());
 
-            let err = wire::map_payload_error(result.unwrap_err());
-            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            let err = SessionError::from(result.unwrap_err());
+            assert!(matches!(err, SessionError::Payload(_)));
         }
 
         /// Test all close codes are valid.

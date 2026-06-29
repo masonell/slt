@@ -10,13 +10,13 @@ use slt_core::proto::{
 use tokio::time;
 use tracing::{info, trace, warn};
 
+use super::error::SessionError;
 use super::{ClientSession, SessionControl, SessionExit};
 use crate::runtime::observer::{ClientEventKind, Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 use crate::transport::quic_discovery;
 use crate::transport::udp_qsp::client_udp_qsp_io;
-use crate::wire;
 
 impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// Handles a host-reported network change.
@@ -27,7 +27,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// current source address and updated its peer. On refresh failure, a live
     /// TCP channel is used to rediscover QUIC IDs and register a fresh UDP path;
     /// if TCP is unavailable the session exits so the runtime reconnects TCP.
-    pub(super) async fn handle_network_changed(&mut self) -> io::Result<SessionControl> {
+    pub(super) async fn handle_network_changed(&mut self) -> Result<SessionControl, SessionError> {
         info!("underlying network changed");
 
         if self.active_transport != ActiveTransport::UdpQsp || self.udp_state.as_active().is_none()
@@ -68,7 +68,9 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         }
     }
 
-    async fn refresh_udp_path_with_replacement_fallback(&mut self) -> io::Result<SessionControl> {
+    async fn refresh_udp_path_with_replacement_fallback(
+        &mut self,
+    ) -> Result<SessionControl, SessionError> {
         match self.refresh_udp_path().await {
             Ok(control) => return Ok(control),
             Err(err) => {
@@ -81,11 +83,16 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         self.refresh_udp_path().await
     }
 
-    async fn recreate_udp_io(&mut self) -> io::Result<()> {
+    async fn recreate_udp_io(&mut self) -> Result<(), SessionError> {
         let peer = self
             .udp_state
             .as_active()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing"))?
+            .ok_or_else(|| {
+                SessionError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "udp-qsp transport missing",
+                ))
+            })?
             .peer();
         let socket = Arc::new(quic_discovery::bind_protected_udp_socket(
             peer,
@@ -93,7 +100,10 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         )?);
         let new_io = client_udp_qsp_io(&socket, peer)?;
         let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+            SessionError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "udp-qsp transport missing",
+            ))
         })?;
         let _old_io = udp.replace_io(new_io).await;
         Ok(())
@@ -131,7 +141,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     pub(super) async fn handle_udp_message(
         &mut self,
         msg_buf: OwnedMessageBuf,
-    ) -> io::Result<SessionControl> {
+    ) -> Result<SessionControl, SessionError> {
         if msg_buf.message().ty() == MessageType::Data {
             if self.active_transport != ActiveTransport::UdpQsp {
                 trace!("dropping udp data while tcp is active");
@@ -145,16 +155,14 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         }
 
         match msg_buf.message() {
-            Message::RegisterOk { .. } => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected register_ok on udp-qsp transport",
-            )),
-            Message::RegisterFail { .. } => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected register_fail on udp-qsp transport",
-            )),
+            Message::RegisterOk { .. } => Err(SessionError::ProtocolViolation {
+                detail: "unexpected register_ok on udp-qsp transport",
+            }),
+            Message::RegisterFail { .. } => Err(SessionError::ProtocolViolation {
+                detail: "unexpected register_fail on udp-qsp transport",
+            }),
             Message::Ping { payload } => {
-                let ping_in = PingPayload::decode(payload).map_err(wire::map_payload_error)?;
+                let ping_in = PingPayload::decode(payload)?;
                 let pong_payload = ping_in.nonce.to_be_bytes();
                 self.write_udp_message_and_flush(Message::Pong {
                     payload: &pong_payload,
@@ -164,13 +172,13 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 Ok(SessionControl::Continue)
             }
             Message::Pong { payload } => {
-                let pong_in = PongPayload::decode(payload).map_err(wire::map_payload_error)?;
+                let pong_in = PongPayload::decode(payload)?;
                 trace!(nonce = pong_in.nonce, "received udp pong");
                 Ok(SessionControl::Continue)
             }
             Message::Data { .. } => unreachable!("data handled by fast-path above"),
             Message::Close { payload } => {
-                let close = ClosePayload::decode(payload).map_err(wire::map_payload_error)?;
+                let close = ClosePayload::decode(payload)?;
                 info!(code = ?close.code, "received udp close");
                 self.metrics.inc_disconnect_close();
                 Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
@@ -183,14 +191,13 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             | Message::UpgradeProbe { .. }
             | Message::UdpReady { .. }
             | Message::SwitchToUdp { .. }
-            | Message::SwitchAck { .. } => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected control message on udp-qsp transport",
-            )),
+            | Message::SwitchAck { .. } => Err(SessionError::ProtocolViolation {
+                detail: "unexpected control message on udp-qsp transport",
+            }),
         }
     }
 
-    async fn refresh_udp_path(&mut self) -> io::Result<SessionControl> {
+    async fn refresh_udp_path(&mut self) -> Result<SessionControl, SessionError> {
         let nonce = fastrand::u64(..);
         let ping = PingPayload { nonce };
         let mut ping_buf = Vec::with_capacity(8);
@@ -202,7 +209,10 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         loop {
             let cancel = self.cancel.clone();
             let udp = self.udp_state.as_active_mut().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "udp-qsp transport missing")
+                SessionError::Io(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "udp-qsp transport missing",
+                ))
             })?;
             let msg_buf = tokio::select! {
                 biased;
@@ -210,16 +220,18 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 () = cancel.cancelled() => return Ok(SessionControl::Close(SessionExit::Shutdown)),
                 result = time::timeout_at(deadline.into(), udp.read_next_message(self.limits)) => match result {
                     Ok(Ok(msg_buf)) => msg_buf,
-                    Ok(Err(err)) if should_drop_refresh_udp_error(&err) => {
+                    // Raw UDP-QSP transport io::Error (phase 3): drop transient
+                    // packet-level errors, wrap and propagate the rest.
+                    Ok(Err(err)) if should_drop_refresh_udp_io_error(&err) => {
                         trace!(error = %err, "dropping udp-qsp packet during path refresh");
                         continue;
                     }
-                    Ok(Err(err)) => return Err(err),
+                    Ok(Err(err)) => return Err(SessionError::from(err)),
                     Err(_) => {
-                        return Err(io::Error::new(
+                        return Err(SessionError::Io(io::Error::new(
                             io::ErrorKind::TimedOut,
                             "udp-qsp path refresh timed out",
-                        ));
+                        )));
                     }
                 }
             };
@@ -227,7 +239,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             match is_matching_pong(&msg_buf, nonce) {
                 Ok(true) => return Ok(SessionControl::Continue),
                 Ok(false) => {}
-                Err(err) if should_drop_refresh_udp_error(&err) => {
+                Err(err) if should_drop_refresh_session_error(&err) => {
                     trace!(error = %err, "dropping udp-qsp pong during path refresh");
                     continue;
                 }
@@ -236,7 +248,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
 
             let control = match self.handle_udp_message(msg_buf).await {
                 Ok(control) => control,
-                Err(err) if should_drop_refresh_udp_error(&err) => {
+                Err(err) if should_drop_refresh_session_error(&err) => {
                     trace!(error = %err, "dropping udp-qsp message during path refresh");
                     continue;
                 }
@@ -292,16 +304,28 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     }
 }
 
-fn is_matching_pong(msg_buf: &OwnedMessageBuf, nonce: u64) -> io::Result<bool> {
+fn is_matching_pong(msg_buf: &OwnedMessageBuf, nonce: u64) -> Result<bool, SessionError> {
     let Message::Pong { payload } = msg_buf.message() else {
         return Ok(false);
     };
-    let pong = PongPayload::decode(payload).map_err(wire::map_payload_error)?;
+    let pong = PongPayload::decode(payload)?;
     Ok(pong.nonce == nonce)
 }
 
-fn should_drop_refresh_udp_error(err: &io::Error) -> bool {
+/// Whether a raw UDP-QSP transport `io::Error` (phase 3) should be dropped
+/// during the path-refresh probe rather than propagated. Packet-level issues
+/// (`InvalidData`: replay, too-old, crypto) are transient.
+fn should_drop_refresh_udp_io_error(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::InvalidData
+}
+
+/// Whether a typed `SessionError` surfaced during the path-refresh probe
+/// should be dropped rather than propagated. Mirrors
+/// [`should_drop_refresh_udp_io_error`] for the wrapped-I/O case; typed
+/// non-I/O session errors (proto decode failures, protocol violations) are
+/// never dropped here — they propagate.
+fn should_drop_refresh_session_error(err: &SessionError) -> bool {
+    matches!(err.io_kind(), Some(io::ErrorKind::InvalidData))
 }
 
 #[cfg(test)]
@@ -350,13 +374,21 @@ mod tests {
         encode_message(Message::Pong { payload: &[] }, &mut frame).unwrap();
         let msg = OwnedMessageBuf::new(MessageType::Pong, frame);
         let err = is_matching_pong(&msg, 0x1234).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        // A malformed pong surfaces as a preserved `PayloadError` (typed), not
+        // an `io::ErrorKind::InvalidData`. The proto decode source survives.
+        assert!(matches!(err, SessionError::Payload(_)));
+        // It is not droppable as a transient UDP packet error (it has no
+        // io::ErrorKind), so the refresh probe propagates it.
+        assert!(!should_drop_refresh_session_error(&err));
     }
 
     #[test]
     fn refresh_drops_invalid_udp_errors() {
         let err = io::Error::new(io::ErrorKind::InvalidData, "replay");
-        assert!(should_drop_refresh_udp_error(&err));
+        assert!(should_drop_refresh_udp_io_error(&err));
+        // The same InvalidData wrapped in a SessionError is also droppable.
+        let session_err = SessionError::from(err);
+        assert!(should_drop_refresh_session_error(&session_err));
     }
 
     #[test]
@@ -368,88 +400,50 @@ mod tests {
             io::ErrorKind::BrokenPipe,
         ] {
             let err = io::Error::new(kind, "transport failure");
-            assert!(!should_drop_refresh_udp_error(&err));
+            assert!(!should_drop_refresh_udp_io_error(&err));
+            // Wrapped in a SessionError, still not droppable.
+            let session_err = SessionError::from(io::Error::new(kind, "transport failure"));
+            assert!(!should_drop_refresh_session_error(&session_err));
         }
     }
 
-    /// Test unexpected `register_ok` error properties.
+    /// Typed (non-I/O) session errors are never droppable as transient UDP
+    /// packet errors: they have no `io::ErrorKind`, so a proto decode failure
+    /// or protocol violation propagates out of the refresh probe.
     #[test]
-    fn unexpected_register_ok_error_kind() {
-        let err = io::Error::new(
-            io::ErrorKind::InvalidData,
+    fn refresh_does_not_drop_typed_session_errors() {
+        let proto = SessionError::Payload(slt_core::proto::PayloadError::InvalidCipher(0x99));
+        assert!(!should_drop_refresh_session_error(&proto));
+        let violation = SessionError::ProtocolViolation { detail: "x" };
+        assert!(!should_drop_refresh_session_error(&violation));
+    }
+
+    /// The unexpected-message branches in `handle_udp_message` emit
+    /// `SessionError::ProtocolViolation` with specific `detail` strings (these
+    /// are the variants the producer builds, not synthetic io::Errors). Each
+    /// must project to the fatal `ProtocolError` exit and render its detail, so
+    /// the terminal `{:#}` report is stage-specific rather than a bare
+    /// `io::ErrorKind`.
+    #[test]
+    fn udp_unexpected_message_variants_are_typed_protocol_violations() {
+        use crate::runtime::session::SessionExit;
+
+        for detail in [
             "unexpected register_ok on udp-qsp transport",
-        );
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    /// Test unexpected `register_fail` error properties.
-    #[test]
-    fn unexpected_register_fail_error_kind() {
-        let err = io::Error::new(
-            io::ErrorKind::InvalidData,
             "unexpected register_fail on udp-qsp transport",
-        );
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    /// Test unexpected control message error properties.
-    #[test]
-    fn unexpected_control_message_error_kind() {
-        let err = io::Error::new(
-            io::ErrorKind::InvalidData,
             "unexpected control message on udp-qsp transport",
-        );
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
-
-    mod handle_udp_error_logic {
-        use super::*;
-
-        /// Test that `InvalidData` errors are considered recoverable (dropped).
-        #[test]
-        fn invalid_data_is_recoverable_kind() {
-            // InvalidData is used for packet-level issues (replay, crypto failures)
-            // and should be dropped, not trigger fallback
-            let err = io::Error::new(io::ErrorKind::InvalidData, "replay detected");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        }
-
-        /// Test that non-InvalidData errors trigger fallback when TCP is alive.
-        #[test]
-        fn non_invalid_data_triggers_fallback() {
-            // Errors other than InvalidData should trigger TCP fallback
-            let non_recoverable_kinds = [
-                io::ErrorKind::ConnectionReset,
-                io::ErrorKind::BrokenPipe,
-                io::ErrorKind::TimedOut,
-                io::ErrorKind::ConnectionAborted,
-            ];
-
-            for kind in non_recoverable_kinds {
-                let err = io::Error::new(kind, "test");
-                assert_ne!(
-                    err.kind(),
-                    io::ErrorKind::InvalidData,
-                    "{kind:?} should not be InvalidData"
-                );
-            }
-        }
-
-        /// Test error kinds that would trigger session closure when TCP is dead.
-        #[test]
-        fn fatal_errors_when_tcp_dead() {
-            // When TCP is dead, these errors should cause session closure
-            let fatal_kinds = [
-                io::ErrorKind::ConnectionReset,
-                io::ErrorKind::BrokenPipe,
-                io::ErrorKind::TimedOut,
-            ];
-
-            for kind in fatal_kinds {
-                let err = io::Error::new(kind, "test");
-                // The logic is: if err.kind() != InvalidData && !tcp_alive -> false
-                assert_ne!(err.kind(), io::ErrorKind::InvalidData);
-            }
+        ] {
+            let err = SessionError::ProtocolViolation { detail };
+            assert_eq!(err.exit(), SessionExit::ProtocolError);
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("session protocol violation"),
+                "missing stage framing: {rendered:?}"
+            );
+            assert!(
+                rendered.contains(detail),
+                "missing producer detail: {rendered:?}"
+            );
         }
     }
 
@@ -476,84 +470,6 @@ mod tests {
         fn explicit_transport_values_are_stable() {
             assert_eq!(ActiveTransport::Tcp, ActiveTransport::Tcp);
             assert_eq!(ActiveTransport::UdpQsp, ActiveTransport::UdpQsp);
-        }
-    }
-
-    mod error_recovery_paths {
-        use super::*;
-
-        /// Test that `ConnectionAborted` (dead channel) is fatal when TCP is dead.
-        #[test]
-        fn connection_aborted_is_fatal_when_tcp_dead() {
-            let err = io::Error::new(io::ErrorKind::ConnectionAborted, "dead channel");
-            // ConnectionAborted is NOT InvalidData
-            assert_ne!(err.kind(), io::ErrorKind::InvalidData);
-            // When TCP is dead, this should cause session closure
-        }
-
-        /// Test that `InvalidData` errors are recoverable regardless of TCP state.
-        #[test]
-        fn invalid_data_is_always_recoverable() {
-            let recoverable_errors = [
-                "replay detected",
-                "too old",
-                "crypto error",
-                "packet number overflow",
-            ];
-
-            for msg in recoverable_errors {
-                let err = io::Error::new(io::ErrorKind::InvalidData, msg);
-                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-            }
-        }
-
-        /// Test that non-fatal errors trigger TCP fallback when TCP is alive.
-        #[test]
-        fn non_invalid_data_triggers_tcp_fallback_when_alive() {
-            let fallback_kinds = [
-                io::ErrorKind::ConnectionReset,
-                io::ErrorKind::BrokenPipe,
-                io::ErrorKind::TimedOut,
-                io::ErrorKind::ConnectionAborted,
-            ];
-
-            for kind in fallback_kinds {
-                let err = io::Error::new(kind, "test");
-                // These are NOT InvalidData, so they trigger fallback logic
-                assert_ne!(err.kind(), io::ErrorKind::InvalidData);
-            }
-        }
-
-        /// Test the error kind classification for UDP-QSP errors.
-        #[test]
-        fn udp_qsp_error_classification() {
-            // Recoverable: packet-level issues (drop and continue)
-            let recoverable_kinds = [io::ErrorKind::InvalidData];
-
-            // Potentially fatal: depends on TCP state
-            let potentially_fatal_kinds = [
-                io::ErrorKind::ConnectionReset,
-                io::ErrorKind::BrokenPipe,
-                io::ErrorKind::TimedOut,
-                io::ErrorKind::ConnectionAborted,
-            ];
-
-            // Verify classification
-            for kind in recoverable_kinds {
-                assert_eq!(
-                    kind,
-                    io::ErrorKind::InvalidData,
-                    "only InvalidData is always recoverable"
-                );
-            }
-
-            for kind in potentially_fatal_kinds {
-                assert_ne!(
-                    kind,
-                    io::ErrorKind::InvalidData,
-                    "non-InvalidData errors may be fatal"
-                );
-            }
         }
     }
 }

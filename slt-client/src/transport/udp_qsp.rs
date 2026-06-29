@@ -134,8 +134,13 @@ impl<I: SessionIo> UdpQspTransport<I> {
     /// - Packet number overflows
     pub async fn write_message(&mut self, message: slt_core::proto::Message<'_>) -> io::Result<()> {
         self.write_buf.clear();
-        slt_core::proto::encode_message(message, &mut self.write_buf)
-            .map_err(crate::wire::map_frame_error)?;
+        slt_core::proto::encode_message(message, &mut self.write_buf).map_err(|err| {
+            // TODO(phase-3): propagate `FrameError` via a typed UDP-QSP
+            // transport error instead of flattening to `io::ErrorKind::InvalidData`.
+            // Inlined from the deleted `wire.rs::map_frame_error` to keep the
+            // UDP-QSP transport's public API unchanged until phase 3 types it.
+            io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
+        })?;
 
         let tx_phase_before = self.session.tx_key_phase();
         match self.session.send(&self.write_buf).await {
@@ -201,7 +206,15 @@ impl<I: SessionIo> UdpQspTransport<I> {
                     io::ErrorKind::InvalidData,
                     "udp-qsp message incomplete",
                 )),
-                Err(err) => Err(crate::wire::map_message_error(err)),
+                // TODO(phase-3): propagate `MessageError` via a typed UDP-QSP
+                // transport error instead of flattening to
+                // `io::ErrorKind::InvalidData`. Inlined from the deleted
+                // `wire.rs::map_message_error` to keep the UDP-QSP transport's
+                // public API unchanged until phase 3 types it.
+                Err(err) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("message error: {err:?}"),
+                )),
             }
         };
         // Check for key phase transition by comparing session state before/after recv

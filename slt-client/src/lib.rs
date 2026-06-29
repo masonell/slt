@@ -35,7 +35,6 @@ mod metrics;
 mod runtime;
 mod transport;
 mod tun;
-mod wire;
 
 #[cfg(test)]
 mod test_support;
