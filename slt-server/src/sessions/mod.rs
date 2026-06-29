@@ -189,7 +189,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     }
 
     fn pong_payload_for_ping(payload: &[u8]) -> Result<[u8; 8], SessionError> {
-        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        // PayloadError flows via #[from], preserving the proto detail (was
+        // map_payload_error).
         let ping = PingPayload::decode(payload)?;
         Ok(ping.nonce.to_be_bytes())
     }

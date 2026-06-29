@@ -45,9 +45,9 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// - Payload decoding fails (invalid payload data)
     pub(super) async fn handle_tcp_read(&mut self) -> Result<SessionControl, SessionError> {
         loop {
-            // MessageError flows via the manual `From<MessageError> for
-            // SessionError` impl, preserving the proto detail instead of
-            // flattening to `io::ErrorKind::InvalidData`.
+            // MessageError flows via `#[from]` on `SessionError::Message`,
+            // preserving the proto detail instead of flattening to
+            // `io::ErrorKind::InvalidData`.
             let Some(msg_buf) = self.tcp.try_pop_message(self.limits)? else {
                 return Ok(SessionControl::Continue);
             };

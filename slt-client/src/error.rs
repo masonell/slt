@@ -275,42 +275,20 @@ pub enum ConnectError {
     Io(#[from] io::Error),
 
     // slt-core protocol errors are preserved, not flattened. These replace the
-    // duplicated `wire.rs` `map_*` mappers on the auth call sites.
-    //
-    // `FrameError` implements `std::error::Error` (it derives `thiserror`),
-    // so it flows via `#[from]`. `MessageError` and `PayloadError` do not (they
-    // are plain `Copy` enums in `slt-core` without `Display`/`Error` impls);
-    // they are preserved by value with a `Debug`-format `Display`, which keeps
-    // their structured payload (lengths, invalid byte, etc.) instead of
-    // collapsing them into a generic `io::Error`. Making `slt-core`'s proto
-    // errors proper `Error` types is out of scope for phase 1; tracked as a
-    // follow-up so these variants can switch to `#[from]`.
+    // duplicated `wire.rs` `map_*` mappers on the auth call sites. Each is a
+    // real `std::error::Error` in `slt-core` (phase 5 promoted
+    // `MessageError`/`PayloadError`), so all three flow via `#[from]` and their
+    // own `Display` (structured lengths, offending byte, etc.) survives to the
+    // terminal instead of being collapsed into a generic `io::Error`.
     /// Protocol framing error, preserved from `slt_core`.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error, preserved from `slt_core` by value.
-    #[error("protocol message error: {0:?}")]
-    Message(MessageError),
-    /// Protocol payload decode error, preserved from `slt_core` by value.
-    #[error("protocol payload error: {0:?}")]
-    Payload(PayloadError),
-}
-
-// Manual `From` impls so the auth call sites can use `?` to preserve proto
-// errors without the `wire.rs` `map_*` mappers. These exist in addition to the
-// `#[from]` on `FrameError`/`io::Error` because `MessageError`/`PayloadError`
-// do not implement `std::error::Error` in `slt-core` (they are plain `Copy`
-// enums). They are `Copy`, so the conversion is trivial.
-impl From<MessageError> for ConnectError {
-    fn from(err: MessageError) -> Self {
-        Self::Message(err)
-    }
-}
-
-impl From<PayloadError> for ConnectError {
-    fn from(err: PayloadError) -> Self {
-        Self::Payload(err)
-    }
+    /// Protocol message error, preserved from `slt_core` via `#[from]`.
+    #[error(transparent)]
+    Message(#[from] MessageError),
+    /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
+    #[error(transparent)]
+    Payload(#[from] PayloadError),
 }
 
 impl ConnectError {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use slt_core::config::ClientConfig;
-use slt_core::crypto::quic_client_chrome_config_with_ca;
+use slt_core::crypto::{QuicConfigError, quic_client_chrome_config_with_ca};
 use slt_core::types::cid::CidError;
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::net::UdpSocket;
@@ -38,6 +38,14 @@ pub enum QuicDiscoveryError {
     /// QUIC handshake / config failure from `quiche`, preserved via `#[from]`.
     #[error("quic error: {0}")]
     Quiche(#[from] quiche::Error),
+
+    /// QUIC TLS-setup failure (boring context / CA-store / config assembly),
+    /// preserved from `slt_core` rather than collapsed to
+    /// `quiche::Error::TlsFail`. Carries the typed `QuicConfigError`, which in
+    /// turn wraps the boring `ErrorStack` (setup) or the underlying
+    /// `quiche::Error` (config assembly) via `#[source]`.
+    #[error(transparent)]
+    QuicConfig(#[from] QuicConfigError),
 
     /// Connection-ID construction failure, preserved via `#[from]`.
     #[error("cid error: {0}")]
@@ -87,7 +95,9 @@ impl QuicDiscoveryError {
             Self::Cancelled => io::Error::new(io::ErrorKind::Interrupted, self),
             Self::NoPeers => io::Error::new(io::ErrorKind::NotFound, self),
             Self::EmptyHostname => io::Error::new(io::ErrorKind::InvalidInput, self),
-            Self::Quiche(_) | Self::Cid(_) => io::Error::new(io::ErrorKind::InvalidData, self),
+            Self::Quiche(_) | Self::QuicConfig(_) | Self::Cid(_) => {
+                io::Error::new(io::ErrorKind::InvalidData, self)
+            }
         }
     }
 }
@@ -362,5 +372,50 @@ mod tests {
         let calls = protector.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, SocketKind::Udp);
+    }
+
+    /// `QuicConfigError` converts to [`QuicDiscoveryError::QuicConfig`] via
+    /// `#[from]`, and the discovery boundary classifies it as `InvalidData`
+    /// (matching the old `quiche::Error::TlsFail` routing the typed error
+    /// replaced). Pins both the conversion and the `into_io` classification so
+    /// the preserved `ErrorStack`-carrying failure reaches callers with the
+    /// right retry kind without being collapsed at the source.
+    #[test]
+    fn quic_config_error_converts_to_discovery_error_as_invalid_data() {
+        use boring::error::ErrorStack;
+
+        let setup: QuicConfigError = QuicConfigError::from(ErrorStack::internal_error(
+            io::Error::other("boring tls setup boom"),
+        ));
+        let err: QuicDiscoveryError = setup.into();
+        assert!(
+            matches!(err, QuicDiscoveryError::QuicConfig(_)),
+            "From<QuicConfigError> must produce QuicDiscoveryError::QuicConfig, got {err:?}"
+        );
+        // The preserved ErrorStack survives into the io::Error message at the
+        // module boundary (the structured Display, not a bare kind).
+        let io_err = err.into_io();
+        assert_eq!(
+            io_err.kind(),
+            io::ErrorKind::InvalidData,
+            "QuicConfig must classify as InvalidData at the discovery boundary"
+        );
+        assert!(
+            io_err.to_string().contains("boring tls setup boom"),
+            "ErrorStack text must survive the boundary conversion: {}",
+            io_err
+        );
+
+        // The quiche-shaped QuicConfigError also routes to InvalidData.
+        let quiche: QuicDiscoveryError = QuicConfigError::from(quiche::Error::TlsFail).into();
+        assert!(matches!(
+            quiche,
+            QuicDiscoveryError::QuicConfig(QuicConfigError::Quiche(quiche::Error::TlsFail))
+        ));
+        assert_eq!(
+            quiche.into_io().kind(),
+            io::ErrorKind::InvalidData,
+            "QuicConfig(Quiche) must classify as InvalidData at the discovery boundary"
+        );
     }
 }

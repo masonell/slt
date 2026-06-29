@@ -288,7 +288,8 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
     {
-        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        // PayloadError flows via #[from], preserving the proto detail (was
+        // map_payload_error).
         let auth = AuthPayload::decode(payload)?;
         trace!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, "processing auth message");
 
@@ -322,7 +323,8 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
-        // PayloadError flows via the manual From impl, replacing map_payload_error.
+        // PayloadError flows via #[from], preserving the proto detail (was
+        // map_payload_error).
         let ping_in = PingPayload::decode(payload)?;
         trace!(nonce = ping_in.nonce, "received ping during auth phase");
 

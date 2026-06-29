@@ -176,18 +176,24 @@ impl MessageLimits {
 }
 
 /// Message-level errors for encode/decode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// This is a real [`std::error::Error`] type (it derives [`thiserror::Error`])
+/// so downstream layers can preserve it via `#[from]` rather than flattening it
+/// into an `io::Error`. It stays `Copy` — callers rely on that, and `thiserror`
+/// is compatible with `Copy` enums as long as every field is `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MessageError {
     /// Framing error while decoding.
-    Frame(FrameError),
+    #[error(transparent)]
+    Frame(#[from] FrameError),
     /// `DATA` payload length exceeds the allowed maximum.
-    DataTooLarge { len: usize, max: usize },
-}
-
-impl From<FrameError> for MessageError {
-    fn from(err: FrameError) -> Self {
-        Self::Frame(err)
-    }
+    #[error("data payload length {len} exceeds maximum {max}")]
+    DataTooLarge {
+        /// Actual payload length decoded from the frame.
+        len: usize,
+        /// Configured maximum payload length for `DATA` messages.
+        max: usize,
+    },
 }
 
 /// Decode a single message from the provided buffer.
@@ -352,6 +358,45 @@ mod tests {
         assert_eq!(
             decode_message(&buf, limits),
             Err(MessageError::DataTooLarge { len: 16, max: 8 })
+        );
+    }
+
+    /// `MessageError` is now a real `std::error::Error` (phase 5 promotion) and
+    /// its `Frame` variant converts from `FrameError` via `#[from]`. Pins the
+    /// conversion and the `Display` shape so downstream `#[from]` propagation
+    /// stays valid and the structured detail reaches the terminal.
+    #[test]
+    fn frame_error_converts_to_message_error_via_from() {
+        let frame_err = FrameError::UnknownType(0xAB);
+        let err: MessageError = frame_err.into();
+        assert!(
+            matches!(err, MessageError::Frame(FrameError::UnknownType(0xAB))),
+            "From<FrameError> must produce MessageError::Frame, got {err:?}"
+        );
+        // MessageError is now an Error: its own Display carries the structured
+        // detail (the variant is #[error(transparent)], so it delegates to
+        // FrameError's Display). The structured values survive to the terminal
+        // {:#} render — the property the design requires ("preserve, don't
+        // stringify").
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("unknown frame type"),
+            "MessageError Display must carry the frame detail: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("0xab"),
+            "MessageError Display must carry the offending byte: {rendered:?}"
+        );
+        // Note: `source()` is intentionally `None` here. thiserror forbids
+        // combining `#[error(transparent)]` with `#[source]` on the same
+        // variant ("transparent variant can't contain #[source]"), so a
+        // transparent `Copy` variant exposes its inner value via `Display`
+        // only — not via the `source()` chain. The structured detail still
+        // reaches logs/UI through `{:#}`, which is the load-bearing contract;
+        // do NOT "fix" this by adding `#[source]`.
+        assert!(
+            std::error::Error::source(&err).is_none(),
+            "transparent MessageError::Frame must not expose a source (thiserror rule)"
         );
     }
 

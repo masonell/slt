@@ -110,13 +110,13 @@ impl TlsError {
 /// only the genuine failure paths: TLS handshake/setup faults, the auth-phase
 /// timeout, a peer disconnect, socket I/O, and protocol decode errors.
 ///
-/// The slt-core protocol errors are preserved, not flattened: `FrameError`
-/// flows via `#[from]` (it is a `thiserror::Error` type), while `MessageError`
-/// and `PayloadError` are plain `Copy` enums in `slt-core` without
-/// `Display`/`Error` impls, so they are stored by value with a `Debug`-format
-/// `Display` — mirroring the phase 1–3 client idiom. Promoting them to proper
-/// `Error` types is phase 5; the by-value + manual `From` impls here switch to
-/// `#[from]` then.
+/// The slt-core protocol errors are preserved, not flattened: `FrameError`,
+/// `MessageError`, and `PayloadError` are all real `thiserror::Error` types in
+/// `slt-core` (phase 5 promoted the latter two), so each flows via `#[from]`
+/// and its own `Display` survives to the terminal — mirroring the phase 1–3
+/// client idiom. (Before phase 5, `MessageError`/`PayloadError` were plain
+/// `Copy` enums stored by value with a `Debug`-format `Display`; phase 5 made
+/// them real `Error` types and switched these variants to `#[from]`.)
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     /// TLS handshake (server-side `accept`) failed.
@@ -166,34 +166,19 @@ pub enum AuthError {
     },
 
     // slt-core protocol errors are preserved, not flattened. These replace the
-    // duplicated `auth/errors.rs` `map_*` mappers. See the module docs for why
-    // `MessageError`/`PayloadError` are by-value rather than `#[from]`.
+    // duplicated `auth/errors.rs` `map_*` mappers. Each is a real
+    // `std::error::Error` in `slt-core` (phase 5 promoted
+    // `MessageError`/`PayloadError`), so all three flow via `#[from]` and their
+    // own `Display` survives to the terminal.
     /// Protocol framing error, preserved from `slt_core`.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error, preserved from `slt_core` by value.
-    #[error("protocol message error: {0:?}")]
-    Message(MessageError),
-    /// Protocol payload decode error, preserved from `slt_core` by value.
-    #[error("protocol payload error: {0:?}")]
-    Payload(PayloadError),
-}
-
-// Manual `From` impls so the auth call sites can use `?` to preserve proto
-// decode errors without the `map_*` mappers. These exist in addition to the
-// `#[from]` on `FrameError` because `MessageError`/`PayloadError` do not
-// implement `std::error::Error` in `slt-core` (they are plain `Copy` enums),
-// so they cannot use `#[from]`. They are `Copy`, so the conversion is trivial.
-impl From<MessageError> for AuthError {
-    fn from(err: MessageError) -> Self {
-        Self::Message(err)
-    }
-}
-
-impl From<PayloadError> for AuthError {
-    fn from(err: PayloadError) -> Self {
-        Self::Payload(err)
-    }
+    /// Protocol message error, preserved from `slt_core` via `#[from]`.
+    #[error(transparent)]
+    Message(#[from] MessageError),
+    /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
+    #[error(transparent)]
+    Payload(#[from] PayloadError),
 }
 
 impl AuthError {
@@ -368,11 +353,26 @@ mod tests {
             len: 9999,
             max: 1500,
         });
-        assert!(format!("{msg:#}").contains("9999"));
+        let rendered = format!("{msg:#}");
+        // Phase 5 promoted `MessageError` to a real `Error` with its own
+        // `Display`; the structured lengths survive to the terminal render.
+        // (Checking "data payload length" / "1500" too — not just "9999", which
+        // the old Debug-format rendering also carried and so is not load-bearing
+        // evidence of the new Display.)
+        assert!(
+            rendered.contains("data payload length"),
+            "msg: {rendered:?}"
+        );
+        assert!(rendered.contains("9999"), "msg: {rendered:?}");
+        assert!(rendered.contains("1500"), "msg: {rendered:?}");
 
         let payload = AuthError::Payload(PayloadError::InvalidCipher(0x99));
         let rendered = format!("{payload:#}");
-        assert!(rendered.contains("InvalidCipher"), "payload: {rendered:?}");
+        assert!(
+            rendered.contains("unknown cipher suite"),
+            "payload: {rendered:?}"
+        );
+        assert!(rendered.contains("0x99"), "payload: {rendered:?}");
 
         // The boring ErrorStack is preserved as the source of ChallengeExport,
         // not formatted into an opaque string.

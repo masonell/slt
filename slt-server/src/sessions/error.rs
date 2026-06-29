@@ -57,10 +57,9 @@ use slt_core::proto::{FrameError, MessageError, PayloadError};
 /// and for faithful terminal `{:#}` display.
 ///
 /// The slt-core protocol errors are preserved, not flattened: `FrameError`
-/// flows via `#[from]` (it is a `thiserror::Error` type), while `MessageError`
-/// is a plain `Copy` enum in `slt-core` without `Display`/`Error` impls, so it
-/// is stored by value with a `Debug`-format `Display` — mirroring the client
-/// idiom. Promoting it to a proper `Error` type is phase 5.
+/// and `MessageError` are both real `thiserror::Error` types in `slt-core`
+/// (phase 5 promoted `MessageError`), so each flows via `#[from]` and its own
+/// `Display` survives to the terminal.
 #[derive(Debug, thiserror::Error)]
 pub enum UdpQspError {
     /// UDP-QSP session failure: a replayed/too-old packet number, a packet
@@ -82,24 +81,12 @@ pub enum UdpQspError {
     #[error(transparent)]
     Frame(#[from] FrameError),
 
-    /// Protocol message encode/decode error, preserved from `slt_core` by value.
-    /// `MessageError` is a plain `Copy` enum in `slt-core` without
-    /// `Display`/`Error`, so it is stored by value with a `Debug`-format
-    /// `Display` (matching the client idiom); phase 5 promotes it to a real
-    /// `Error` type and this switches to `#[from]`.
-    #[error("protocol message error: {0:?}")]
-    Message(MessageError),
-}
-
-// Manual `From` impl so the proto encode call sites can use `?` to preserve
-// `MessageError` without a flattening mapper. Mirrors the client handling:
-// `MessageError` does not implement `std::error::Error` in `slt-core` (it is a
-// plain `Copy` enum), so it cannot use `#[from]`. It is `Copy`, so the
-// conversion is trivial.
-impl From<MessageError> for UdpQspError {
-    fn from(err: MessageError) -> Self {
-        Self::Message(err)
-    }
+    /// Protocol message encode/decode error, preserved from `slt_core` via
+    /// `#[from]`. `MessageError` is now a real `std::error::Error` in
+    /// `slt-core` (phase 5 promoted it), so its own `Display` survives to the
+    /// terminal.
+    #[error(transparent)]
+    Message(#[from] MessageError),
 }
 
 /// A failure from an established server-side client session.
@@ -111,11 +98,10 @@ impl From<MessageError> for UdpQspError {
 /// the session's terminal log unchanged rather than being round-tripped through
 /// `io::Error::new(...)`.
 ///
-/// The slt-core protocol errors are preserved, not flattened: `FrameError`
-/// flows via `#[from]`, while `MessageError` and `PayloadError` are plain `Copy`
-/// enums in `slt-core` without `Display`/`Error` impls, so they are stored by
-/// value with a `Debug`-format `Display` — mirroring the client idiom. Promoting
-/// them to proper `Error` types is phase 5.
+/// The slt-core protocol errors are preserved, not flattened: `FrameError`,
+/// `MessageError`, and `PayloadError` are all real `thiserror::Error` types in
+/// `slt-core` (phase 5 promoted the latter two), so each flows via `#[from]`
+/// and its own `Display` survives to the terminal.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     /// Client-detected protocol violation on the session path.
@@ -158,34 +144,19 @@ pub enum SessionError {
     Io(#[from] io::Error),
 
     // slt-core protocol errors are preserved, not flattened. These replace the
-    // `sessions/mod.rs` `map_*` mappers on the session call sites. See the
-    // module docs for why `MessageError`/`PayloadError` are by-value.
+    // `sessions/mod.rs` `map_*` mappers on the session call sites. Each is a
+    // real `std::error::Error` in `slt-core` (phase 5 promoted
+    // `MessageError`/`PayloadError`), so all three flow via `#[from]` and their
+    // own `Display` survives to the terminal.
     /// Protocol framing error, preserved from `slt_core`.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error, preserved from `slt_core` by value.
-    #[error("protocol message error: {0:?}")]
-    Message(MessageError),
-    /// Protocol payload decode error, preserved from `slt_core` by value.
-    #[error("protocol payload error: {0:?}")]
-    Payload(PayloadError),
-}
-
-// Manual `From` impls so session call sites can use `?` to preserve proto
-// decode errors without the `map_*` mappers. These mirror the auth handling:
-// `MessageError`/`PayloadError` do not implement `std::error::Error` in
-// `slt-core` (they are plain `Copy` enums), so they cannot use `#[from]`; they
-// are `Copy`, so the conversion is trivial.
-impl From<MessageError> for SessionError {
-    fn from(err: MessageError) -> Self {
-        Self::Message(err)
-    }
-}
-
-impl From<PayloadError> for SessionError {
-    fn from(err: PayloadError) -> Self {
-        Self::Payload(err)
-    }
+    /// Protocol message error, preserved from `slt_core` via `#[from]`.
+    #[error(transparent)]
+    Message(#[from] MessageError),
+    /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
+    #[error(transparent)]
+    Payload(#[from] PayloadError),
 }
 
 #[cfg(test)]
@@ -272,11 +243,18 @@ mod tests {
             len: 9999,
             max: 1500,
         });
-        assert!(format!("{msg:#}").contains("9999"));
+        let rendered = format!("{msg:#}");
+        // Phase 5 promoted `MessageError` to a real `Error` with its own
+        // `Display`; the structured lengths survive to the terminal render.
+        assert!(rendered.contains("9999"), "msg: {rendered:?}");
 
         let payload = SessionError::Payload(PayloadError::InvalidCipher(0x99));
         let rendered = format!("{payload:#}");
-        assert!(rendered.contains("InvalidCipher"), "payload: {rendered:?}");
+        assert!(
+            rendered.contains("unknown cipher suite"),
+            "payload: {rendered:?}"
+        );
+        assert!(rendered.contains("0x99"), "payload: {rendered:?}");
     }
 
     /// Manual `From` impls let the session call sites use `?` for proto decode

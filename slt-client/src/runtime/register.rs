@@ -66,8 +66,8 @@ pub(super) fn prepare_udp_qsp_registration(
     };
 
     let mut payload_buf = Vec::new();
-    // PayloadError flows via the manual `From<PayloadError> for SessionError`
-    // impl, preserving the proto detail instead of flattening to an io::Error.
+    // PayloadError flows via `#[from]` on `SessionError::Payload`, preserving
+    // the proto detail instead of flattening to an io::Error.
     payload.encode(&mut payload_buf)?;
 
     // Reverse key directions: the payload is expressed in the server's (tx/rx) terms.

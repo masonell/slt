@@ -253,6 +253,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin, K: KeyUpdater> TcpChannel<S, K> {
         self.key_updater
             .maybe_request_key_update(self.stream.ssl_mut())?;
         self.write_buf.clear();
+        // TODO(phase-5.1): this is the last live `FrameError -> io::Error`
+        // flattening (server TCP path). Phase 5 promoted `FrameError` to a real
+        // `Error` and switched every other proto site to `#[from]`; this one
+        // remains because `TcpChannel::write_message` returns `io::Result<()>`
+        // and is consumed by both client and server TCP paths (and by
+        // `slt-client/src/test_support/server.rs`). Phase 5.1: flip
+        // `TcpChannel::write_message` to a typed write error, thread it to
+        // `SessionError::Frame` (and the server `AuthError`/`SessionError`)
+        // via `#[from]`, then delete `map_frame_error`/`map_message_error`/
+        // `map_payload_error` and their tests, and migrate
+        // `slt-client/src/test_support/server.rs` off them.
         encode_message(message, &mut self.write_buf).map_err(map_frame_error)?;
         self.stream.write_all(&self.write_buf).await
     }

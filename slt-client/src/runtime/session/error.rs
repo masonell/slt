@@ -31,13 +31,14 @@ use crate::transport::udp_qsp::UdpQspError;
 /// [`SessionExit`](super::SessionExit); like [`crate::error::ConnectError::stage`]
 /// it can never disagree with the variant because it is derived from it.
 ///
-/// The slt-core protocol errors are preserved, not flattened: `FrameError`
-/// flows via `#[from]` (it is a `thiserror::Error` type), while `MessageError`
-/// and `PayloadError` are plain `Copy` enums in `slt-core` without
-/// `Display`/`Error` impls, so they are stored by value with a `Debug`-format
-/// `Display` — mirroring the phase-1 [`crate::error::ConnectError`] handling.
-/// Promoting them to proper `Error` types is phase 5; the by-value + manual
-/// `From` impls here switch to `#[from]` then.
+/// The slt-core protocol errors are preserved, not flattened: `FrameError`,
+/// `MessageError`, and `PayloadError` are all real `thiserror::Error` types in
+/// `slt-core` (phase 5 promoted the latter two), so each flows via `#[from]`
+/// and its own `Display` survives to the terminal — mirroring the phase-1
+/// [`crate::error::ConnectError`] handling. (Before phase 5, `MessageError`/
+/// `PayloadError` were plain `Copy` enums stored by value with a `Debug`-format
+/// `Display`; phase 5 made them real `Error` types and switched these variants
+/// to `#[from]`.)
 ///
 /// The UDP-QSP transport failure flows via [`Self::UdpQsp`] (phase 3): the typed
 /// [`UdpQspError`] preserves the `slt-core` `QspSessionError`/`QspCryptoError`
@@ -128,34 +129,19 @@ pub enum SessionError {
     Crypto(#[from] ErrorStack),
 
     // slt-core protocol errors are preserved, not flattened. These replace the
-    // `wire.rs` `map_*` mappers on the session call sites. See the module docs
-    // for why `MessageError`/`PayloadError` are by-value rather than `#[from]`.
+    // `wire.rs` `map_*` mappers on the session call sites. Each is a real
+    // `std::error::Error` in `slt-core` (phase 5 promoted
+    // `MessageError`/`PayloadError`), so all three flow via `#[from]` and their
+    // own `Display` survives to the terminal.
     /// Protocol framing error, preserved from `slt_core`.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error, preserved from `slt_core` by value.
-    #[error("protocol message error: {0:?}")]
-    Message(MessageError),
-    /// Protocol payload decode error, preserved from `slt_core` by value.
-    #[error("protocol payload error: {0:?}")]
-    Payload(PayloadError),
-}
-
-// Manual `From` impls so session call sites can use `?` to preserve proto
-// decode errors without the `wire.rs` `map_*` mappers. These mirror the phase-1
-// `ConnectError` handling: `MessageError`/`PayloadError` do not implement
-// `std::error::Error` in `slt-core` (they are plain `Copy` enums), so they
-// cannot use `#[from]`; they are `Copy`, so the conversion is trivial.
-impl From<MessageError> for SessionError {
-    fn from(err: MessageError) -> Self {
-        Self::Message(err)
-    }
-}
-
-impl From<PayloadError> for SessionError {
-    fn from(err: PayloadError) -> Self {
-        Self::Payload(err)
-    }
+    /// Protocol message error, preserved from `slt_core` via `#[from]`.
+    #[error(transparent)]
+    Message(#[from] MessageError),
+    /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
+    #[error(transparent)]
+    Payload(#[from] PayloadError),
 }
 
 impl SessionError {
@@ -395,8 +381,9 @@ mod tests {
             SessionExit::ConnectionError
         );
         // PayloadError buckets under ProtocolError (fatal) to preserve the
-        // pre-refactor behaviour; phase 5 can revisit per-variant policy once
-        // PayloadError is a real `Error` type.
+        // pre-refactor behaviour. Phase 5 promoted `PayloadError` to a real
+        // `Error` type but deliberately did not revisit per-variant exit policy
+        // (behaviour-preserving representation change only).
         assert_eq!(
             SessionError::Payload(PayloadError::InvalidCipher(0x99)).exit(),
             SessionExit::ProtocolError
@@ -514,16 +501,23 @@ mod tests {
             max: 1500,
         });
         let rendered = format!("{msg:#}");
-        assert!(rendered.contains("DataTooLarge"), "msg: {rendered:?}");
+        // Phase 5 promoted `MessageError` to a real `Error` with its own
+        // `Display`, so the structured values (lengths) survive to the terminal
+        // render rather than a `Debug`-format variant name.
+        assert!(
+            rendered.contains("data payload length"),
+            "msg: {rendered:?}"
+        );
         assert!(rendered.contains("9999"), "msg: {rendered:?}");
+        assert!(rendered.contains("1500"), "msg: {rendered:?}");
 
         let payload = SessionError::Payload(PayloadError::InvalidCipher(0x99));
         let rendered = format!("{payload:#}");
-        assert!(rendered.contains("InvalidCipher"), "payload: {rendered:?}");
         assert!(
-            rendered.contains("0x99") || rendered.contains("153"),
+            rendered.contains("unknown cipher suite"),
             "payload: {rendered:?}"
         );
+        assert!(rendered.contains("0x99"), "payload: {rendered:?}");
     }
 
     /// The terminal renders useful, stage-specific detail (peer-relevant

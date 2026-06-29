@@ -26,10 +26,9 @@ use crate::metrics::Metrics;
 /// The slt-core UDP-QSP errors (`QspSessionError`, carrying `QspCryptoError`,
 /// `ReplayError`, the dead-channel signal, and the underlying socket `io::Error`)
 /// are preserved, not flattened: they flow via `#[from]`. The proto encode
-/// errors are likewise preserved (`FrameError` via `#[from]`; `MessageError` by
-/// value with a `Debug`-format `Display`, mirroring the phase-1/2 idiom until
-/// phase 5 promotes `slt-core`'s `MessageError`/`PayloadError` to real `Error`
-/// types).
+/// errors are likewise preserved (`FrameError` and `MessageError` both via
+/// `#[from]`; phase 5 promoted `MessageError` to a real `Error` type, so its
+/// own `Display` survives to the terminal).
 ///
 /// Actual socket I/O on the UDP path keeps using raw `io::Error` (preserved here
 /// via `Io`): the design note scopes this typed error to the *domain* failures —
@@ -81,13 +80,12 @@ pub enum UdpQspError {
     #[error(transparent)]
     Frame(#[from] FrameError),
 
-    /// Protocol message encode/decode error, preserved from `slt_core` by value.
-    /// Fatal. `MessageError` is a plain `Copy` enum in `slt-core` without
-    /// `Display`/`Error`, so it is stored by value with a `Debug`-format
-    /// `Display` (matching the phase-1/2 idiom); phase 5 promotes it to a real
-    /// `Error` type and this switches to `#[from]`.
-    #[error("protocol message error: {0:?}")]
-    Message(MessageError),
+    /// Protocol message encode/decode error, preserved from `slt_core` via
+    /// `#[from]`. Fatal: a version mismatch / corruption that retry won't fix.
+    /// `MessageError` is now a real `std::error::Error` in `slt-core` (phase 5
+    /// promoted it), so its own `Display` survives to the terminal.
+    #[error(transparent)]
+    Message(#[from] MessageError),
 
     /// Received a UDP-QSP packet whose decrypted payload did not contain a
     /// complete framed message. The session dropped the partial packet.
@@ -195,17 +193,6 @@ impl UdpQspError {
     #[must_use]
     pub const fn is_dead_channel(&self) -> bool {
         matches!(self, Self::Qsp(QspSessionError::DeadChannel))
-    }
-}
-
-// Manual `From` impl so the proto encode call sites can use `?` to preserve
-// `MessageError` without a flattening mapper. Mirrors the phase-1/2
-// `ConnectError`/`SessionError` handling: `MessageError` does not implement
-// `std::error::Error` in `slt-core` (it is a plain `Copy` enum), so it cannot
-// use `#[from]`. It is `Copy`, so the conversion is trivial.
-impl From<MessageError> for UdpQspError {
-    fn from(err: MessageError) -> Self {
-        Self::Message(err)
     }
 }
 
@@ -333,7 +320,7 @@ impl<I: SessionIo> UdpQspTransport<I> {
         message: slt_core::proto::Message<'_>,
     ) -> Result<(), UdpQspError> {
         self.write_buf.clear();
-        // FrameError flows via `#[from]`; MessageError via the manual `From`.
+        // FrameError and MessageError both flow via `#[from]`.
         slt_core::proto::encode_message(message, &mut self.write_buf)?;
 
         let tx_phase_before = self.session.tx_key_phase();
@@ -406,7 +393,7 @@ impl<I: SessionIo> UdpQspTransport<I> {
                     Ok((message.ty(), opened.payload[..consumed].to_vec()))
                 }
                 Ok(None) => Err(UdpQspError::IncompleteMessage),
-                // MessageError flows via the manual `From`.
+                // MessageError flows via `#[from]`.
                 Err(err) => Err(err.into()),
             }
         };
