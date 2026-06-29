@@ -208,7 +208,7 @@ impl From<AuthError> for io::Error {
     /// `AuthPhaseResult::into_io_result` flattening: the structured error is
     /// preserved as the `io::Error`'s inner source (via `io::Error::new(kind,
     /// error)`), so the cause chain survives for `{:#}` and the kind matches the
-    /// variant's [`io_kind`](Self::io_kind).
+    /// variant's `AuthError::io_kind`.
     fn from(err: AuthError) -> Self {
         let kind = err.io_kind();
         Self::new(kind, err)

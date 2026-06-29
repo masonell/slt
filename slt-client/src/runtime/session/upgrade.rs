@@ -268,19 +268,23 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
 
             let ok = RegisterOkPayload::decode(payload)?;
             if ok.client_to_server_cid != quic_ids.dcid {
+                // Carry the offending value (the mismatched DCIDs) into the
+                // terminal report rather than discarding it. `Cow::Owned`
+                // formats the two CIDs into the detail string.
                 return Err(SessionError::ProtocolViolation {
-                    detail: "register_ok client_to_server_cid mismatch",
+                    detail: format!(
+                        "register_ok client_to_server_cid mismatch: expected={:?}, got={:?}",
+                        quic_ids.dcid, ok.client_to_server_cid,
+                    )
+                    .into(),
                 });
             }
 
-            let session =
-                in_flight
-                    .prepared
-                    .session
-                    .take()
-                    .ok_or(SessionError::ProtocolViolation {
-                        detail: "udp-qsp session missing",
-                    })?;
+            let session = in_flight.prepared.session.take().ok_or_else(|| {
+                SessionError::ProtocolViolation {
+                    detail: "udp-qsp session missing".into(),
+                }
+            })?;
             (quic_ids, session)
         };
 
@@ -858,6 +862,12 @@ mod tests {
     /// emit `SessionError::ProtocolViolation` with specific `detail` strings
     /// (the variants the producer builds, not synthetic io::Errors). Each must
     /// project to the fatal `ProtocolError` exit and render its detail.
+    ///
+    /// The DCID-mismatch site formats the offending value into a `Cow::Owned`
+    /// detail (verified separately by `register_ok_dcid_mismatch_carries_value`);
+    /// the strings iterated here are the common prefixes both producer shapes
+    /// render, so the substring assertion holds for the literal and the owned
+    /// shape alike.
     #[test]
     fn register_ok_failure_variants_are_typed_protocol_violations() {
         use crate::runtime::session::SessionExit;
@@ -866,7 +876,9 @@ mod tests {
             "register_ok client_to_server_cid mismatch",
             "udp-qsp session missing",
         ] {
-            let err = SessionError::ProtocolViolation { detail };
+            let err = SessionError::ProtocolViolation {
+                detail: detail.into(),
+            };
             assert_eq!(err.exit(), SessionExit::ProtocolError);
             let rendered = format!("{err:#}");
             assert!(
@@ -878,6 +890,36 @@ mod tests {
                 "missing producer detail: {rendered:?}"
             );
         }
+    }
+
+    /// The DCID-mismatch producer carries the offending value: the two CIDs are
+    /// formatted into the `Cow::Owned` detail (not discarded). This is the
+    /// phase-minor fix — pin that both the expected and received CID bytes
+    /// survive in the terminal `{:#}` render.
+    #[test]
+    fn register_ok_dcid_mismatch_carries_offending_value() {
+        use slt_core::types::{Cid, MAX_DCID_LEN};
+
+        let expected = Cid::from([0x11; MAX_DCID_LEN]);
+        let got = Cid::from([0x22; MAX_DCID_LEN]);
+        let err = SessionError::ProtocolViolation {
+            detail: format!(
+                "register_ok client_to_server_cid mismatch: expected={expected:?}, got={got:?}",
+            )
+            .into(),
+        };
+        let rendered = format!("{err:#}");
+        // Both offending CID values survive the render (the whole point of
+        // widening `detail` to `Cow<'static, str>`). `Cid`'s `Debug` emits the
+        // raw byte values, so we assert on the decimal byte values.
+        assert!(
+            rendered.contains("17, 17, 17, 17"),
+            "expected CID bytes missing from render: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("34, 34, 34, 34"),
+            "received CID bytes missing from render: {rendered:?}"
+        );
     }
 
     mod backoff_timing {
@@ -992,21 +1034,6 @@ mod tests {
         use slt_core::proto::{RegisterFailCode, RegisterFailPayload};
 
         #[test]
-        fn register_fail_without_in_flight_returns_continue() {
-            // This tests the logic: if no in-flight registration, we just continue
-            // The actual implementation logs and returns Continue
-            let has_in_flight = false;
-            assert!(!has_in_flight);
-        }
-
-        #[test]
-        fn register_ok_without_in_flight_returns_continue() {
-            // This tests the logic: if no in-flight registration, we just continue
-            let has_in_flight = false;
-            assert!(!has_in_flight);
-        }
-
-        #[test]
         fn register_fail_payload_with_unknown_decodes() {
             let buf = [u8::from(RegisterFailCode::Unknown)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
@@ -1018,32 +1045,6 @@ mod tests {
             let buf = [u8::from(RegisterFailCode::NotAuthenticated)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::NotAuthenticated);
-        }
-    }
-
-    mod session_control_behavior {
-        use super::*;
-        use crate::runtime::session::SessionExit;
-
-        #[test]
-        fn register_fail_returns_continue() {
-            // handle_register_fail always returns Continue (it schedules retry internally)
-            let control = SessionControl::Continue;
-            assert_eq!(control, SessionControl::Continue);
-        }
-
-        #[test]
-        fn register_ok_returns_continue_on_success() {
-            // handle_register_ok returns Continue on success
-            let control = SessionControl::Continue;
-            assert_eq!(control, SessionControl::Continue);
-        }
-
-        #[test]
-        fn register_ok_returns_close_on_protocol_error() {
-            // If dcid mismatches, returns error which maps to ProtocolError exit
-            let exit = SessionExit::ProtocolError;
-            assert_eq!(exit, SessionExit::ProtocolError);
         }
     }
 }

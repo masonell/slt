@@ -370,6 +370,7 @@ fn spawn_metrics_task(
                         tun_queue_overflow_drops = snap.tun_queue_overflow_drops,
                         auth_successes = snap.auth_successes,
                         auth_failures = snap.auth_failures,
+                        auth_rejections = snap.auth_rejections,
                         tcp_to_udp = snap.transport_tcp_to_udp,
                         udp_to_tcp = snap.transport_udp_to_tcp,
                         disconnect_idle = snap.disconnect_idle_timeout,

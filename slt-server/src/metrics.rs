@@ -19,6 +19,7 @@ pub struct Metrics {
     tun_queue_overflow_drops: AtomicU64,
     auth_successes: AtomicU64,
     auth_failures: AtomicU64,
+    auth_rejections: AtomicU64,
     transport_tcp_to_udp: AtomicU64,
     transport_udp_to_tcp: AtomicU64,
     disconnect_idle_timeout: AtomicU64,
@@ -53,8 +54,10 @@ pub struct MetricsSnapshot {
     pub upstream_send_failures: u64,
     /// TUN packets dropped because session queue was full.
     pub tun_queue_overflow_drops: u64,
-    /// Authentication failures.
+    /// Authentication failures (all auth-phase failures: rejections + transport/decode).
     pub auth_failures: u64,
+    /// Authentication rejections (genuine `AUTH_FAIL` sent — a subset of `auth_failures`).
+    pub auth_rejections: u64,
     /// Authentication successes.
     pub auth_successes: u64,
     /// TCP -> UDP transport switches.
@@ -151,6 +154,14 @@ impl Metrics {
     pub fn inc_auth_failures(&self) {
         let count = inc(&self.auth_failures);
         trace!(auth_failures = count, "Authentication failed");
+    }
+
+    /// Increment auth rejection counter (genuine `AUTH_FAIL` sent — a subset of
+    /// `auth_failures`; transport/decode failures are `auth_failures` but not
+    /// rejections).
+    pub fn inc_auth_rejections(&self) {
+        let count = inc(&self.auth_rejections);
+        trace!(auth_rejections = count, "Authentication rejected");
     }
 
     /// Increment auth success counter.
@@ -288,6 +299,7 @@ impl Metrics {
             upstream_send_failures: self.upstream_send_failures.load(Ordering::Relaxed),
             tun_queue_overflow_drops: self.tun_queue_overflow_drops.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
+            auth_rejections: self.auth_rejections.load(Ordering::Relaxed),
             auth_successes: self.auth_successes.load(Ordering::Relaxed),
             transport_tcp_to_udp: self.transport_tcp_to_udp.load(Ordering::Relaxed),
             transport_udp_to_tcp: self.transport_udp_to_tcp.load(Ordering::Relaxed),

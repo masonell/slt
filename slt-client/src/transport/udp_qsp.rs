@@ -55,7 +55,7 @@ pub enum UdpQspError {
     /// it would lose the outbound packet and leave the session sending over a
     /// path that just failed, so it propagates to TCP fallback (or close if TCP
     /// is dead), matching the pre-refactor behaviour. Constructed only by
-    /// [`Self::write_message`], which re-wraps `QspSessionError::Io` from
+    /// `UdpQspTransport::write_message`, which re-wraps `QspSessionError::Io` from
     /// `session.send` here so the send-vs-recv distinction survives.
     #[error("udp-qsp send io error: {source}")]
     SendIo {

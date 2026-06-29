@@ -89,12 +89,19 @@ pub enum TlsError {
         verify_error: Option<X509VerifyError>,
         /// `ErrorKind` of the underlying I/O error boring associated with the
         /// handshake failure, if any (e.g. connection reset mid-handshake).
-        /// Only the kind is preserved because `io::Error` is not `Clone`; the
-        /// kind is the retry-relevant part and is `Copy`/`Debug`. Preserving
-        /// the full `io::Error` here is a phase-1 simplification tracked as a
-        /// follow-up if a richer cause chain is needed.
-        // TODO(phase-1): preserve the full `io::Error` cause if a richer chain
-        // is needed later.
+        ///
+        /// Only the kind is preserved (not the full `io::Error`):
+        /// `tokio_boring::HandshakeError::as_io_error()` lends the `io::Error`
+        /// by `&`, and `io::Error` is not `Clone`, so owning it would require a
+        /// `Box<io::Error>` heap allocation on every handshake-failure path.
+        /// The kind is the retry-relevant part (`Copy`/`Debug`, consumed by
+        /// [`Self::is_transient_io`]); the richer diagnostic detail already
+        /// survives in the boring `ErrorCode`, the captured `X509VerifyError`,
+        /// and the setup `ErrorStack`. An `io::Error` for a mid-handshake
+        /// failure typically carries only a generic message ("Connection reset
+        /// by peer") that is redundant with the boring cause, so preserving the
+        /// full error was assessed (phase-1 follow-up) as awkward and
+        /// low-value — **not warranted**.
         io_error_kind: Option<io::ErrorKind>,
     },
 }

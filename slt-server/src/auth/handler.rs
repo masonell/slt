@@ -370,22 +370,17 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 }
                 if outcome.is_failure() {
                     self.sessions.metrics().inc_auth_failures();
+                    // Genuine AUTH_FAIL rejection (the server chose to send a
+                    // rejection code). Counted separately from transport/decode
+                    // failures (the Err arm below) so the metric distinguishes
+                    // "credential/config rejection" from "auth exchange never
+                    // completed".
+                    self.sessions.metrics().inc_auth_rejections();
                 }
             }
-            // Every transport/decode failure (TLS handshake/timeout, auth-phase
-            // timeout, peer disconnect, socket I/O, proto decode) increments the
-            // auth-failures counter, matching the historical behaviour where
-            // the failure variants of AuthPhaseResult were all counted via
-            // is_failure().
-            //
-            // TODO(phase-minor): these transport/decode failures are now
-            // distinguishable from a genuine on-protocol `Rejected(code)` (an
-            // `Ok(Rejected(_))` outcome — the server chose to send AUTH_FAIL),
-            // but they share the single `auth_failures` counter. A future
-            // `inc_auth_transport_failure()` could split them so the metric
-            // distinguishes "credential/config rejection" from "the auth
-            // exchange never completed". Out of scope for phase 4 (would change
-            // the metric contract); tracked here so the conflation is visible.
+            // Transport/decode failures (TLS handshake/timeout, auth-phase
+            // timeout, peer disconnect, socket I/O, proto decode) increment
+            // auth_failures but NOT auth_rejections.
             Err(_) => {
                 self.sessions.metrics().inc_auth_failures();
             }

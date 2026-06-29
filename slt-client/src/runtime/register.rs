@@ -71,6 +71,8 @@ pub(super) fn prepare_udp_qsp_registration(
     payload.encode(&mut payload_buf)?;
 
     // Reverse key directions: the payload is expressed in the server's (tx/rx) terms.
+    // `QspCryptoError` flows via `#[from]` on `SessionError::UdpQspKeys`,
+    // preserving the typed slt-core cause rather than discarding it.
     let keys = UdpQspKeys::new(
         cipher,
         payload.hp_rx,
@@ -79,10 +81,7 @@ pub(super) fn prepare_udp_qsp_registration(
         payload.aead_tx,
         payload.iv_rx,
         payload.iv_tx,
-    )
-    .map_err(|_| SessionError::ProtocolViolation {
-        detail: "udp-qsp keys invalid",
-    })?;
+    )?;
 
     let io = client_udp_qsp_io(&ids.socket, ids.peer)?;
     let session = QuicQspSession::new(

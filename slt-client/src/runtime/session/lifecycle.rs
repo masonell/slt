@@ -132,12 +132,11 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 .await
                 .map_err(SessionError::from),
             ActiveTransport::UdpQsp => {
-                let udp =
-                    self.udp_state
-                        .as_active_mut()
-                        .ok_or(SessionError::ProtocolViolation {
-                            detail: "udp-qsp transport missing",
-                        })?;
+                let udp = self.udp_state.as_active_mut().ok_or_else(|| {
+                    SessionError::ProtocolViolation {
+                        detail: "udp-qsp transport missing".into(),
+                    }
+                })?;
                 udp.write_message(message).await.map_err(SessionError::from)
             }
         }
@@ -155,12 +154,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         &mut self,
         message: Message<'_>,
     ) -> Result<(), SessionError> {
-        let udp = self
-            .udp_state
-            .as_active_mut()
-            .ok_or(SessionError::ProtocolViolation {
-                detail: "udp-qsp transport missing",
-            })?;
+        let udp =
+            self.udp_state
+                .as_active_mut()
+                .ok_or_else(|| SessionError::ProtocolViolation {
+                    detail: "udp-qsp transport missing".into(),
+                })?;
         udp.write_message(message).await?;
         udp.flush().await.map_err(SessionError::from)
     }
@@ -171,12 +170,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     ///
     /// Returns an error if UDP-QSP is inactive or the socket backend fails.
     pub(super) async fn flush_udp_transport(&mut self) -> Result<(), SessionError> {
-        let udp = self
-            .udp_state
-            .as_active_mut()
-            .ok_or(SessionError::ProtocolViolation {
-                detail: "udp-qsp transport missing",
-            })?;
+        let udp =
+            self.udp_state
+                .as_active_mut()
+                .ok_or_else(|| SessionError::ProtocolViolation {
+                    detail: "udp-qsp transport missing".into(),
+                })?;
         udp.flush().await.map_err(SessionError::from)
     }
 

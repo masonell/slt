@@ -87,8 +87,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         let peer = self
             .udp_state
             .as_active()
-            .ok_or(SessionError::ProtocolViolation {
-                detail: "udp-qsp transport missing",
+            .ok_or_else(|| SessionError::ProtocolViolation {
+                detail: "udp-qsp transport missing".into(),
             })?
             .peer();
         let socket = Arc::new(quic_discovery::bind_protected_udp_socket(
@@ -96,12 +96,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             self.services.socket_protector(),
         )?);
         let new_io = client_udp_qsp_io(&socket, peer)?;
-        let udp = self
-            .udp_state
-            .as_active_mut()
-            .ok_or(SessionError::ProtocolViolation {
-                detail: "udp-qsp transport missing",
-            })?;
+        let udp =
+            self.udp_state
+                .as_active_mut()
+                .ok_or_else(|| SessionError::ProtocolViolation {
+                    detail: "udp-qsp transport missing".into(),
+                })?;
         let _old_io = udp.replace_io(new_io).await;
         Ok(())
     }
@@ -153,10 +153,10 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
 
         match msg_buf.message() {
             Message::RegisterOk { .. } => Err(SessionError::ProtocolViolation {
-                detail: "unexpected register_ok on udp-qsp transport",
+                detail: "unexpected register_ok on udp-qsp transport".into(),
             }),
             Message::RegisterFail { .. } => Err(SessionError::ProtocolViolation {
-                detail: "unexpected register_fail on udp-qsp transport",
+                detail: "unexpected register_fail on udp-qsp transport".into(),
             }),
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload)?;
@@ -189,7 +189,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             | Message::UdpReady { .. }
             | Message::SwitchToUdp { .. }
             | Message::SwitchAck { .. } => Err(SessionError::ProtocolViolation {
-                detail: "unexpected control message on udp-qsp transport",
+                detail: "unexpected control message on udp-qsp transport".into(),
             }),
         }
     }
@@ -205,12 +205,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         let deadline = Instant::now() + self.config.timing.register_timeout;
         loop {
             let cancel = self.cancel.clone();
-            let udp = self
-                .udp_state
-                .as_active_mut()
-                .ok_or(SessionError::ProtocolViolation {
-                    detail: "udp-qsp transport missing",
-                })?;
+            let udp =
+                self.udp_state
+                    .as_active_mut()
+                    .ok_or_else(|| SessionError::ProtocolViolation {
+                        detail: "udp-qsp transport missing".into(),
+                    })?;
             let msg_buf = tokio::select! {
                 biased;
 
@@ -264,7 +264,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
 
     /// Handle a UDP-QSP transport failure from the session event loop.
     ///
-    /// Takes the typed [`SessionError`] (which wraps a [`UdpQspError`] on this
+    /// Takes the typed [`SessionError`] (which wraps a `UdpQspError` on this
     /// path) and applies the recoverable-vs-fatal policy: recoverable failures
     /// drop & continue (the UDP path stays alive); fatal failures (the
     /// dead-channel signal, packet-number overflow, or any failure when TCP is
@@ -426,7 +426,7 @@ mod tests {
         // Typed (non-I/O) session errors propagate.
         let proto = SessionError::Payload(slt_core::proto::PayloadError::InvalidCipher(0x99));
         assert!(!proto.is_udp_qsp_recoverable());
-        let violation = SessionError::ProtocolViolation { detail: "x" };
+        let violation = SessionError::ProtocolViolation { detail: "x".into() };
         assert!(!violation.is_udp_qsp_recoverable());
     }
 
@@ -445,7 +445,9 @@ mod tests {
             "unexpected register_fail on udp-qsp transport",
             "unexpected control message on udp-qsp transport",
         ] {
-            let err = SessionError::ProtocolViolation { detail };
+            let err = SessionError::ProtocolViolation {
+                detail: detail.into(),
+            };
             assert_eq!(err.exit(), SessionExit::ProtocolError);
             let rendered = format!("{err:#}");
             assert!(
@@ -469,36 +471,10 @@ mod tests {
         use crate::runtime::session::SessionExit;
 
         let err = SessionError::ProtocolViolation {
-            detail: "udp-qsp transport missing",
+            detail: "udp-qsp transport missing".into(),
         };
         assert_eq!(err.exit(), SessionExit::ProtocolError);
         let rendered = format!("{err:#}");
         assert!(rendered.contains("transport missing"), "{rendered:?}");
-    }
-
-    mod transport_switching {
-        use super::super::ActiveTransport;
-
-        /// Verify UDP active-transport identity comparisons.
-        #[test]
-        fn udp_qsp_active_transport_value_is_distinct() {
-            assert_eq!(ActiveTransport::UdpQsp, ActiveTransport::UdpQsp);
-            assert_ne!(ActiveTransport::UdpQsp, ActiveTransport::Tcp);
-        }
-
-        /// Verify transport comparison logic.
-        #[test]
-        fn tcp_and_udp_qsp_are_distinct() {
-            assert_ne!(ActiveTransport::Tcp, ActiveTransport::UdpQsp);
-            assert_eq!(ActiveTransport::Tcp, ActiveTransport::Tcp);
-            assert_eq!(ActiveTransport::UdpQsp, ActiveTransport::UdpQsp);
-        }
-
-        /// Verify explicit transport values remain stable.
-        #[test]
-        fn explicit_transport_values_are_stable() {
-            assert_eq!(ActiveTransport::Tcp, ActiveTransport::Tcp);
-            assert_eq!(ActiveTransport::UdpQsp, ActiveTransport::UdpQsp);
-        }
     }
 }

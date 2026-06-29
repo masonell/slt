@@ -16,9 +16,11 @@
 //!
 //! See `local/error-architecture.md` for the full design (phases 2 and 3).
 
+use std::borrow::Cow;
 use std::io;
 
 use boring::error::ErrorStack;
+use slt_core::crypto::udp_qsp::QspCryptoError;
 use slt_core::proto::{FrameError, MessageError, PayloadError};
 use slt_core::transport::tcp::TcpWriteError;
 
@@ -55,13 +57,16 @@ pub enum SessionError {
     /// Distinct from a proto decode failure ([`Self::Frame`]/[`Self::Message`]/
     /// [`Self::Payload`]) and from a server-sent rejection.
     ///
-    // TODO(phase-minor): carry the offending value (e.g. the mismatched DCID)
-    // rather than only a `&'static str` detail, so the terminal report can
-    // surface it. Out of scope for the phase-2 pass.
+    /// `detail` is a [`Cow<'static, str>`] so string-literal construction sites
+    /// stay zero-alloc ([`Cow::Borrowed`]) while the value-carrying sites (e.g.
+    /// the `register_ok` DCID-mismatch, which formats the offending value into
+    /// the detail) use [`Cow::Owned`]. This keeps the offending value in the
+    /// terminal `{:#}` render rather than discarding it.
     #[error("session protocol violation: {detail}")]
     ProtocolViolation {
-        /// Short, stage-specific description of the violation.
-        detail: &'static str,
+        /// Stage-specific description of the violation, possibly carrying the
+        /// offending value (e.g. a mismatched DCID).
+        detail: Cow<'static, str>,
     },
 
     /// Local OS or network policy denied an operation (e.g. socket protect).
@@ -129,6 +134,18 @@ pub enum SessionError {
     #[error("session crypto error: {0}")]
     Crypto(#[from] ErrorStack),
 
+    /// UDP-QSP key derivation failed at session-setup time (`UdpQspKeys::new`
+    /// during `REGISTER_CID` preparation). Preserves the typed
+    /// [`QspCryptoError`] rather than discarding it (the previous code did
+    /// `.map_err(|_| ProtocolViolation { ... })`, dropping the cause).
+    ///
+    /// Distinct from [`Self::Crypto`] (which carries the boring `ErrorStack`
+    /// from `RAND_bytes`): `QspCryptoError` is the slt-core UDP-QSP crypto
+    /// error for cipher/key-material construction, not the OS-level RNG.
+    /// Fatal: local key state, retry won't help.
+    #[error("udp-qsp key derivation failed: {0}")]
+    UdpQspKeys(#[from] QspCryptoError),
+
     // slt-core protocol errors are preserved, not flattened. These replace the
     // `wire.rs` `map_*` mappers on the session call sites. Each is a real
     // `std::error::Error` in `slt-core` (phase 5 promoted
@@ -184,8 +201,8 @@ impl SessionError {
     /// Mapping (preserves today's reconnect decisions — see the policy table
     /// in `local/error-architecture.md`):
     /// - [`Self::ProtocolViolation`] / proto errors ([`Self::Frame`]/
-    ///   [`Self::Message`]/[`Self::Payload`]) / [`Self::Crypto`] →
-    ///   `ProtocolError` (fatal).
+    ///   [`Self::Message`]/[`Self::Payload`]) / [`Self::Crypto`] /
+    ///   [`Self::UdpQspKeys`] → `ProtocolError` (fatal).
     /// - [`Self::PermissionDenied`] → `PermissionDenied` (fatal).
     /// - [`Self::UdpUpgradeRequired`] → `UdpUpgradeRequired` (fatal).
     /// - [`Self::Connection`] / generic [`Self::Io`] / [`Self::UdpQsp`] →
@@ -208,7 +225,8 @@ impl SessionError {
             | Self::Frame(_)
             | Self::Message(_)
             | Self::Payload(_)
-            | Self::Crypto(_) => super::SessionExit::ProtocolError,
+            | Self::Crypto(_)
+            | Self::UdpQspKeys(_) => super::SessionExit::ProtocolError,
             Self::PermissionDenied { .. } => super::SessionExit::PermissionDenied,
             Self::UdpUpgradeRequired => super::SessionExit::UdpUpgradeRequired,
             Self::Connection { .. } | Self::Io(_) | Self::UdpQsp(_) => {
@@ -309,7 +327,7 @@ mod tests {
     fn representative_cases() -> Vec<SessionError> {
         let cases: Vec<SessionError> = vec![
             SessionError::ProtocolViolation {
-                detail: "unexpected control message",
+                detail: "unexpected control message".into(),
             },
             SessionError::PermissionDenied {
                 source: io::Error::from(io::ErrorKind::PermissionDenied),
@@ -327,11 +345,12 @@ mod tests {
                 slt_core::crypto::udp_qsp::QspSessionError::DeadChannel,
             )),
             SessionError::Crypto(ErrorStack::internal_error(io::Error::other("rand"))),
+            SessionError::UdpQspKeys(slt_core::crypto::udp_qsp::QspCryptoError::CryptoFail),
             SessionError::Frame(FrameError::UnknownType(0xFF)),
             SessionError::Message(MessageError::DataTooLarge { len: 10, max: 5 }),
             SessionError::Payload(PayloadError::InvalidCipher(0x99)),
         ];
-        // 11 cases covering all 10 distinct SessionError variants, with a
+        // 12 cases covering all 11 distinct SessionError variants, with a
         // second `UdpQsp` entry (the variant has two behaviorally-distinct
         // inner shapes that `is_udp_qsp_recoverable()` / `is_udp_qsp_dead_channel()`
         // distinguish): one recoverable shape (Replay) and one fatal shape
@@ -339,19 +358,19 @@ mod tests {
         // the distinct-discriminant check below.
         assert_eq!(
             cases.len(),
-            11,
-            "representative_cases must contain exactly 11 cases \
-             (10 variants + a second UdpQsp inner shape); update when adding a variant"
+            12,
+            "representative_cases must contain exactly 12 cases \
+             (11 variants + a second UdpQsp inner shape); update when adding a variant"
         );
         // Distinct variants via a HashSet of Discriminant values (a `Vec::dedup`
         // would only catch *adjacent* duplicates and so could miss a misplaced
-        // case). 10 = the number of SessionError variants.
+        // case). 11 = the number of SessionError variants.
         let distinct: std::collections::HashSet<_> =
             cases.iter().map(std::mem::discriminant).collect();
         assert_eq!(
             distinct.len(),
-            10,
-            "representative_cases must cover all 10 distinct SessionError variants exactly once"
+            11,
+            "representative_cases must cover all 11 distinct SessionError variants exactly once"
         );
         // Pin the deliberate second `UdpQsp` case so the intent is explicit:
         // the two entries must cover both the recoverable and the fatal
@@ -402,7 +421,7 @@ mod tests {
     fn exit_matches_policy_table() {
         // Fatal exits.
         assert_eq!(
-            SessionError::ProtocolViolation { detail: "x" }.exit(),
+            SessionError::ProtocolViolation { detail: "x".into() }.exit(),
             SessionExit::ProtocolError
         );
         assert_eq!(
@@ -426,6 +445,12 @@ mod tests {
         );
         assert_eq!(
             SessionError::Crypto(ErrorStack::internal_error(io::Error::other("x"))).exit(),
+            SessionExit::ProtocolError
+        );
+        // UdpQspKeys (construction-time key derivation failure) is fatal: local
+        // key state, retry won't help.
+        assert_eq!(
+            SessionError::UdpQspKeys(slt_core::crypto::udp_qsp::QspCryptoError::CryptoFail).exit(),
             SessionExit::ProtocolError
         );
 
@@ -465,7 +490,7 @@ mod tests {
     #[test]
     fn protocol_and_connection_errors_are_distinct() {
         assert_ne!(
-            SessionError::ProtocolViolation { detail: "x" }.exit(),
+            SessionError::ProtocolViolation { detail: "x".into() }.exit(),
             SessionError::Connection {
                 source: io::Error::other("net")
             }
@@ -537,9 +562,15 @@ mod tests {
         // Typed non-transport conditions propagate (NOT UDP-path transport
         // conditions eligible for the fallback decision).
         assert!(!proto.is_udp_path_transport_error());
-        assert!(!SessionError::ProtocolViolation { detail: "x" }.is_udp_path_transport_error());
+        assert!(
+            !SessionError::ProtocolViolation { detail: "x".into() }.is_udp_path_transport_error()
+        );
         assert!(
             !SessionError::Crypto(ErrorStack::internal_error(io::Error::other("rand")))
+                .is_udp_path_transport_error()
+        );
+        assert!(
+            !SessionError::UdpQspKeys(slt_core::crypto::udp_qsp::QspCryptoError::CryptoFail)
                 .is_udp_path_transport_error()
         );
         assert!(!SessionError::Frame(FrameError::UnknownType(0x01)).is_udp_path_transport_error());
@@ -713,5 +744,46 @@ mod tests {
         // Composed exit: UdpQsp buckets under ConnectionError (reconnect),
         // consistent with the other UdpQsp shapes — see `exit()` docs.
         assert_eq!(overflow.exit(), SessionExit::ConnectionError);
+    }
+
+    /// `QspCryptoError` from `UdpQspKeys::new` (the construction-time key
+    /// derivation in `prepare_udp_qsp_registration`) is preserved via `#[from]`
+    /// on [`SessionError::UdpQspKeys`], not discarded. This is the phase-3
+    /// deferral's resolution: the old code did
+    /// `.map_err(|_| ProtocolViolation { ... })`, dropping the typed cause.
+    ///
+    /// The preserved cause survives to the terminal `{:#}` render (the
+    /// `QspCryptoError`'s own `Display`), and the variant is fatal.
+    #[test]
+    fn udp_qsp_keys_error_preserves_qsp_crypto_error() {
+        use slt_core::crypto::udp_qsp::QspCryptoError;
+
+        for err in [
+            QspCryptoError::UnsupportedCipher,
+            QspCryptoError::CryptoFail,
+            QspCryptoError::InvalidHeader,
+        ] {
+            let rendered_err: SessionError = err.into();
+            assert!(
+                matches!(rendered_err, SessionError::UdpQspKeys(_)),
+                "QspCryptoError must route to UdpQspKeys, got {rendered_err:?}"
+            );
+            assert_eq!(
+                rendered_err.exit(),
+                SessionExit::ProtocolError,
+                "UdpQspKeys must be fatal"
+            );
+            // The typed cause survives in the render.
+            let rendered = format!("{rendered_err:#}");
+            let cause = format!("{err}");
+            assert!(
+                rendered.contains(&cause),
+                "QspCryptoError cause missing from render: {rendered:?}"
+            );
+            assert!(
+                rendered.contains("udp-qsp key derivation failed"),
+                "missing stage framing: {rendered:?}"
+            );
+        }
     }
 }

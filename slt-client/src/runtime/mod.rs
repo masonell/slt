@@ -344,7 +344,7 @@ fn handle_session_exit(outcome: SessionOutcome, cancel: &CancellationToken) -> S
             let err = error.unwrap_or_else(|| {
                 debug!("ProtocolError exit without a typed SessionError; synthesizing fallback");
                 SessionError::ProtocolViolation {
-                    detail: "protocol error",
+                    detail: "protocol error".into(),
                 }
             });
             warn!(reason = ?exit, error = %err, "protocol error; exiting");

@@ -16,16 +16,17 @@
 //! # Why this is narrower than the client's `SessionError`
 //!
 //! The client's `SessionError` (phases 2–3) carries `PermissionDenied`,
-//! `UdpUpgradeRequired`, `Crypto`, and a `ProtocolViolation { detail }` that
-//! this server enum deliberately omits. A future reader "completing" the mirror
-//! should NOT re-add them: the server's session path has no socket-protect step
-//! (protection happens client-side), no `require_udp` policy (the server accepts
-//! whichever transport the client drives), and no session-path crypto operation
-//! (server-side `RAND_bytes`/key-derivation happens in the UDP-QSP/CID layer,
-//! not in `ClientSessionBase`). The server's [`SessionError::ProtocolViolation`]
-//! is a unit variant carrying no detail; promoting it to carry the offending
-//! value (e.g. the offending message type) is the same phase-minor deferral
-//! tracked in `local/error-architecture.md`'s Deferred follow-ups.
+//! `UdpUpgradeRequired`, `Crypto`, and a `ProtocolViolation { detail }` (a
+//! `Cow<'static, str>`) that this server enum deliberately omits. A future
+//! reader "completing" the mirror should NOT re-add them: the server's session
+//! path has no socket-protect step (protection happens client-side), no
+//! `require_udp` policy (the server accepts whichever transport the client
+//! drives), and no session-path crypto operation (server-side
+//! `RAND_bytes`/key-derivation happens in the UDP-QSP/CID layer, not in
+//! `ClientSessionBase`). The server's [`SessionError::ProtocolViolation`] is a
+//! unit variant carrying no detail by design; the client's value-carrying shape
+//! serves the client's richer terminal diagnostics (offending DCID, etc.), which
+//! the server's per-client log does not need.
 
 use std::io;
 

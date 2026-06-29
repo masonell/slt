@@ -3,16 +3,16 @@ use slt_core::proto::AuthFailCode;
 /// Outcome of a successfully-completed authentication phase.
 ///
 /// Reserved for the auth loop's *decided outcomes*: the phase ran to completion
-/// without a transport/decode failure (those are typed [`AuthError`](super::AuthError)
-/// and surface as `Err`), and the server either authenticated the client,
+/// without a transport/decode failure (those are typed `AuthError`
+/// (in `super::error`) and surface as `Err`), and the server either authenticated the client,
 /// completed normally (e.g. the client sent `CLOSE`), or rejected the client
 /// on-protocol with a concrete [`AuthFailCode`] it chose to send in `AUTH_FAIL`.
 ///
 /// Historically this enum also carried the failure variants (`Failed`,
 /// `Timeout`, `ConnectionClosed`, `TlsHandshakeFailed`, `TlsHandshakeTimeout`)
 /// and flattened each to an `io::Error` via `into_io_result()`, discarding the
-/// structured TLS/I/O source. Phase 4 moves those onto [`AuthError`](super::AuthError),
-/// which preserves the source; this enum now carries only the outcomes.
+/// structured TLS/I/O source. Phase 4 moves those onto `AuthError`
+/// (in `super::error`), which preserves the source; this enum now carries only the outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AuthPhaseResult {
     /// Authentication completed and a client session was created.
@@ -31,7 +31,7 @@ impl AuthPhaseResult {
     /// should increment the auth-failures metric.
     ///
     /// Only `Rejected` counts: the failure-path conditions (timeout, disconnect,
-    /// TLS fault) are now typed [`AuthError`](super::AuthError) and are counted
+    /// TLS fault) are now typed `AuthError` (in `super::error`) and are counted
     /// by the handler's error path, not here.
     pub(super) const fn is_failure(self) -> bool {
         matches!(self, Self::Rejected(_))

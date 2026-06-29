@@ -147,7 +147,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             | Message::UpgradeProbeAck { .. }
             | Message::UdpReady { .. }
             | Message::SwitchAck { .. } => Err(SessionError::ProtocolViolation {
-                detail: "unexpected control message on established session",
+                detail: "unexpected control message on established session".into(),
             }),
         }
     }
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn unexpected_control_message_is_typed_protocol_violation() {
         let err = SessionError::ProtocolViolation {
-            detail: "unexpected control message on established session",
+            detail: "unexpected control message on established session".into(),
         };
         assert_eq!(err.exit(), SessionExit::ProtocolError);
         let rendered = format!("{err:#}");
@@ -309,7 +309,7 @@ mod tests {
         }
 
         // A typed (non-I/O) variant is distinct from the I/O variant.
-        let proto = SessionError::ProtocolViolation { detail: "x" };
+        let proto = SessionError::ProtocolViolation { detail: "x".into() };
         assert!(!matches!(proto, SessionError::Io(_)));
     }
 }

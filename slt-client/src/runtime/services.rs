@@ -4,9 +4,10 @@
 //! monomorphized per concrete service bundle — there is no `dyn` dispatch and no
 //! `Arc<dyn …>` indirection on the socket protector, host resolver, or observer.
 //! The desktop CLI supplies [`DesktopServices`]; Android supplies
-//! [`AndroidServices`]. Both are plain structs holding the concrete types, so
-//! the runtime gets static dispatch while keeping a single generic entrypoint
-//! ([`crate::runtime::run_client`]).
+//! `AndroidServices` (defined in the `slt-client` Android native-library
+//! target, not this desktop lib). Both are plain structs holding the concrete
+//! types, so the runtime gets static dispatch while keeping a single generic
+//! entrypoint ([`crate::runtime::run_client`]).
 
 use crate::runtime::observer::{ClientObserver, ObserverSink};
 use crate::transport::host_resolver::HostResolver;

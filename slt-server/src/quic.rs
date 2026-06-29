@@ -287,10 +287,10 @@ impl QuicEndpoint {
 
     /// Dispatch one `recvmmsg` batch: stride-split each (possibly `UDP_GRO`
     /// coalesced) [`RecvMeta`] into individual datagrams and route each through
-    /// [`handle_datagram`].
+    /// `handle_datagram`.
     ///
     /// Only reads `recv.meta` / `recv.bufs` (the batch was filled by the `recv`
-    /// call in [`run`]), so this takes `&self` and can run while the `AsyncFd`
+    /// call in `run`), so this takes `&self` and can run while the `AsyncFd`
     /// readiness guard - which borrows `recv.fd` - is still held.
     async fn dispatch_recv_batch(
         &self,
