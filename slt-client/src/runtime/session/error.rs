@@ -20,6 +20,7 @@ use std::io;
 
 use boring::error::ErrorStack;
 use slt_core::proto::{FrameError, MessageError, PayloadError};
+use slt_core::transport::tcp::TcpWriteError;
 
 use crate::transport::udp_qsp::UdpQspError;
 
@@ -144,6 +145,33 @@ pub enum SessionError {
     Payload(#[from] PayloadError),
 }
 
+impl From<TcpWriteError> for SessionError {
+    /// Thread `TcpChannel::write_message`'s typed write error into the session
+    /// error without flattening either source.
+    ///
+    /// This is **NOT a behaviour-preserving representation change** — the
+    /// `Frame` branch is a deliberate policy change:
+    /// - **`Io` → [`SessionError::Io`]** is genuine parity: the pre-refactor
+    ///   path already routed the TLS write failure through `io::Error` →
+    ///   `From<io::Error>` → `SessionError::Io` (`exit() == ConnectionError`,
+    ///   reconnect). Unchanged.
+    /// - **`Frame` → [`SessionError::Frame`]** is a **deliberate change to
+    ///   fatal** (`exit() == ProtocolError`). The old path flattened
+    ///   `FrameError` via `map_frame_error` into `io::Error(InvalidData)` →
+    ///   `SessionError::Io` (reconnect). A `FrameError` from encoding a
+    ///   locally-constructed `Message` is a logic/config bug (an unknown
+    ///   message type, or a payload oversized despite the TUN-layer
+    ///   pre-check) — reconnecting won't fix it, so the old routing masked
+    ///   the bug behind a reconnect loop. Routing it to the typed `Frame`
+    ///   variant surfaces it as fatal instead.
+    fn from(err: TcpWriteError) -> Self {
+        match err {
+            TcpWriteError::Frame(frame) => Self::Frame(frame),
+            TcpWriteError::Io(io) => Self::Io(io),
+        }
+    }
+}
+
 impl SessionError {
     /// Reconnect/fatal policy projection onto [`SessionExit`](super::SessionExit).
     ///
@@ -241,6 +269,39 @@ impl SessionError {
 mod tests {
     use super::*;
     use crate::runtime::session::SessionExit;
+
+    /// `From<TcpWriteError>` routes `Frame` → `SessionError::Frame` (fatal,
+    /// `exit() == ProtocolError`) and `Io` → `SessionError::Io` (reconnect,
+    /// `exit() == ConnectionError`). Pins both arms so the deliberate change to
+    /// the `Frame` branch's policy (the old `map_frame_error` path flattened it
+    /// to `SessionError::Io`, reconnect) cannot silently regress.
+    #[test]
+    fn from_tcp_write_error_routes_frame_fatal_and_io_reconnect() {
+        use slt_core::transport::tcp::TcpWriteError;
+
+        let frame: SessionError = TcpWriteError::Frame(FrameError::UnknownType(1)).into();
+        assert!(
+            matches!(frame, SessionError::Frame(_)),
+            "Frame arm must route to SessionError::Frame, got {frame:?}"
+        );
+        assert_eq!(
+            frame.exit(),
+            SessionExit::ProtocolError,
+            "SessionError::Frame from TcpWriteError must be fatal (ProtocolError)"
+        );
+
+        let io: SessionError =
+            TcpWriteError::Io(io::Error::from(io::ErrorKind::ConnectionReset)).into();
+        assert!(
+            matches!(io, SessionError::Io(_)),
+            "Io arm must route to SessionError::Io, got {io:?}"
+        );
+        assert_eq!(
+            io.exit(),
+            SessionExit::ConnectionError,
+            "SessionError::Io from TcpWriteError must reconnect (parity with the old path)"
+        );
+    }
 
     /// One representative `SessionError` per variant, so coverage tests can't
     /// miss a variant. The asserted length is the number of `SessionError`

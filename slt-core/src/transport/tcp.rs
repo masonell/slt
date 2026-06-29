@@ -10,8 +10,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_boring::SslStream;
 
 use crate::proto::{
-    FrameError, Message, MessageError, MessageLimits, MessageType, OwnedMessageBuf, PayloadError,
-    decode_frame, encode_message,
+    FrameError, Message, MessageError, MessageLimits, MessageType, OwnedMessageBuf, decode_frame,
+    encode_message,
 };
 
 /// Hook invoked by `TcpChannel` before each outbound application message.
@@ -247,50 +247,50 @@ impl<S: AsyncRead + AsyncWrite + Unpin, K: KeyUpdater> TcpChannel<S, K> {
     ///
     /// # Errors
     ///
-    /// Returns an error if key update fails, frame encoding fails, or the write
-    /// fails.
-    pub async fn write_message(&mut self, message: Message<'_>) -> io::Result<()> {
+    /// Returns a [`TcpWriteError`], which preserves both failure sources
+    /// unchanged: a frame-encode failure as [`TcpWriteError::Frame`] (the typed
+    /// slt-core `FrameError`) and a TLS write failure as [`TcpWriteError::Io`]
+    /// (the underlying `io::Error`). Neither is stringified into `io::Error`.
+    pub async fn write_message(&mut self, message: Message<'_>) -> Result<(), TcpWriteError> {
         self.key_updater
             .maybe_request_key_update(self.stream.ssl_mut())?;
         self.write_buf.clear();
-        // TODO(phase-5.1): this is the last live `FrameError -> io::Error`
-        // flattening (server TCP path). Phase 5 promoted `FrameError` to a real
-        // `Error` and switched every other proto site to `#[from]`; this one
-        // remains because `TcpChannel::write_message` returns `io::Result<()>`
-        // and is consumed by both client and server TCP paths (and by
-        // `slt-client/src/test_support/server.rs`). Phase 5.1: flip
-        // `TcpChannel::write_message` to a typed write error, thread it to
-        // `SessionError::Frame` (and the server `AuthError`/`SessionError`)
-        // via `#[from]`, then delete `map_frame_error`/`map_message_error`/
-        // `map_payload_error` and their tests, and migrate
-        // `slt-client/src/test_support/server.rs` off them.
-        encode_message(message, &mut self.write_buf).map_err(map_frame_error)?;
-        self.stream.write_all(&self.write_buf).await
+        encode_message(message, &mut self.write_buf)?;
+        self.stream
+            .write_all(&self.write_buf)
+            .await
+            .map_err(TcpWriteError::from)
     }
 }
 
-/// Map a protocol framing error into an `io::Error`.
-#[must_use]
-pub fn map_frame_error(err: FrameError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("frame error: {err:?}"))
-}
+/// Typed failure from `TcpChannel::write_message`.
+///
+/// Preserves both failure sources unchanged — neither is stringified into
+/// `io::Error`: the encode failure as the structured [`FrameError`], the write
+/// failure as the underlying [`io::Error`]. Each consumer threads the variants
+/// into its own policy via a `From<TcpWriteError>` impl or an explicit `match`.
+///
+/// Note on the `Frame` arm's policy downstream: a `FrameError` here means
+/// encoding a locally-constructed `Message` failed (an unknown message type, or
+/// a payload oversized despite the TUN-layer pre-check) — a logic/config bug a
+/// reconnect cannot fix. Consumers therefore route `Frame` to a fatal bucket
+/// (e.g. `SessionError::Frame` / `ConnectError::Frame`) rather than the
+/// reconnect/retry path the old `map_frame_error` flattening produced; the `Io`
+/// arm stays retryable/reconnect as before.
+///
+/// `Frame` absorbs `FrameError` via `#[from]`; the write-side `io::Error` is
+/// also absorbed via `#[from]` so `?` works at the failure site.
+#[derive(Debug, thiserror::Error)]
+pub enum TcpWriteError {
+    /// Protocol framing error from `encode_message`, preserved from `slt_core`
+    /// via `#[from]`. Its own `Display` survives to the terminal.
+    #[error(transparent)]
+    Frame(#[from] FrameError),
 
-/// Map a protocol message error into an `io::Error`.
-#[must_use]
-pub fn map_message_error(err: MessageError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("message error: {err:?}"),
-    )
-}
-
-/// Map a protocol payload decode error into an `io::Error`.
-#[must_use]
-pub fn map_payload_error(err: PayloadError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("payload error: {err:?}"),
-    )
+    /// Network-level I/O error from the underlying TLS stream write, preserved
+    /// rather than stringified.
+    #[error(transparent)]
+    Io(#[from] io::Error),
 }
 
 fn pop_message_buf(
@@ -527,35 +527,5 @@ mod tests {
         let updater_with_peer = IntervalKeyUpdater::new(NonZeroU64::new(100).unwrap())
             .with_peer_response_requested(true);
         assert!(updater_with_peer.requests_peer_update());
-    }
-
-    #[test]
-    fn map_frame_error_produces_correct_message() {
-        let err = FrameError::UnknownType(0xFF);
-        let io_err = map_frame_error(err);
-        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
-        let msg = io_err.to_string();
-        assert!(msg.contains("frame error"));
-        assert!(msg.contains("UnknownType"));
-    }
-
-    #[test]
-    fn map_message_error_produces_correct_message() {
-        let err = MessageError::DataTooLarge { len: 100, max: 50 };
-        let io_err = map_message_error(err);
-        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
-        let msg = io_err.to_string();
-        assert!(msg.contains("message error"));
-        assert!(msg.contains("DataTooLarge"));
-    }
-
-    #[test]
-    fn map_payload_error_produces_correct_message() {
-        let err = PayloadError::InvalidCipher(0x99);
-        let io_err = map_payload_error(err);
-        assert_eq!(io_err.kind(), io::ErrorKind::InvalidData);
-        let msg = io_err.to_string();
-        assert!(msg.contains("payload error"));
-        assert!(msg.contains("InvalidCipher"));
     }
 }

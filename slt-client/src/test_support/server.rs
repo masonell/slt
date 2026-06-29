@@ -15,9 +15,17 @@ use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthPayload, Message, MessageLimits,
     PingPayload, PongPayload, RegisterOkPayload,
 };
-use slt_core::transport::tcp::{TcpChannel, map_frame_error, map_payload_error};
+use slt_core::transport::tcp::TcpChannel;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio_boring::SslStream;
+
+/// Boxed error used by the mock server's protocol helpers so that slt-core's
+/// typed `FrameError`/`PayloadError` and the raw `io::Error` all flow via `?`
+/// without being stringified (the deleted `map_frame_error`/`map_payload_error`
+/// flattened them into `io::ErrorKind::InvalidData`). Test-only: callers in the
+/// integration tests `.unwrap()` the result, so the dynamic dispatch cost is
+/// irrelevant.
+pub type MockResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 use crate::metrics::Metrics;
 
@@ -100,11 +108,15 @@ impl MockTlsServer {
     }
 
     /// Attempt to pop the next message from the internal read buffer.
-    pub fn try_pop_message(&mut self) -> Result<Option<MockMessage>, io::Error> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a boxed error if the buffered bytes contain an invalid frame;
+    /// the slt-core `FrameError` is preserved (not stringified).
+    pub fn try_pop_message(&mut self) -> MockResult<Option<MockMessage>> {
         let limits = MessageLimits::new(MAX_FRAME, MAX_FRAME);
         let Some((frame, consumed)) =
-            slt_core::proto::decode_frame(&self.read_buf, limits.max_frame_len)
-                .map_err(map_frame_error)?
+            slt_core::proto::decode_frame(&self.read_buf, limits.max_frame_len)?
         else {
             return Ok(None);
         };
@@ -116,10 +128,17 @@ impl MockTlsServer {
     }
 
     /// Write a protocol message to the client.
-    pub async fn write_message(&mut self, message: Message<'_>) -> io::Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a boxed error if frame encoding or the underlying write fails;
+    /// both the slt-core `FrameError` and the `io::Error` are preserved (not
+    /// stringified).
+    pub async fn write_message(&mut self, message: Message<'_>) -> MockResult<()> {
         let mut frame = Vec::new();
-        slt_core::proto::encode_message(message, &mut frame).map_err(map_frame_error)?;
-        self.stream.write_all(&frame).await
+        slt_core::proto::encode_message(message, &mut frame)?;
+        self.stream.write_all(&frame).await?;
+        Ok(())
     }
 
     /// Export keying material for auth challenge verification.
@@ -133,17 +152,16 @@ impl MockTlsServer {
     }
 
     /// Read until a message is available and return it.
-    async fn recv_message(&mut self) -> io::Result<MockMessage> {
+    async fn recv_message(&mut self) -> MockResult<MockMessage> {
         loop {
             if let Some(msg) = self.try_pop_message()? {
                 return Ok(msg);
             }
             let n = self.read_more().await?;
             if n == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "connection closed",
-                ));
+                return Err(
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed").into(),
+                );
             }
         }
     }
@@ -155,19 +173,20 @@ impl MockTlsServer {
     /// Returns an error if:
     /// - The next message is not AUTH
     /// - Signature verification fails
-    pub async fn recv_auth_verify(&mut self, config: &ClientConfig) -> io::Result<AuthPayload> {
+    pub async fn recv_auth_verify(&mut self, config: &ClientConfig) -> MockResult<AuthPayload> {
         let msg = self.recv_message().await?;
 
         if msg.ty != slt_core::proto::MessageType::Auth {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("expected AUTH, got {:?}", msg.ty),
-            ));
+            )
+            .into());
         }
 
         // Find the payload start (skip type + length header)
         let payload = &msg.buf[5..];
-        let payload = AuthPayload::decode(payload).map_err(map_payload_error)?;
+        let payload = AuthPayload::decode(payload)?;
 
         // Verify signature
         let challenge = self.export_keying_material()?;
@@ -181,7 +200,7 @@ impl MockTlsServer {
     /// # Errors
     ///
     /// Returns an error if signature verification fails or I/O fails.
-    pub async fn recv_auth_and_send_ok(&mut self, config: &ClientConfig) -> io::Result<()> {
+    pub async fn recv_auth_and_send_ok(&mut self, config: &ClientConfig) -> MockResult<()> {
         self.recv_auth_verify(config).await?;
         self.write_message(Message::AuthOk {
             payload: &[], // AuthOkPayload is empty
@@ -199,7 +218,7 @@ impl MockTlsServer {
         &mut self,
         config: &ClientConfig,
         code: AuthFailCode,
-    ) -> io::Result<()> {
+    ) -> MockResult<()> {
         // Still verify to consume the message, but ignore the result
         let _ = self.recv_auth_verify(config).await;
         let fail = AuthFailPayload { code };
@@ -210,7 +229,7 @@ impl MockTlsServer {
     }
 
     /// Send a PING message with the given nonce.
-    pub async fn send_ping(&mut self, nonce: u64) -> io::Result<()> {
+    pub async fn send_ping(&mut self, nonce: u64) -> MockResult<()> {
         let payload = PingPayload { nonce };
         let mut buf = Vec::with_capacity(8);
         payload.encode(&mut buf);
@@ -219,18 +238,19 @@ impl MockTlsServer {
 
     /// Receive a PONG message and return the nonce.
     #[allow(dead_code)]
-    pub async fn recv_pong(&mut self) -> io::Result<u64> {
+    pub async fn recv_pong(&mut self) -> MockResult<u64> {
         let msg = self.recv_message().await?;
 
         if msg.ty != slt_core::proto::MessageType::Pong {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("expected PONG, got {:?}", msg.ty),
-            ));
+            )
+            .into());
         }
 
         let payload = &msg.buf[5..];
-        let pong = PongPayload::decode(payload).map_err(map_payload_error)?;
+        let pong = PongPayload::decode(payload)?;
         Ok(pong.nonce)
     }
 
@@ -238,19 +258,19 @@ impl MockTlsServer {
     ///
     /// Returns the DCID from the registration.
     #[allow(dead_code)]
-    pub async fn recv_register_and_send_ok(&mut self) -> io::Result<slt_core::types::Cid> {
+    pub async fn recv_register_and_send_ok(&mut self) -> MockResult<slt_core::types::Cid> {
         let msg = self.recv_message().await?;
 
         if msg.ty != slt_core::proto::MessageType::RegisterCid {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("expected REGISTER_CID, got {:?}", msg.ty),
-            ));
+            )
+            .into());
         }
 
         let payload = &msg.buf[5..];
-        let register =
-            slt_core::proto::RegisterCidPayload::decode(payload).map_err(map_payload_error)?;
+        let register = slt_core::proto::RegisterCidPayload::decode(payload)?;
 
         let dcid = register.client_to_server_cid;
         let ok_payload = RegisterOkPayload {
@@ -266,7 +286,7 @@ impl MockTlsServer {
 
     /// Send a CLOSE message with the given code.
     #[allow(dead_code)]
-    pub async fn send_close(&mut self, code: slt_core::proto::CloseCode) -> io::Result<()> {
+    pub async fn send_close(&mut self, code: slt_core::proto::CloseCode) -> MockResult<()> {
         let payload = slt_core::proto::ClosePayload { code };
         let mut buf = Vec::new();
         payload.encode(&mut buf);

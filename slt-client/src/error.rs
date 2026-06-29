@@ -21,6 +21,7 @@ use boring::error::ErrorStack;
 use boring::ssl::ErrorCode;
 use boring::x509::X509VerifyError;
 use slt_core::proto::{AuthFailCode, FrameError, MessageError, PayloadError};
+use slt_core::transport::tcp::TcpWriteError;
 use slt_core::types::ClientId;
 
 use crate::transport::socket_protector::SocketKind;
@@ -289,6 +290,32 @@ pub enum ConnectError {
     /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
     #[error(transparent)]
     Payload(#[from] PayloadError),
+}
+
+impl From<TcpWriteError> for ConnectError {
+    /// Thread `TcpChannel::write_message`'s typed write error into the
+    /// connect/auth error without flattening either source.
+    ///
+    /// This is **NOT a behaviour-preserving representation change** — the
+    /// `Frame` branch is a deliberate policy change:
+    /// - **`Io` → [`ConnectError::Io`]** is genuine parity: the pre-refactor
+    ///   path already routed the TLS write failure through `io::Error` →
+    ///   `From<io::Error>` → `ConnectError::Io` (retryable). Unchanged.
+    /// - **`Frame` → [`ConnectError::Frame`]** is a **deliberate change to
+    ///   fatal**. The old path flattened `FrameError` via `map_frame_error`
+    ///   into `io::Error(InvalidData)` → `ConnectError::Io` (retryable). A
+    ///   `FrameError` from encoding a locally-constructed `Message` is a
+    ///   logic/config bug (an unknown message type, or a payload oversized
+    ///   despite the TUN-layer pre-check) — retrying won't fix it, so the old
+    ///   routing just masked the bug behind a reconnect loop. Routing it to
+    ///   the typed `Frame` variant surfaces it as fatal (`is_retriable() ==
+    ///   false`) instead.
+    fn from(err: TcpWriteError) -> Self {
+        match err {
+            TcpWriteError::Frame(frame) => Self::Frame(frame),
+            TcpWriteError::Io(io) => Self::Io(io),
+        }
+    }
 }
 
 impl ConnectError {
@@ -619,6 +646,36 @@ mod tests {
             .is_retriable()
         );
         assert!(ConnectError::Io(io::Error::other("x")).is_retriable());
+    }
+
+    /// `From<TcpWriteError>` routes `Frame` → `ConnectError::Frame` (fatal) and
+    /// `Io` → `ConnectError::Io` (retriable). Pins both arms so the deliberate
+    /// change to the `Frame` branch's policy (the old `map_frame_error` path
+    /// flattened it to `ConnectError::Io`, retriable) cannot silently regress.
+    #[test]
+    fn from_tcp_write_error_routes_frame_fatal_and_io_retriable() {
+        use slt_core::transport::tcp::TcpWriteError;
+
+        let frame: ConnectError = TcpWriteError::Frame(FrameError::UnknownType(1)).into();
+        assert!(
+            matches!(frame, ConnectError::Frame(_)),
+            "Frame arm must route to ConnectError::Frame, got {frame:?}"
+        );
+        assert!(
+            !frame.is_retriable(),
+            "ConnectError::Frame from TcpWriteError must be fatal (non-retriable)"
+        );
+
+        let io: ConnectError =
+            TcpWriteError::Io(io::Error::from(io::ErrorKind::ConnectionReset)).into();
+        assert!(
+            matches!(io, ConnectError::Io(_)),
+            "Io arm must route to ConnectError::Io, got {io:?}"
+        );
+        assert!(
+            io.is_retriable(),
+            "ConnectError::Io from TcpWriteError must be retriable (parity with the old path)"
+        );
     }
 
     /// One representative `ConnectError` per variant, so coverage tests can't

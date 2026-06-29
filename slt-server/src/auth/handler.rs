@@ -408,9 +408,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
-        tcp.write_message(message)
-            .await
-            .map_err(|source| AuthError::Connection { source })
+        tcp.write_message(message).await.map_err(|err| match err {
+            slt_core::transport::tcp::TcpWriteError::Frame(frame) => AuthError::Frame(frame),
+            slt_core::transport::tcp::TcpWriteError::Io(source) => AuthError::Connection { source },
+        })
     }
 
     async fn send_auth_fail<S>(

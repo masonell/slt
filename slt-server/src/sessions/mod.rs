@@ -250,7 +250,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         self.tcp
             .write_message(message)
             .await
-            .map_err(|source| SessionError::Connection { source })
+            .map_err(|err| match err {
+                slt_core::transport::tcp::TcpWriteError::Frame(frame) => SessionError::Frame(frame),
+                slt_core::transport::tcp::TcpWriteError::Io(source) => {
+                    SessionError::Connection { source }
+                }
+            })
     }
 
     /// Send a message via UDP-QSP.
