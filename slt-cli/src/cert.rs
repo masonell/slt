@@ -33,7 +33,7 @@ pub fn extract_domain_from_cert(pem: &str) -> Result<String> {
                     saw_wildcard = true;
                     continue;
                 }
-                return Ok(dns.to_string());
+                return Ok((*dns).to_string());
             }
         }
 

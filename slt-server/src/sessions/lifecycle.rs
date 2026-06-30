@@ -167,7 +167,13 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         let max = self.timeouts.ping_max;
 
         // Config validation ensures timeouts <= 1 hour (fits in u64) and min <= max.
-        #[allow(clippy::cast_possible_truncation, clippy::unchecked_time_subtraction)]
+        #[allow(
+            unknown_lints,
+            renamed_and_removed_lints,
+            clippy::cast_possible_truncation,
+            clippy::unchecked_time_subtraction,
+            clippy::unchecked_duration_subtraction
+        )]
         let range_ms = (max - min).as_millis() as u64;
         let jitter = if range_ms > 0 {
             Duration::from_millis(fastrand::u64(0..=range_ms))
