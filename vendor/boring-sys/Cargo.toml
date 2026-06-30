@@ -108,3 +108,7 @@ version = "0.2"
 level = "allow"
 priority = 0
 check-cfg = ["cfg(const_fn)"]
+
+[lints.rust.unnecessary_transmutes]
+level = "allow"
+priority = 0
