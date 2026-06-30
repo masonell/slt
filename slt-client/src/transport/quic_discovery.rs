@@ -23,16 +23,14 @@ const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// precursor).
 ///
 /// The variant is the source of truth and preserves the original error via
-/// `#[source]`/`#[from]`. This replaces the old `map_quic_error`/`map_cid_error`
-/// flattening to `io::ErrorKind::InvalidData`, which destroyed the `quiche::Error`
-/// code and `CidError` detail before they reached the caller.
+/// `#[source]`/`#[from]`, so the `quiche::Error` code and `CidError` detail
+/// survive to the caller.
 ///
 /// The discovery path's public surface stays `io::Result` because its callers
 /// (the session layer's discovery task) treat discovery as opaque pass/fail and
 /// do not branch on the inner variant — but within the discovery module the
 /// typed error carries the structured source, and [`Self::into_io`] re-encodes
-/// it to `io::Error` exactly once at the module boundary rather than flattening
-/// it piecemeal at every call site.
+/// it to `io::Error` exactly once at the module boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum QuicDiscoveryError {
     /// QUIC handshake / config failure from `quiche`, preserved via `#[from]`.
@@ -83,9 +81,7 @@ impl QuicDiscoveryError {
     ///
     /// The discovery callers do not branch on the variant, so the typed error is
     /// collapsed to `io::Error` here — once, preserving the original via the
-    /// `Display` message — rather than being flattened piecemeal at every call
-    /// site by the deleted `map_quic_error`/`map_cid_error`. An `Io` source
-    /// round-trips unchanged.
+    /// `Display` message. An `Io` source round-trips unchanged.
     #[must_use]
     pub fn into_io(self) -> io::Error {
         match self {
@@ -375,11 +371,10 @@ mod tests {
     }
 
     /// `QuicConfigError` converts to [`QuicDiscoveryError::QuicConfig`] via
-    /// `#[from]`, and the discovery boundary classifies it as `InvalidData`
-    /// (matching the old `quiche::Error::TlsFail` routing the typed error
-    /// replaced). Pins both the conversion and the `into_io` classification so
-    /// the preserved `ErrorStack`-carrying failure reaches callers with the
-    /// right retry kind without being collapsed at the source.
+    /// `#[from]`, and the discovery boundary classifies it as `InvalidData`.
+    /// Pins both the conversion and the `into_io` classification so the
+    /// preserved `ErrorStack`-carrying failure reaches callers with the right
+    /// retry kind.
     #[test]
     fn quic_config_error_converts_to_discovery_error_as_invalid_data() {
         use boring::error::ErrorStack;

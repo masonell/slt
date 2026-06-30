@@ -1,21 +1,13 @@
 //! Typed errors for the inbound authentication path.
 //!
-//! `io::Error` was historically the cross-layer lingua franca of the server's
-//! auth path. It carries only an `ErrorKind` and a free-text string, so once a
-//! rich failure entered that type it could not be recovered — the boring TLS
-//! `HandshakeError` was stringified into `io::Error::other(format!("{err:?}"))`
-//! at `generate_challenge`, the `AuthPhaseResult` failure variants were each
-//! flattened to an `io::Error` (losing the `AuthFailCode`'s surrounding TLS/I/O
-//! source context), and the slt-core proto decode errors were collapsed to
-//! `InvalidData` by the duplicated `map_message_error`/`map_payload_error`
-//! flatteners. [`AuthError`] replaces that contract: every variant is the source
-//! of truth (it carries the detail and preserves the original error via
-//! `#[source]`/`#[from]`), and [`AuthPhaseResult`](super::types::AuthPhaseResult)
-//! is reserved for the auth loop's *outcomes* (the code the server chose to send
-//! in `AUTH_FAIL`, or the success/normal-completion outcomes) rather than for
-//! transport/decode failures.
+//! [`AuthError`] covers the genuine failure paths of the inbound TLS + auth
+//! sequence: TLS handshake/setup faults, the auth-phase timeout, a peer
+//! disconnect, socket I/O, and protocol decode errors.
 //!
-//! See `local/error-architecture.md` for the full design (this is phase 4).
+//! [`AuthPhaseResult`](super::types::AuthPhaseResult) is reserved for the auth
+//! loop's *outcomes* — the code the server chose to send in `AUTH_FAIL`, or the
+//! success/normal-completion outcomes — rather than for transport/decode
+//! failures, which are typed `AuthError`.
 
 use std::io;
 
@@ -23,8 +15,8 @@ use boring::error::ErrorStack;
 use boring::ssl::ErrorCode;
 use slt_core::proto::{FrameError, MessageError, PayloadError};
 
-/// A wrapper that preserves a boring TLS handshake failure without
-/// stringifying it, decoupled from the underlying stream type.
+/// A wrapper that preserves a boring TLS handshake failure, decoupled from the
+/// underlying stream type.
 ///
 /// `tokio_boring::HandshakeError<S>` is parameterized by the stream type and
 /// keeps its inner `boring::ssl::HandshakeError` private, so it cannot be stored
@@ -34,10 +26,6 @@ use slt_core::proto::{FrameError, MessageError, PayloadError};
 /// [`ErrorStack`] (for a pre-handshake setup failure), plus — when available —
 /// the underlying I/O error kind so transient conditions can be distinguished
 /// from handshake faults.
-///
-/// This mirrors the phase-1 client `TlsError`: the requirement from the design
-/// note is "preserve, don't stringify", so the structured values survive rather
-/// than being collapsed into a single opaque `io::Error`.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
     /// TLS setup failed before the handshake could run (`Ssl::new`, acceptor
@@ -46,11 +34,10 @@ pub enum TlsError {
     /// Note: `tokio_boring::HandshakeError` does not expose the inner
     /// `ErrorStack` of a `SetupFailure` (it's private), so this variant
     /// captures a **placeholder** `ErrorStack` (see [`Self::from_handshake_error`])
-    /// rather than the real one — a shared limitation with the phase-1 client
-    /// `TlsError::Setup`. Surfacing the real stack is phase-5 scoped (core
-    /// crypto-helper work); the variant still distinguishes a setup fault from
-    /// a mid-handshake `Handshake` fault, which is the classification the
-    /// boundary cares about.
+    /// rather than the real one. This is a shared limitation with the client
+    /// `ConnectError` path's `TlsError::Setup`. The variant still distinguishes
+    /// a setup fault from a mid-handshake `Handshake` fault, which is the
+    /// classification the boundary cares about.
     #[error("tls setup failed: {0}")]
     Setup(#[source] ErrorStack),
 
@@ -99,35 +86,21 @@ impl TlsError {
 
 /// A failure from the inbound TLS + auth sequence on the server.
 ///
-/// The variant is the source of truth — it carries the operation's detail and
-/// preserves the original error via `#[source]`/`#[from]`. Nothing rich is
-/// stringified into `io::Error` mid-stack.
-///
-/// This is distinct from [`super::types::AuthPhaseResult`], which represents the
-/// auth loop's *decided outcomes*: an `AUTH_FAIL` the server chose to send
+/// Distinct from [`super::types::AuthPhaseResult`], which represents the auth
+/// loop's *decided outcomes*: an `AUTH_FAIL` the server chose to send
 /// (`Rejected(code)`), successful authentication, or normal completion are all
 /// `Ok` outcomes of the auth phase — they are not failures. [`AuthError`] covers
 /// only the genuine failure paths: TLS handshake/setup faults, the auth-phase
 /// timeout, a peer disconnect, socket I/O, and protocol decode errors.
-///
-/// The slt-core protocol errors are preserved, not flattened: `FrameError`,
-/// `MessageError`, and `PayloadError` are all real `thiserror::Error` types in
-/// `slt-core` (phase 5 promoted the latter two), so each flows via `#[from]`
-/// and its own `Display` survives to the terminal — mirroring the phase 1–3
-/// client idiom. (Before phase 5, `MessageError`/`PayloadError` were plain
-/// `Copy` enums stored by value with a `Debug`-format `Display`; phase 5 made
-/// them real `Error` types and switched these variants to `#[from]`.)
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     /// TLS handshake (server-side `accept`) failed.
     ///
-    /// Preserves the boring handshake failure via [`TlsError`] rather than
-    /// stringifying it. The previous code flattened this to
-    /// `io::Error::other("tls handshake failed")`, dropping the cause; the
-    /// structured error code / setup stack now survives for `{:#}` and the log.
+    /// Carries the boring handshake failure via [`TlsError`]: the structured
+    /// error code / setup stack survives for `{:#}` and the log.
     #[error("tls handshake failed: {source}")]
     TlsHandshake {
-        /// Preserved boring TLS handshake failure (error code / setup stack).
+        /// Underlying boring TLS handshake failure (error code / setup stack).
         #[source]
         source: TlsError,
     },
@@ -138,12 +111,10 @@ pub enum AuthError {
 
     /// TLS keying-material export failed during auth challenge derivation.
     ///
-    /// Fixes the `map_err(|err| io::Error::other(format!("{err:?}")))`
-    /// stringification at the challenge-generation site: the boring `ErrorStack`
-    /// is preserved, not formatted into an opaque `io::Error`.
+    /// Carries the boring `ErrorStack` from `export_keying_material`.
     #[error("auth challenge keying-material export failed: {source}")]
     ChallengeExport {
-        /// Preserved `ErrorStack` from `export_keying_material`.
+        /// `ErrorStack` from `export_keying_material`.
         #[source]
         source: ErrorStack,
     },
@@ -157,26 +128,21 @@ pub enum AuthError {
     ConnectionClosed,
 
     /// Network-level I/O failure on the auth path (socket read/write, send of
-    /// `AUTH_OK`/`AUTH_FAIL`/`PONG`, etc.). The source is preserved.
+    /// `AUTH_OK`/`AUTH_FAIL`/`PONG`, etc.).
     #[error("auth connection error: {source}")]
     Connection {
-        /// Preserved underlying I/O error.
+        /// Underlying I/O error.
         #[source]
         source: io::Error,
     },
 
-    // slt-core protocol errors are preserved, not flattened. These replace the
-    // duplicated `auth/errors.rs` `map_*` mappers. Each is a real
-    // `std::error::Error` in `slt-core` (phase 5 promoted
-    // `MessageError`/`PayloadError`), so all three flow via `#[from]` and their
-    // own `Display` survives to the terminal.
-    /// Protocol framing error, preserved from `slt_core`.
+    /// Protocol framing error.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error, preserved from `slt_core` via `#[from]`.
+    /// Protocol message error.
     #[error(transparent)]
     Message(#[from] MessageError),
-    /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
+    /// Protocol payload decode error.
     #[error(transparent)]
     Payload(#[from] PayloadError),
 }
@@ -184,11 +150,10 @@ pub enum AuthError {
 impl AuthError {
     /// Coarse `io::ErrorKind` projection for this failure.
     ///
-    /// Used only by the binary entry point to preserve the historical
-    /// `handle()` -> `io::Result<()>` contract (whose `ErrorKind` is asserted on
-    /// by metrics tests). The kind is derived from the variant here, at the
-    /// boundary, rather than guessed from `io::Error` at a distant call site —
-    /// so it can never disagree with the structured error.
+    /// Used only by the binary entry point to satisfy the `handle()` ->
+    /// `io::Result<()>` contract (whose `ErrorKind` is asserted on by metrics
+    /// tests). The kind is derived from the variant here, at the boundary, so it
+    /// can never disagree with the structured error.
     #[must_use]
     pub fn io_kind(&self) -> io::ErrorKind {
         match self {
@@ -204,11 +169,11 @@ impl AuthError {
 impl From<AuthError> for io::Error {
     /// Compose an `io::Error` from the typed failure at the binary boundary.
     ///
-    /// This is the single conversion point that replaces the deleted
-    /// `AuthPhaseResult::into_io_result` flattening: the structured error is
-    /// preserved as the `io::Error`'s inner source (via `io::Error::new(kind,
-    /// error)`), so the cause chain survives for `{:#}` and the kind matches the
-    /// variant's `AuthError::io_kind`.
+    /// This is the single conversion point where the typed `AuthError` meets
+    /// `io::Error`: the structured error is preserved as the `io::Error`'s
+    /// inner source (via `io::Error::new(kind, error)`), so the cause chain
+    /// survives for `{:#}` and the kind matches the variant's
+    /// `AuthError::io_kind`.
     fn from(err: AuthError) -> Self {
         let kind = err.io_kind();
         Self::new(kind, err)
@@ -263,16 +228,13 @@ mod tests {
     /// and the `From<AuthError> for io::Error` conversion must agree with it.
     /// Pins the `io_kind` / `From` mapping so a careless edit is caught loudly.
     ///
-    /// Also pins the "preserve, don't stringify" property: the typed
-    /// `AuthError`'s `Display` must survive into the `io::Error`'s message
-    /// (visible to the `warn!(error = %err)` log at the binary boundary), not
-    /// be collapsed to a bare kind. This is the guardrail against regressing
-    /// the `io::Error::other(format!("{err:?}"))` stringification that phase 4
-    /// removed.
+    /// Also pins that the typed `AuthError`'s `Display` survives into the
+    /// `io::Error`'s message (visible to the `warn!(error = %err)` log at the
+    /// binary boundary).
     ///
     /// Note: `io::Error::source()` is NOT asserted here. `io::Error::new(kind,
     /// custom_err)` drops the source for some "simple" kinds (`TimedOut`, etc.)
-    /// — a std quirk, not a phase-4 bug. What matters for the boundary log is
+    /// — a std quirk. What matters for the boundary log is
     /// that the structured `Display` survives in `to_string()`, asserted below.
     /// The typed error already reaches the session/log paths *before* this
     /// boundary conversion (the auth flow returns `Result<_, AuthError>`
@@ -313,10 +275,9 @@ mod tests {
     }
 
     /// The structured proto detail must survive the `io::Error` boundary
-    /// round-trip and be visible in the `io::Error` message — the property the
-    /// design note requires of the terminal render. Specialized to a proto
-    /// variant (whose offending byte is the load-bearing structured value):
-    /// after `From<AuthError> for io::Error`, the message still carries
+    /// round-trip and be visible in the `io::Error` message. Specialized to a
+    /// proto variant (whose offending byte is the load-bearing structured
+    /// value): after `From<AuthError> for io::Error`, the message still carries
     /// "unknown frame type" and the offending byte.
     #[test]
     fn io_error_boundary_preserves_proto_detail() {
@@ -336,9 +297,9 @@ mod tests {
         );
     }
 
-    /// Proto decode sources must be preserved (not stringified). The displayed
-    /// form carries the structured payload detail, and the cause chain survives
-    /// the `io::Error` round-trip at the boundary.
+    /// Proto decode sources flow to the terminal `{:#}` render with their
+    /// structured payload detail intact, and the cause chain survives the
+    /// `io::Error` round-trip at the boundary.
     #[test]
     fn proto_sources_are_preserved_in_display() {
         let frame = AuthError::Frame(FrameError::UnknownType(0xAB));
@@ -354,11 +315,11 @@ mod tests {
             max: 1500,
         });
         let rendered = format!("{msg:#}");
-        // Phase 5 promoted `MessageError` to a real `Error` with its own
-        // `Display`; the structured lengths survive to the terminal render.
+        // `MessageError` is a real `Error` with its own `Display`; the
+        // structured lengths survive to the terminal render.
         // (Checking "data payload length" / "1500" too — not just "9999", which
-        // the old Debug-format rendering also carried and so is not load-bearing
-        // evidence of the new Display.)
+        // a Debug-format rendering would also carry and so is not load-bearing
+        // evidence of the `Display`.)
         assert!(
             rendered.contains("data payload length"),
             "msg: {rendered:?}"
@@ -374,8 +335,7 @@ mod tests {
         );
         assert!(rendered.contains("0x99"), "payload: {rendered:?}");
 
-        // The boring ErrorStack is preserved as the source of ChallengeExport,
-        // not formatted into an opaque string.
+        // The boring ErrorStack rides as the source of ChallengeExport.
         let export = AuthError::ChallengeExport {
             source: ErrorStack::internal_error(io::Error::other("export-key")),
         };
@@ -387,7 +347,7 @@ mod tests {
     }
 
     /// Manual `From` impls let the auth call sites use `?` for proto decode
-    /// errors, replacing the deleted `map_message_error`/`map_payload_error`.
+    /// errors.
     #[test]
     fn manual_from_impls_preserve_proto_errors() {
         let msg = MessageError::DataTooLarge { len: 10, max: 5 };
@@ -398,7 +358,6 @@ mod tests {
         let err: AuthError = payload.into();
         assert!(matches!(err, AuthError::Payload(_)));
 
-        // FrameError flows via #[from].
         let frame = FrameError::UnknownType(0x01);
         let err: AuthError = frame.into();
         assert!(matches!(err, AuthError::Frame(_)));

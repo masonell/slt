@@ -1,32 +1,18 @@
-//! Typed errors for the session path.
-//!
-//! `io::Error` was historically the cross-layer lingua franca of the server's
-//! per-client session path. It carries only an `ErrorKind` and a free-text
-//! string, so once a rich failure (a decoded payload error, a UDP-QSP
-//! dead-channel signal, an offending byte) entered that type it could not be
-//! recovered — the slt-core proto decode errors were collapsed to `InvalidData`
-//! by the duplicated `map_message_error`/`map_frame_error`/`map_payload_error`
-//! flatteners, and the UDP-QSP session failures were collapsed to
-//! `ConnectionAborted`/`InvalidData` in `send_udp_message`. [`SessionError`]
-//! replaces that contract: every variant is the source of truth (it carries the
-//! detail and preserves the original error via `#[source]`/`#[from]`).
-//!
-//! See `local/error-architecture.md` for the full design (this is phase 4).
+//! Typed errors for the per-client server session path.
 //!
 //! # Why this is narrower than the client's `SessionError`
 //!
-//! The client's `SessionError` (phases 2–3) carries `PermissionDenied`,
-//! `UdpUpgradeRequired`, `Crypto`, and a `ProtocolViolation { detail }` (a
-//! `Cow<'static, str>`) that this server enum deliberately omits. A future
-//! reader "completing" the mirror should NOT re-add them: the server's session
-//! path has no socket-protect step (protection happens client-side), no
-//! `require_udp` policy (the server accepts whichever transport the client
-//! drives), and no session-path crypto operation (server-side
-//! `RAND_bytes`/key-derivation happens in the UDP-QSP/CID layer, not in
-//! `ClientSessionBase`). The server's [`SessionError::ProtocolViolation`] is a
-//! unit variant carrying no detail by design; the client's value-carrying shape
-//! serves the client's richer terminal diagnostics (offending DCID, etc.), which
-//! the server's per-client log does not need.
+//! The client's `SessionError` carries four variants this server enum omits:
+//! - `PermissionDenied` — the server's session path has no socket-protect step
+//!   (protection happens client-side).
+//! - `UdpUpgradeRequired` — the server has no `require_udp` policy; it accepts
+//!   whichever transport the client drives.
+//! - `Crypto` — server-side `RAND_bytes`/key-derivation happens in the
+//!   UDP-QSP/CID layer, not in `ClientSessionBase`.
+//! - `ProtocolViolation { detail }` — the server's
+//!   [`SessionError::ProtocolViolation`] is a unit variant; the client's
+//!   value-carrying shape serves richer terminal diagnostics (offending DCID)
+//!   that the server's per-client log does not need.
 
 use std::io;
 
@@ -35,10 +21,11 @@ use slt_core::proto::{FrameError, MessageError, PayloadError};
 
 /// A failure from the UDP-QSP transport on the server's session path.
 ///
-/// This is a **pure propagation wrapper**, not a policy type. Unlike the
-/// phase-3 client `UdpQspError` — whose `is_recoverable`/`is_dead_channel` the
-/// client's session loop consults via `handle_udp_error` to decide drop-vs-
-/// propagate — the server handles UDP-QSP errors **inline at the source**:
+/// This is a **pure propagation wrapper**, not a policy type. The server handles
+/// UDP-QSP errors **inline at the source**, so there is no recoverable-vs-fatal
+/// decision for this type to encode (unlike the client's `UdpQspError`, whose
+/// `is_recoverable`/`is_dead_channel` the client's session loop consults via
+/// `handle_udp_error`):
 ///
 /// - The **recv path** (`open_udp_packet` in `sessions/udp.rs`) matches every
 ///   `QspSessionError` variant at the source, drops the recoverable packet
@@ -48,61 +35,39 @@ use slt_core::proto::{FrameError, MessageError, PayloadError};
 ///   every failure unchanged via `?` (it has no drop-and-continue option — a
 ///   failed send can't be silently dropped without losing the outbound packet).
 ///
-/// So there is no recoverable-vs-fatal decision for this type to encode. The
-/// earlier draft carried an `is_recoverable`/`is_dead_channel` modeled on the
-/// client; it had **zero production callers** (verified) and encoded the naive
-/// classification (no `SendIo` distinction, so send-side I/O was wrongly
-/// recoverable — the bug the client fixed), so it was deleted to avoid giving
-/// false confidence. `UdpQspError` exists only to wrap `QspSessionError` (and
-/// the proto encode errors) for typed propagation through `SessionError::UdpQsp`
-/// and for faithful terminal `{:#}` display.
-///
-/// The slt-core protocol errors are preserved, not flattened: `FrameError`
-/// and `MessageError` are both real `thiserror::Error` types in `slt-core`
-/// (phase 5 promoted `MessageError`), so each flows via `#[from]` and its own
-/// `Display` survives to the terminal.
+/// `UdpQspError` exists only to wrap `QspSessionError` (and the proto encode
+/// errors) for typed propagation through `SessionError::UdpQsp` and for faithful
+/// terminal `{:#}` display.
 #[derive(Debug, thiserror::Error)]
 pub enum UdpQspError {
     /// UDP-QSP session failure: a replayed/too-old packet number, a packet
     /// number overflow, a crypto (header-protection/AEAD) failure, or the
     /// dead-channel signal after too many consecutive decrypt failures.
     ///
-    /// Preserved from `slt_core` via `#[from]` and propagated unchanged — the
-    /// recv path drops the recoverable variants at the source, and the send
-    /// path propagates everything (see the type-level doc).
+    /// Propagated unchanged — the recv path drops the recoverable variants at
+    /// the source, and the send path propagates everything (see the type-level
+    /// doc).
     #[error(transparent)]
     Qsp(#[from] QspSessionError),
 
-    /// Network-level I/O error from the underlying UDP socket. Preserved, not
-    /// stringified.
+    /// Network-level I/O error from the underlying UDP socket.
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    /// Protocol framing error from `encode_message`, preserved from `slt_core`.
+    /// Protocol framing error from `encode_message`.
     #[error(transparent)]
     Frame(#[from] FrameError),
 
-    /// Protocol message encode/decode error, preserved from `slt_core` via
-    /// `#[from]`. `MessageError` is now a real `std::error::Error` in
-    /// `slt-core` (phase 5 promoted it), so its own `Display` survives to the
-    /// terminal.
+    /// Protocol message encode/decode error.
     #[error(transparent)]
     Message(#[from] MessageError),
 }
 
 /// A failure from an established server-side client session.
 ///
-/// The variant is the source of truth — it carries the operation's detail and
-/// preserves the original error via `#[source]`/`#[from]`. This replaces the
-/// lossy `io::Result` contract on the session path: [`ClientSessionBase::run`](super::ClientSessionBase::run)
-/// now returns `Result<(), SessionError>`, and the structured failure flows to
-/// the session's terminal log unchanged rather than being round-tripped through
-/// `io::Error::new(...)`.
-///
-/// The slt-core protocol errors are preserved, not flattened: `FrameError`,
-/// `MessageError`, and `PayloadError` are all real `thiserror::Error` types in
-/// `slt-core` (phase 5 promoted the latter two), so each flows via `#[from]`
-/// and its own `Display` survives to the terminal.
+/// [`ClientSessionBase::run`](super::ClientSessionBase::run) returns
+/// `Result<(), SessionError>`; the structured failure flows to the session's
+/// terminal log.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     /// Client-detected protocol violation on the session path.
@@ -117,20 +82,17 @@ pub enum SessionError {
     /// Network-level I/O error on the session's TCP connection.
     ///
     /// A transient condition (reset, refused, timeout) for which the session
-    /// terminates. The source is preserved.
+    /// terminates.
     #[error("session connection error: {source}")]
     Connection {
-        /// Preserved underlying I/O error.
+        /// Underlying I/O error.
         #[source]
         source: io::Error,
     },
 
     /// UDP-QSP transport failure (send-side propagation).
     ///
-    /// The typed [`UdpQspError`] preserves the slt-core UDP-QSP session errors
-    /// and the proto encode errors that were previously flattened to
-    /// `ConnectionAborted`/`InvalidData` in `send_udp_message`. This variant is
-    /// only ever produced by the **send path** (`send_udp_message`); recv-side
+    /// Only ever produced by the **send path** (`send_udp_message`); recv-side
     /// UDP-QSP errors are handled inline by `open_udp_packet` (see the
     /// [`UdpQspError`] type-level doc). [`UdpQspError`] is a pure propagation
     /// wrapper with no recoverable policy.
@@ -144,18 +106,13 @@ pub enum SessionError {
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    // slt-core protocol errors are preserved, not flattened. These replace the
-    // `sessions/mod.rs` `map_*` mappers on the session call sites. Each is a
-    // real `std::error::Error` in `slt-core` (phase 5 promoted
-    // `MessageError`/`PayloadError`), so all three flow via `#[from]` and their
-    // own `Display` survives to the terminal.
-    /// Protocol framing error, preserved from `slt_core`.
+    /// Protocol framing error.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error, preserved from `slt_core` via `#[from]`.
+    /// Protocol message error.
     #[error(transparent)]
     Message(#[from] MessageError),
-    /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
+    /// Protocol payload decode error.
     #[error(transparent)]
     Payload(#[from] PayloadError),
 }
@@ -228,8 +185,8 @@ mod tests {
         );
     }
 
-    /// Proto decode sources must be preserved (not stringified). The displayed
-    /// form carries the structured payload detail.
+    /// Proto decode sources flow to the terminal `{:#}` render with their
+    /// structured payload detail intact.
     #[test]
     fn proto_sources_are_preserved_in_display() {
         let frame = SessionError::Frame(FrameError::UnknownType(0xAB));
@@ -245,8 +202,8 @@ mod tests {
             max: 1500,
         });
         let rendered = format!("{msg:#}");
-        // Phase 5 promoted `MessageError` to a real `Error` with its own
-        // `Display`; the structured lengths survive to the terminal render.
+        // `MessageError` is a real `Error` with its own `Display`; the
+        // structured lengths survive to the terminal render.
         assert!(rendered.contains("9999"), "msg: {rendered:?}");
 
         let payload = SessionError::Payload(PayloadError::InvalidCipher(0x99));
@@ -259,7 +216,7 @@ mod tests {
     }
 
     /// Manual `From` impls let the session call sites use `?` for proto decode
-    /// errors, replacing the deleted `map_*` mappers.
+    /// errors.
     #[test]
     fn manual_from_impls_preserve_proto_errors() {
         let msg = MessageError::DataTooLarge { len: 10, max: 5 };
@@ -274,8 +231,6 @@ mod tests {
         let err: SessionError = frame.into();
         assert!(matches!(err, SessionError::Frame(_)));
 
-        // QspSessionError flows via #[from] into UdpQspError, and UdpQspError
-        // flows via #[from] into SessionError.
         let qsp: SessionError = UdpQspError::from(QspSessionError::Replay).into();
         assert!(matches!(
             qsp,

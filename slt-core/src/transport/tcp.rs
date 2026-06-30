@@ -265,30 +265,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin, K: KeyUpdater> TcpChannel<S, K> {
 
 /// Typed failure from `TcpChannel::write_message`.
 ///
-/// Preserves both failure sources unchanged — neither is stringified into
-/// `io::Error`: the encode failure as the structured [`FrameError`], the write
-/// failure as the underlying [`io::Error`]. Each consumer threads the variants
-/// into its own policy via a `From<TcpWriteError>` impl or an explicit `match`.
+/// The encode failure surfaces as [`FrameError`]; the write failure as
+/// [`io::Error`].
 ///
 /// Note on the `Frame` arm's policy downstream: a `FrameError` here means
 /// encoding a locally-constructed `Message` failed (an unknown message type, or
 /// a payload oversized despite the TUN-layer pre-check) — a logic/config bug a
 /// reconnect cannot fix. Consumers therefore route `Frame` to a fatal bucket
-/// (e.g. `SessionError::Frame` / `ConnectError::Frame`) rather than the
-/// reconnect/retry path the old `map_frame_error` flattening produced; the `Io`
-/// arm stays retryable/reconnect as before.
-///
-/// `Frame` absorbs `FrameError` via `#[from]`; the write-side `io::Error` is
-/// also absorbed via `#[from]` so `?` works at the failure site.
+/// (e.g. `SessionError::Frame` / `ConnectError::Frame`); the `Io` arm stays
+/// retryable/reconnect.
 #[derive(Debug, thiserror::Error)]
 pub enum TcpWriteError {
-    /// Protocol framing error from `encode_message`, preserved from `slt_core`
-    /// via `#[from]`. Its own `Display` survives to the terminal.
+    /// Encode failure from `encode_message`.
     #[error(transparent)]
     Frame(#[from] FrameError),
 
-    /// Network-level I/O error from the underlying TLS stream write, preserved
-    /// rather than stringified.
+    /// Write failure from the underlying TLS stream.
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -325,6 +317,12 @@ fn request_tls_key_update(ssl: &mut SslRef, request_peer_update: bool) -> io::Re
         return Ok(());
     }
     let err = ErrorStack::get();
+    // The `KeyUpdater` trait returns `io::Result<()>`, so the boring `ErrorStack`
+    // cannot survive this boundary as a typed source. Log it before collapsing —
+    // mirroring the `set_tls_configure_callback` pattern in `crypto/mod.rs` — so
+    // the structured boring failure reaches the log rather than being stringified
+    // and dropped.
+    tracing::warn!(error = %err, "tls key update failed");
     Err(io::Error::other(format!("tls key update failed: {err:?}")))
 }
 

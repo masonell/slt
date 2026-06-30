@@ -45,9 +45,6 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// - Payload decoding fails (invalid payload data)
     pub(super) async fn handle_tcp_read(&mut self) -> Result<SessionControl, SessionError> {
         loop {
-            // MessageError flows via `#[from]` on `SessionError::Message`,
-            // preserving the proto detail instead of flattening to
-            // `io::ErrorKind::InvalidData`.
             let Some(msg_buf) = self.tcp.try_pop_message(self.limits)? else {
                 return Ok(SessionControl::Continue);
             };
@@ -163,8 +160,7 @@ mod tests {
     use crate::runtime::session::SessionExit;
 
     /// A ping payload decode failure is preserved as a typed `SessionError`
-    /// carrying the `PayloadError`, not flattened to an `io::Error` kind — the
-    /// proto error survives to the caller.
+    /// carrying the `PayloadError` — the proto error survives to the caller.
     #[test]
     fn ping_payload_decode_error_preserved_as_session_error() {
         let result = PingPayload::decode(&[]);
@@ -294,10 +290,8 @@ mod tests {
     }
 
     /// A TCP-path `SessionError::Io` wrapping an `io::Error` preserves the
-    /// underlying error via the variant (phase 3 retired the kind-based
-    /// `io_kind()`/`as_io()` bridge that the UDP path no longer needs; the TCP
-    /// path's `SessionError::Io` keeps the source intact for the terminal
-    /// cause chain).
+    /// underlying error via the variant (the TCP path's `SessionError::Io`
+    /// keeps the source intact for the terminal cause chain).
     #[test]
     fn io_error_source_is_preserved_through_session_error() {
         let err = SessionError::from(io::Error::from(io::ErrorKind::ConnectionAborted));

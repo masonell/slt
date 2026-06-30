@@ -147,8 +147,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             client_to_server_cid: register.client_to_server_cid,
         };
         let mut ok_buf = Vec::new();
-        // PayloadError flows via #[from], preserving the proto detail (was
-        // map_payload_error).
         ok.encode(&mut ok_buf)?;
         self.send_message(Message::RegisterOk { payload: &ok_buf })
             .await?;

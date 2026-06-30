@@ -88,8 +88,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         &mut self,
         payload: &[u8],
     ) -> Result<SessionControl, SessionError> {
-        // PayloadError flows via #[from], preserving the proto detail (was
-        // map_payload_error).
         let probe = UpgradeProbePayload::decode(payload)?;
         if !self.note_upgrade_id(probe.upgrade_id, "upgrade_probe") {
             return Ok(SessionControl::Continue);
@@ -113,8 +111,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         &mut self,
         payload: &[u8],
     ) -> Result<SessionControl, SessionError> {
-        // PayloadError flows via #[from], preserving the proto detail (was
-        // map_payload_error).
         let ready = UdpReadyPayload::decode(payload)?;
         if !self.note_upgrade_id(ready.upgrade_id, "udp_ready") {
             return Ok(SessionControl::Continue);
@@ -129,8 +125,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         &mut self,
         payload: &[u8],
     ) -> Result<SessionControl, SessionError> {
-        // PayloadError flows via #[from], preserving the proto detail (was
-        // map_payload_error).
         let ack = SwitchAckPayload::decode(payload)?;
         let Some(expected_upgrade_id) = self.udp_upgrade.upgrade_id else {
             debug!(

@@ -361,10 +361,10 @@ mod tests {
         );
     }
 
-    /// `MessageError` is now a real `std::error::Error` (phase 5 promotion) and
-    /// its `Frame` variant converts from `FrameError` via `#[from]`. Pins the
-    /// conversion and the `Display` shape so downstream `#[from]` propagation
-    /// stays valid and the structured detail reaches the terminal.
+    /// `MessageError` is a real `std::error::Error` and its `Frame` variant
+    /// converts from `FrameError` via `#[from]`. Pins the conversion and the
+    /// `Display` shape so downstream `#[from]` propagation stays valid and the
+    /// structured detail reaches the terminal.
     #[test]
     fn frame_error_converts_to_message_error_via_from() {
         let frame_err = FrameError::UnknownType(0xAB);

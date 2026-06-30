@@ -22,9 +22,9 @@ use crate::transport::socket_protector::SocketProtector;
 /// Android) — there is no runtime polymorphism to pay for.
 ///
 /// `run_client` is generic over `S: ClientRuntimeServices`, so the bundle stays
-/// one argument (Phase 3 grouping) without introducing `dyn`. The trait itself
-/// carries no `dyn`, even though a concrete impl (Android) may use `Arc<dyn …>`
-/// internally to bridge to its own platform callbacks.
+/// one argument without introducing `dyn`. The trait itself carries no `dyn`,
+/// even though a concrete impl (Android) may use `Arc<dyn …>` internally to
+/// bridge to its own platform callbacks.
 pub trait ClientRuntimeServices: Send + Sync + 'static {
     /// Socket protector excluding transport sockets from VPN routing.
     /// `Clone` so it can be moved into spawned background tasks.

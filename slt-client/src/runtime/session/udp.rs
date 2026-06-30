@@ -273,8 +273,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// transports are dead and the session should close.
     pub(super) fn handle_udp_error(&mut self, err: &SessionError) -> bool {
         // Recoverable UDP-QSP transport failure (replay, too-old, single crypto
-        // failure, partial packet, transient socket I/O): drop & continue. This
-        // replaces the old `err.kind() == InvalidData` check.
+        // failure, partial packet, transient socket I/O): drop & continue.
         if err.is_udp_qsp_recoverable() {
             trace!(error = %err, "dropping udp-qsp packets");
             return true;
@@ -374,9 +373,7 @@ mod tests {
     }
 
     /// Recoverable UDP-QSP transport failures are droppable during the refresh
-    /// probe. This pins the typed replacement for the old
-    /// `should_drop_refresh_udp_io_error` / `should_drop_refresh_session_error`
-    /// kind-based drop checks.
+    /// probe.
     #[test]
     fn refresh_drops_recoverable_udp_qsp_errors() {
         for qsp in [
@@ -409,7 +406,7 @@ mod tests {
 
         // Plain socket io::Error wrapped as SessionError::Io (not via UdpQsp):
         // the typed UDP-QSP recoverable classification does not apply — it
-        // propagates. (The UDP transport now returns UdpQspError::Io for its
+        // propagates. (The UDP transport returns UdpQspError::Io for its
         // socket I/O, which IS recoverable; a bare SessionError::Io comes from
         // other session-path I/O and is not a UDP-QSP transport condition.)
         for kind in [
@@ -434,8 +431,7 @@ mod tests {
     /// `SessionError::ProtocolViolation` with specific `detail` strings (these
     /// are the variants the producer builds, not synthetic io::Errors). Each
     /// must project to the fatal `ProtocolError` exit and render its detail, so
-    /// the terminal `{:#}` report is stage-specific rather than a bare
-    /// `io::ErrorKind`.
+    /// the terminal `{:#}` report is stage-specific.
     #[test]
     fn udp_unexpected_message_variants_are_typed_protocol_violations() {
         use crate::runtime::session::SessionExit;

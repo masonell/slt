@@ -152,7 +152,6 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// # Errors
     ///
     /// Returns [`AuthError::ChallengeExport`] if keying material export fails.
-    /// The boring `ErrorStack` is preserved rather than stringified.
     fn generate_challenge<S>(
         tcp: &SessionTcpChannel<S>,
     ) -> Result<[u8; AUTH_CHALLENGE_LEN], AuthError>
@@ -229,7 +228,6 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 let msg_buf = match as_tcp_channel(tcp)?.try_pop_message(self.sessions.limits()) {
                     Ok(Some(buf)) => buf,
                     Ok(None) => break,
-                    // FrameError flows via #[from]; MessageError via manual From.
                     Err(err) => {
                         // MessageError is not Display; render via Debug.
                         warn!(error = ?err, peer_addr = ?peer_addr, "message parse error");
@@ -288,8 +286,6 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
     {
-        // PayloadError flows via #[from], preserving the proto detail (was
-        // map_payload_error).
         let auth = AuthPayload::decode(payload)?;
         trace!(client_id = %auth.client_id, assigned_ip = %auth.assigned_ipv4, "processing auth message");
 
@@ -323,8 +319,6 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
-        // PayloadError flows via #[from], preserving the proto detail (was
-        // map_payload_error).
         let ping_in = PingPayload::decode(payload)?;
         trace!(nonce = ping_in.nonce, "received ping during auth phase");
 

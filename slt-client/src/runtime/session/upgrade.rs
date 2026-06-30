@@ -800,8 +800,8 @@ mod tests {
             let result = RegisterFailPayload::decode(&[]);
             assert!(result.is_err());
 
-            // The payload decode error is preserved as a typed `SessionError`
-            // (not flattened to an io::Error kind), carrying the proto detail.
+            // The payload decode error is preserved as a typed `SessionError`,
+            // carrying the proto detail.
             let err = SessionError::from(result.unwrap_err());
             assert!(matches!(err, SessionError::Payload(_)));
             assert_eq!(err.exit(), super::super::SessionExit::ProtocolError);
@@ -893,9 +893,8 @@ mod tests {
     }
 
     /// The DCID-mismatch producer carries the offending value: the two CIDs are
-    /// formatted into the `Cow::Owned` detail (not discarded). This is the
-    /// phase-minor fix — pin that both the expected and received CID bytes
-    /// survive in the terminal `{:#}` render.
+    /// formatted into the `Cow::Owned` detail (not discarded). Pin that both the
+    /// expected and received CID bytes survive in the terminal `{:#}` render.
     #[test]
     fn register_ok_dcid_mismatch_carries_offending_value() {
         use slt_core::types::{Cid, MAX_DCID_LEN};

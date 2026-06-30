@@ -25,8 +25,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     /// * `Err(SessionError)` if reading from the TCP buffer fails
     pub(super) async fn handle_tcp_read(&mut self) -> Result<SessionControl, SessionError> {
         loop {
-            // MessageError flows via #[from], preserving the proto detail (was
-            // map_message_error).
             let Some(msg_buf) = self.tcp.try_pop_message(self.limits)? else {
                 return Ok(SessionControl::Continue);
             };

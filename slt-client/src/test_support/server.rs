@@ -21,10 +21,8 @@ use tokio_boring::SslStream;
 
 /// Boxed error used by the mock server's protocol helpers so that slt-core's
 /// typed `FrameError`/`PayloadError` and the raw `io::Error` all flow via `?`
-/// without being stringified (the deleted `map_frame_error`/`map_payload_error`
-/// flattened them into `io::ErrorKind::InvalidData`). Test-only: callers in the
-/// integration tests `.unwrap()` the result, so the dynamic dispatch cost is
-/// irrelevant.
+/// without being stringified. Test-only: callers in the integration tests
+/// `.unwrap()` the result, so the dynamic dispatch cost is irrelevant.
 pub type MockResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 use crate::metrics::Metrics;

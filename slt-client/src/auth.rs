@@ -22,11 +22,11 @@ const AUTH_MAX_FRAME: usize = 16 * 1024;
 ///
 /// Returns a [`ConnectError`] describing the auth failure:
 /// - [`ConnectError::AuthRejected`] carries the server's [`slt_core::proto::AuthFailCode`],
-///   the client id, and the assigned IPv4 (closing the decode-then-discard hole).
+///   the client id, and the assigned IPv4.
 /// - [`ConnectError::AuthTimeout`] if `AUTH_OK`/`AUTH_FAIL` does not arrive in time.
 /// - [`ConnectError::AuthDisconnected`] if the server closes the connection.
 /// - [`ConnectError::AuthTlsExport`] if the TLS keying-material export fails.
-/// - Protocol decode errors flow through via `#[from]`.
+/// - Protocol decode errors surface as their typed variant.
 pub async fn authenticate(
     tcp: &mut crate::transport::tcp::TcpTransport,
     config: &ClientConfig,
@@ -206,9 +206,7 @@ where
             Ok(AuthResult::Accepted)
         }
         Message::AuthFail { payload } => {
-            // Decode the AuthFailCode, then carry it to the caller instead of
-            // discarding it. This closes the decode-then-discard hole at the
-            // auth boundary. The auth-failure metric is bumped by the outer
+            // The auth-failure metric is bumped by the outer
             // `authenticate_with_channel_impl` loop when it observes the
             // rejection (it owns the `Metrics` handle; the channel does not).
             let fail = AuthFailPayload::decode(payload)?;
@@ -561,9 +559,8 @@ mod integration_tests {
         server_result.expect("server should complete without error");
 
         let err = client_result.expect_err("client auth should fail");
-        // The server's AuthFailCode must survive to the caller — this is the
-        // decode-then-discard hole being closed. A kind-based assertion would
-        // pass even if the code were dropped.
+        // The server's AuthFailCode must survive to the caller — a kind-based
+        // assertion would pass even if the code were dropped.
         assert!(
             matches!(
                 err,

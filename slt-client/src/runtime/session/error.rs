@@ -1,20 +1,12 @@
-//! Typed errors for the session path.
+//! Typed errors for the established-session path.
 //!
 //! Where [`crate::error::ConnectError`] is the typed error for the connect/auth
 //! sequence, [`SessionError`] is its counterpart for the established-session
 //! path: TCP/UDP message handling, payload decoding, and the UDP-upgrade FSM.
-//! It replaces the lossy `classify_error(io::Error) -> SessionExit` derivation,
-//! which guessed a failure's meaning from `io::ErrorKind` at a distance and
-//! discarded the structured detail (decoded payload error, offending byte,
-//! peer address) that existed at the failure site.
 //!
 //! [`SessionExit`](super::SessionExit) remains the control-flow reason used by
 //! the runtime to decide reconnect policy (it stays `Clone + Copy`); a
-//! [`SessionError`] carries the rich, source-preserving failure that produced
-//! an error exit, and flows to the terminal unchanged rather than being
-//! round-tripped through `io::Error::new(...)`.
-//!
-//! See `local/error-architecture.md` for the full design (phases 2 and 3).
+//! [`SessionError`] carries the rich failure that produced an error exit.
 
 use std::borrow::Cow;
 use std::io;
@@ -28,25 +20,13 @@ use crate::transport::udp_qsp::UdpQspError;
 
 /// A failure from an established session.
 ///
-/// The variant is the source of truth — it carries the operation's detail and
-/// preserves the original error via `#[source]`/`#[from]`. [`Self::exit`] is a
-/// derived projection onto the reconnect-policy enum
+/// [`Self::exit`] is a derived projection onto the reconnect-policy enum
 /// [`SessionExit`](super::SessionExit); like [`crate::error::ConnectError::stage`]
 /// it can never disagree with the variant because it is derived from it.
 ///
-/// The slt-core protocol errors are preserved, not flattened: `FrameError`,
-/// `MessageError`, and `PayloadError` are all real `thiserror::Error` types in
-/// `slt-core` (phase 5 promoted the latter two), so each flows via `#[from]`
-/// and its own `Display` survives to the terminal — mirroring the phase-1
-/// [`crate::error::ConnectError`] handling. (Before phase 5, `MessageError`/
-/// `PayloadError` were plain `Copy` enums stored by value with a `Debug`-format
-/// `Display`; phase 5 made them real `Error` types and switched these variants
-/// to `#[from]`.)
-///
-/// The UDP-QSP transport failure flows via [`Self::UdpQsp`] (phase 3): the typed
-/// [`UdpQspError`] preserves the `slt-core` `QspSessionError`/`QspCryptoError`
-/// and the proto encode errors, and carries its own recoverable-vs-fatal
-/// classification via [`UdpQspError::is_recoverable`] / [`UdpQspError::is_dead_channel`].
+/// The UDP-QSP transport failure flows via [`Self::UdpQsp`]: the typed
+/// [`UdpQspError`] carries its own recoverable-vs-fatal classification via
+/// [`UdpQspError::is_recoverable`] / [`UdpQspError::is_dead_channel`].
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     /// Client-detected protocol violation on the session path.
@@ -71,17 +51,14 @@ pub enum SessionError {
 
     /// Local OS or network policy denied an operation (e.g. socket protect).
     ///
-    /// Preserves the underlying I/O error rather than stringifying it. Fatal:
-    /// a capability/permission problem won't self-heal across a retry.
+    /// Fatal: a capability/permission problem won't self-heal across a retry.
     ///
     /// No session-path producer constructs this today (socket protection
-    /// happens on the connect path, owned by phase 1's `ConnectError`); it is
-    /// reserved for a future UDP-protect denial on the session path. Not a
-    /// regression — the old `classify_error` `PermissionDenied` branch was
-    /// likewise unreachable on the session path.
+    /// happens on the connect path, owned by [`crate::error::ConnectError`]); it
+    /// is reserved for a future UDP-protect denial on the session path.
     #[error("session operation denied: {source}")]
     PermissionDenied {
-        /// Preserved underlying I/O error from the denied operation.
+        /// Underlying I/O error from the denied operation.
         #[source]
         source: io::Error,
     },
@@ -96,10 +73,10 @@ pub enum SessionError {
     /// Network-level I/O error on the session's TCP connection.
     ///
     /// A transient condition (reset, refused, timeout) for which the runtime
-    /// reconnects. The source is preserved.
+    /// reconnects.
     #[error("session connection error: {source}")]
     Connection {
-        /// Preserved underlying I/O error.
+        /// Underlying I/O error.
         #[source]
         source: io::Error,
     },
@@ -113,31 +90,27 @@ pub enum SessionError {
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    /// UDP-QSP transport failure (phase 3).
+    /// UDP-QSP transport failure.
     ///
     /// The typed [`UdpQspError`] preserves the slt-core UDP-QSP session/crypto
-    /// errors and the proto encode errors that were previously flattened to
-    /// `io::ErrorKind::InvalidData` by the deleted `map_qsp_error`. The
-    /// recoverable-vs-fatal decision lives on the inner type
-    /// ([`UdpQspError::is_recoverable`] / [`UdpQspError::is_dead_channel`]):
-    /// recoverable failures (replay, too-old, single crypto failure, proto
-    /// decode, partial packet, transient socket I/O) are dropped by the session
-    /// and keep the UDP path alive; the dead-channel signal and packet-number
-    /// overflow propagate (see [`UdpQspError::is_recoverable`] for the policy,
-    /// including the deliberate changes from the old kind-based path).
+    /// errors and the proto encode errors. The recoverable-vs-fatal decision
+    /// lives on the inner type ([`UdpQspError::is_recoverable`] /
+    /// [`UdpQspError::is_dead_channel`]): recoverable failures (replay,
+    /// too-old, single crypto failure, proto decode, partial packet, transient
+    /// socket I/O) are dropped by the session and keep the UDP path alive; the
+    /// dead-channel signal and packet-number overflow propagate (see
+    /// [`UdpQspError::is_recoverable`] for the policy).
     #[error(transparent)]
     UdpQsp(#[from] UdpQspError),
 
     /// Cryptographic operation failure on the session path (e.g. `RAND_bytes`
-    /// during UDP-QSP registration key generation). Preserves the boring
-    /// `ErrorStack` rather than stringifying it. Fatal: local crypto state.
+    /// during UDP-QSP registration key generation). Fatal: local crypto state.
     #[error("session crypto error: {0}")]
     Crypto(#[from] ErrorStack),
 
     /// UDP-QSP key derivation failed at session-setup time (`UdpQspKeys::new`
     /// during `REGISTER_CID` preparation). Preserves the typed
-    /// [`QspCryptoError`] rather than discarding it (the previous code did
-    /// `.map_err(|_| ProtocolViolation { ... })`, dropping the cause).
+    /// [`QspCryptoError`] so the cause survives.
     ///
     /// Distinct from [`Self::Crypto`] (which carries the boring `ErrorStack`
     /// from `RAND_bytes`): `QspCryptoError` is the slt-core UDP-QSP crypto
@@ -146,41 +119,29 @@ pub enum SessionError {
     #[error("udp-qsp key derivation failed: {0}")]
     UdpQspKeys(#[from] QspCryptoError),
 
-    // slt-core protocol errors are preserved, not flattened. These replace the
-    // `wire.rs` `map_*` mappers on the session call sites. Each is a real
-    // `std::error::Error` in `slt-core` (phase 5 promoted
-    // `MessageError`/`PayloadError`), so all three flow via `#[from]` and their
-    // own `Display` survives to the terminal.
-    /// Protocol framing error, preserved from `slt_core`.
+    /// Protocol framing error.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error, preserved from `slt_core` via `#[from]`.
+    /// Protocol message error.
     #[error(transparent)]
     Message(#[from] MessageError),
-    /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
+    /// Protocol payload decode error.
     #[error(transparent)]
     Payload(#[from] PayloadError),
 }
 
 impl From<TcpWriteError> for SessionError {
     /// Thread `TcpChannel::write_message`'s typed write error into the session
-    /// error without flattening either source.
+    /// error.
     ///
-    /// This is **NOT a behaviour-preserving representation change** — the
-    /// `Frame` branch is a deliberate policy change:
-    /// - **`Io` → [`SessionError::Io`]** is genuine parity: the pre-refactor
-    ///   path already routed the TLS write failure through `io::Error` →
-    ///   `From<io::Error>` → `SessionError::Io` (`exit() == ConnectionError`,
-    ///   reconnect). Unchanged.
-    /// - **`Frame` → [`SessionError::Frame`]** is a **deliberate change to
-    ///   fatal** (`exit() == ProtocolError`). The old path flattened
-    ///   `FrameError` via `map_frame_error` into `io::Error(InvalidData)` →
-    ///   `SessionError::Io` (reconnect). A `FrameError` from encoding a
+    /// - **`Io` → [`SessionError::Io`]**: a network-level write failure on the
+    ///   session path reconnects (`exit() == ConnectionError`).
+    /// - **`Frame` → [`SessionError::Frame`]**: fatal
+    ///   (`exit() == ProtocolError`). A `FrameError` from encoding a
     ///   locally-constructed `Message` is a logic/config bug (an unknown
     ///   message type, or a payload oversized despite the TUN-layer
-    ///   pre-check) — reconnecting won't fix it, so the old routing masked
-    ///   the bug behind a reconnect loop. Routing it to the typed `Frame`
-    ///   variant surfaces it as fatal instead.
+    ///   pre-check) — reconnecting won't fix it, so routing it to the typed
+    ///   `Frame` variant surfaces it as fatal.
     fn from(err: TcpWriteError) -> Self {
         match err {
             TcpWriteError::Frame(frame) => Self::Frame(frame),
@@ -193,13 +154,10 @@ impl SessionError {
     /// Reconnect/fatal policy projection onto [`SessionExit`](super::SessionExit).
     ///
     /// Derived from the variant via a `match`, so it can never disagree with
-    /// the variant (unlike the old `classify_error(io::Error)` that guessed
-    /// from `ErrorKind`). This is the replacement for `classify_error`: the
-    /// typed error is built at the failure site, and the control-flow reason
-    /// is derived from it here.
+    /// the variant. The typed error is built at the failure site, and the
+    /// control-flow reason is derived from it here.
     ///
-    /// Mapping (preserves today's reconnect decisions — see the policy table
-    /// in `local/error-architecture.md`):
+    /// Mapping:
     /// - [`Self::ProtocolViolation`] / proto errors ([`Self::Frame`]/
     ///   [`Self::Message`]/[`Self::Payload`]) / [`Self::Crypto`] /
     ///   [`Self::UdpQspKeys`] → `ProtocolError` (fatal).
@@ -210,14 +168,10 @@ impl SessionError {
     ///   the recoverable-vs-fatal *transport* decision (drop & continue vs.
     ///   dead-channel) is made before reaching `exit()`: a dropped recoverable
     ///   failure never produces a `SessionError` at all, and the dead-channel
-    ///   signal routes through `exit()` as a reconnect (matching the old
-    ///   `ConnectionAborted` → reconnect behaviour).
+    ///   signal routes through `exit()` as a reconnect.
     ///
-    /// Proto decode failures all map to `ProtocolError` to match the old
-    /// `classify_error` behaviour, where `map_*_error` produced
-    /// `io::ErrorKind::InvalidData` and `classify_error` bucketed that as
-    /// `ProtocolError`. Phase 5 (promoting `MessageError`/`PayloadError` to
-    /// real `Error` types) can revisit per-variant policy if warranted.
+    /// Proto decode failures all map to `ProtocolError` (fatal). Per-variant
+    /// exit policy may be revisited separately if warranted.
     #[must_use]
     pub const fn exit(&self) -> super::SessionExit {
         match self {
@@ -238,10 +192,9 @@ impl SessionError {
     /// Whether this is the UDP-QSP dead-channel signal — the one fatal
     /// non-I/O condition on the UDP-QSP transport path.
     ///
-    /// Phase-3 replacement for the old `io_kind() == Some(ConnectionAborted)`
-    /// check on the UDP path: the typed [`UdpQspError`] carries the
-    /// classification directly. Returns `false` for every non-`UdpQsp` variant
-    /// and for non-dead-channel `UdpQsp` failures.
+    /// The typed [`UdpQspError`] carries the classification directly. Returns
+    /// `false` for every non-`UdpQsp` variant and for non-dead-channel `UdpQsp`
+    /// failures.
     #[must_use]
     pub const fn is_udp_qsp_dead_channel(&self) -> bool {
         match self {
@@ -253,10 +206,9 @@ impl SessionError {
     /// Whether this is a recoverable UDP-QSP transport failure (drop &
     /// continue, keeping the UDP path alive).
     ///
-    /// Phase-3 replacement for the old `io_kind() == Some(InvalidData)` drop
-    /// check on the UDP path. Returns `false` for every non-`UdpQsp` variant,
-    /// since those are typed session/proto errors that propagate (the UDP
-    /// transport's recoverable classification does not apply to them).
+    /// Returns `false` for every non-`UdpQsp` variant, since those are typed
+    /// session/proto errors that propagate (the UDP transport's recoverable
+    /// classification does not apply to them).
     #[must_use]
     pub fn is_udp_qsp_recoverable(&self) -> bool {
         match self {
@@ -273,10 +225,7 @@ impl SessionError {
     /// its own recoverable/dead-channel classification) and for [`Self::Io`]
     /// when reached on the UDP path (a raw socket I/O error from
     /// `udp.flush()`). False for the typed protocol/violation/crypto variants,
-    /// which the UDP write/flush handlers propagate unchanged. This is the
-    /// phase-3 replacement for the old `err.as_io().is_some()` check that
-    /// separated "I/O from the UDP path → fall back" from "typed session error
-    /// → propagate".
+    /// which the UDP write/flush handlers propagate unchanged.
     #[must_use]
     pub const fn is_udp_path_transport_error(&self) -> bool {
         matches!(self, Self::UdpQsp(_) | Self::Io(_))
@@ -288,11 +237,8 @@ mod tests {
     use super::*;
     use crate::runtime::session::SessionExit;
 
-    /// `From<TcpWriteError>` routes `Frame` → `SessionError::Frame` (fatal,
-    /// `exit() == ProtocolError`) and `Io` → `SessionError::Io` (reconnect,
-    /// `exit() == ConnectionError`). Pins both arms so the deliberate change to
-    /// the `Frame` branch's policy (the old `map_frame_error` path flattened it
-    /// to `SessionError::Io`, reconnect) cannot silently regress.
+    /// Pins both arms of `From<TcpWriteError>` so the routing cannot silently
+    /// regress.
     #[test]
     fn from_tcp_write_error_routes_frame_fatal_and_io_reconnect() {
         use slt_core::transport::tcp::TcpWriteError;
@@ -317,7 +263,7 @@ mod tests {
         assert_eq!(
             io.exit(),
             SessionExit::ConnectionError,
-            "SessionError::Io from TcpWriteError must reconnect (parity with the old path)"
+            "SessionError::Io from TcpWriteError must reconnect (ConnectionError)"
         );
     }
 
@@ -414,9 +360,8 @@ mod tests {
         }
     }
 
-    /// The fatal-vs-reconnect projection must match the policy table. This is
-    /// the guardrail against re-introducing `ErrorKind`-based guesswork on the
-    /// session path.
+    /// The fatal-vs-reconnect projection, pinned per variant. Guardrail against
+    /// re-introducing `ErrorKind`-based guesswork on the session path.
     #[test]
     fn exit_matches_policy_table() {
         // Fatal exits.
@@ -466,10 +411,8 @@ mod tests {
             SessionError::Io(io::Error::other("x")).exit(),
             SessionExit::ConnectionError
         );
-        // PayloadError buckets under ProtocolError (fatal) to preserve the
-        // pre-refactor behaviour. Phase 5 promoted `PayloadError` to a real
-        // `Error` type but deliberately did not revisit per-variant exit policy
-        // (behaviour-preserving representation change only).
+        // PayloadError buckets under ProtocolError (fatal). `PayloadError` is
+        // a real `Error` type; per-variant exit policy is not revisited here.
         assert_eq!(
             SessionError::Payload(PayloadError::InvalidCipher(0x99)).exit(),
             SessionExit::ProtocolError
@@ -485,8 +428,8 @@ mod tests {
         );
     }
 
-    /// A protocol error must be distinct from a connection error: this is the
-    /// "classified by stage, not by ErrorKind" property from the design note.
+    /// A protocol error must be distinct from a connection error: classification
+    /// is by stage, not by `ErrorKind`.
     #[test]
     fn protocol_and_connection_errors_are_distinct() {
         assert_ne!(
@@ -499,12 +442,11 @@ mod tests {
     }
 
     /// The typed UDP-QSP recoverable/dead-channel projections must classify
-    /// each `UdpQspError` shape correctly: this is the phase-3 replacement for
-    /// the old `io_kind() == Some(InvalidData)` / `ConnectionAborted` checks.
-    /// Also pins [`SessionError::is_udp_path_transport_error`] — the phase-3
-    /// replacement for the old `as_io().is_some()` gate used at the UDP write /
-    /// flush / tun-packet / upgrade-probe call sites to separate "UDP-path
-    /// transport condition -> fall back" from "typed session error -> propagate".
+    /// each `UdpQspError` shape correctly. Also pins
+    /// [`SessionError::is_udp_path_transport_error`] — the gate used at the
+    /// UDP write / flush / tun-packet / upgrade-probe call sites to separate
+    /// "UDP-path transport condition -> fall back" from "typed session error
+    /// -> propagate".
     #[test]
     fn udp_qsp_projections_classify_each_shape() {
         use slt_core::crypto::udp_qsp::{QspCryptoError, QspSessionError};
@@ -525,8 +467,8 @@ mod tests {
         assert!(dead.is_udp_qsp_dead_channel());
 
         // Fatal (packet-number overflow): TX pn space exhausted, session cannot
-        // send again on this UDP path — propagates to TCP fallback (the old
-        // `QuotaExceeded` routing), not a drop. Not the dead-channel signal.
+        // send again on this UDP path — propagates to TCP fallback, not a drop.
+        // Not the dead-channel signal.
         let overflow: SessionError =
             UdpQspError::from(QspSessionError::PacketNumberOverflow).into();
         assert!(!overflow.is_udp_qsp_recoverable());
@@ -547,11 +489,10 @@ mod tests {
         assert!(!proto.is_udp_qsp_recoverable());
         assert!(!proto.is_udp_qsp_dead_channel());
 
-        // `is_udp_path_transport_error` is the phase-3 gate for the UDP write /
-        // flush / tun-packet / upgrade-probe fallback decision (replaces the old
-        // `err.as_io().is_some()` check). True for the UDP-QSP typed failure and
-        // for a raw socket `io::Error` (UDP flush); false for typed
-        // proto/violation/crypto conditions, which propagate.
+        // `is_udp_path_transport_error` is the gate for the UDP write /
+        // flush / tun-packet / upgrade-probe fallback decision. True for the
+        // UDP-QSP typed failure and for a raw socket `io::Error` (UDP flush);
+        // false for typed proto/violation/crypto conditions, which propagate.
         assert!(recoverable.is_udp_path_transport_error());
         assert!(dead.is_udp_path_transport_error());
         assert!(overflow.is_udp_path_transport_error());
@@ -576,8 +517,8 @@ mod tests {
         assert!(!SessionError::Frame(FrameError::UnknownType(0x01)).is_udp_path_transport_error());
     }
 
-    /// Proto decode sources must be preserved (not stringified). The displayed
-    /// form carries the structured payload detail.
+    /// The proto decode sources flow to the terminal `{:#}` render with their
+    /// structured payload detail intact.
     #[test]
     fn proto_sources_are_preserved_in_display() {
         let frame = SessionError::Frame(FrameError::UnknownType(0xAB));
@@ -593,9 +534,9 @@ mod tests {
             max: 1500,
         });
         let rendered = format!("{msg:#}");
-        // Phase 5 promoted `MessageError` to a real `Error` with its own
-        // `Display`, so the structured values (lengths) survive to the terminal
-        // render rather than a `Debug`-format variant name.
+        // `MessageError` is a real `Error` with its own `Display`, so the
+        // structured values (lengths) survive to the terminal render rather
+        // than a `Debug`-format variant name.
         assert!(
             rendered.contains("data payload length"),
             "msg: {rendered:?}"
@@ -613,8 +554,7 @@ mod tests {
     }
 
     /// The terminal renders useful, stage-specific detail (peer-relevant
-    /// values, the offending byte, etc.) — the property the design note
-    /// requires of the terminal `{:#}` format.
+    /// values, the offending byte, etc.).
     #[test]
     fn terminal_renders_useful_detail() {
         let err = SessionError::Connection {
@@ -712,7 +652,7 @@ mod tests {
     /// Overflow is a UDP-path transport error that is fatal (non-recoverable)
     /// and NOT the dead-channel signal — i.e. at the session layer it reaches
     /// the `handle_udp_error` branch that does TCP fallback (when TCP is alive)
-    /// or session close (otherwise), matching the old `QuotaExceeded` routing.
+    /// or session close (otherwise).
     /// The session-level exit (`ConnectionError`) reconnects only once the
     /// session re-establishes; the overflow itself is not an immediate
     /// reconnect trigger.
@@ -747,13 +687,9 @@ mod tests {
     }
 
     /// `QspCryptoError` from `UdpQspKeys::new` (the construction-time key
-    /// derivation in `prepare_udp_qsp_registration`) is preserved via `#[from]`
-    /// on [`SessionError::UdpQspKeys`], not discarded. This is the phase-3
-    /// deferral's resolution: the old code did
-    /// `.map_err(|_| ProtocolViolation { ... })`, dropping the typed cause.
-    ///
-    /// The preserved cause survives to the terminal `{:#}` render (the
-    /// `QspCryptoError`'s own `Display`), and the variant is fatal.
+    /// derivation in `prepare_udp_qsp_registration`) routes to
+    /// [`SessionError::UdpQspKeys`]; its `Display` survives to the terminal
+    /// `{:#}` render, and the variant is fatal.
     #[test]
     fn udp_qsp_keys_error_preserves_qsp_crypto_error() {
         use slt_core::crypto::udp_qsp::QspCryptoError;

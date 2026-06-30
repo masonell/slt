@@ -8,11 +8,8 @@ use slt_core::proto::AuthFailCode;
 /// completed normally (e.g. the client sent `CLOSE`), or rejected the client
 /// on-protocol with a concrete [`AuthFailCode`] it chose to send in `AUTH_FAIL`.
 ///
-/// Historically this enum also carried the failure variants (`Failed`,
-/// `Timeout`, `ConnectionClosed`, `TlsHandshakeFailed`, `TlsHandshakeTimeout`)
-/// and flattened each to an `io::Error` via `into_io_result()`, discarding the
-/// structured TLS/I/O source. Phase 4 moves those onto `AuthError`
-/// (in `super::error`), which preserves the source; this enum now carries only the outcomes.
+/// Transport/decode failures are typed `AuthError` (in `super::error`), which
+/// preserves the source; this enum carries only the outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AuthPhaseResult {
     /// Authentication completed and a client session was created.

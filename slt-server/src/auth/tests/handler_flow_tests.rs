@@ -139,11 +139,9 @@ async fn auth_phase_rejects_unexpected_message_with_auth_fail() {
 ///
 /// This path is security-relevant (the server must *respond* rather than drop
 /// the connection on a parse error) and carries a silent `ErrorKind`
-/// reclassification at the binary boundary: the message-parse failure now
-/// surfaces as `io::ErrorKind::InvalidData` via `AuthError::io_kind()` (it was
-/// previously flattened through `AuthPhaseResult::Failed` →
-/// `ErrorKind::PermissionDenied`). The test pins both the on-wire response and
-/// the failure-metric count.
+/// reclassification at the binary boundary: the message-parse failure surfaces
+/// as `io::ErrorKind::InvalidData` via `AuthError::io_kind()`. The test pins
+/// both the on-wire response and the failure-metric count.
 #[tokio::test]
 async fn auth_phase_responds_with_auth_fail_on_malformed_frame() {
     let (handler, _registry, metrics) = TestAuthHandler::builder()
@@ -182,8 +180,8 @@ async fn auth_phase_responds_with_auth_fail_on_malformed_frame() {
     }
 
     // The handler returns Err(AuthError) (a MessageError, surfaced as
-    // io::ErrorKind::InvalidData at the boundary, not the old
-    // PermissionDenied) — recorded as an auth failure.
+    // io::ErrorKind::InvalidData at the boundary) — recorded as an auth
+    // failure.
     let result = handle.await.unwrap();
     assert!(
         result.is_err(),

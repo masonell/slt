@@ -48,13 +48,13 @@ const CHROME_QUIC_CURVE_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
 /// A failure from QUIC client TLS-setup (`quic_client_chrome_config` /
 /// `quic_client_chrome_config_with_ca` and their callees).
 ///
-/// These helpers previously returned `quiche::Result<quiche::Config>` and
-/// collapsed every distinct boring TLS-setup failure (context build, CA store
-/// load, default verify paths, transport-parameter assembly) into the opaque
-/// unit variant `quiche::Error::TlsFail`, **dropping the boring `ErrorStack`**.
-/// `QuicConfigError` preserves that stack via `#[source]` so the structured
-/// cause survives for `{:#}` and the log, per the design note's "preserve, don't
-/// stringify" rule.
+/// These helpers build the QUIC client TLS context and assemble the
+/// `quiche::Config`. A distinct boring TLS-setup failure (context build, CA
+/// store load, default verify paths, transport-parameter assembly) is preserved
+/// rather than collapsed into the opaque unit variant
+/// `quiche::Error::TlsFail`. `QuicConfigError` preserves the boring
+/// `ErrorStack` via `#[source]` so the structured cause survives for `{:#}` and
+/// the log.
 ///
 /// This is a layer-local typed error in `slt-core` because the QUIC TLS setup is
 /// shared by every consumer of the Chrome QUIC config (client transport, the
@@ -68,11 +68,13 @@ const CHROME_QUIC_CURVE_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
 pub enum QuicConfigError {
     /// `BoringSSL` TLS context / CA-store setup failed before the handshake could
     /// run (`quic_client_chrome_ctx_builder`, `configure_ca_store`,
-    /// `set_default_verify_paths`). The boring [`ErrorStack`] is preserved.
+    /// `set_default_verify_paths`). The boring [`ErrorStack`] is preserved via
+    /// `#[from]`, so setup call sites propagate it with `?`.
     #[error("quic tls setup failed: {source}")]
     Setup {
         /// Preserved boring error stack from the failing setup operation.
         #[source]
+        #[from]
         source: ErrorStack,
     },
 
@@ -81,16 +83,6 @@ pub enum QuicConfigError {
     /// underlying [`quiche::Error`] is preserved.
     #[error("quic config assembly failed: {0}")]
     Quiche(#[from] quiche::Error),
-}
-
-impl From<ErrorStack> for QuicConfigError {
-    /// Compose a setup [`ErrorStack`] into [`Self::Setup`].
-    ///
-    /// Lets the setup call sites use `?` to preserve the boring error stack
-    /// without a flattening mapper.
-    fn from(source: ErrorStack) -> Self {
-        Self::Setup { source }
-    }
 }
 
 /// Build a QUIC client config that mirrors Chrome's transport parameters.
@@ -323,9 +315,8 @@ mod tests {
     use super::*;
 
     /// `From<ErrorStack>` produces [`QuicConfigError::Setup`], and the boring
-    /// `ErrorStack` survives as the `source()` of the typed error (the phase's
-    /// central "preserve, don't stringify" claim — the old code collapsed this
-    /// to the opaque unit `quiche::Error::TlsFail`, dropping the stack).
+    /// `ErrorStack` survives as the `source()` of the typed error rather than
+    /// being collapsed to the opaque unit `quiche::Error::TlsFail`.
     #[test]
     fn errorstack_preserved_as_setup_source() {
         let stack = ErrorStack::internal_error(io::Error::other("boring tls setup boom"));

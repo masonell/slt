@@ -66,13 +66,9 @@ pub(super) fn prepare_udp_qsp_registration(
     };
 
     let mut payload_buf = Vec::new();
-    // PayloadError flows via `#[from]` on `SessionError::Payload`, preserving
-    // the proto detail instead of flattening to an io::Error.
     payload.encode(&mut payload_buf)?;
 
     // Reverse key directions: the payload is expressed in the server's (tx/rx) terms.
-    // `QspCryptoError` flows via `#[from]` on `SessionError::UdpQspKeys`,
-    // preserving the typed slt-core cause rather than discarding it.
     let keys = UdpQspKeys::new(
         cipher,
         payload.hp_rx,
@@ -126,11 +122,10 @@ pub(super) async fn start_udp_qsp_registration(
 /// Fill a fixed-size array with cryptographically secure random bytes.
 ///
 /// The boring `ErrorStack` from `RAND_bytes` is preserved via
-/// [`SessionError::Crypto`] rather than stringified into a generic `io::Error`,
-/// so the cause chain survives to the terminal report.
+/// [`SessionError::Crypto`], so the cause chain survives to the terminal
+/// report.
 fn random_array<const N: usize>() -> Result<[u8; N], SessionError> {
     let mut bytes = [0u8; N];
-    // ErrorStack flows via `#[from]` on `SessionError::Crypto`.
     rand_bytes(&mut bytes)?;
     Ok(bytes)
 }

@@ -1,17 +1,10 @@
 //! Typed errors for the connect/auth sequence.
 //!
-//! `io::Error` was historically the cross-layer lingua franca of the connect
-//! path. It carries only an `ErrorKind` and a free-text string, so once a rich
-//! failure (an `AuthFailCode`, a peer address, an `ErrorStack`) entered that
-//! type it could not be recovered — callers had to guess its meaning from
-//! `ErrorKind`, which is how a socket-create `PermissionDenied` ended up logged
-//! as "authentication rejected". [`ConnectError`] replaces that contract for the
-//! connect/auth path: every variant is the source of truth (it carries the
-//! detail and the preserved source), [`ConnectError::stage`] is a derived
-//! projection that can never disagree with the variant, and
-//! [`ConnectError::is_retriable`] is the typed retry/fatal policy.
-//!
-//! See `local/error-architecture.md` for the full design (this is phase 1).
+//! [`ConnectError`] classifies each failure by *where it happened and what it
+//! was* — not by guessing an `io::ErrorKind` at a distant call site.
+//! [`ConnectError::stage`] is a coarse projection for log grouping and UI
+//! summaries; [`ConnectError::is_retriable`] is the typed retry/fatal policy.
+//! Both are derived from the variant, so they can never disagree with it.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -50,8 +43,8 @@ pub enum Stage {
     Cancelled,
 }
 
-/// A wrapper that preserves a boring TLS handshake failure without
-/// stringifying it, decoupled from the underlying stream type.
+/// A wrapper that preserves a boring TLS handshake failure, decoupled from the
+/// underlying stream type.
 ///
 /// `tokio_boring::HandshakeError<S>` is parameterized by the stream type and
 /// keeps its inner `boring::ssl::HandshakeError` private, so it cannot be
@@ -62,10 +55,6 @@ pub enum Stage {
 /// the captured X.509 verification error and underlying I/O error so cert
 /// failures can be distinguished from transient I/O in
 /// [`ConnectError::is_retriable`].
-///
-/// The requirement from the design note is "preserve, don't stringify", so the
-/// structured values (error code, verify error, io error, error stack) survive
-/// rather than being collapsed into a single opaque string.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
     /// TLS setup failed before the handshake could run (context build, CA
@@ -89,19 +78,9 @@ pub enum TlsError {
         verify_error: Option<X509VerifyError>,
         /// `ErrorKind` of the underlying I/O error boring associated with the
         /// handshake failure, if any (e.g. connection reset mid-handshake).
-        ///
-        /// Only the kind is preserved (not the full `io::Error`):
-        /// `tokio_boring::HandshakeError::as_io_error()` lends the `io::Error`
-        /// by `&`, and `io::Error` is not `Clone`, so owning it would require a
-        /// `Box<io::Error>` heap allocation on every handshake-failure path.
-        /// The kind is the retry-relevant part (`Copy`/`Debug`, consumed by
-        /// [`Self::is_transient_io`]); the richer diagnostic detail already
-        /// survives in the boring `ErrorCode`, the captured `X509VerifyError`,
-        /// and the setup `ErrorStack`. An `io::Error` for a mid-handshake
-        /// failure typically carries only a generic message ("Connection reset
-        /// by peer") that is redundant with the boring cause, so preserving the
-        /// full error was assessed (phase-1 follow-up) as awkward and
-        /// low-value — **not warranted**.
+        /// Only the kind is kept because `tokio_boring::HandshakeError` lends
+        /// the `io::Error` by `&` and `io::Error` is not `Clone`; the kind is
+        /// the retry-relevant part, consumed by [`Self::is_transient_io`].
         io_error_kind: Option<io::ErrorKind>,
     },
 }
@@ -142,11 +121,8 @@ impl TlsError {
 
 /// A failure from the connect/auth sequence.
 ///
-/// The variant is the source of truth — it carries the operation's detail and
-/// preserves the original error via `#[source]`/`#[from]`. [`Stage`] is a
-/// derived projection ([`Self::stage`]); retry/fatal policy is derived from the
-/// variant ([`Self::is_retriable`]). Nothing rich is stringified into
-/// `io::Error` mid-stack.
+/// [`Stage`] is a derived projection ([`Self::stage`]); retry/fatal policy is
+/// derived from the variant ([`Self::is_retriable`]).
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     /// The connect sequence was cancelled before completing.
@@ -166,7 +142,7 @@ pub enum ConnectError {
     TcpSocketCreate {
         /// Peer address that was being connected to.
         peer: SocketAddr,
-        /// Preserved underlying I/O error.
+        /// Underlying I/O error.
         #[source]
         source: io::Error,
     },
@@ -180,7 +156,7 @@ pub enum ConnectError {
         kind: SocketKind,
         /// Peer address associated with the socket.
         peer: SocketAddr,
-        /// Preserved underlying I/O error from the protector.
+        /// Underlying I/O error from the protector.
         #[source]
         source: io::Error,
     },
@@ -199,7 +175,7 @@ pub enum ConnectError {
     TcpConnect {
         /// Peer address that was being connected to.
         peer: SocketAddr,
-        /// Preserved underlying I/O error.
+        /// Underlying I/O error.
         #[source]
         source: io::Error,
     },
@@ -218,15 +194,15 @@ pub enum ConnectError {
     TlsHandshake {
         /// SNI hostname used for the handshake.
         sni: String,
-        /// Preserved boring TLS error (do not stringify).
+        /// Underlying boring TLS failure.
         #[source]
         source: TlsError,
     },
 
     /// Server rejected authentication with a concrete `AUTH_FAIL` code.
     ///
-    /// Carries the [`AuthFailCode`] the server chose to send, closing the
-    /// decode-then-discard hole where the code was logged and then dropped.
+    /// Carries the [`AuthFailCode`] the server chose to send, so the caller
+    /// (retry policy, UI) sees the actual rejection reason.
     #[error("auth rejected: code={code:?} client_id={client_id} assigned_ipv4={assigned_ipv4}")]
     AuthRejected {
         /// Failure code reported by the server.
@@ -257,11 +233,10 @@ pub enum ConnectError {
 
     /// TLS keying-material export failed during auth challenge derivation.
     ///
-    /// Local TLS state; retry will not help. Preserves the boring `ErrorStack`
-    /// rather than stringifying it.
+    /// Local TLS state; retry will not help.
     #[error("auth tls key export failed: {source}")]
     AuthTlsExport {
-        /// Preserved `ErrorStack` from `export_keying_material`.
+        /// `ErrorStack` from `export_keying_material`.
         #[source]
         #[from]
         source: ErrorStack,
@@ -272,7 +247,7 @@ pub enum ConnectError {
     DnsResolution {
         /// Hostname that failed to resolve.
         hostname: String,
-        /// Preserved underlying I/O error from the resolver.
+        /// Underlying I/O error from the resolver.
         #[source]
         source: io::Error,
     },
@@ -282,19 +257,13 @@ pub enum ConnectError {
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    // slt-core protocol errors are preserved, not flattened. These replace the
-    // duplicated `wire.rs` `map_*` mappers on the auth call sites. Each is a
-    // real `std::error::Error` in `slt-core` (phase 5 promoted
-    // `MessageError`/`PayloadError`), so all three flow via `#[from]` and their
-    // own `Display` (structured lengths, offending byte, etc.) survives to the
-    // terminal instead of being collapsed into a generic `io::Error`.
-    /// Protocol framing error, preserved from `slt_core`.
+    /// Protocol framing error.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error, preserved from `slt_core` via `#[from]`.
+    /// Protocol message error.
     #[error(transparent)]
     Message(#[from] MessageError),
-    /// Protocol payload decode error, preserved from `slt_core` via `#[from]`.
+    /// Protocol payload decode error.
     #[error(transparent)]
     Payload(#[from] PayloadError),
 }
@@ -303,20 +272,13 @@ impl From<TcpWriteError> for ConnectError {
     /// Thread `TcpChannel::write_message`'s typed write error into the
     /// connect/auth error without flattening either source.
     ///
-    /// This is **NOT a behaviour-preserving representation change** — the
-    /// `Frame` branch is a deliberate policy change:
-    /// - **`Io` → [`ConnectError::Io`]** is genuine parity: the pre-refactor
-    ///   path already routed the TLS write failure through `io::Error` →
-    ///   `From<io::Error>` → `ConnectError::Io` (retryable). Unchanged.
-    /// - **`Frame` → [`ConnectError::Frame`]** is a **deliberate change to
-    ///   fatal**. The old path flattened `FrameError` via `map_frame_error`
-    ///   into `io::Error(InvalidData)` → `ConnectError::Io` (retryable). A
-    ///   `FrameError` from encoding a locally-constructed `Message` is a
-    ///   logic/config bug (an unknown message type, or a payload oversized
-    ///   despite the TUN-layer pre-check) — retrying won't fix it, so the old
-    ///   routing just masked the bug behind a reconnect loop. Routing it to
-    ///   the typed `Frame` variant surfaces it as fatal (`is_retriable() ==
-    ///   false`) instead.
+    /// - **`Io` → [`ConnectError::Io`]**: a network-level write failure on the
+    ///   connect/auth path is retryable.
+    /// - **`Frame` → [`ConnectError::Frame`]**: fatal. A `FrameError` from
+    ///   encoding a locally-constructed `Message` is a logic/config bug (an
+    ///   unknown message type, or a payload oversized despite the TUN-layer
+    ///   pre-check) — retrying won't fix it, so routing it to the typed `Frame`
+    ///   variant surfaces it as fatal (`is_retriable() == false`).
     fn from(err: TcpWriteError) -> Self {
         match err {
             TcpWriteError::Frame(frame) => Self::Frame(frame),
@@ -341,7 +303,8 @@ impl ConnectError {
             // Generic I/O on the connect/auth path has no single origin; bucket
             // it under TcpConnect (the closest "transport" stage). This is a
             // fallback that should become more specific as variants are added;
-            // the Io catch-all is expected to shrink across later phases.
+            // the Io catch-all is expected to shrink as more specific variants
+            // are added.
             Self::TcpConnectTimeout { .. } | Self::TcpConnect { .. } | Self::Io(_) => {
                 Stage::TcpConnect
             }
@@ -359,12 +322,8 @@ impl ConnectError {
 
     /// Retry/fatal policy for the connect/auth path.
     ///
-    /// Replaces the `ErrorKind`-based `should_reconnect` table, which was
-    /// correct only by luck (TLS errors flatten to `Uncategorized`, so a
-    /// certificate error was retried forever alongside transient TLS I/O).
     /// Matches on the variant — some stages need detail (e.g. TLS cert vs.
-    /// transient I/O) that only the variant carries. See the policy table in
-    /// `local/error-architecture.md`.
+    /// transient I/O) that only the variant carries.
     ///
     /// - **Fatal** (won't self-heal): `EmptyHostname`, `TcpSocketCreate`,
     ///   `SocketProtect`, `TlsHandshake` (cert/setup fault),
@@ -376,10 +335,8 @@ impl ConnectError {
     ///   `DnsResolution`, `TlsHandshake` (transient I/O), generic `Io`.
     /// - **Not a real failure**: `Cancelled`.
     ///
-    /// The grouping of arms by policy (`false` / `true`) is deliberate: it
-    /// mirrors the design-note policy table, so a reviewer can audit each
-    /// variant's classification against the table at a glance. `match_same_arms`
-    /// is therefore allowed on this method.
+    /// Arms are grouped by policy (`false` / `true`) for reviewability;
+    /// `match_same_arms` is allowed on this method.
     #[allow(clippy::match_same_arms)]
     #[must_use]
     pub fn is_retriable(&self) -> bool {
@@ -400,8 +357,7 @@ impl ConnectError {
             | Self::Payload(_) => false,
             // Transient network conditions. DNS is retriable because the
             // resolver cannot distinguish a permanent typo from a transient
-            // failure, and the old code already retried these (as generic
-            // `NotFound` io errors); retry-with-backoff is the safer default.
+            // failure; retry-with-backoff is the safer default.
             Self::TcpConnectTimeout { .. }
             | Self::AuthTimeout
             | Self::AuthDisconnected
@@ -410,8 +366,7 @@ impl ConnectError {
             // TCP connect(2): most failures are transient (refused, reset,
             // unreachable) and worth retrying. PermissionDenied (EACCES) is a
             // firewall/platform policy block that won't self-heal, so treat it
-            // as fatal — matching the old `should_reconnect` table, which
-            // stopped on PermissionDenied rather than retrying forever.
+            // as fatal rather than retrying forever.
             Self::TcpConnect { source, .. } => source.kind() != io::ErrorKind::PermissionDenied,
             // TLS: distinguish cert/setup fault (fatal) from transient I/O.
             Self::TlsHandshake { source, .. } => source.is_transient_io(),
@@ -529,8 +484,8 @@ mod tests {
         );
     }
 
-    /// The retry/fatal policy must match the design-note table. This is the
-    /// real guardrail against re-introducing the `ErrorKind`-based guesswork.
+    /// The retry/fatal policy, pinned per variant. Guardrail against
+    /// re-introducing `ErrorKind`-based guesswork.
     #[test]
     fn is_retriable_matches_policy_table() {
         let peer: SocketAddr = "127.0.0.1:8443".parse().unwrap();
@@ -624,8 +579,7 @@ mod tests {
             .is_retriable()
         );
         // PermissionDenied from connect(2) is a firewall/platform policy block
-        // (non-transient) — fatal, not retried indefinitely. This restores the
-        // old `should_reconnect` contract that the unconditional retry arm lost.
+        // (non-transient) — fatal, not retried indefinitely.
         assert!(
             !ConnectError::TcpConnect {
                 peer,
@@ -643,8 +597,7 @@ mod tests {
             .is_retriable()
         );
         // DNS is retriable: the resolver cannot distinguish a permanent typo
-        // from a transient failure, and the old code retried these as generic
-        // NotFound io errors.
+        // from a transient failure.
         assert!(
             ConnectError::DnsResolution {
                 hostname: "example.com".into(),
@@ -655,10 +608,8 @@ mod tests {
         assert!(ConnectError::Io(io::Error::other("x")).is_retriable());
     }
 
-    /// `From<TcpWriteError>` routes `Frame` → `ConnectError::Frame` (fatal) and
-    /// `Io` → `ConnectError::Io` (retriable). Pins both arms so the deliberate
-    /// change to the `Frame` branch's policy (the old `map_frame_error` path
-    /// flattened it to `ConnectError::Io`, retriable) cannot silently regress.
+    /// Pins both arms of `From<TcpWriteError>` so the routing cannot silently
+    /// regress.
     #[test]
     fn from_tcp_write_error_routes_frame_fatal_and_io_retriable() {
         use slt_core::transport::tcp::TcpWriteError;
@@ -681,7 +632,7 @@ mod tests {
         );
         assert!(
             io.is_retriable(),
-            "ConnectError::Io from TcpWriteError must be retriable (parity with the old path)"
+            "ConnectError::Io from TcpWriteError must be retriable"
         );
     }
 
@@ -777,10 +728,9 @@ mod tests {
     /// `auth`, and no `stage() == Auth` variant may render without carrying its
     /// auth-specific detail.
     ///
-    /// This is the "no misleading messages" regression guard from the design
-    /// note: it catches a blanket "PermissionDenied => authentication rejected"
-    /// branch reintroduced at any call site. The variant's own `Display` is the
-    /// surface that flows to logs and the UI. Cases come from
+    /// Regression guard against a blanket "PermissionDenied => authentication
+    /// rejected" branch reintroduced at any call site: the variant's own
+    /// `Display` is the surface that flows to logs and the UI. Cases come from
     /// [`representative_cases`] so a future variant can't slip through untested.
     #[test]
     fn no_misleading_auth_messages() {

@@ -72,9 +72,8 @@ pub(super) struct ClientSession<'a, S: ClientRuntimeServices> {
 ///
 /// The control-flow reason ([`SessionExit`]) is always present so the runtime
 /// can decide reconnect policy; the typed [`SessionError`] is present only for
-/// the error exits, carrying the source-preserving failure that produced them.
-/// This replaces the old `SessionExit -> io::Error::new(...)` round-trip: the
-/// error flows to the terminal unchanged.
+/// the error exits, carrying the source-preserving failure that produced them,
+/// and flows to the terminal unchanged.
 pub(super) struct SessionOutcome {
     /// Reconnect-policy reason derived from the failure (or the clean-exit
     /// reason). Always present.
@@ -406,7 +405,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                     Ok(control)
                 }
                 Err(err) => {
-                    // Typed UDP-QSP transport error (phase 3): the slt-core
+                    // Typed UDP-QSP transport error: the slt-core
                     // QspSessionError/QspCryptoError and proto encode errors
                     // are preserved here, not flattened. `err` is always a
                     // `UdpQspError` (the sole error type `read_next_message`

@@ -238,8 +238,7 @@ mod tests {
             let result = PongPayload::decode(&[0x01, 0x02, 0x03, 0x04]);
             assert!(result.is_err());
 
-            // Decode error is preserved as a typed SessionError::Payload (not
-            // flattened to an io::Error kind).
+            // Decode error is preserved as a typed SessionError::Payload.
             let err = SessionError::from(result.unwrap_err());
             assert!(matches!(err, SessionError::Payload(_)));
         }

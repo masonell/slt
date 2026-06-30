@@ -185,8 +185,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         &self,
         payload: &'a [u8],
     ) -> Result<Option<Message<'a>>, SessionError> {
-        // MessageError flows via #[from], preserving the proto detail (was
-        // map_message_error).
         let decoded = decode_message(payload, self.limits)?;
         let Some((message, _consumed)) = decoded else {
             return Ok(None);
@@ -226,8 +224,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 Ok(SessionControl::Continue)
             }
             Message::Pong { payload } => {
-                // PayloadError flows via #[from], preserving the proto detail (was
-                // map_payload_error).
                 let pong_in = PongPayload::decode(payload)?;
                 trace!(
                     session_id = self.session_id,

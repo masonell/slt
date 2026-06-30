@@ -156,10 +156,9 @@ where
                 );
                 match handle_session_exit(session.run().await, cancel) {
                     SessionAction::Break => break Ok(()),
-                    // The session path now flows a typed `SessionError` to the
-                    // terminal directly; the `SessionExit -> io::Error`
-                    // round-trip is gone. The error carries its preserved
-                    // source (proto error, io::Error, etc.) and renders useful,
+                    // The session path flows a typed `SessionError` to the
+                    // terminal directly. The error carries its preserved source
+                    // (proto error, io::Error, etc.) and renders useful,
                     // stage-specific detail via `{:#}`.
                     SessionAction::Fatal(err) => break Err(RuntimeError::from(err)),
                     SessionAction::Reconnect => {
@@ -246,10 +245,7 @@ where
         Ok(tcp) => ConnectOutcome::Connected(tcp),
         Err(err) => {
             // err: ConnectError — a typed failure whose variant carries the
-            // site and detail. The runtime reads the variant's policy directly;
-            // the old blanket "PermissionDenied => authentication rejected"
-            // branch is deleted because it misclassified a socket-create
-            // PermissionDenied as an auth rejection.
+            // site and detail. The runtime reads the variant's policy directly.
             if cancel.is_cancelled() {
                 return ConnectOutcome::Shutdown;
             }
@@ -311,11 +307,9 @@ where
 /// Determine what action to take based on a session outcome.
 ///
 /// Reads the [`SessionOutcome::exit`] control-flow reason to decide reconnect
-/// policy (the policy is unchanged from before phase 2 — only the type of what
-/// flows to the terminal changed). For the fatal exits, the preserved
-/// [`SessionError`] is carried through `SessionAction::Fatal`; no
-/// `SessionExit -> io::Error::new(...)` round-trip is performed, so the source
-/// chain survives to the terminal `{:#}` rendering.
+/// policy. For the fatal exits, the preserved [`SessionError`] is carried
+/// through `SessionAction::Fatal`, so the source chain survives to the
+/// terminal `{:#}` rendering.
 fn handle_session_exit(outcome: SessionOutcome, cancel: &CancellationToken) -> SessionAction {
     if cancel.is_cancelled() {
         return SessionAction::Break;

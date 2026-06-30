@@ -189,8 +189,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     }
 
     fn pong_payload_for_ping(payload: &[u8]) -> Result<[u8; 8], SessionError> {
-        // PayloadError flows via #[from], preserving the proto detail (was
-        // map_payload_error).
         let ping = PingPayload::decode(payload)?;
         Ok(ping.nonce.to_be_bytes())
     }
@@ -272,7 +270,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         };
 
         self.udp_write_buf.clear();
-        // FrameError flows via #[from]; MessageError via the manual From.
         encode_message(message, &mut self.udp_write_buf)?;
         let tx_phase_before = session.tx_key_phase();
         match session.send(&self.udp_write_buf).await {
@@ -292,7 +289,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 self.metrics.inc_udp_qsp_dead_channel();
                 Err(UdpQspError::Qsp(QspSessionError::DeadChannel))
             }
-            // QspSessionError (other variants) flows via `#[from]`.
             Err(err) => Err(UdpQspError::Qsp(err)),
         }
     }
