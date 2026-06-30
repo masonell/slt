@@ -9,8 +9,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::SigningKey;
-use rand::RngCore;
-use rand::rngs::OsRng;
 use slt_core::types::{ClientId, PrivKeyEd25519, PubKeyEd25519, ServerClient};
 
 use crate::cert::extract_domain_from_cert;
@@ -66,7 +64,7 @@ pub fn add_client(
 
     // Generate client ID (16 random bytes)
     let mut client_id_bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut client_id_bytes);
+    rand::fill(&mut client_id_bytes);
     let client_id = ClientId(client_id_bytes);
 
     // Check for client ID collision (extremely unlikely but defensive)
@@ -76,7 +74,7 @@ pub fn add_client(
 
     // Generate Ed25519 keypair
     let mut key_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut key_bytes);
+    rand::fill(&mut key_bytes);
     let signing_key = SigningKey::from_bytes(&key_bytes);
     let verifying_key = signing_key.verifying_key();
 

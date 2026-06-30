@@ -7,7 +7,6 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rand::RngCore;
 use slt_core::config::ServerConfig;
 use slt_core::types::{
     ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, SharedSecret, TlsMaterial, TunConfig,
@@ -57,7 +56,7 @@ pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) ->
 
     // Generate random server secret
     let mut secret_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
+    rand::fill(&mut secret_bytes);
     let server_secret = SharedSecret(secret_bytes);
 
     // Load certificate content if inline mode

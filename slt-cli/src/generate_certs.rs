@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, SanType,
 };
 use time::{Duration, OffsetDateTime};
@@ -95,6 +95,7 @@ fn generate_cert_chain(domain: &str) -> Result<(String, String, String)> {
     let ca_cert = ca_params
         .self_signed(&ca_key)
         .context("failed to self-sign CA certificate")?;
+    let ca_issuer = Issuer::from_params(&ca_params, &ca_key);
 
     // Generate server key and certificate
     let server_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
@@ -118,7 +119,7 @@ fn generate_cert_chain(domain: &str) -> Result<(String, String, String)> {
     server_params.use_authority_key_identifier_extension = true;
 
     let server_cert = server_params
-        .signed_by(&server_key, &ca_cert, &ca_key)
+        .signed_by(&server_key, &ca_issuer)
         .context("failed to sign server certificate with CA")?;
 
     Ok((ca_cert.pem(), server_cert.pem(), server_key.serialize_pem()))

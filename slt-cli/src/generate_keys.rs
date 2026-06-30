@@ -1,13 +1,11 @@
 //! Ed25519 keypair generation command.
 
 use ed25519_dalek::SigningKey;
-use rand::RngCore;
-use rand::rngs::OsRng;
 
 /// Generate an Ed25519 keypair and print to stdout.
 pub fn generate_keys() {
     let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    rand::fill(&mut bytes);
 
     let signing_key = SigningKey::from_bytes(&bytes);
     let verifying_key = signing_key.verifying_key();
