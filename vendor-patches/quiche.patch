@@ -1,42 +1,42 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 28f7685..0c1efab 100644
+index f71eeae..48d887f 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -112,7 +112,7 @@ name = "server"
+@@ -108,7 +108,7 @@ name = "server"
  path = "examples/server.rs"
  
  [dependencies.boring]
 -version = "4.3"
-+version = "5.0.1"
++version = "5.1.0"
  optional = true
  
- [dependencies.either]
+ [dependencies.bytes]
 diff --git a/src/lib.rs b/src/lib.rs
-index da30e15..47975fc 100644
+index 95758cd..ea5edc4 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -605,6 +605,10 @@ pub struct Config {
-     track_unknown_transport_params: Option<usize>,
+@@ -609,6 +609,10 @@ pub struct Config {
  
      initial_rtt: Duration,
-+
+ 
 +    #[cfg(feature = "boringssl-boring-crate")]
 +    tls_configure:
 +        Option<Box<dyn Fn(&mut boring::ssl::SslRef) -> Result<()> + Send + Sync>>,
- }
- 
- // See https://quicwg.org/base-drafts/rfc9000.html#section-15
-@@ -681,6 +685,9 @@ impl Config {
- 
++
+     /// When true, uses the initial max data (for connection
+     /// and stream) as the initial flow control window.
+     use_initial_max_data_as_flow_control_win: bool,
+@@ -691,6 +695,9 @@ impl Config {
              track_unknown_transport_params: None,
              initial_rtt: DEFAULT_INITIAL_RTT,
-+
+ 
 +            #[cfg(feature = "boringssl-boring-crate")]
 +            tls_configure: None,
++
+             use_initial_max_data_as_flow_control_win: false,
          })
      }
- 
-@@ -803,6 +810,16 @@ impl Config {
+@@ -814,6 +821,16 @@ impl Config {
          self.tls_ctx.enable_keylog();
      }
  
@@ -53,7 +53,7 @@ index da30e15..47975fc 100644
      /// Configures the session ticket key material.
      ///
      /// On the server this key will be used to encrypt and decrypt session
-@@ -848,6 +865,19 @@ impl Config {
+@@ -859,6 +876,19 @@ impl Config {
          self.tls_ctx.set_alpn(protos_list)
      }
  
@@ -73,9 +73,9 @@ index da30e15..47975fc 100644
      /// Configures the list of supported application protocols using wire
      /// format.
      ///
-@@ -1820,7 +1850,11 @@ impl<F: BufFactory> Connection<F> {
-         local: SocketAddr, peer: SocketAddr, config: &mut Config,
-         is_server: bool,
+@@ -1978,7 +2008,11 @@ impl<F: BufFactory> Connection<F> {
+         client_dcid: Option<&ConnectionId>, local: SocketAddr, peer: SocketAddr,
+         config: &mut Config, is_server: bool,
      ) -> Result<Connection<F>> {
 -        let tls = config.tls_ctx.new_handshake()?;
 +        let mut tls = config.tls_ctx.new_handshake()?;
@@ -84,19 +84,19 @@ index da30e15..47975fc 100644
 +            cb(tls.ssl_mut())?;
 +        }
          Connection::with_tls(
-             scid, retry_cids, local, peer, config, tls, is_server,
-         )
-@@ -2061,7 +2095,7 @@ impl<F: BufFactory> Connection<F> {
-         // Derive initial secrets for the client. We can do this here because
-         // we already generated the random destination connection ID.
-         if !is_server {
--            let mut dcid = [0; 16];
-+            let mut dcid = [0; 8];
-             rand::rand_bytes(&mut dcid[..]);
- 
-             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
+             scid,
+             retry_cids,
+@@ -2268,7 +2302,7 @@ impl<F: BufFactory> Connection<F> {
+                 // Derive initial secrets for the client. We can do this here
+                 // because we already generated the random
+                 // destination connection ID.
+-                let mut dcid = [0; 16];
++                let mut dcid = [0; 8];
+                 rand::rand_bytes(&mut dcid[..]);
+                 dcid.to_vec()
+             };
 diff --git a/src/transport_params.rs b/src/transport_params.rs
-index 420c770..4c77260 100644
+index 7d5b0ff..1b1ed03 100644
 --- a/src/transport_params.rs
 +++ b/src/transport_params.rs
 @@ -35,6 +35,9 @@ use crate::Error;
@@ -109,7 +109,7 @@ index 420c770..4c77260 100644
  #[cfg(feature = "qlog")]
  use crate::crypto;
  #[cfg(feature = "qlog")]
-@@ -185,6 +188,12 @@ pub struct TransportParams {
+@@ -189,6 +192,12 @@ pub struct TransportParams {
      pub retry_source_connection_id: Option<ConnectionId<'static>>,
      /// DATAGRAM frame extension parameter, if any.
      pub max_datagram_frame_size: Option<u64>,
@@ -122,7 +122,7 @@ index 420c770..4c77260 100644
      /// Unknown peer transport parameters and values, if any.
      pub unknown_params: Option<UnknownTransportParameters>,
      // pub preferred_address: ...,
-@@ -210,6 +219,9 @@ impl Default for TransportParams {
+@@ -214,6 +223,9 @@ impl Default for TransportParams {
              initial_source_connection_id: None,
              retry_source_connection_id: None,
              max_datagram_frame_size: None,
@@ -132,7 +132,7 @@ index 420c770..4c77260 100644
              unknown_params: Default::default(),
          }
      }
-@@ -521,6 +533,22 @@ impl TransportParams {
+@@ -525,6 +537,22 @@ impl TransportParams {
              TransportParams::encode_param(&mut b, 0x000c, 0)?;
          }
  
@@ -155,7 +155,7 @@ index 420c770..4c77260 100644
          // TODO: encode preferred_address
  
          if tp.active_conn_id_limit != 2 {
-@@ -555,6 +583,20 @@ impl TransportParams {
+@@ -559,6 +587,20 @@ impl TransportParams {
              b.put_varint(max_datagram_frame_size)?;
          }
  

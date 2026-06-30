@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "boring"
-version = "5.0.1"
+version = "5.1.0"
 dependencies = [
  "bitflags",
  "boring-sys",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "boring-sys"
-version = "5.0.1"
+version = "5.1.0"
 dependencies = [
  "bindgen",
  "cmake",
@@ -280,9 +280,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
+checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "c2rust-bitfields"
@@ -526,6 +526,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
+name = "debug_panic"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9377eb110cece2e9431deb8d7d2ec8c116510b896741f9f2bf02b352147aa2a6"
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -643,7 +649,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1224,7 +1230,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1285,9 +1291,9 @@ dependencies = [
 
 [[package]]
 name = "octets"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ba5d98c13e549f6f26f7d70808688ab85c6b42eb350ba2524d96c24ebde27e9"
+checksum = "8311fa8ab7a57759b4ff1f851a3048d9ef0effaa0130726426b742d26d8a88e7"
 
 [[package]]
 name = "oid-registry"
@@ -1429,10 +1435,11 @@ dependencies = [
 
 [[package]]
 name = "quiche"
-version = "0.25.0"
+version = "0.29.2"
 dependencies = [
  "boring",
- "cmake",
+ "bytes",
+ "debug_panic",
  "either",
  "enum_dispatch",
  "foreign-types-shared",
@@ -1456,7 +1463,7 @@ dependencies = [
  "libc",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1614,7 +1621,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1955,7 +1962,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

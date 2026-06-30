@@ -41,9 +41,13 @@ const MAX_GREASE_TP_LEN: usize = 16;
 #[cfg(feature = "qlog")]
 use crate::crypto;
 #[cfg(feature = "qlog")]
-use qlog::events::connectivity::TransportOwner;
+use qlog::events::quic::TransportInitiator;
 #[cfg(feature = "qlog")]
 use qlog::events::EventData;
+
+/// Maximum permitted value of the `ack_delay_exponent` transport parameter,
+/// as mandated by RFC 9000 Section 18.2.
+pub const MAX_ACK_DELAY_EXPONENT: u64 = 20;
 
 /// QUIC Unknown Transport Parameter.
 ///
@@ -327,7 +331,7 @@ impl TransportParams {
                 0x000a => {
                     let ack_delay_exponent = val.get_varint()?;
 
-                    if ack_delay_exponent > 20 {
+                    if ack_delay_exponent > MAX_ACK_DELAY_EXPONENT {
                         return Err(Error::InvalidTransportParam);
                     }
 
@@ -510,7 +514,7 @@ impl TransportParams {
         }
 
         if tp.ack_delay_exponent != 0 {
-            assert!(tp.ack_delay_exponent <= octets::MAX_VAR_INT);
+            assert!(tp.ack_delay_exponent <= MAX_ACK_DELAY_EXPONENT);
             TransportParams::encode_param(
                 &mut b,
                 0x000a,
@@ -605,7 +609,7 @@ impl TransportParams {
     /// Creates a qlog event for connection transport parameters and TLS fields
     #[cfg(feature = "qlog")]
     pub fn to_qlog(
-        &self, owner: TransportOwner, cipher: Option<crypto::Algorithm>,
+        &self, initiator: TransportInitiator, cipher: Option<crypto::Algorithm>,
     ) -> EventData {
         let original_destination_connection_id = qlog::HexSlice::maybe_string(
             self.original_destination_connection_id.as_ref(),
@@ -617,20 +621,18 @@ impl TransportParams {
 
         let tls_cipher: Option<String> = cipher.map(|f| format!("{f:?}"));
 
-        EventData::TransportParametersSet(
-            qlog::events::quic::TransportParametersSet {
-                owner: Some(owner),
+        EventData::QuicParametersSet(Box::new(
+            qlog::events::quic::ParametersSet {
+                initiator: Some(initiator),
                 tls_cipher,
                 original_destination_connection_id,
                 stateless_reset_token,
                 disable_active_migration: Some(self.disable_active_migration),
                 max_idle_timeout: Some(self.max_idle_timeout),
-                max_udp_payload_size: Some(self.max_udp_payload_size as u32),
-                ack_delay_exponent: Some(self.ack_delay_exponent as u16),
-                max_ack_delay: Some(self.max_ack_delay as u16),
-                active_connection_id_limit: Some(
-                    self.active_conn_id_limit as u32,
-                ),
+                max_udp_payload_size: Some(self.max_udp_payload_size),
+                ack_delay_exponent: Some(self.ack_delay_exponent),
+                max_ack_delay: Some(self.max_ack_delay),
+                active_connection_id_limit: Some(self.active_conn_id_limit),
 
                 initial_max_data: Some(self.initial_max_data),
                 initial_max_stream_data_bidi_local: Some(
@@ -663,6 +665,6 @@ impl TransportParams {
 
                 ..Default::default()
             },
-        )
+        ))
     }
 }

@@ -366,6 +366,20 @@ pub extern "C" fn quiche_config_enable_pacing(config: &mut Config, v: bool) {
 }
 
 #[no_mangle]
+pub extern "C" fn quiche_config_set_enable_cubic_idle_restart_fix(
+    config: &mut Config, v: bool,
+) {
+    config.set_enable_cubic_idle_restart_fix(v);
+}
+
+#[no_mangle]
+pub extern "C" fn quiche_config_set_use_initial_max_data_as_flow_control_win(
+    config: &mut Config, v: bool,
+) {
+    config.set_use_initial_max_data_as_flow_control_win(v);
+}
+
+#[no_mangle]
 pub extern "C" fn quiche_config_set_max_pacing_rate(config: &mut Config, v: u64) {
     config.set_max_pacing_rate(v);
 }
@@ -441,7 +455,9 @@ pub extern "C" fn quiche_config_set_ticket_key(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_free(config: *mut Config) {
-    drop(unsafe { Box::from_raw(config) });
+    if !config.is_null() {
+        drop(unsafe { Box::from_raw(config) });
+    }
 }
 
 #[no_mangle]
@@ -612,6 +628,60 @@ pub extern "C" fn quiche_retry(
 }
 
 #[no_mangle]
+#[cfg(feature = "custom-client-dcid")]
+pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
+    scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
+    local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
+    config: &Config, ssl: *mut c_void,
+) -> *mut Connection {
+    {
+        let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
+        let scid = ConnectionId::from_ref(scid);
+
+        let dcid = if !dcid.is_null() && dcid_len > 0 {
+            Some(ConnectionId::from_ref(unsafe {
+                slice::from_raw_parts(dcid, dcid_len)
+            }))
+        } else {
+            None
+        };
+
+        let local = std_addr_from_c(local, local_len);
+        let peer = std_addr_from_c(peer, peer_len);
+
+        let tls = unsafe { tls::Handshake::from_ptr(ssl) };
+
+        match Connection::with_tls(
+            &scid,
+            None, // retry_cids
+            dcid.as_ref(),
+            local,
+            peer,
+            config,
+            tls,
+            false,
+        ) {
+            Ok(c) => Box::into_raw(Box::new(c)),
+
+            Err(_) => ptr::null_mut(),
+        }
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "custom-client-dcid"))]
+#[allow(unused_variables)]
+pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
+    scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
+    local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
+    config: &Config, ssl: *mut c_void,
+) -> *mut Connection {
+    // It's always an error to call this function without the custom-client-dcid
+    // feature enabled.
+    ptr::null_mut()
+}
+
+#[no_mangle]
 pub extern "C" fn quiche_conn_new_with_tls(
     scid: *const u8, scid_len: size_t, odcid: *const u8, odcid_len: size_t,
     local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
@@ -639,7 +709,7 @@ pub extern "C" fn quiche_conn_new_with_tls(
     let tls = unsafe { tls::Handshake::from_ptr(ssl) };
 
     match Connection::with_tls(
-        &scid, retry_cids, local, peer, config, tls, is_server,
+        &scid, retry_cids, None, local, peer, config, tls, is_server,
     ) {
         Ok(c) => Box::into_raw(Box::new(c)),
 
@@ -1058,17 +1128,6 @@ pub struct ConnectionIdIter<'a> {
     index: usize,
 }
 
-impl<'a> Iterator for ConnectionIdIter<'a> {
-    type Item = ConnectionId<'a>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let v = self.cids.get(self.index)?;
-        self.index += 1;
-        Some(v.clone())
-    }
-}
-
 #[no_mangle]
 pub extern "C" fn quiche_conn_source_ids(
     conn: &Connection,
@@ -1084,10 +1143,11 @@ pub extern "C" fn quiche_conn_source_ids(
 pub extern "C" fn quiche_connection_id_iter_next(
     iter: &mut ConnectionIdIter, out: &mut *const u8, out_len: &mut size_t,
 ) -> bool {
-    if let Some(conn_id) = iter.next() {
+    if let Some(conn_id) = iter.cids.get(iter.index) {
         let id = conn_id.as_ref();
         *out = id.as_ptr();
         *out_len = id.len();
+        iter.index += 1;
         return true;
     }
 
@@ -1096,7 +1156,9 @@ pub extern "C" fn quiche_connection_id_iter_next(
 
 #[no_mangle]
 pub extern "C" fn quiche_connection_id_iter_free(iter: *mut ConnectionIdIter) {
-    drop(unsafe { Box::from_raw(iter) });
+    if !iter.is_null() {
+        drop(unsafe { Box::from_raw(iter) });
+    }
 }
 
 #[no_mangle]
@@ -1254,7 +1316,9 @@ pub extern "C" fn quiche_stream_iter_next(
 
 #[no_mangle]
 pub extern "C" fn quiche_stream_iter_free(iter: *mut StreamIter) {
-    drop(unsafe { Box::from_raw(iter) });
+    if !iter.is_null() {
+        drop(unsafe { Box::from_raw(iter) });
+    }
 }
 
 #[repr(C)]
@@ -1280,6 +1344,8 @@ pub struct Stats {
     stream_data_blocked_sent_count: u64,
     data_blocked_recv_count: u64,
     stream_data_blocked_recv_count: u64,
+    streams_blocked_bidi_recv_count: u64,
+    streams_blocked_uni_recv_count: u64,
     path_challenge_rx_count: u64,
     bytes_in_flight_duration_msec: u64,
     tx_buffered_inconsistent: bool,
@@ -1326,6 +1392,8 @@ pub extern "C" fn quiche_conn_stats(conn: &Connection, out: &mut Stats) {
     out.stream_data_blocked_sent_count = stats.stream_data_blocked_sent_count;
     out.data_blocked_recv_count = stats.data_blocked_recv_count;
     out.stream_data_blocked_recv_count = stats.stream_data_blocked_recv_count;
+    out.streams_blocked_bidi_recv_count = stats.streams_blocked_bidi_recv_count;
+    out.streams_blocked_uni_recv_count = stats.streams_blocked_uni_recv_count;
     out.path_challenge_rx_count = stats.path_challenge_rx_count;
     out.bytes_in_flight_duration_msec =
         stats.bytes_in_flight_duration.as_millis() as u64;
@@ -1568,7 +1636,9 @@ pub extern "C" fn quiche_conn_send_ack_eliciting_on_path(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_free(conn: *mut Connection) {
-    drop(unsafe { Box::from_raw(conn) });
+    if !conn.is_null() {
+        drop(unsafe { Box::from_raw(conn) });
+    }
 }
 
 #[no_mangle]
@@ -1641,19 +1711,14 @@ pub extern "C" fn quiche_conn_retired_scids(conn: &Connection) -> size_t {
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_retired_scid_next(
-    conn: &mut Connection, out: &mut *const u8, out_len: &mut size_t,
-) -> bool {
-    match conn.retired_scid_next() {
-        None => false,
-
-        Some(conn_id) => {
-            let id = conn_id.as_ref();
-            *out = id.as_ptr();
-            *out_len = id.len();
-            true
-        },
+pub extern "C" fn quiche_conn_retired_scid_iter(
+    conn: &mut Connection,
+) -> *mut ConnectionIdIter<'_> {
+    let mut cids = Vec::with_capacity(conn.retired_scids());
+    while let Some(cid) = conn.retired_scid_next() {
+        cids.push(cid);
     }
+    Box::into_raw(Box::new(ConnectionIdIter { cids, index: 0 }))
 }
 
 #[no_mangle]
@@ -1691,7 +1756,9 @@ pub extern "C" fn quiche_socket_addr_iter_next(
 
 #[no_mangle]
 pub extern "C" fn quiche_socket_addr_iter_free(iter: *mut SocketAddrIter) {
-    drop(unsafe { Box::from_raw(iter) });
+    if !iter.is_null() {
+        drop(unsafe { Box::from_raw(iter) });
+    }
 }
 
 #[no_mangle]
@@ -1884,7 +1951,9 @@ pub extern "C" fn quiche_path_event_peer_migrated(
 
 #[no_mangle]
 pub extern "C" fn quiche_path_event_free(ev: *mut PathEvent) {
-    drop(unsafe { Box::from_raw(ev) });
+    if !ev.is_null() {
+        drop(unsafe { Box::from_raw(ev) });
+    }
 }
 
 #[no_mangle]
@@ -1930,10 +1999,7 @@ fn optional_std_addr_from_c(
         return None;
     }
 
-    Some({
-        let addr = unsafe { slice::from_raw_parts(addr, addr_len as usize) };
-        std_addr_from_c(addr.first().unwrap(), addr_len)
-    })
+    Some(std_addr_from_c(unsafe { &*addr }, addr_len))
 }
 
 fn std_addr_from_c(addr: &sockaddr, addr_len: socklen_t) -> SocketAddr {
@@ -2198,6 +2264,98 @@ mod tests {
                 .parse()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn connection_id_iter_next() {
+        let cids = vec![
+            ConnectionId::from_vec(vec![1, 2, 3, 4]),
+            ConnectionId::from_vec(vec![5, 6]),
+        ];
+
+        let mut iter = ConnectionIdIter { cids, index: 0 };
+
+        let mut out: *const u8 = ptr::null();
+        let mut out_len: size_t = 0;
+
+        // First CID.
+        assert!(quiche_connection_id_iter_next(
+            &mut iter,
+            &mut out,
+            &mut out_len
+        ));
+        assert_eq!(out_len, 4);
+        let slice = unsafe { slice::from_raw_parts(out, out_len) };
+        assert_eq!(slice, &[1, 2, 3, 4]);
+
+        // Second CID.
+        assert!(quiche_connection_id_iter_next(
+            &mut iter,
+            &mut out,
+            &mut out_len
+        ));
+        assert_eq!(out_len, 2);
+        let slice = unsafe { slice::from_raw_parts(out, out_len) };
+        assert_eq!(slice, &[5, 6]);
+
+        // Exhausted.
+        assert!(!quiche_connection_id_iter_next(
+            &mut iter,
+            &mut out,
+            &mut out_len
+        ));
+    }
+
+    #[test]
+    fn retired_scid_iter() {
+        let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+        config
+            .load_cert_chain_from_pem_file("examples/cert.crt")
+            .unwrap();
+        config
+            .load_priv_key_from_pem_file("examples/cert.key")
+            .unwrap();
+        config
+            .set_application_protos(&[b"proto1", b"proto2"])
+            .unwrap();
+        config.verify_peer(false);
+        config.set_active_connection_id_limit(2);
+
+        let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+        assert_eq!(pipe.handshake(), Ok(()));
+
+        let scid = pipe.client.source_id().into_owned();
+
+        let (scid_1, reset_token_1) = test_utils::create_cid_and_reset_token(16);
+        assert_eq!(pipe.client.new_scid(&scid_1, reset_token_1, false), Ok(1));
+        assert_eq!(pipe.advance(), Ok(()));
+
+        // Retire the initial SCID by advertising a new one with
+        // retire_prior_to.
+        let (scid_2, reset_token_2) = test_utils::create_cid_and_reset_token(16);
+        assert_eq!(pipe.client.new_scid(&scid_2, reset_token_2, true), Ok(2));
+        assert_eq!(pipe.advance(), Ok(()));
+
+        // Use the FFI iterator to collect retired SCIDs.
+        let iter = quiche_conn_retired_scid_iter(&mut pipe.client);
+        let iter = unsafe { &mut *iter };
+
+        let mut out: *const u8 = ptr::null();
+        let mut out_len: size_t = 0;
+
+        // The initial SCID should have been retired.
+        assert!(quiche_connection_id_iter_next(iter, &mut out, &mut out_len));
+        let slice = unsafe { slice::from_raw_parts(out, out_len) };
+        assert_eq!(slice, scid.as_ref());
+
+        // No more retired SCIDs.
+        assert!(!quiche_connection_id_iter_next(
+            iter,
+            &mut out,
+            &mut out_len
+        ));
+
+        quiche_connection_id_iter_free(iter);
     }
 
     #[cfg(not(windows))]

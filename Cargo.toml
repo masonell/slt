@@ -41,9 +41,9 @@ slt-core = { path = "slt-core" }
 
 tokio-boring = "5.0.0"
 # Vendored crates; keep exact versions aligned with vendor-versions.toml.
-boring = "5.0.1"
-boring-sys = "5.0.1"
-quiche = { version = "0.25.0", features = ["boringssl-boring-crate"] }
+boring = "5.1.0"
+boring-sys = "5.1.0"
+quiche = { version = "0.29.2", features = ["boringssl-boring-crate"] }
 
 [patch.crates-io]
 boring = { path = "vendor/boring" }

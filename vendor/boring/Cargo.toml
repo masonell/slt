@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.85"
 name = "boring"
-version = "5.0.1"
+version = "5.1.0"
 authors = [
     "Steven Fackler <sfackler@gmail.com>",
     "Ivan Nikulin <ifaaan@gmail.com>",
@@ -55,9 +55,11 @@ rustdoc-args = [
 credential = []
 default = []
 fips = ["boring-sys/fips"]
+fips-precompiled = ["fips"]
 legacy-compat-deprecated = []
 mlkem = []
 pq-experimental = []
+prf = []
 rpk = [
     "credential",
     "boring-sys/rpk",
@@ -80,7 +82,7 @@ path = "examples/mk_certs.rs"
 version = "2.9"
 
 [dependencies.boring-sys]
-version = "5.0.1"
+version = "5.1.0"
 default-features = false
 
 [dependencies.foreign-types]

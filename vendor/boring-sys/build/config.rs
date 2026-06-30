@@ -12,6 +12,7 @@ pub(crate) struct Config {
     pub(crate) target_os: String,
     pub(crate) unix: bool,
     pub(crate) target_env: String,
+    pub(crate) target_features: Vec<String>,
     pub(crate) features: Features,
     pub(crate) env: Env,
 }
@@ -38,18 +39,29 @@ pub(crate) struct Env {
     pub(crate) cc: Option<OsString>,
     pub(crate) cxx: Option<OsString>,
     pub(crate) docs_rs: bool,
+    /// If set, built artifacts (libraries and patched headers) will be copied
+    /// into this directory. The directory must exist and be empty.
+    pub(crate) export_to_install_dir: Option<PathBuf>,
 }
 
 impl Config {
-    pub(crate) fn from_env() -> Self {
-        let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap().into();
-        let out_dir = env::var_os("OUT_DIR").unwrap().into();
+    pub(crate) fn from_env() -> Result<Self, &'static str> {
+        let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
+            .ok_or("CARGO_MANIFEST_DIR")?
+            .into();
+        let out_dir = env::var_os("OUT_DIR").ok_or("OUT_DIR")?.into();
         let host = env::var("HOST").unwrap();
         let target = env::var("TARGET").unwrap();
         let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
         let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
         let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap();
         let unix = env::var("CARGO_CFG_UNIX").is_ok();
+
+        let target_features = env::var("CARGO_CFG_TARGET_FEATURE")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.to_owned())
+            .collect();
 
         let features = Features::from_env();
         let env = Env::from_env(&host, &target, features.is_fips_like());
@@ -69,18 +81,19 @@ impl Config {
             target_os,
             unix,
             target_env,
+            target_features,
             features,
             env,
         };
 
-        config.check_feature_compatibility();
+        config.check_feature_compatibility()?;
 
-        config
+        Ok(config)
     }
 
-    fn check_feature_compatibility(&self) {
+    fn check_feature_compatibility(&self) -> Result<(), &'static str> {
         if self.features.fips && self.features.rpk {
-            panic!("`fips` and `rpk` features are mutually exclusive");
+            return Err("`fips` and `rpk` features are mutually exclusive");
         }
 
         let is_precompiled_native_lib = self.env.path.is_some();
@@ -88,9 +101,9 @@ impl Config {
             !is_precompiled_native_lib && self.env.source_path.is_none();
 
         if self.env.assume_patched && is_external_native_lib_source {
-            panic!(
+            return Err(
                 "`BORING_BSSL_{{,_FIPS}}_ASSUME_PATCHED` env variable is supposed to be used with\
-                `BORING_BSSL{{,_FIPS}}_PATH` or `BORING_BSSL{{,_FIPS}}_SOURCE_PATH` env variables"
+                `BORING_BSSL{{,_FIPS}}_PATH` or `BORING_BSSL{{,_FIPS}}_SOURCE_PATH` env variables",
             );
         }
 
@@ -103,6 +116,11 @@ impl Config {
                 "cargo:warning=precompiled BoringSSL was provided, so patches will be ignored"
             );
         }
+
+        if self.env.export_to_install_dir.is_some() && is_precompiled_native_lib {
+            return Err("`BORING_BSSL{{,_FIPS_}}INSTALL_DIR` cannot be used together with a precompiled library");
+        }
+        Ok(())
     }
 }
 
@@ -175,6 +193,7 @@ impl Env {
             cc: target_only_var("CC"),
             cxx: target_only_var("CXX"),
             docs_rs: var("DOCS_RS").is_some(),
+            export_to_install_dir: boringssl_var("BORING_BSSL_INSTALL_DIR").map(PathBuf::from),
         }
     }
 }

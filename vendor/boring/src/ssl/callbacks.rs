@@ -401,8 +401,11 @@ where
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     let client_hello =
         unsafe { slice::from_raw_parts(client_hello, client_hello_len) };
-    let session_id =
-        unsafe { slice::from_raw_parts_mut(session_id, session_id_len) };
+    let session_id = if session_id_len == 0 {
+        &mut []
+    } else {
+        unsafe { slice::from_raw_parts_mut(session_id, session_id_len) }
+    };
 
     let ssl_context = ssl.ssl_context().to_owned();
     let callback = ssl_context

@@ -32,6 +32,9 @@ pq-experimental = []
 # Interface for ML-KEM (FIPS 203) post-quantum key encapsulation. Does not affect ciphers used in TLS.
 mlkem = []
 
+# Expose internal `tls1_prf`
+prf = []
+
 # SslCredential API
 credential = []
 
@@ -48,6 +51,10 @@ rpk = ["credential", "boring-sys/rpk"]
 # feature set can be provided by setting `BORING_BSSL{,_FIPS}_SOURCE_PATH` and
 # `BORING_BSSL{,_FIPS}_ASSUME_PATCHED`.
 underscore-wildcards = ["boring-sys/underscore-wildcards"]
+
+# **DO NOT USE** This will be removed without warning in future releases.
+# Alias for 'fips', only for backwards compatibility.
+fips-precompiled = ["fips"]
 
 [dependencies]
 bitflags = { workspace = true }

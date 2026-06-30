@@ -12,10 +12,10 @@ index 5087d10..c640127 100644
      }
  
 diff --git a/src/ssl/callbacks.rs b/src/ssl/callbacks.rs
-index 41c08c6..d798566 100644
+index 41c08c6..5c1b759 100644
 --- a/src/ssl/callbacks.rs
 +++ b/src/ssl/callbacks.rs
-@@ -387,6 +387,37 @@ where
+@@ -387,6 +387,40 @@ where
      }
  }
  
@@ -33,8 +33,11 @@ index 41c08c6..d798566 100644
 +    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 +    let client_hello =
 +        unsafe { slice::from_raw_parts(client_hello, client_hello_len) };
-+    let session_id =
-+        unsafe { slice::from_raw_parts_mut(session_id, session_id_len) };
++    let session_id = if session_id_len == 0 {
++        &mut []
++    } else {
++        unsafe { slice::from_raw_parts_mut(session_id, session_id_len) }
++    };
 +
 +    let ssl_context = ssl.ssl_context().to_owned();
 +    let callback = ssl_context
@@ -54,10 +57,10 @@ index 41c08c6..d798566 100644
  where
      F: Fn(&mut SslRef) -> Result<bool, ErrorStack> + 'static + Sync + Send,
 diff --git a/src/ssl/mod.rs b/src/ssl/mod.rs
-index b330ce9..42a1a57 100644
+index 7911c1a..08c03ad 100644
 --- a/src/ssl/mod.rs
 +++ b/src/ssl/mod.rs
-@@ -1638,6 +1638,28 @@ impl SslContextBuilder {
+@@ -1646,6 +1646,28 @@ impl SslContextBuilder {
          }
      }
  

@@ -1,8 +1,8 @@
 diff --git a/build/main.rs b/build/main.rs
-index 0fe1241..cb6f551 100644
+index d192a0f..687b4fc 100644
 --- a/build/main.rs
 +++ b/build/main.rs
-@@ -464,6 +464,9 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
+@@ -467,6 +467,9 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
      println!("cargo:warning=applying post quantum crypto patch to boringssl");
      apply_patch(config, "boring-pq.patch")?;
  

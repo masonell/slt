@@ -11,21 +11,15 @@
 
 [package]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 name = "quiche"
-version = "0.25.0"
+version = "0.29.2"
 authors = ["Alessandro Ghedini <alessandro@ghedini.me>"]
 build = "src/build.rs"
 include = [
     "/*.md",
     "/*.toml",
     "/COPYING",
-    "/deps/boringssl/**/*.[chS]",
-    "/deps/boringssl/**/*.asm",
-    "/deps/boringssl/src/**/*.cc",
-    "/deps/boringssl/**/CMakeLists.txt",
-    "/deps/boringssl/**/sources.cmake",
-    "/deps/boringssl/LICENSE",
     "/examples",
     "/include",
     "/quiche.svg",
@@ -46,36 +40,38 @@ categories = ["network-programming"]
 license = "BSD-2-Clause"
 repository = "https://github.com/cloudflare/quiche"
 
+[package.metadata.release]
+tag-prefix = ""
+
 [package.metadata.docs.rs]
+no-default-features = true
 features = [
     "boringssl-boring-crate",
     "qlog",
+    "custom-client-dcid",
 ]
-no-default-features = true
 rustdoc-args = [
     "--cfg",
     "docsrs",
 ]
-
-[package.metadata.release]
-tag-prefix = ""
 
 [features]
 boringssl-boring-crate = [
     "boring",
     "foreign-types-shared",
 ]
-boringssl-vendored = []
-default = ["boringssl-vendored"]
+custom-client-dcid = []
+default = ["boringssl-boring-crate"]
 ffi = ["dep:cdylib-link-lines"]
 fuzzing = []
 gcongestion = []
 internal = []
-openssl = ["pkg-config"]
 pkg-config-meta = []
 qlog = [
     "dep:qlog",
+    "dep:serde",
     "dep:serde_json",
+    "dep:serde_with",
 ]
 
 [lib]
@@ -112,8 +108,14 @@ name = "server"
 path = "examples/server.rs"
 
 [dependencies.boring]
-version = "5.0.1"
+version = "5.1.0"
 optional = true
+
+[dependencies.bytes]
+version = "1.11.1"
+
+[dependencies.debug_panic]
+version = "0.2.1"
 
 [dependencies.either]
 version = "1.8"
@@ -141,16 +143,26 @@ version = "0.4.20"
 features = ["std"]
 
 [dependencies.octets]
-version = "0.3.4"
+version = "0.3.5"
 features = ["huffman_hpack"]
 
 [dependencies.qlog]
-version = "0.16.0"
+version = "0.18.0"
+optional = true
+
+[dependencies.serde]
+version = "1"
 optional = true
 
 [dependencies.serde_json]
 version = "1.0"
 optional = true
+
+[dependencies.serde_with]
+version = "3.20.0"
+features = ["macros"]
+optional = true
+default-features = false
 
 [dependencies.sfv]
 version = "0.9"
@@ -184,16 +196,20 @@ version = "2"
 version = "0.1"
 optional = true
 
-[build-dependencies.cmake]
-version = "0.1"
-
-[build-dependencies.pkg-config]
-version = "0.3"
-optional = true
-
 [target."cfg(windows)".dependencies.windows-sys]
 version = "0.59"
 features = [
     "Win32_Networking_WinSock",
     "Win32_Security_Cryptography",
+]
+
+[lints.clippy]
+mem_forget = "deny"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = [
+    "cfg(capture_keylogs)",
+    "cfg(test_invalid_len_compilation_fail)",
 ]

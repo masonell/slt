@@ -39,15 +39,15 @@ use intrusive_collections::RBTreeAtomicLink;
 
 use smallvec::SmallVec;
 
-use crate::range_buf::DefaultBufFactory;
+use crate::buffers::DefaultBufFactory;
 use crate::BufFactory;
 use crate::Error;
 use crate::Result;
 
 const DEFAULT_URGENCY: u8 = 127;
 
-// The default size of the receiver stream flow control window.
-const DEFAULT_STREAM_WINDOW: u64 = 32 * 1024;
+/// The default size of the receiver stream flow control window.
+pub(crate) const DEFAULT_STREAM_WINDOW: u64 = 32 * 1024;
 
 /// The maximum size of the receiver stream flow control window.
 pub const MAX_STREAM_WINDOW: u64 = 16 * 1024 * 1024;
@@ -83,9 +83,9 @@ impl RecvBufResetReturn {
 }
 
 /// Action to perform when reading from a stream's receive buffer.
-pub enum RecvAction<'a> {
+pub enum RecvAction<T: bytes::BufMut> {
     /// Emit data by copying it into the provided buffer.
-    Emit { out: &'a mut [u8] },
+    Emit { out: T },
     /// Discard up to the specified number of bytes without copying.
     Discard { len: usize },
 }
@@ -143,9 +143,15 @@ pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
     local_max_streams_bidi: u64,
     local_max_streams_bidi_next: u64,
 
+    /// Initial maximum bidirectional stream count.
+    initial_max_streams_bidi: u64,
+
     /// Local maximum unidirectional stream count limit.
     local_max_streams_uni: u64,
     local_max_streams_uni_next: u64,
+
+    /// Initial maximum unidirectional stream count.
+    initial_max_streams_uni: u64,
 
     /// The total number of bidirectional streams opened by the local endpoint.
     local_opened_streams_bidi: u64,
@@ -192,6 +198,13 @@ pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
 
     /// The maximum size of a stream window.
     max_stream_window: u64,
+
+    /// When `true`, the initial flow control window will be set to the
+    /// `max_rx_data`, if false, it will be set to `DEFAULT_STREAM_WINDOW`
+    use_initial_max_data_as_flow_control_win: bool,
+
+    /// Total number of bytes in send buffers across all streams.
+    tx_buffered: usize,
 }
 
 impl<F: BufFactory> StreamMap<F> {
@@ -201,9 +214,11 @@ impl<F: BufFactory> StreamMap<F> {
         StreamMap {
             local_max_streams_bidi: max_streams_bidi,
             local_max_streams_bidi_next: max_streams_bidi,
+            initial_max_streams_bidi: max_streams_bidi,
 
             local_max_streams_uni: max_streams_uni,
             local_max_streams_uni_next: max_streams_uni,
+            initial_max_streams_uni: max_streams_uni,
 
             max_stream_window,
 
@@ -329,12 +344,18 @@ impl<F: BufFactory> StreamMap<F> {
                     },
                 };
 
+                let initial_window =
+                    if self.use_initial_max_data_as_flow_control_win {
+                        max_rx_data
+                    } else {
+                        cmp::min(max_rx_data, DEFAULT_STREAM_WINDOW)
+                    };
                 let s = Stream::new(
                     id,
                     max_rx_data,
                     max_tx_data,
-                    is_bidi(id),
                     local,
+                    initial_window,
                     self.max_stream_window,
                 );
 
@@ -526,6 +547,7 @@ impl<F: BufFactory> StreamMap<F> {
     pub fn set_max_streams_bidi(&mut self, max: u64) {
         self.local_max_streams_bidi = max;
         self.local_max_streams_bidi_next = max;
+        self.initial_max_streams_bidi = max;
     }
 
     /// Returns the current max_streams_bidi limit.
@@ -548,10 +570,20 @@ impl<F: BufFactory> StreamMap<F> {
         self.local_max_streams_uni_next
     }
 
+    /// Returns the peer's current maximum bidirectional stream count limit.
+    pub fn peer_max_streams_bidi(&self) -> u64 {
+        self.peer_max_streams_bidi
+    }
+
     /// Returns the number of bidirectional streams that can be created
     /// before the peer's stream count limit is reached.
     pub fn peer_streams_left_bidi(&self) -> u64 {
         self.peer_max_streams_bidi - self.local_opened_streams_bidi
+    }
+
+    /// Returns the peer's current maximum unidirectional stream count limit.
+    pub fn peer_max_streams_uni(&self) -> u64 {
+        self.peer_max_streams_uni
     }
 
     /// Returns the number of unidirectional streams that can be created
@@ -662,24 +694,104 @@ impl<F: BufFactory> StreamMap<F> {
 
     /// Returns true if the max bidirectional streams count needs to be updated
     /// by sending a MAX_STREAMS frame to the peer.
+    ///
+    /// This only sends MAX_STREAMS when available capacity is at or below 50%
+    /// of the initial maximum streams target.
     pub fn should_update_max_streams_bidi(&self) -> bool {
+        let available = self
+            .local_max_streams_bidi
+            .saturating_sub(self.peer_opened_streams_bidi);
         self.local_max_streams_bidi_next != self.local_max_streams_bidi &&
-            self.local_max_streams_bidi_next / 2 >
-                self.local_max_streams_bidi - self.peer_opened_streams_bidi
+            available <= self.initial_max_streams_bidi / 2
     }
 
     /// Returns true if the max unidirectional streams count needs to be updated
     /// by sending a MAX_STREAMS frame to the peer.
+    ///
+    /// This only send MAX_STREAMS when available capacity is at or below 50% of
+    /// the initial maximum streams target.
     pub fn should_update_max_streams_uni(&self) -> bool {
+        let available = self
+            .local_max_streams_uni
+            .saturating_sub(self.peer_opened_streams_uni);
         self.local_max_streams_uni_next != self.local_max_streams_uni &&
-            self.local_max_streams_uni_next / 2 >
-                self.local_max_streams_uni - self.peer_opened_streams_uni
+            available <= self.initial_max_streams_uni / 2
     }
 
     /// Returns the number of active streams in the map.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.streams.len()
+    }
+
+    /// Returns the total number of bytes buffered across all streams.
+    pub(crate) fn tx_buffered(&self) -> usize {
+        self.tx_buffered
+    }
+
+    /// Computes the actual number of bytes in send buffers by summing across
+    /// all streams. This is used for debugging to verify that tx_buffered
+    /// is accurate.
+    fn tx_buffered_actual(&self) -> usize {
+        self.streams
+            .values()
+            .map(|s| s.send.buffered_bytes() as usize)
+            .sum()
+    }
+
+    /// Checks if the stored tx_buffered matches the actual value.
+    /// Returns true if they match, false otherwise.
+    pub(crate) fn tx_buffered_is_consistent(&self) -> bool {
+        self.tx_buffered == self.tx_buffered_actual()
+    }
+
+    /// Updates the tx_buffered value by adding the delta.
+    pub(crate) fn add_tx_buffered(&mut self, delta: usize) {
+        self.tx_buffered += delta;
+
+        #[cfg(debug_assertions)]
+        self.debug_check_tx_buffered_consistency();
+    }
+
+    /// Updates the tx_buffered value by subtracting the delta.
+    pub(crate) fn sub_tx_buffered(&mut self, delta: usize) {
+        debug_assert!(self.tx_buffered >= delta);
+        self.tx_buffered = self.tx_buffered.saturating_sub(delta);
+
+        #[cfg(debug_assertions)]
+        self.debug_check_tx_buffered_consistency();
+    }
+
+    /// Verifies that the stored tx_buffered value matches the actual bytes in
+    /// send buffers across all streams. Enabled in debug builds to catch
+    /// inconsistencies early.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_check_tx_buffered_consistency(&self) {
+        if !self.tx_buffered_is_consistent() {
+            let buffered_per_stream = self
+                .streams
+                .iter()
+                .map(|(id, s)| (*id, s.send.buffered_bytes()))
+                .collect::<Vec<_>>();
+
+            let actual = self.tx_buffered_actual();
+            let stored = self.tx_buffered;
+            panic!(
+                "tx_buffered mismatch: stored={}, actual={}, diff={}, buffered_per_stream={:?}",
+                stored,
+                actual,
+                stored as i64 - actual as i64,
+                buffered_per_stream
+            );
+        }
+    }
+
+    /// When `true`, the initial flow control window will be set to the
+    /// `max_rx_data`, if false, it will be set to `DEFAULT_STREAM_WINDOW`
+    pub(crate) fn set_use_initial_max_data_as_flow_control_win(
+        &mut self, v: bool,
+    ) {
+        self.use_initial_max_data_as_flow_control_win = v;
     }
 }
 
@@ -711,8 +823,8 @@ pub struct Stream<F: BufFactory = DefaultBufFactory> {
 impl<F: BufFactory> Stream<F> {
     /// Creates a new stream with the given flow control limits.
     pub fn new(
-        id: u64, max_rx_data: u64, max_tx_data: u64, bidi: bool, local: bool,
-        max_window: u64,
+        id: u64, max_rx_data: u64, max_tx_data: u64, local: bool,
+        initial_window: u64, max_window: u64,
     ) -> Self {
         let priority_key = Arc::new(StreamPriorityKey {
             id,
@@ -720,10 +832,10 @@ impl<F: BufFactory> Stream<F> {
         });
 
         Stream {
-            recv: recv_buf::RecvBuf::new(max_rx_data, max_window),
+            recv: recv_buf::RecvBuf::new(max_rx_data, initial_window, max_window),
             send: send_buf::SendBuf::new(max_tx_data),
             send_lowat: 1,
-            bidi,
+            bidi: is_bidi(id),
             local,
             urgency: priority_key.urgency,
             incremental: priority_key.incremental,
@@ -935,8 +1047,7 @@ mod tests {
 
     #[test]
     fn recv_flow_control() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let mut buf = [0; 32];
@@ -967,8 +1078,7 @@ mod tests {
 
     #[test]
     fn recv_past_fin() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -980,8 +1090,7 @@ mod tests {
 
     #[test]
     fn recv_fin_dup() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -999,8 +1108,7 @@ mod tests {
 
     #[test]
     fn recv_fin_change() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1012,8 +1120,7 @@ mod tests {
 
     #[test]
     fn recv_fin_lower_than_received() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1025,8 +1132,7 @@ mod tests {
 
     #[test]
     fn recv_fin_flow_control() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let mut buf = [0; 32];
@@ -1046,8 +1152,7 @@ mod tests {
 
     #[test]
     fn recv_fin_reset_mismatch() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1058,8 +1163,7 @@ mod tests {
 
     #[test]
     fn recv_reset_with_gap() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -1081,8 +1185,7 @@ mod tests {
 
     #[test]
     fn recv_reset_dup() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -1100,8 +1203,7 @@ mod tests {
 
     #[test]
     fn recv_reset_change() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -1119,8 +1221,7 @@ mod tests {
 
     #[test]
     fn recv_reset_lower_than_received() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -1133,8 +1234,7 @@ mod tests {
     fn send_flow_control() {
         let mut buf = [0; 25];
 
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         let first = b"hello";
         let second = b"world";
@@ -1177,8 +1277,7 @@ mod tests {
 
     #[test]
     fn send_past_fin() {
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         let first = b"hello";
         let second = b"world";
@@ -1194,8 +1293,7 @@ mod tests {
 
     #[test]
     fn send_fin_dup() {
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", true), Ok(5));
         assert!(stream.send.is_fin());
@@ -1206,8 +1304,7 @@ mod tests {
 
     #[test]
     fn send_undo_fin() {
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", true), Ok(5));
         assert!(stream.send.is_fin());
@@ -1222,8 +1319,7 @@ mod tests {
     fn send_fin_max_data_match() {
         let mut buf = [0; 15];
 
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         let slice = b"hellohellohello";
 
@@ -1239,8 +1335,7 @@ mod tests {
     fn send_fin_zero_length() {
         let mut buf = [0; 5];
 
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"", true), Ok(0));
@@ -1256,8 +1351,7 @@ mod tests {
     fn send_ack() {
         let mut buf = [0; 5];
 
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1287,8 +1381,7 @@ mod tests {
     fn send_ack_reordering() {
         let mut buf = [0; 5];
 
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1325,8 +1418,7 @@ mod tests {
 
     #[test]
     fn recv_data_below_off() {
-        let mut stream =
-            <Stream>::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 15, 0, true, 15, DEFAULT_STREAM_WINDOW);
 
         let first = RangeBuf::from(b"hello", 0, false);
 
@@ -1349,7 +1441,7 @@ mod tests {
     #[test]
     fn stream_complete() {
         let mut stream =
-            <Stream>::new(0, 30, 30, true, true, DEFAULT_STREAM_WINDOW);
+            <Stream>::new(0, 30, 30, true, 30, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1392,8 +1484,7 @@ mod tests {
     fn send_fin_zero_length_output() {
         let mut buf = [0; 5];
 
-        let mut stream =
-            <Stream>::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 15, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.off_front(), 0);
@@ -1423,8 +1514,7 @@ mod tests {
     fn send_emit() {
         let mut buf = [0; 5];
 
-        let mut stream =
-            <Stream>::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 20, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1476,8 +1566,7 @@ mod tests {
     fn send_emit_ack() {
         let mut buf = [0; 5];
 
-        let mut stream =
-            <Stream>::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(0, 0, 20, true, 0, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1544,8 +1633,14 @@ mod tests {
     fn send_emit_retransmit() {
         let mut buf = [0; 5];
 
-        let mut stream =
-            <Stream>::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
+        let mut stream = <Stream>::new(
+            0,
+            0,
+            20,
+            true,
+            DEFAULT_STREAM_WINDOW,
+            DEFAULT_STREAM_WINDOW,
+        );
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -2173,6 +2268,245 @@ mod tests {
         let walk_2: Vec<u64> =
             prioritized_writable.iter().map(|s| s.id).collect();
         assert_eq!(walk_2, vec![0, 0, 4, 4, 8, 8, 12, 12]);
+    }
+
+    #[test]
+    fn retransmit_returns_zero_when_already_acked() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Write and emit some data.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Mark data for retransmission.
+        let retransmitted = stream.send.retransmit(0, 5);
+        assert_eq!(retransmitted, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Ack the data.
+        stream.send.ack_and_drop(0, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Try to retransmit again - should return 0 since data is acked.
+        let retransmitted = stream.send.retransmit(0, 5);
+        assert_eq!(retransmitted, 0);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn retransmit_returns_partial_when_some_acked() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Write and emit 10 bytes.
+        assert_eq!(stream.send.write(b"helloworld", false), Ok(10));
+        assert_eq!(stream.send.buffered_bytes(), 10);
+
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 10);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Mark all data for retransmission.
+        let retransmitted = stream.send.retransmit(0, 10);
+        assert_eq!(retransmitted, 10);
+        assert_eq!(stream.send.buffered_bytes(), 10);
+
+        // Ack first 5 bytes and drop them.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Try to retransmit all 10 bytes - should return 5 since first 5 are
+        // acked.
+        let retransmitted = stream.send.retransmit(0, 10);
+        assert_eq!(retransmitted, 0); // Already marked, so no change
+        assert_eq!(stream.send.buffered_bytes(), 5);
+    }
+
+    #[test]
+    fn ack_and_drop_decrements_len_and_returns_dropped() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Write some data.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Emit it.
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Mark for retransmission.
+        let retransmitted = stream.send.retransmit(0, 5);
+        assert_eq!(retransmitted, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Ack and drop - should decrement len and return dropped amount.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn ack_and_drop_partial_buffer() {
+        let mut stream = <Stream>::new(0, 30, 30, true, 0, 30);
+
+        // Write and emit two chunks.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        assert_eq!(stream.send.write(b"world", false), Ok(5));
+        assert_eq!(stream.send.buffered_bytes(), 10);
+
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 10);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // Mark both chunks for retransmission.
+        let retransmitted = stream.send.retransmit(0, 10);
+        assert_eq!(retransmitted, 10);
+        assert_eq!(stream.send.buffered_bytes(), 10);
+
+        // Ack and drop only first chunk.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // Ack and drop second chunk.
+        let dropped = stream.send.ack_and_drop(5, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn ack_and_drop_returns_zero_when_nothing_dropped() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Write and emit data.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 5);
+
+        // Ack data that's already been fully emitted and not retransmitted.
+        // Nothing should be dropped since there's no buffered data.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 0);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn cache_consistency_through_full_lifecycle() {
+        // This test verifies that StreamMap.tx_buffered stays in sync with
+        // actual buffered data through a full lifecycle: write → emit →
+        // retransmit → ack.
+        let mut streams = <StreamMap>::new(5, 5, 15);
+
+        // Create a stream using low-level StreamMap interface.
+        let local_params = crate::TransportParams {
+            initial_max_data: 30,
+            initial_max_stream_data_bidi_local: 15,
+            initial_max_stream_data_bidi_remote: 15,
+            initial_max_stream_data_uni: 10,
+            initial_max_streams_bidi: 5,
+            initial_max_streams_uni: 5,
+            ..Default::default()
+        };
+        let peer_params = local_params.clone();
+
+        // Update peer stream limits to allow locally-initiated streams.
+        streams.update_peer_max_streams_bidi(5);
+        streams.update_peer_max_streams_uni(5);
+
+        let stream_id = 0u64;
+
+        // Write data: both stream.send.buffered_bytes() and tx_buffered increase.
+        {
+            let stream = streams
+                .get_or_create(
+                    stream_id,
+                    &local_params,
+                    &peer_params,
+                    true,
+                    false,
+                )
+                .unwrap();
+            assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        }
+        streams.add_tx_buffered(5);
+        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 5);
+        assert_eq!(streams.tx_buffered(), 5);
+        assert!(streams.tx_buffered_is_consistent());
+
+        // Emit data: both stream.send.buffered_bytes() and tx_buffered decrease.
+        let mut buf = [0; 10];
+        let written = {
+            let stream = streams.get_mut(stream_id).unwrap();
+            let (written, _) = stream.send.emit(&mut buf).unwrap();
+            written
+        };
+        assert_eq!(written, 5);
+        streams.sub_tx_buffered(5);
+        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 0);
+        assert_eq!(streams.tx_buffered(), 0);
+        assert!(streams.tx_buffered_is_consistent());
+
+        // Retransmit: both stream.send.buffered_bytes() and tx_buffered increase
+        // by actual amount retransmitted.
+        let retransmitted = {
+            let stream = streams.get_mut(stream_id).unwrap();
+            stream.send.retransmit(0, 5)
+        };
+        assert_eq!(retransmitted, 5);
+        streams.add_tx_buffered(retransmitted);
+        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 5);
+        assert_eq!(streams.tx_buffered(), 5);
+        assert!(streams.tx_buffered_is_consistent());
+
+        // Ack and drop: both stream.send.buffered_bytes() and tx_buffered
+        // decrease by actual amount dropped.
+        let dropped = {
+            let stream = streams.get_mut(stream_id).unwrap();
+            stream.send.ack_and_drop(0, 5)
+        };
+        assert_eq!(dropped, 5);
+        streams.sub_tx_buffered(dropped);
+        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 0);
+        assert_eq!(streams.tx_buffered(), 0);
+        assert!(streams.tx_buffered_is_consistent());
+    }
+
+    #[test]
+    fn send_buf_len_reflects_buffered_data() {
+        let mut stream = <Stream>::new(0, 15, 15, true, 0, 15);
+
+        // Initially empty.
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // After write.
+        assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // After emit.
+        let mut buf = [0; 10];
+        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
+
+        // After retransmit.
+        let retransmitted = stream.send.retransmit(0, 5);
+        assert_eq!(retransmitted, 5);
+        assert_eq!(stream.send.buffered_bytes(), 5);
+
+        // After ack_and_drop.
+        let dropped = stream.send.ack_and_drop(0, 5);
+        assert_eq!(dropped, 5);
+        assert_eq!(stream.send.buffered_bytes(), 0);
     }
 }
 

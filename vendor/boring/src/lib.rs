@@ -120,6 +120,7 @@ mod macros;
 mod bio;
 #[macro_use]
 mod util;
+pub mod aead;
 pub mod aes;
 pub mod asn1;
 pub mod base64;
@@ -143,6 +144,8 @@ pub mod nid;
 pub mod pkcs12;
 pub mod pkcs5;
 pub mod pkey;
+#[cfg(feature = "prf")]
+pub mod prf;
 pub mod rand;
 pub mod rsa;
 pub mod sha;

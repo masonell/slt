@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
@@ -161,7 +162,7 @@ fn get_boringssl_source_path(config: &Config) -> &Path {
 /// MSVC generator on Windows place static libs in a target sub-folder,
 /// so adjust library location based on platform and build target.
 /// See issue: <https://github.com/alexcrichton/cmake-rs/issues/18>
-fn get_boringssl_platform_output_path(config: &Config) -> String {
+fn msvc_lib_subdir(config: &Config) -> Option<&'static str> {
     if config.target.ends_with("-msvc") {
         // Code under this branch should match the logic in cmake-rs
         let debug_env_var = config
@@ -195,9 +196,9 @@ fn get_boringssl_platform_output_path(config: &Config) -> String {
             _ => panic!("Unknown OPT_LEVEL={opt_env_var:?} env var."),
         };
 
-        subdir.to_string()
+        Some(subdir)
     } else {
-        String::new()
+        None
     }
 }
 
@@ -217,7 +218,11 @@ fn get_boringssl_cmake_config(config: &Config) -> cmake::Config {
         // This is required now because newest BoringSSL requires CMake 3.22 which
         // uses the new logic with CMAKE_MSVC_RUNTIME_LIBRARY introduced in CMake 3.15.
         // https://github.com/rust-lang/cmake-rs/pull/30#issuecomment-2969758499
-        boringssl_cmake.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
+        if config.target_features.iter().any(|f| f == "crt-static") {
+            boringssl_cmake.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreaded");
+        } else {
+            boringssl_cmake.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
+        }
     }
 
     if config.host == config.target {
@@ -303,12 +308,10 @@ fn get_boringssl_cmake_config(config: &Config) -> cmake::Config {
             boringssl_cmake.cflag(&cflag);
         }
 
-        "windows" => {
-            if config.host.contains("windows") {
-                // BoringSSL's CMakeLists.txt isn't set up for cross-compiling using Visual Studio.
-                // Disable assembly support so that it at least builds.
-                boringssl_cmake.define("OPENSSL_NO_ASM", "YES");
-            }
+        "windows" if config.host.contains("windows") => {
+            // BoringSSL's CMakeLists.txt isn't set up for cross-compiling using Visual Studio.
+            // Disable assembly support so that it at least builds.
+            boringssl_cmake.define("OPENSSL_NO_ASM", "YES");
         }
 
         "linux" => match &*config.target_arch {
@@ -356,7 +359,7 @@ fn get_boringssl_cmake_config(config: &Config) -> cmake::Config {
     boringssl_cmake
 }
 
-fn pick_best_android_ndk_toolchain(toolchains_dir: &Path) -> std::io::Result<OsString> {
+fn pick_best_android_ndk_toolchain(toolchains_dir: &Path) -> io::Result<OsString> {
     let toolchains = std::fs::read_dir(toolchains_dir)?.collect::<Result<Vec<_>, _>>()?;
     // First look for one of the toolchains that Google has documented.
     // https://developer.android.com/ndk/guides/other_build_systems
@@ -535,7 +538,7 @@ fn run_command(command: &mut Command) -> io::Result<Output> {
     Ok(out)
 }
 
-fn built_boring_source_path(config: &Config) -> &PathBuf {
+fn build_boringssl_or_get_prebuilt(config: &Config) -> &Path {
     static BUILD_SOURCE_PATH: OnceLock<PathBuf> = OnceLock::new();
 
     BUILD_SOURCE_PATH.get_or_init(|| {
@@ -565,7 +568,13 @@ fn built_boring_source_path(config: &Config) -> &PathBuf {
         }
 
         cfg.build_target("ssl").build();
-        cfg.build_target("crypto").build()
+        let path = cfg.build_target("crypto").build();
+        let build_dir = path.join("build");
+        if build_dir.exists() {
+            build_dir
+        } else {
+            path
+        }
     })
 }
 
@@ -582,46 +591,92 @@ fn get_cpp_runtime_lib(config: &Config) -> Option<String> {
     }
 }
 
-fn main() {
-    let config = Config::from_env();
-    ensure_patches_applied(&config).unwrap();
+/// Copies built BoringSSL artifacts (libraries and patched headers) into a
+/// user-specified directory. This is intended for producing a pre-built package.
+///
+/// The destination directory must exist and be empty. Writes:
+///
+///   - `lib/libcrypto.a`
+///   - `lib/libssl.a`
+///   - `lib/bcm.o` (if FIPS is enabled)
+///   - `include/openssl/...` (patched headers)
+fn install_artifacts(
+    config: &Config,
+    install_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let install_dir = match install_dir.canonicalize() {
+        Ok(dir) if dir.read_dir().is_ok_and(|mut d| d.next().is_none()) => dir,
+        dir => {
+            let path = dir.as_deref().unwrap_or(install_dir).display();
+            return Err(format!("{path} must be an empty dir").into());
+        }
+    };
+    let bssl_build_dir = build_boringssl_or_get_prebuilt(config);
+
+    let lib_dir = install_dir.join("lib");
+    fs::create_dir(&lib_dir)?;
+
+    for lib in ["libcrypto.a", "libssl.a", "bcm.o"] {
+        if !config.features.fips && lib == "bcm.o" {
+            continue;
+        }
+        fs::copy(bssl_build_dir.join(lib), lib_dir.join(lib))?;
+    }
+
+    fs_extra::dir::copy(get_include_path(config)?, &install_dir, &Default::default())?;
+
+    eprintln!(
+        "installed BoringSSL artifacts into {}",
+        install_dir.display()
+    );
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    if let Err(e) = run() {
+        eprintln!("boring-sys failed: {e}");
+        println!(
+            "cargo::error={}",
+            e.to_string().trim_ascii().replace('\n', "\ncargo::error=")
+        );
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::from_env()?;
+    ensure_patches_applied(&config)?;
     if !config.env.docs_rs {
         emit_link_directives(&config);
     }
-    generate_bindings(&config);
+    generate_bindings(&config).map_err(|e| format!("could not generate bindings: {e}"))?;
+    if let Some(install_dir) = &config.env.export_to_install_dir {
+        install_artifacts(&config, install_dir)
+            .map_err(|e| format!("install artifacts failed: {e}"))?;
+    }
+    Ok(())
 }
 
 fn emit_link_directives(config: &Config) {
-    let bssl_dir = built_boring_source_path(config);
-    let build_path = get_boringssl_platform_output_path(config);
+    let bssl_dir = build_boringssl_or_get_prebuilt(config);
+    let msvc_lib_subdir = msvc_lib_subdir(config);
 
-    if config.is_bazel || (config.features.is_fips_like() && config.env.path.is_some()) {
-        println!(
-            "cargo:rustc-link-search=native={}/lib/{}",
-            bssl_dir.display(),
-            build_path
-        );
-    } else {
-        // todo(rmehra): clean this up, I think these are pretty redundant
-        println!(
-            "cargo:rustc-link-search=native={}/build/crypto/{}",
-            bssl_dir.display(),
-            build_path
-        );
-        println!(
-            "cargo:rustc-link-search=native={}/build/ssl/{}",
-            bssl_dir.display(),
-            build_path
-        );
-        println!(
-            "cargo:rustc-link-search=native={}/build/{}",
-            bssl_dir.display(),
-            build_path
-        );
-        println!(
-            "cargo:rustc-link-search=native={}/build",
-            bssl_dir.display(),
-        );
+    let subdirs =
+        if config.is_bazel || (config.features.is_fips_like() && config.env.path.is_some()) {
+            &["lib"][..]
+        } else {
+            &["lib", "crypto", "ssl", ""][..]
+        };
+
+    for subdir in subdirs {
+        let dir = bssl_dir.join(subdir);
+        let dir = msvc_lib_subdir
+            .map(|s| dir.join(s))
+            .filter(|d| d.exists())
+            .unwrap_or(dir);
+        println!("cargo:rustc-link-search=native={}", dir.display());
     }
 
     if let Some(cpp_lib) = get_cpp_runtime_lib(config) {
@@ -652,21 +707,25 @@ fn check_include_path(path: PathBuf) -> Result<PathBuf, String> {
     }
 }
 
-fn generate_bindings(config: &Config) {
-    let include_path = config.env.include_path.clone().unwrap_or_else(|| {
-        if let Some(bssl_path) = &config.env.path {
-            return check_include_path(bssl_path.join("include"))
-                .expect("config has invalid include path");
-        }
+fn get_include_path(config: &Config) -> Result<PathBuf, String> {
+    if let Some(path) = &config.env.include_path {
+        return check_include_path(path.to_owned());
+    }
 
-        let src_path = get_boringssl_source_path(config);
-        check_include_path(src_path.join("include"))
-            .or_else(|_| check_include_path(src_path.join("src").join("include")))
-            .expect("can't find usable include path")
-    });
+    if let Some(bssl_path) = &config.env.path {
+        return check_include_path(bssl_path.join("include"));
+    }
 
-    let target_rust_version =
-        bindgen::RustTarget::stable(77, 0).expect("bindgen does not recognize target rust version");
+    let src_path = get_boringssl_source_path(config);
+    check_include_path(src_path.join("include"))
+        .or_else(|_| check_include_path(src_path.join("src").join("include")))
+}
+
+fn generate_bindings(config: &Config) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let include_path = get_include_path(config)?;
+
+    let target_rust_version = bindgen::RustTarget::stable(77, 0)
+        .map_err(|e| format!("bindgen does not recognize target rust version: {e}"))?;
 
     let mut builder = bindgen::Builder::default()
         .rust_target(target_rust_version) // bindgen MSRV is 1.70, so this is enough
@@ -684,6 +743,7 @@ fn generate_bindings(config: &Config) {
         .fit_macro_constants(false)
         .size_t_is_usize(true)
         .layout_tests(config.env.debug.is_some())
+        .merge_extern_blocks(true)
         .prepend_enum_name(true)
         .blocklist_type("max_align_t") // Not supported by bindgen on all targets, not used by BoringSSL
         .clang_args(get_extra_clang_args_for_bindgen(config))
@@ -750,21 +810,27 @@ fn generate_bindings(config: &Config) {
             builder = builder.header(header_path.to_str().unwrap());
         } else {
             let err = format!("'openssl/{header}' is missing from '{}'. The include path may be incorrect or contain an outdated version of OpenSSL/BoringSSL", include_path.display());
-            let required = i < must_have_headers.len();
-            println!(
-                "cargo::{}={err}",
-                if required { "error" } else { "warning" }
-            );
+            if i < must_have_headers.len() {
+                return Err(err.into());
+            }
+            println!("cargo::warning={err}");
         }
     }
 
-    let bindings = builder.generate().expect("Unable to generate bindings");
+    let bindings = builder.generate()?;
     let mut source_code = Vec::new();
     bindings
         .write(Box::new(&mut source_code))
-        .expect("Couldn't serialize bindings!");
+        .map_err(|e| format!("Couldn't serialize bindings: {e}"))?;
     ensure_err_lib_enum_is_named(&mut source_code);
-    fs::write(config.out_dir.join("bindings.rs"), source_code).expect("Couldn't write bindings!");
+    let bindings_path = config.out_dir.join("bindings.rs");
+    fs::write(&bindings_path, source_code).map_err(|e| {
+        format!(
+            "Couldn't write bindings to {}: {e}",
+            bindings_path.display()
+        )
+    })?;
+    Ok(bindings_path)
 }
 
 /// err.h has anonymous `enum { ERR_LIB_NONE = 1 }`, which makes a dodgy `_bindgen_ty_1` name
