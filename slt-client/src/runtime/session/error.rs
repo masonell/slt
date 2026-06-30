@@ -72,8 +72,9 @@ pub enum SessionError {
 
     /// Network-level I/O error on the session's TCP connection.
     ///
-    /// A transient condition (reset, refused, timeout) for which the runtime
-    /// reconnects.
+    /// Most network-level errors here are transient conditions (reset, refused,
+    /// timeout) for which the runtime reconnects. `PermissionDenied` projects to
+    /// a fatal permission failure.
     #[error("session connection error: {source}")]
     Connection {
         /// Underlying I/O error.
@@ -87,6 +88,8 @@ pub enum SessionError {
     /// does not map cleanly to [`Self::PermissionDenied`] or
     /// [`Self::Connection`]; primarily reached from the TCP path, which still
     /// returns `io::Result` from `slt_core::transport::TcpChannel`.
+    /// [`Self::exit`] maps a wrapped `PermissionDenied` kind to a fatal
+    /// permission-denied exit.
     #[error(transparent)]
     Io(#[from] io::Error),
 
@@ -135,7 +138,8 @@ impl From<TcpWriteError> for SessionError {
     /// error.
     ///
     /// - **`Io` → [`SessionError::Io`]**: a network-level write failure on the
-    ///   session path reconnects (`exit() == ConnectionError`).
+    ///   session path. Transient I/O reconnects (`exit() == ConnectionError`);
+    ///   `PermissionDenied` exits fatally (`exit() == PermissionDenied`).
     /// - **`Frame` → [`SessionError::Frame`]**: fatal
     ///   (`exit() == ProtocolError`). A `FrameError` from encoding a
     ///   locally-constructed `Message` is a logic/config bug (an unknown
@@ -164,16 +168,18 @@ impl SessionError {
     /// - [`Self::PermissionDenied`] → `PermissionDenied` (fatal).
     /// - [`Self::UdpUpgradeRequired`] → `UdpUpgradeRequired` (fatal).
     /// - [`Self::Connection`] / generic [`Self::Io`] / [`Self::UdpQsp`] →
-    ///   `ConnectionError` (reconnect). [`Self::UdpQsp`] buckets here because
-    ///   the recoverable-vs-fatal *transport* decision (drop & continue vs.
-    ///   dead-channel) is made before reaching `exit()`: a dropped recoverable
-    ///   failure never produces a `SessionError` at all, and the dead-channel
-    ///   signal routes through `exit()` as a reconnect.
+    ///   `ConnectionError` (reconnect), except `PermissionDenied` wrapped by
+    ///   `Connection`/`Io`, which projects to `PermissionDenied` (fatal).
+    ///   [`Self::UdpQsp`] buckets here because the recoverable-vs-fatal
+    ///   *transport* decision (drop & continue vs. dead-channel) is made before
+    ///   reaching `exit()`: a dropped recoverable failure never produces a
+    ///   `SessionError` at all, and the dead-channel signal routes through
+    ///   `exit()` as a reconnect.
     ///
     /// Proto decode failures all map to `ProtocolError` (fatal). Per-variant
     /// exit policy may be revisited separately if warranted.
     #[must_use]
-    pub const fn exit(&self) -> super::SessionExit {
+    pub fn exit(&self) -> super::SessionExit {
         match self {
             Self::ProtocolViolation { .. }
             | Self::Frame(_)
@@ -183,6 +189,11 @@ impl SessionError {
             | Self::UdpQspKeys(_) => super::SessionExit::ProtocolError,
             Self::PermissionDenied { .. } => super::SessionExit::PermissionDenied,
             Self::UdpUpgradeRequired => super::SessionExit::UdpUpgradeRequired,
+            Self::Connection { source } | Self::Io(source)
+                if source.kind() == io::ErrorKind::PermissionDenied =>
+            {
+                super::SessionExit::PermissionDenied
+            }
             Self::Connection { .. } | Self::Io(_) | Self::UdpQsp(_) => {
                 super::SessionExit::ConnectionError
             }
@@ -408,8 +419,19 @@ mod tests {
             SessionExit::ConnectionError
         );
         assert_eq!(
+            SessionError::Connection {
+                source: io::Error::from(io::ErrorKind::PermissionDenied)
+            }
+            .exit(),
+            SessionExit::PermissionDenied
+        );
+        assert_eq!(
             SessionError::Io(io::Error::other("x")).exit(),
             SessionExit::ConnectionError
+        );
+        assert_eq!(
+            SessionError::Io(io::Error::from(io::ErrorKind::PermissionDenied)).exit(),
+            SessionExit::PermissionDenied
         );
         // PayloadError buckets under ProtocolError (fatal). `PayloadError` is
         // a real `Error` type; per-variant exit policy is not revisited here.

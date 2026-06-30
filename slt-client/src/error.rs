@@ -273,7 +273,8 @@ impl From<TcpWriteError> for ConnectError {
     /// connect/auth error without flattening either source.
     ///
     /// - **`Io` → [`ConnectError::Io`]**: a network-level write failure on the
-    ///   connect/auth path is retryable.
+    ///   connect/auth path. Transient I/O is retryable; `PermissionDenied` is a
+    ///   local policy/capability failure and is fatal.
     /// - **`Frame` → [`ConnectError::Frame`]**: fatal. A `FrameError` from
     ///   encoding a locally-constructed `Message` is a logic/config bug (an
     ///   unknown message type, or a payload oversized despite the TUN-layer
@@ -329,10 +330,11 @@ impl ConnectError {
     ///   `SocketProtect`, `TlsHandshake` (cert/setup fault),
     ///   `AuthRejected`, `AuthUnexpectedMessage`, `AuthTlsExport`, protocol
     ///   errors.
-    /// - **Retry**: `TcpConnectTimeout`, `TcpConnect` (transient kinds only;
-    ///   `PermissionDenied` — a firewall/policy block — is fatal),
-    ///   `AuthTimeout`, `AuthDisconnected`, `TlsHandshakeTimeout`,
-    ///   `DnsResolution`, `TlsHandshake` (transient I/O), generic `Io`.
+    /// - **Retry**: `TcpConnectTimeout`, transient `TcpConnect`, `AuthTimeout`,
+    ///   `AuthDisconnected`, `TlsHandshakeTimeout`, `DnsResolution`,
+    ///   `TlsHandshake` (transient I/O), and transient generic `Io`.
+    ///   `PermissionDenied` from `TcpConnect` or generic `Io` is a
+    ///   firewall/platform policy block and is fatal.
     /// - **Not a real failure**: `Cancelled`.
     ///
     /// Arms are grouped by policy (`false` / `true`) for reviewability;
@@ -370,8 +372,9 @@ impl ConnectError {
             Self::TcpConnect { source, .. } => source.kind() != io::ErrorKind::PermissionDenied,
             // TLS: distinguish cert/setup fault (fatal) from transient I/O.
             Self::TlsHandshake { source, .. } => source.is_transient_io(),
-            // Generic fallback: transient by default.
-            Self::Io(_) => true,
+            // Generic fallback: transient by default, except for local
+            // policy/capability denial (EACCES/EPERM), which won't self-heal.
+            Self::Io(source) => source.kind() != io::ErrorKind::PermissionDenied,
         }
     }
 }
@@ -606,6 +609,7 @@ mod tests {
             .is_retriable()
         );
         assert!(ConnectError::Io(io::Error::other("x")).is_retriable());
+        assert!(!ConnectError::Io(io::Error::from(io::ErrorKind::PermissionDenied)).is_retriable());
     }
 
     /// Pins both arms of `From<TcpWriteError>` so the routing cannot silently
