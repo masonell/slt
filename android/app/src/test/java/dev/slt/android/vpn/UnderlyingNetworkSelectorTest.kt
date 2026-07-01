@@ -18,6 +18,18 @@ class UnderlyingNetworkSelectorTest {
     }
 
     @Test
+    fun ordersDefaultNetworkBeforeOtherUsableNetworks() {
+        val selected = selectUnderlyingNetworks(
+            listOf(
+                candidate("cellular", isDefault = false, hasInternet = true, isVpn = false),
+                candidate("wifi", isDefault = true, hasInternet = true, isVpn = false),
+            ),
+        )
+
+        assertEquals(listOf("wifi", "cellular"), selected)
+    }
+
+    @Test
     fun skipsDefaultVpnAndSelectsNonVpnInternetNetwork() {
         val selected = selectInitialUnderlyingNetwork(
             listOf(
@@ -27,6 +39,20 @@ class UnderlyingNetworkSelectorTest {
         )
 
         assertEquals("wifi", selected)
+    }
+
+    @Test
+    fun orderedNetworksSkipVpnAndNetworksWithoutInternet() {
+        val selected = selectUnderlyingNetworks(
+            listOf(
+                candidate("other-vpn", isDefault = true, hasInternet = true, isVpn = true),
+                candidate("wifi-direct", isDefault = false, hasInternet = false, isVpn = false),
+                candidate("cellular", isDefault = false, hasInternet = true, isVpn = false),
+                candidate("wifi", isDefault = false, hasInternet = true, isVpn = false),
+            ),
+        )
+
+        assertEquals(listOf("cellular", "wifi"), selected)
     }
 
     @Test

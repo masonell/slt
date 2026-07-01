@@ -14,26 +14,45 @@ internal data class UnderlyingNetworkCandidate<K>(
 
 internal fun <K> selectInitialUnderlyingNetwork(
     candidates: List<UnderlyingNetworkCandidate<K>>,
-): K? =
-    candidates.firstOrNull { it.isDefault && it.canCarryVpnSocket() }?.network
-        ?: candidates.firstOrNull { it.canCarryVpnSocket() }?.network
+): K? = selectUnderlyingNetworks(candidates).firstOrNull()
+
+internal fun <K> selectUnderlyingNetworks(
+    candidates: List<UnderlyingNetworkCandidate<K>>,
+): List<K> {
+    val default = candidates.firstOrNull { it.isDefault && it.canCarryVpnSocket() }
+    val fallback = candidates
+        .filter { candidate ->
+            candidate.canCarryVpnSocket() && candidate.network != default?.network
+        }
+        .map { it.network }
+    return listOfNotNull(default?.network) + fallback
+}
 
 private fun <K> UnderlyingNetworkCandidate<K>.canCarryVpnSocket(): Boolean =
     hasInternet != false && isVpn != true
 
-// `allNetworks` is deprecated in favor of callback APIs, but startup needs a
-// synchronous snapshot before Rust opens the first protected transport socket.
-@Suppress("DEPRECATION")
 internal fun ConnectivityManager?.findInitialUnderlyingNetwork(logTag: String): Network? {
+    val selected = findUnderlyingNetworks(logTag).firstOrNull()
+    if (selected == null) {
+        Log.w(logTag, "No initial non-VPN underlying network available")
+    }
+    return selected
+}
+
+// `allNetworks` is deprecated in favor of callback APIs, but startup and
+// callback-side DNS fallback need a synchronous snapshot before Rust opens or
+// reuses a protected transport socket.
+@Suppress("DEPRECATION")
+internal fun ConnectivityManager?.findUnderlyingNetworks(logTag: String): List<Network> {
     val manager = this
     if (manager == null) {
         Log.w(logTag, "No ConnectivityManager; initial underlying network unavailable")
-        return null
+        return emptyList()
     }
 
     val defaultNetwork = manager.activeNetwork
     val networks = (manager.allNetworks.toList() + listOfNotNull(defaultNetwork)).distinct()
-    val selected = selectInitialUnderlyingNetwork(
+    return selectUnderlyingNetworks(
         networks.map { network ->
             val capabilities = try {
                 manager.getNetworkCapabilities(network)
@@ -49,11 +68,6 @@ internal fun ConnectivityManager?.findInitialUnderlyingNetwork(logTag: String): 
             )
         },
     )
-
-    if (selected == null) {
-        Log.w(logTag, "No initial non-VPN underlying network available")
-    }
-    return selected
 }
 
 private fun NetworkCapabilities?.isVpnNetwork(): Boolean? =

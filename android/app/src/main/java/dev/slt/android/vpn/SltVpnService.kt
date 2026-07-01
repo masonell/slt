@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.ParcelFileDescriptor
 import android.os.Looper
 import android.util.Log
+import androidx.core.content.edit
 import dev.slt.android.ConfigValidationResult
 import dev.slt.android.SltNative
 import dev.slt.android.profile.SltProfile
@@ -21,6 +22,9 @@ import dev.slt.android.uniffi.PlatformServices
 import dev.slt.android.uniffi.SltInteropException
 import dev.slt.android.uniffi.SocketKind
 import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONException
+import kotlin.concurrent.thread
 
 class SltVpnService : VpnService() {
     @Volatile private var tunFd: ParcelFileDescriptor? = null
@@ -34,6 +38,9 @@ class SltVpnService : VpnService() {
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val profileApplier by lazy { VpnProfileApplier(this, TAG) }
     private val notificationFactory by lazy { VpnNotificationFactory(this) }
+    private val dnsCachePrefs by lazy {
+        getSharedPreferences(DNS_CACHE_PREFS, Context.MODE_PRIVATE)
+    }
     private var networkWatcher: NetworkChangeWatcher? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -93,9 +100,9 @@ class SltVpnService : VpnService() {
             SltNative.load()
             val profile = loadActiveProfile()
             val summary = validateProfile(profile)
-            val initialUnderlyingNetwork =
+            warmDnsCacheAsync(summary.serverHost)
+            val preEstablishUnderlyingNetwork =
                 getSystemService(ConnectivityManager::class.java).findInitialUnderlyingNetwork(TAG)
-            activeUnderlyingNetwork = initialUnderlyingNetwork
 
             val builder = Builder()
                 .setSession(profile.metadata.name)
@@ -109,6 +116,20 @@ class SltVpnService : VpnService() {
                 failVpn("Android did not return a TUN fd")
                 return
             }
+
+            val initialUnderlyingNetwork =
+                getSystemService(ConnectivityManager::class.java).findInitialUnderlyingNetwork(TAG)
+                    ?: preEstablishUnderlyingNetwork
+            if (initialUnderlyingNetwork == null) {
+                try {
+                    fd.close()
+                } catch (error: RuntimeException) {
+                    Log.w(TAG, "Failed to close unused VPN fd after startup network failure", error)
+                }
+                failVpn("No non-VPN network available; stop the other VPN and try again")
+                return
+            }
+            activeUnderlyingNetwork = initialUnderlyingNetwork
 
             tunFd = fd
             val session = startNativeSession(profile.clientToml, fd.fd, summary.tunMtu)
@@ -254,23 +275,130 @@ class SltVpnService : VpnService() {
                 }
 
             override fun resolveHost(hostname: String): List<String> {
-                val network = currentUnderlyingNetwork()
-                    ?: throw SltInteropException.Platform("No underlying network available for DNS")
-                return try {
-                    val addresses = network.getAllByName(hostname)
-                        .mapNotNull { it.hostAddress }
-                    if (addresses.isEmpty()) {
-                        throw SltInteropException.Platform("No addresses returned for $hostname")
-                    }
-                    addresses
-                } catch (error: Exception) {
-                    Log.w(TAG, "Failed to resolve $hostname on underlying network", error)
-                    throw SltInteropException.Platform(
-                        "Failed to resolve $hostname on underlying network: ${error.message}",
-                    )
-                }
+                return resolveHostOnUnderlyingNetworks(hostname)
             }
         }
+
+    private fun resolveHostOnUnderlyingNetworks(hostname: String): List<String> {
+        val networks = currentUnderlyingNetworks()
+        if (networks.isEmpty()) {
+            throw SltInteropException.Platform("No underlying network available for DNS")
+        }
+
+        val failures = mutableListOf<String>()
+        val resolved = resolveHostOnNetworks(hostname, networks, failures)
+        if (resolved != null) {
+            publishUnderlyingNetwork(resolved.network)
+            cacheResolvedAddresses(hostname, resolved.addresses)
+            return resolved.addresses
+        }
+
+        val cached = cachedResolvedAddresses(hostname)
+        if (cached.isNotEmpty()) {
+            Log.w(TAG, "Using cached DNS result for $hostname after live DNS failed")
+            return cached
+        }
+
+        throw SltInteropException.Platform(
+            "Failed to resolve $hostname on underlying networks: ${failures.joinToString("; ")}",
+        )
+    }
+
+    private fun warmDnsCache(hostname: String) {
+        val failures = mutableListOf<String>()
+        val resolved = resolveHostOnNetworks(hostname, currentUnderlyingNetworks(), failures)
+        if (resolved != null) {
+            cacheResolvedAddresses(hostname, resolved.addresses)
+            return
+        }
+        Log.w(TAG, "Could not warm DNS cache for $hostname: ${failures.joinToString("; ")}")
+    }
+
+    private fun warmDnsCacheAsync(hostname: String) {
+        thread(name = "slt-dns-cache-warm", isDaemon = true) {
+            try {
+                warmDnsCache(hostname)
+            } catch (error: Exception) {
+                Log.w(TAG, "DNS cache warmup failed for $hostname", error)
+            }
+        }
+    }
+
+    private data class ResolvedHost(
+        val network: Network,
+        val addresses: List<String>,
+    )
+
+    private fun resolveHostOnNetworks(
+        hostname: String,
+        networks: List<Network>,
+        failures: MutableList<String>,
+    ): ResolvedHost? {
+        for (network in networks) {
+            try {
+                val addresses = network.getAllByName(hostname)
+                    .mapNotNull { it.hostAddress }
+                if (addresses.isNotEmpty()) {
+                    return ResolvedHost(network, addresses)
+                }
+                failures += "network=$network: no addresses returned"
+            } catch (error: Exception) {
+                Log.w(TAG, "Failed to resolve $hostname on underlying network=$network", error)
+                failures += "network=$network: ${error.message ?: error::class.java.simpleName}"
+            }
+        }
+        return null
+    }
+
+    private fun cacheResolvedAddresses(hostname: String, addresses: List<String>) {
+        if (addresses.isEmpty()) {
+            return
+        }
+        val payload = JSONArray()
+        addresses.forEach { address -> payload.put(address) }
+        dnsCachePrefs.edit {
+            putString(dnsCacheAddressesKey(hostname), payload.toString())
+            putLong(dnsCacheTimestampKey(hostname), System.currentTimeMillis())
+        }
+    }
+
+    private fun cachedResolvedAddresses(hostname: String): List<String> {
+        val timestamp = dnsCachePrefs.getLong(dnsCacheTimestampKey(hostname), 0L)
+        if (timestamp == 0L || System.currentTimeMillis() - timestamp > DNS_CACHE_MAX_AGE_MS) {
+            dnsCachePrefs.edit {
+                remove(dnsCacheAddressesKey(hostname))
+                remove(dnsCacheTimestampKey(hostname))
+            }
+            return emptyList()
+        }
+
+        val raw = dnsCachePrefs.getString(dnsCacheAddressesKey(hostname), null)
+            ?: return emptyList()
+        return try {
+            val payload = JSONArray(raw)
+            buildList {
+                for (index in 0 until payload.length()) {
+                    val address = payload.optString(index)
+                    if (address.isNotBlank()) {
+                        add(address)
+                    }
+                }
+            }
+        } catch (error: JSONException) {
+            Log.w(TAG, "Dropping malformed DNS cache entry for $hostname", error)
+            dnsCachePrefs.edit {
+                remove(dnsCacheAddressesKey(hostname))
+                remove(dnsCacheTimestampKey(hostname))
+            }
+            emptyList()
+        }
+    }
+
+    private fun dnsCacheAddressesKey(hostname: String): String =
+        "addresses:${hostname.lowercase()}"
+
+    private fun dnsCacheTimestampKey(hostname: String): String =
+        "timestamp:${hostname.lowercase()}"
 
     private fun protectAndBindSocket(fd: Int, kind: SocketKind): Boolean {
         val protected = protect(fd)
@@ -292,17 +420,20 @@ class SltVpnService : VpnService() {
     }
 
     private fun currentUnderlyingNetwork(): Network? {
-        if (tornDown) {
-            return null
-        }
-        activeUnderlyingNetwork?.let { return it }
+        return currentUnderlyingNetworks().firstOrNull()
+    }
 
-        val fallback =
-            getSystemService(ConnectivityManager::class.java).findInitialUnderlyingNetwork(TAG)
-        if (fallback != null) {
-            publishUnderlyingNetwork(fallback)
+    private fun currentUnderlyingNetworks(): List<Network> {
+        if (tornDown) {
+            return emptyList()
         }
-        return fallback
+
+        val networks = (
+            listOfNotNull(activeUnderlyingNetwork) +
+                getSystemService(ConnectivityManager::class.java).findUnderlyingNetworks(TAG)
+            ).distinct()
+        networks.firstOrNull()?.let(::publishUnderlyingNetwork)
+        return networks
     }
 
     private fun buildNativeCallback(): NativeSessionCallback =
@@ -389,6 +520,8 @@ class SltVpnService : VpnService() {
 
         private const val TAG = "SltVpnService"
         private const val CLIENT_ADDRESS_PREFIX = 32
+        private const val DNS_CACHE_PREFS = "slt_dns_cache"
+        private const val DNS_CACHE_MAX_AGE_MS = 24L * 60L * 60L * 1000L
 
         fun startIntent(context: Context): Intent =
             Intent(context, SltVpnService::class.java).setAction(ACTION_START)
