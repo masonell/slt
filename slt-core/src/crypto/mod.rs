@@ -4,6 +4,7 @@ pub mod client_hello;
 pub mod udp_qsp;
 
 use std::io::{Cursor, Write};
+use std::path::{Path, PathBuf};
 
 use boring::error::ErrorStack;
 use boring::ssl::{
@@ -44,6 +45,20 @@ const CHROME_CIPHERS: &str = "AES128-GCM-SHA256:\
     AES256-SHA";
 
 const CHROME_QUIC_CURVE_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
+
+#[cfg(target_os = "android")]
+const ANDROID_SYSTEM_CA_DIRS: &[&str] = &[
+    "/apex/com.android.conscrypt/cacerts",
+    "/system/etc/security/cacerts",
+];
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const SYSTEM_CA_BUNDLES: &[&str] = &[
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/ssl/ca-bundle.pem",
+];
 
 /// A failure from QUIC client TLS-setup (`quic_client_chrome_config` /
 /// `quic_client_chrome_config_with_ca` and their callees).
@@ -103,7 +118,8 @@ pub fn quic_client_chrome_config() -> Result<quiche::Config, QuicConfigError> {
 /// Build a QUIC client config with optional CA trust anchors.
 ///
 /// If `tls_ca` is `Some`, configures custom CA verification from the provided
-/// TLS material. If `None`, uses the system's default CA store for verification.
+/// TLS material. If `None`, uses the host CA store locations available to the
+/// `BoringSSL` verifier for certificate verification.
 ///
 /// For inline PEM, certs are parsed and added directly to the cert store
 /// without writing to disk.
@@ -123,10 +139,67 @@ pub fn quic_client_chrome_config_with_ca(
             configure_ca_store(&mut tls_ctx, ca)?;
         }
         None => {
-            tls_ctx.set_default_verify_paths()?;
+            configure_host_ca_store(&mut tls_ctx)?;
         }
     }
     quic_config_from_ctx(tls_ctx)
+}
+
+/// Configure a `BoringSSL` context builder to trust host CA locations.
+///
+/// `BoringSSL`'s built-in defaults are OpenSSL-style paths controlled by
+/// `SSL_CERT_FILE` / `SSL_CERT_DIR`, falling back to `/etc/ssl/cert.pem` and
+/// `/etc/ssl/certs`. Some supported hosts put trust anchors elsewhere, so this
+/// also registers known platform locations that `BoringSSL` does not discover on
+/// its own, including Android's system CA directories.
+///
+/// # Errors
+///
+/// Returns an error if `BoringSSL` cannot register its default verify paths or an
+/// existing system CA bundle cannot be loaded.
+pub fn configure_host_ca_store(ctx: &mut SslContextBuilder) -> Result<(), ErrorStack> {
+    ctx.set_default_verify_paths()?;
+
+    let mut loaded_bundles = Vec::new();
+    for bundle in system_ca_bundles() {
+        let path = Path::new(bundle);
+        if path.is_file() {
+            let key = path
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(bundle));
+            if loaded_bundles.contains(&key) {
+                continue;
+            }
+            ctx.load_verify_locations(Some(path), None)?;
+            loaded_bundles.push(key);
+        }
+    }
+
+    for dir in system_ca_dirs() {
+        ctx.load_verify_locations(None, Some(Path::new(dir)))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const fn system_ca_bundles() -> &'static [&'static str] {
+    SYSTEM_CA_BUNDLES
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const fn system_ca_bundles() -> &'static [&'static str] {
+    &[]
+}
+
+#[cfg(target_os = "android")]
+const fn system_ca_dirs() -> &'static [&'static str] {
+    ANDROID_SYSTEM_CA_DIRS
+}
+
+#[cfg(not(target_os = "android"))]
+const fn system_ca_dirs() -> &'static [&'static str] {
+    &[]
 }
 
 /// Configure a `BoringSSL` context builder to trust the provided certificate material.
@@ -350,5 +423,19 @@ mod tests {
             matches!(err, QuicConfigError::Quiche(quiche::Error::TlsFail)),
             "From<quiche::Error> must produce QuicConfigError::Quiche, got {err:?}"
         );
+    }
+
+    #[test]
+    fn host_ca_store_configures_default_locations() {
+        let mut ctx = quic_client_chrome_ctx_builder().unwrap();
+
+        configure_host_ca_store(&mut ctx).unwrap();
+    }
+
+    #[cfg(target_os = "android")]
+    #[test]
+    fn android_host_ca_dirs_include_platform_system_store() {
+        assert!(system_ca_dirs().contains(&"/apex/com.android.conscrypt/cacerts"));
+        assert!(system_ca_dirs().contains(&"/system/etc/security/cacerts"));
     }
 }

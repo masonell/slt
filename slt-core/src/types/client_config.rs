@@ -39,10 +39,11 @@ impl ClientNetworkConfig {
 pub struct ClientTlsConfig {
     /// Certificate authority for verifying SLT server certificate (TCP).
     pub tls_ca: TlsMaterial,
-    /// Optional CA for QUIC discovery. If `None`, uses system CA store.
+    /// Optional CA for QUIC discovery. If `None`, uses host CA locations
+    /// available to the Rust/BoringSSL verifier.
     ///
     /// Set this when nginx uses a custom CA. For Let's Encrypt, leave as `None`
-    /// to use the system's built-in trust store.
+    /// to use the host's built-in public trust anchors.
     #[serde(default)]
     pub quic_ca: Option<TlsMaterial>,
 }

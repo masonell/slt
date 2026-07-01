@@ -224,7 +224,7 @@ reconnect_max = "5s"
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `tls_ca` | [TlsMaterial](#tlsmaterial-type) | Yes | CA certificate for verifying the SLT server certificate (TCP). |
-| `quic_ca` | [TlsMaterial](#tlsmaterial-type) | No | Optional CA for QUIC discovery. If omitted, uses system CA store. Set this when nginx uses a custom CA; for Let's Encrypt, leave as `None` to use the system's built-in trust store. |
+| `quic_ca` | [TlsMaterial](#tlsmaterial-type) | No | Optional CA for QUIC discovery. If omitted, uses host CA locations available to the Rust/BoringSSL verifier. Set this when nginx uses a custom CA; for Let's Encrypt, omit the field to use public trust anchors. |
 
 #### Identity Section
 
@@ -277,6 +277,7 @@ port = 443
 # Server certificate for pinning (works with PARTIAL_CHAIN flag)
 tls_ca = { file = "/etc/slt/ca.crt" }
 # quic_ca = { file = "/etc/slt/quic-ca.crt" }  # Optional: for custom QUIC CA
+# Omit quic_ca when the QUIC endpoint uses a public CA such as Let's Encrypt.
 
 [identity]
 client_id = "0102030405060708090a0b0c0d0e0f10"

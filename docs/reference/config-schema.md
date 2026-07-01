@@ -131,7 +131,7 @@ enabled = true
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `tls_ca` | TlsMaterial | Yes | CA for server cert verification |
-| `quic_ca` | TlsMaterial | No | Uses system CA if omitted |
+| `quic_ca` | TlsMaterial | No | Uses host CA locations available to the Rust/BoringSSL verifier if omitted |
 
 ### `[identity]`
 
