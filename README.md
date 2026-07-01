@@ -30,7 +30,13 @@ slt-cli generate-keys --server
 # Generate server certificates
 slt-cli generate-certs
 
-# Start the server (requires root for TUN)
+# Preconfigure the TUN device once (root); address/MTU must match [tun]
+sudo ip tuntap add dev tun0 mode tun
+sudo ip addr add 10.10.0.1/24 dev tun0
+sudo ip link set dev tun0 mtu 1406
+sudo ip link set tun0 up
+
+# Start the server (root or CAP_NET_BIND_SERVICE binds port 443)
 sudo slt-server
 
 # Generate client keys and connect

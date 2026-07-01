@@ -34,6 +34,8 @@ tls_key = "..."       # PEM string or { file = "path" }
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.1"
+tun_prefix = 24
 
 [timing]
 ping_min = "10s"
@@ -86,8 +88,10 @@ enabled = true
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `tun_name` | string | Yes | - | TUN interface name (e.g., `tun0`). Must not be empty. |
-| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406. |
+| `tun_name` | string | Yes | - | TUN interface name (e.g., `tun0`). Must not be empty. Must already exist on the host. |
+| `tun_ipv4` | IPv4 address | No | `10.10.0.1` | Local overlay address on the interface. Server: the gateway address. Client: must equal `assigned_ipv4`. |
+| `tun_prefix` | integer | No | `24` | Overlay subnet prefix length. Must be 1-32. Client IPs must fall within this subnet. |
+| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface. |
 
 #### Timing Section
 
@@ -128,6 +132,8 @@ tls_key = { file = "/etc/slt/server.key" }
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.1"
+tun_prefix = 24
 
 [timing]
 ping_min = "10s"
@@ -186,6 +192,8 @@ privkey_ed25519 = "..."
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.2"
+tun_prefix = 24
 
 # Transport options (top-level fields)
 enable_upgrade = true
@@ -231,8 +239,10 @@ reconnect_max = "5s"
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `tun_name` | string | Yes | - | TUN interface name (e.g., `tun0`). Must not be empty. |
-| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406. |
+| `tun_name` | string | Yes | - | TUN interface name (e.g., `tun0`). Must not be empty. Must already exist on the host. |
+| `tun_ipv4` | IPv4 address | No | `10.10.0.1` | Local overlay address on the interface. Server: the gateway address. Client: must equal `assigned_ipv4`. |
+| `tun_prefix` | integer | No | `24` | Overlay subnet prefix length. Must be 1-32. Client IPs must fall within this subnet. |
+| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface. |
 
 #### Transport Options
 
@@ -278,6 +288,8 @@ privkey_ed25519 = { file = "/etc/slt/client.key" }
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.2"
+tun_prefix = 24
 
 # Transport options (top-level fields)
 enable_upgrade = true
@@ -396,6 +408,8 @@ The TUN MTU has a maximum value of **1406 bytes**. This ensures that UDP-QSP DAT
 
 The default value of **1280 bytes** is safe for all scenarios.
 
+`slt init` writes `tun_mtu = 1406` (and `slt add-client` copies that into the client config); omitting the field falls back to the 1280 default above. Whatever value you use, the preconfigured interface's MTU must match it exactly or the server/client will refuse to attach (see [Server Setup](../deployment/server-setup.md) and [Client Setup](../deployment/client-setup.md)).
+
 ---
 
 ## Common Configuration Patterns
@@ -422,6 +436,8 @@ tls_key = { file = "/etc/slt/server.key" }
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.1"
+tun_prefix = 24
 
 # Default timing is fine for most cases
 
@@ -450,6 +466,8 @@ privkey_ed25519 = { file = "/etc/slt/client.key" }
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.2"
+tun_prefix = 24
 
 enable_upgrade = true
 require_udp = false
@@ -527,6 +545,10 @@ Both server and client configurations are validated when loaded. Common validati
 | `EmptyHostname` | Client `hostname` is empty | Provide a valid hostname |
 | `EmptyTunName` | `tun_name` is empty | Set a TUN interface name |
 | `InvalidTunMtu` | MTU is 0 or > 1406 | Use MTU between 1-1406 |
+| `InvalidTunPrefix` | `tun_prefix` is outside 1-32 | Use a prefix between 1-32 |
+| `ClientTunIpMismatch` | Client `tun_ipv4` differs from `assigned_ipv4` | Set client `tun_ipv4` equal to its `assigned_ipv4` |
+| `ClientOutsideTunSubnet` | Server client IP is outside `tun_ipv4`/`tun_prefix` | Assign client IPs inside the TUN subnet |
+| `ClientUsesTunAddress` | Server client IP equals the server's `tun_ipv4` | Assign a different client IP |
 | `InvalidPingInterval` | `ping_min` > `ping_max` | Ensure `ping_min` <= `ping_max` |
 | `InvalidReconnectInterval` | `reconnect_min` > `reconnect_max` | Ensure `reconnect_min` <= `reconnect_max` |
 | `ZeroTimeout` | Any timeout is 0 | Use positive duration |

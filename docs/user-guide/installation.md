@@ -55,9 +55,9 @@ sudo pacman -S base-devel cmake go perl ninja pkg-config
 
 ### Additional Runtime Dependencies
 
-SLT creates TUN interfaces for VPN traffic, which requires elevated privileges:
+SLT attaches to a preconfigured TUN device for VPN traffic. Creating and addressing the interface requires `CAP_NET_ADMIN` (or root) once; the running client/server then needs only access to the device. On the server, binding public port 443 additionally requires `CAP_NET_BIND_SERVICE` (or root).
 
-- **Linux**: `CAP_NET_ADMIN` capability or root access
+- **Linux**: `CAP_NET_ADMIN` once for TUN preconfiguration; `CAP_NET_BIND_SERVICE` for the server's port 443
 - **macOS**: Root access or appropriate entitlements
 
 ## Building from Source
@@ -141,14 +141,23 @@ If the BoringSSL build fails:
 
 ### Permission Denied on TUN Interface
 
-On Linux, you may need to grant capabilities to the binaries:
+SLT attaches to a preconfigured TUN interface and needs no `CAP_NET_ADMIN` at runtime. Permission errors at startup usually mean the interface has not been preconfigured, or your user cannot open it:
 
 ```bash
-sudo setcap cap_net_admin+ep target/release/client
-sudo setcap cap_net_admin+ep target/release/server
+# Preconfigure the interface once (root); owner = your user
+sudo ip tuntap add dev tun0 mode tun user "$USER"
+sudo ip addr add 10.10.0.2/24 dev tun0     # match [tun] tun_ipv4 / tun_prefix
+sudo ip link set dev tun0 mtu 1406         # match [tun] tun_mtu
+sudo ip link set tun0 up
 ```
 
-Alternatively, run the binaries with `sudo`.
+For the server only, grant privileged-port binding without root:
+
+```bash
+sudo setcap cap_net_bind_service+ep target/release/server
+```
+
+The client needs no capabilities once the interface is owned by its user.
 
 ### Linker Errors
 

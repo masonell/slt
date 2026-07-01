@@ -24,7 +24,7 @@ Before setting up the SLT server, ensure you have:
 
 - **Server with a public IP address** - A VPS or dedicated server with a static public IPv4 address
 - **Domain name** - A domain (e.g., `vpn.example.com`) with DNS A record pointing to your server's IP
-- **Root or sudo access** - Required for network configuration, TUN device creation, and firewall rules
+- **Root or sudo access** - Required once for TUN device preconfiguration, NAT/firewall rules, and binding port 443 on the server
 
 ### Port Availability
 
@@ -81,15 +81,45 @@ For systemd services (recommended), configure limits in the service unit file in
 
 ## Network Setup
 
-### TUN Device Requirements
+### TUN Device Preconfiguration
 
-SLT creates and manages the TUN device at runtime. The server binary requires the `CAP_NET_ADMIN` capability or root privileges to create TUN interfaces.
+SLT attaches to an existing, preconfigured TUN device — it does not create, address, or bring up the interface itself. The interface must already exist with a name, overlay address, prefix, and MTU that match the `[tun]` section of `server.toml`. On startup SLT opens the named interface, enables GRO/GSO offload, and validates that the interface is running and that its MTU and configured IPv4 address match the config; it refuses to start if anything differs.
 
-The TUN device configuration is handled by the SLT server process:
+Creating and addressing the interface requires `CAP_NET_ADMIN` (or root), but this is a one-time setup step — the running server process does not need it (see [Running as Non-Root](#running-as-non-root)).
 
-- **Interface name**: Configured in `server.toml` (default: `tun0`)
-- **MTU**: Configured in `server.toml` (default: 1280, max: 1406)
-- **IP assignment**: Handled automatically based on client `assigned_ipv4` addresses
+#### Create the Interface
+
+Create a persistent TUN interface owned by the user that will run SLT (here `slt`), assign the server's overlay gateway address, set the MTU, and bring it up:
+
+```bash
+# Create a persistent tun0 owned by the slt user
+sudo ip tuntap add dev tun0 mode tun user slt
+
+# Assign the overlay address from [tun] (tun_ipv4 / tun_prefix)
+sudo ip addr add 10.10.0.1/24 dev tun0
+
+# Set the MTU from [tun] (tun_mtu); slt init writes 1406
+sudo ip link set dev tun0 mtu 1406
+
+# Bring the interface up
+sudo ip link set tun0 up
+```
+
+Adjust `tun0`, `10.10.0.1/24`, and `1406` to match the `[tun]` values in your `server.toml`. Verify before starting SLT:
+
+```bash
+ip -brief addr show tun0          # expect: tun0  UP  10.10.0.1/24
+ip link show tun0 | grep mtu      # expect: mtu 1406
+```
+
+> **Tip:** A persistent interface survives a server restart, so it only needs to be created once. Put the creation and addressing commands in a systemd oneshot service (or your provisioning tool) so they run at boot — SLT will simply attach on each start.
+
+The interface parameters all come from `server.toml`'s `[tun]` section:
+
+- **Interface name**: `tun_name` (default: `tun0`)
+- **MTU**: `tun_mtu` (default: 1280, max: 1406)
+- **Server overlay address**: `tun_ipv4` (default: `10.10.0.1`) — the gateway address clients reach
+- **Subnet prefix**: `tun_prefix` (default: 24); every client `assigned_ipv4` must fall within this subnet and must not equal `tun_ipv4`
 
 ### VPN Subnet Selection
 
@@ -128,7 +158,9 @@ tls_key = { file = "/etc/slt/server.key" }
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1280
+tun_mtu = 1406
+tun_ipv4 = "10.10.0.1"
+tun_prefix = 24
 
 [[clients]]
 client_id = "0102030405060708090a0b0c0d0e0f10"
@@ -342,7 +374,7 @@ ss -ulnp | grep 8080
 
 ### Direct Execution
 
-For testing or manual operation:
+For testing or manual operation (the TUN interface must already be preconfigured — see [TUN Device Preconfiguration](#tun-device-preconfiguration); `sudo` is only needed to bind port 443):
 
 ```bash
 # Run with configuration file
@@ -366,11 +398,11 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-User=root
-# Or use a dedicated user with capabilities:
-# User=slt
-# Group=slt
-# AmbientCapabilities=CAP_NET_ADMIN
+# Run as an unprivileged user. The TUN interface is preconfigured separately
+# (see "TUN Device Preconfiguration"); SLT only needs to bind port 443.
+User=slt
+Group=slt
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 # File limits for many connections
 LimitNOFILE=65536
@@ -464,22 +496,30 @@ The nftables configuration above provides basic firewall rules. Key points:
 
 ### Running as Non-Root
 
-For better security, run SLT as a dedicated user with specific capabilities:
+Because the TUN interface is preconfigured separately (see [TUN Device Preconfiguration](#tun-device-preconfiguration)), the running server needs no `CAP_NET_ADMIN`. The only privileged operation it performs is binding public port 443, which you can grant without running as root:
 
 ```bash
 # Create slt user
 sudo useradd -r -s /usr/sbin/nologin -M slt
 
-# Set capabilities on the binary (allows TUN creation without full root)
-sudo setcap cap_net_admin+ep /usr/local/bin/slt-server
+# Allow binding privileged ports (443) without full root
+sudo setcap cap_net_bind_service+ep /usr/local/bin/slt-server
 
-# Set ownership of config directory
+# Preconfigure the TUN interface owned by the slt user (one-time)
+sudo ip tuntap add dev tun0 mode tun user slt
+sudo ip addr add 10.10.0.1/24 dev tun0
+sudo ip link set dev tun0 mtu 1406
+sudo ip link set tun0 up
+
+# Set ownership of the config directory
 sudo chown -R slt:slt /etc/slt
 
-# Update systemd service (uncomment User/Group lines)
+# Update systemd service (User=slt, AmbientCapabilities=CAP_NET_BIND_SERVICE)
 sudo systemctl daemon-reload
 sudo systemctl restart slt-server
 ```
+
+`setcap cap_net_bind_service+ep` on the binary is the file-based alternative to `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit — use one or the other, not both. The `user slt` on `ip tuntap add` grants the `slt` user permission to open and attach to the persistent interface.
 
 ### Protecting Secrets
 
@@ -550,17 +590,30 @@ sudo systemctl restart slt-server
 
 ### TUN Device Issues
 
+SLT attaches to a preconfigured interface and validates it on startup. Most TUN errors mean the interface does not exist yet, or its address/MTU/state does not match the `[tun]` section of `server.toml` (see [TUN Device Preconfiguration](#tun-device-preconfiguration)).
+
 ```bash
-# Check if TUN module is loaded
+# Check if the TUN module is loaded
 lsmod | grep tun
 
-# Load TUN module if missing
+# Load the TUN module if missing
 sudo modprobe tun
 
-# Verify TUN device exists (after starting server)
-ip link show tun0
-ip addr show tun0
+# The interface must exist BEFORE starting the server, with a matching
+# address, MTU, and UP state
+ip -brief addr show tun0          # expect: tun0  UP  10.10.0.1/24
+ip link show tun0 | grep mtu      # expect: mtu 1406
 ```
+
+If the server logs an attach error, match it against the `[tun]` config:
+
+| Symptom in logs | Cause |
+|-----------------|-------|
+| `failed to attach TUN tun0` | Interface does not exist, or the user cannot open `/dev/net/tun` |
+| `TUN tun0 MTU is X, expected Y` | `tun_mtu` differs from the interface MTU |
+| `TUN tun0 is not up/running` | Interface was not brought up (`ip link set tun0 up`) |
+| `TUN tun0 is missing expected IPv4 address …` | Interface lacks the configured `tun_ipv4` |
+| `TUN tun0 does not have TCP GSO offload enabled for this fd` | Offload could not be enabled on attach (kernel/TUN driver) |
 
 ### NAT Not Working
 

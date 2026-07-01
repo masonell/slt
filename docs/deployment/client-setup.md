@@ -23,7 +23,7 @@ Before setting up the SLT client, ensure you have:
 ### Required Items
 
 - **Client configuration file** - Provided by the server administrator. Contains your client ID, assigned VPN IP, private key, and server connection details.
-- **Root or sudo access** - Required for TUN device creation and routing configuration.
+- **Root or sudo access** - Required once to preconfigure the TUN device (address, MTU, routes); the running client needs none of it
 - **Linux system** - Primary supported platform (see [Platform-Specific Notes](#platform-specific-notes) for other platforms).
 
 ### Network Requirements
@@ -54,7 +54,9 @@ privkey_ed25519 = { file = "/etc/slt/client.key" }
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1280
+tun_mtu = 1406          # copied from the server's tun_mtu by slt add-client
+tun_ipv4 = "10.10.0.2"
+tun_prefix = 24
 
 enable_upgrade = true
 ```
@@ -65,16 +67,36 @@ See [Configuration Reference](../user-guide/configuration.md) for all options.
 
 ## TUN Device Setup
 
-### How SLT Creates the TUN Device
+### Preconfiguring the TUN Device
 
-SLT automatically creates the TUN device at startup. The client binary requires `CAP_NET_ADMIN` capability or root privileges to create TUN interfaces.
+SLT attaches to an existing, preconfigured TUN device — it does not create, address, or bring up the interface itself. The interface must already exist with a name, overlay address, prefix, and MTU that match the `[tun]` section of your `client.toml`. On startup SLT opens the named interface, enables GRO/GSO offload, and validates that the interface is running and that its MTU and configured IPv4 address match the config; it refuses to start if anything differs.
 
-**No manual TUN creation is needed.** When the client starts:
+Creating and addressing the interface requires `CAP_NET_ADMIN` (or root), but this is a one-time setup step — the running client process needs none of it (see [Running the Client](#running-the-client)).
 
-1. SLT opens `/dev/net/tun`
-2. Creates the TUN interface with the name specified in `tun_name` (default: `tun0`)
-3. Brings the interface up
-4. Assigns the configured MTU (default: 1280)
+The client's overlay address is its `assigned_ipv4` (from `[identity]`), and `tun_ipv4` in `[tun]` must equal it. Create a persistent interface owned by the user that will run SLT (here `slt`):
+
+```bash
+# Create a persistent tun0 owned by the slt user
+sudo ip tuntap add dev tun0 mode tun user slt
+
+# Assign the client's overlay address (must match assigned_ipv4 / tun_prefix)
+sudo ip addr add 10.10.0.2/24 dev tun0
+
+# Set the MTU from [tun] (tun_mtu); slt add-client copies the server's 1406
+sudo ip link set dev tun0 mtu 1406
+
+# Bring the interface up
+sudo ip link set tun0 up
+```
+
+Adjust `tun0`, `10.10.0.2/24`, and `1406` to match your `client.toml`. Verify before starting the client:
+
+```bash
+ip -brief addr show tun0          # expect: tun0  UP  10.10.0.2/24
+ip link show tun0 | grep mtu      # expect: mtu 1406
+```
+
+> **Tip:** A persistent interface survives a client restart, so it only needs to be created once. Put the creation and addressing commands in a script or provisioning step so they run before the client starts — SLT will simply attach on each start.
 
 ### TUN Module Verification
 
@@ -91,14 +113,9 @@ sudo modprobe tun
 ls -la /dev/net/tun
 ```
 
-### Post-Creation Configuration
+### Routing
 
-After SLT creates the TUN device, you need to configure:
-
-1. **IP address assignment** - Assign the VPN IP from your configuration
-2. **Routing rules** - Direct traffic through the tunnel (see [Routing Configuration](#routing-configuration))
-
-This can be done manually or via a script (see [Routing Scripts](#routing-scripts)).
+With the interface preconfigured and up, direct traffic through it according to your chosen mode — see [Routing Configuration](#routing-configuration).
 
 ---
 
@@ -119,20 +136,17 @@ VPN_IP="10.10.0.2"          # Your assigned_ipv4
 SERVER_IP="203.0.113.50"    # Your server's public IP
 SERVER_PORT="443"
 
-# 1. Assign the VPN IP to the TUN interface
-sudo ip addr add ${VPN_IP}/32 dev ${TUN_DEV}
+# The interface is already addressed and up from preconfiguration
+# (see "Preconfiguring the TUN Device"). The following only adds routes.
 
-# 2. Bring up the interface
-sudo ip link set ${TUN_DEV} up
-
-# 3. Add a route to the server via your current gateway (before VPN)
+# 1. Add a route to the server via your current gateway (before VPN)
 CURRENT_GW=$(ip route | grep default | awk '{print $3}')
 sudo ip route add ${SERVER_IP}/32 via ${CURRENT_GW}
 
-# 4. Route all other traffic through the VPN
+# 2. Route all other traffic through the VPN
 sudo ip route replace default dev ${TUN_DEV}
 
-# 5. Add back the server route (to prevent routing loop)
+# 3. Add back the server route (to prevent routing loop)
 sudo ip route add ${SERVER_IP}/32 via ${CURRENT_GW}
 ```
 
@@ -157,15 +171,10 @@ Route only specific traffic through the VPN. Other traffic uses your regular int
 ```bash
 # Variables
 TUN_DEV="tun0"
-VPN_IP="10.10.0.2"
 
-# 1. Assign the VPN IP
-sudo ip addr add ${VPN_IP}/32 dev ${TUN_DEV}
+# The interface is already addressed and up from preconfiguration.
+# Route specific subnets through VPN:
 
-# 2. Bring up the interface
-sudo ip link set ${TUN_DEV} up
-
-# 3. Route specific subnets through VPN
 # Example: Route 10.0.0.0/8 (corporate network) through VPN
 sudo ip route add 10.0.0.0/8 dev ${TUN_DEV}
 
@@ -236,7 +245,7 @@ Create scripts to automate routing setup and teardown.
 ```bash
 #!/bin/bash
 # /etc/slt/route-up.sh
-# Called after SLT creates the TUN device
+# Adds routes to the preconfigured TUN device (address/MTU/up set separately)
 
 set -e
 
@@ -248,9 +257,7 @@ MODE="${4:-split}"  # full or split
 # Resolve server IP
 SERVER_IP=$(dig +short ${SERVER_HOST} | tail -1)
 
-# Assign IP and bring up interface
-ip addr add ${VPN_IP}/32 dev ${TUN_DEV}
-ip link set ${TUN_DEV} up
+# Interface is already addressed and up from preconfiguration.
 
 if [ "${MODE}" = "full" ]; then
     # Full tunnel setup
@@ -280,7 +287,8 @@ echo "Routing configured on ${TUN_DEV}"
 ```bash
 #!/bin/bash
 # /etc/slt/route-down.sh
-# Called before SLT destroys the TUN device
+# Removes routes from the persistent TUN interface. The interface itself
+# is not destroyed (it is preconfigured and reused across restarts).
 
 set -e
 
@@ -293,8 +301,8 @@ if ip route show default dev ${TUN_DEV} | grep -q .; then
     dhclient -r eth0 && dhclient eth0 2>/dev/null || true
 fi
 
-# Remove IP from interface
-ip addr flush dev ${TUN_DEV} 2>/dev/null || true
+# Remove routes pointing at the interface (split-tunnel routes, etc.)
+ip route flush dev ${TUN_DEV} 2>/dev/null || true
 
 # Restore DNS (if modified)
 # systemctl restart systemd-resolved
@@ -308,17 +316,17 @@ echo "Routing cleaned up for ${TUN_DEV}"
 
 ### Direct Execution
 
-For testing or manual operation:
+For testing or manual operation. The TUN interface must already be preconfigured and owned by your user (see [Preconfiguring the TUN Device](#preconfiguring-the-tun-device)):
 
 ```bash
-# Run with configuration file
-sudo /usr/local/bin/slt-client --config /etc/slt/client.toml
+# Run with configuration file (no root needed once the interface is preconfigured)
+slt-client --config /etc/slt/client.toml
 
 # Or with verbose logging
-RUST_LOG=debug sudo /usr/local/bin/slt-client --config /etc/slt/client.toml
+RUST_LOG=debug slt-client --config /etc/slt/client.toml
 
 # Run in background
-sudo /usr/local/bin/slt-client --config /etc/slt/client.toml &
+slt-client --config /etc/slt/client.toml &
 ```
 
 ### Command Line Options
@@ -349,19 +357,18 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-User=root
-# Or use a dedicated user with capabilities:
-# User=slt
-# Group=slt
-# AmbientCapabilities=CAP_NET_ADMIN
+# Run as an unprivileged user. The TUN interface is preconfigured and owned
+# by this user (see "Preconfiguring the TUN Device"); the client binds no
+# privileged ports, so it needs no special capabilities.
+User=slt
+Group=slt
 
 # Environment
 Environment=RUST_LOG=info
 
-# Executable
+# Executable. Routes must already be configured on the persistent interface
+# (see "Preconfiguring the TUN Device") to keep the client fully unprivileged.
 ExecStart=/usr/local/bin/slt-client --config /etc/slt/client.toml
-ExecStartPost=/etc/slt/route-up.sh tun0 10.10.0.2 vpn.example.com split
-ExecStopPost=/etc/slt/route-down.sh tun0
 
 Restart=on-failure
 RestartSec=5
@@ -388,6 +395,8 @@ sudo systemctl start slt-client
 sudo systemctl status slt-client
 ```
 
+> **Note on privileges:** The unit above runs the client fully unprivileged because both the TUN interface *and* its routes are preconfigured. Manipulating routes at runtime (`ip route add`/`del`) still requires `CAP_NET_ADMIN`. If you need routes applied only while the client is connected, use the routing-hook variant below and grant `CAP_NET_ADMIN` (or run as root) so the hook can change routes — the interface itself still comes from preconfiguration.
+
 #### Service with Routing Hooks
 
 For more control, use a wrapper script:
@@ -402,19 +411,11 @@ TUN_DEV=$(grep -Po 'tun_name\s*=\s*"\K[^"]+' ${CONFIG} || echo "tun0")
 VPN_IP=$(grep -Po 'assigned_ipv4\s*=\s*"\K[^"]+' ${CONFIG})
 SERVER_HOST=$(grep -Po 'hostname\s*=\s*"\K[^"]+' ${CONFIG})
 
-# Start client in background
+# The TUN interface is preconfigured and already exists. Start the client,
+# then apply routes now that the session is up.
 /usr/local/bin/slt-client --config ${CONFIG} &
 CLIENT_PID=$!
 
-# Wait for TUN device to appear
-for i in {1..30}; do
-    if ip link show ${TUN_DEV} 2>/dev/null; then
-        break
-    fi
-    sleep 0.5
-done
-
-# Configure routing
 /etc/slt/route-up.sh ${TUN_DEV} ${VPN_IP} ${SERVER_HOST} split
 
 # Handle shutdown
@@ -513,8 +514,8 @@ ip link show tun0
 ip addr show tun0
 
 # Expected output:
-# 3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1280 qdisc fq_codel state UNKNOWN ...
-#     inet 10.10.0.2/32 scope global tun0
+# 3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1406 qdisc fq_codel state UNKNOWN ...
+#     inet 10.10.0.2/24 scope global tun0
 ```
 
 ### Ping Through Tunnel
@@ -585,47 +586,56 @@ sudo journalctl -u slt-client -f | grep -i "transport\|udp\|tcp"
 
 ### Permission Errors
 
-**Symptom:** `Permission denied` or `Operation not permitted`
+**Symptom:** `Permission denied` or `Operation not permitted` when starting the client
 
 **Causes and fixes:**
 
+The client needs no `CAP_NET_ADMIN`. It only needs to open the preconfigured TUN interface (granted by owning it) and `/dev/net/tun`.
+
 ```bash
-# Check if running as root or with capabilities
-whoami  # Should be root
+# Confirm the interface exists and is owned by your user (set at preconfiguration)
+ip -brief addr show tun0
+sudo ip tuntap add dev tun0 mode tun user slt   # if not already owned by slt
 
-# If running as non-root user, check capabilities
-getcap /usr/local/bin/slt-client
-# Should show: cap_net_admin+ep
-
-# Add capability if missing
-sudo setcap cap_net_admin+ep /usr/local/bin/slt-client
-
-# Check /dev/net/tun permissions
+# /dev/net/tun must be accessible
 ls -la /dev/net/tun
-# Should be: crw-rw-rw- (or at least readable by your user)
+# Should be: crw-rw-rw- (world-readable/writable) — the default on most distros
+
+# The client binds no privileged ports, so no setcap is required.
 ```
 
-### TUN Device Creation Fails
+If you see `failed to attach TUN tun0`, the interface does not exist or your user cannot open it — see [TUN Attach Fails](#tun-attach-fails).
 
-**Symptom:** `Failed to create TUN device`
+### TUN Attach Fails
 
-**Diagnostic steps:**
+**Symptom:** The client exits at startup with a TUN attach/validation error.
+
+The client attaches to a preconfigured interface and validates it on startup. Errors mean the interface does not exist, your user cannot open it, or its address/MTU/state does not match the `[tun]` section of `client.toml` (see [Preconfiguring the TUN Device](#preconfiguring-the-tun-device)).
 
 ```bash
-# Check if TUN module is loaded
+# Check if the TUN module is loaded
 lsmod | grep tun
 
-# Load TUN module
+# Load the TUN module
 sudo modprobe tun
 
 # Check if /dev/net/tun exists
 ls -la /dev/net/tun
-
 # Create if missing
 sudo mkdir -p /dev/net
 sudo mknod /dev/net/tun c 10 200
 sudo chmod 666 /dev/net/tun
 ```
+
+Match the startup error against the `[tun]` config:
+
+| Symptom in logs | Cause |
+|-----------------|-------|
+| `failed to attach TUN tun0` | Interface does not exist, or the user cannot open `/dev/net/tun` |
+| `TUN tun0 MTU is X, expected Y` | `tun_mtu` differs from the interface MTU |
+| `TUN tun0 is not up/running` | Interface was not brought up (`ip link set tun0 up`) |
+| `TUN tun0 is missing expected IPv4 address …` | Interface lacks the configured `tun_ipv4` (must equal `assigned_ipv4`) |
+| `TUN tun0 does not have TCP GSO offload enabled for this fd` | Offload could not be enabled on attach (kernel/TUN driver) |
 
 ### Connection Failures
 
@@ -711,10 +721,10 @@ ping 10.10.0.2
 
 **Symptom:** Routes disappear after client restart
 
-**Solution:** Use routing scripts or systemd service with `ExecStartPost`:
+**Solution:** Preconfigure routes on the persistent interface, or use the [Service with Routing Hooks](#service-with-routing-hooks) variant, which re-applies routes via `ExecStartPost` on each start (that variant requires `CAP_NET_ADMIN` for route manipulation):
 
 ```bash
-# In systemd service file
+# In the routing-hooks systemd service file
 ExecStartPost=/etc/slt/route-up.sh tun0 10.10.0.2 vpn.example.com split
 ```
 
@@ -808,15 +818,13 @@ dmesg | grep -i "killed process"
 **Diagnostic steps:**
 
 ```bash
-# Check if TUN device was cleaned up
-ip link show tun0 2>/dev/null && echo "TUN still exists"
+# The TUN interface is persistent and preconfigured; it is not created or
+# destroyed by SLT. Do not delete it.
+ip -brief addr show tun0          # should still show the preconfigured address
 
 # Kill any stale processes
 sudo pkill -9 slt-client
 
-# Remove stale TUN device
-sudo ip link delete tun0 2>/dev/null
-
-# Restart client
+# Restart the client (it re-attaches to the existing interface)
 sudo systemctl restart slt-client
 ```

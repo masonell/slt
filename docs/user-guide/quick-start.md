@@ -9,7 +9,7 @@ Before starting, ensure SLT is installed on both your server and client machines
 You'll need:
 - A server with a public IP address and a domain name
 - A client machine (your laptop, workstation, etc.)
-- Root/admin privileges on both machines (required for TUN interface creation)
+- Root/admin privileges on both machines for the one-time TUN device setup (the client then runs unprivileged)
 
 ## Step 1: Initialize Server Configuration
 
@@ -75,34 +75,50 @@ On the client machine, save this file securely (e.g., `~/slt-client.toml`).
 
 ## Step 4: Start the Server
 
-Start the SLT server on your server machine:
+SLT attaches to a preconfigured TUN device, so create it first (one-time; root). The address, prefix, and MTU must match the `[tun]` section of `server.toml`:
 
 ```bash
-# Run with sudo (required for TUN interface)
+sudo ip tuntap add dev tun0 mode tun
+sudo ip addr add 10.10.0.1/24 dev tun0     # match tun_ipv4 / tun_prefix
+sudo ip link set dev tun0 mtu 1406         # match tun_mtu (init generates 1406)
+sudo ip link set tun0 up
+```
+
+Then start the SLT server (root or `CAP_NET_BIND_SERVICE` is needed to bind port 443):
+
+```bash
 sudo slt-server --config /etc/slt/server.toml
 ```
 
 You should see log output indicating the server is running:
 
 ```
-INFO server starting: listen_tcp=0.0.0.0:443 listen_udp=0.0.0.0:443 tun_name="tun0" tun_mtu=1280
+INFO server starting: listen_tcp=0.0.0.0:443 listen_udp=0.0.0.0:443 tun_name="tun0" tun_mtu=1406
 ```
 
 The server is now listening on port 443 for both TCP and UDP connections.
 
 ## Step 5: Start the Client
 
-On your client machine, start the SLT client:
+On your client machine, preconfigure the TUN device first (one-time; root). The address must equal the client's `assigned_ipv4`, and the prefix/MTU must match `[tun]`:
 
 ```bash
-# Run with sudo (required for TUN interface)
-sudo slt-client --config ~/slt-client.toml
+sudo ip tuntap add dev tun0 mode tun user "$USER"
+sudo ip addr add 10.10.0.2/24 dev tun0     # equals assigned_ipv4 / tun_prefix
+sudo ip link set dev tun0 mtu 1406         # match tun_mtu
+sudo ip link set tun0 up
+```
+
+Then start the SLT client (no root needed — the interface is owned by your user):
+
+```bash
+slt-client --config ~/slt-client.toml
 ```
 
 You should see log output indicating a successful connection:
 
 ```
-INFO client starting: hostname="vpn.example.com" port=443 tun_name="tun0" tun_mtu=1280
+INFO client starting: hostname="vpn.example.com" port=443 tun_name="tun0" tun_mtu=1406
 INFO session established: client_id=a1b2c3d4e5f67890a1b2c3d4e5f67890
 ```
 
@@ -149,8 +165,10 @@ tls_cert = { file = "server.pem" }     # Server certificate
 tls_key = { file = "server-key.pem" }  # Server private key
 
 [tun]
-tun_name = "tun0"   # TUN interface name
-tun_mtu = 1406      # MTU (init uses 1406, default is 1280)
+tun_name = "tun0"        # TUN interface name
+tun_mtu = 1406           # MTU (init uses 1406, default is 1280)
+tun_ipv4 = "10.10.0.1"   # server overlay gateway address
+tun_prefix = 24          # overlay subnet prefix length
 
 [timing]
 ping_min = "10s"
@@ -188,7 +206,9 @@ privkey_ed25519 = "hex-encoded-32-byte-private-key"
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1280
+tun_mtu = 1406          # copied from the server by `slt add-client`
+tun_ipv4 = "10.10.0.2"  # equals assigned_ipv4
+tun_prefix = 24
 
 # Transport options (top-level)
 enable_upgrade = true   # Enable UDP-QSP upgrade
@@ -203,13 +223,17 @@ ping_max = "30s"
 
 ### Permission Denied
 
-If you get permission errors creating the TUN interface:
+If the server or client cannot attach to the TUN interface, the interface does not exist yet or your user cannot open it. Preconfigure it first — the address and MTU must match `[tun]`:
 
 ```bash
-# Grant CAP_NET_ADMIN capability
-sudo setcap cap_net_admin+ep /usr/local/bin/slt-client
-sudo setcap cap_net_admin+ep /usr/local/bin/slt-server
+# Preconfigure the interface (one-time, root)
+sudo ip tuntap add dev tun0 mode tun user "$USER"
+sudo ip addr add 10.10.0.2/24 dev tun0      # use the server's tun_ipv4 on the server
+sudo ip link set dev tun0 mtu 1406           # match tun_mtu
+sudo ip link set tun0 up
 ```
+
+The server still needs root (or `CAP_NET_BIND_SERVICE`) to bind port 443; the client needs none once the interface is owned by its user.
 
 ### Connection Timeout
 

@@ -114,16 +114,16 @@ The VPN handler processes authenticated VPN sessions:
 
 ### TUN Device
 
-A Layer 3 virtual network interface that carries VPN traffic:
+A Layer 3 virtual network interface that carries VPN traffic. SLT does not create or configure it — it attaches to an existing, preconfigured interface and validates on startup that the interface is up and that its MTU and overlay address match the `[tun]` config. Creating and addressing the interface (which needs `CAP_NET_ADMIN`) is a separate setup step, so the running SLT process needs no `CAP_NET_ADMIN`.
 
 **Server side:**
-- Created and configured by external script
+- Created and configured by an external setup step (persistent interface)
 - Assigned gateway IP (e.g., 10.10.0.1)
 - Receives packets from clients via VPN, writes to TUN
 - Reads packets from TUN, sends to appropriate client
 
 **Client side:**
-- Created and configured by external script
+- Created and configured by an external setup step (persistent interface)
 - Assigned client VPN IP (e.g., 10.10.0.2)
 - Reads outgoing packets from TUN, sends via VPN
 - Receives packets from VPN, writes to TUN

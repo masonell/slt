@@ -35,10 +35,17 @@ Quick reference for SLT configuration fields. For detailed explanations, see [Us
 
 ### `[tun]`
 
+The preconfigured TUN interface SLT attaches to. The interface must already exist
+(created and configured with `CAP_NET_ADMIN`/root) with a matching name, address,
+prefix, MTU, and UP state before SLT starts. SLT validates the interface on attach
+and refuses to start if any field mismatches.
+
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
-| `tun_name` | string | Yes | - | non-empty |
-| `tun_mtu` | integer | No | `1280` | 1-1406 |
+| `tun_name` | string | Yes | - | non-empty; must match an existing interface |
+| `tun_mtu` | integer | No | `1280` | 1-1406; must match the interface MTU |
+| `tun_ipv4` | IPv4 address | No | `10.10.0.1` | server's local overlay address; must be present on the interface |
+| `tun_prefix` | integer | No | `24` | 1-32; overlay subnet prefix length |
 
 ### `[timing]` (Server)
 
@@ -76,6 +83,8 @@ tls_key = { file = "/etc/slt/server.key" }
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.1"
+tun_prefix = 24
 
 [timing]
 ping_min = "10s"
@@ -133,6 +142,18 @@ enabled = true
 | `assigned_ipv4` | IPv4 address | Yes | e.g., `"10.10.0.2"` |
 | `privkey_ed25519` | hex string (32 bytes) | Yes | 64 hex chars |
 
+### `[tun]` (Client)
+
+The preconfigured TUN interface SLT attaches to. The interface must already exist
+with a matching name, address, prefix, MTU, and UP state before SLT starts.
+
+| Field | Type | Required | Default | Constraints |
+|-------|------|----------|---------|-------------|
+| `tun_name` | string | Yes | - | non-empty; must match an existing interface |
+| `tun_mtu` | integer | No | `1280` | 1-1406; must match the interface MTU |
+| `tun_ipv4` | IPv4 address | No | `10.10.0.1` | must equal this client's `assigned_ipv4` |
+| `tun_prefix` | integer | No | `24` | 1-32; overlay subnet prefix length |
+
 ### `[timing]` (Client)
 
 | Field | Type | Required | Default | Constraints |
@@ -164,6 +185,8 @@ privkey_ed25519 = { file = "/etc/slt/client.key" }
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.2"
+tun_prefix = 24
 
 enable_upgrade = true
 require_udp = false
@@ -264,6 +287,10 @@ nginx_tcp_upstream = "127.0.0.1:8080"
 | `EmptyHostname` | Client `hostname` is empty |
 | `EmptyTunName` | `tun_name` is empty |
 | `InvalidTunMtu` | MTU is 0 or > 1406 |
+| `InvalidTunPrefix` | `tun_prefix` is outside 1-32 |
+| `ClientTunIpMismatch` | Client `tun_ipv4` differs from its `assigned_ipv4` |
+| `ClientOutsideTunSubnet` | Server client `assigned_ipv4` is outside the `tun_ipv4`/`tun_prefix` subnet |
+| `ClientUsesTunAddress` | Server client `assigned_ipv4` equals the server's `tun_ipv4` |
 | `InvalidPingInterval` | `ping_min` > `ping_max` |
 | `InvalidReconnectInterval` | `reconnect_min` > `reconnect_max` |
 | `ZeroTimeout` | Any timeout is 0 |
