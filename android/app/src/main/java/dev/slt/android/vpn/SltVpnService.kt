@@ -93,7 +93,7 @@ class SltVpnService : VpnService() {
             val profile = loadActiveProfile()
             val summary = validateProfile(profile)
             val initialUnderlyingNetwork =
-                getSystemService(ConnectivityManager::class.java)?.activeNetwork
+                getSystemService(ConnectivityManager::class.java).findInitialUnderlyingNetwork(TAG)
             activeUnderlyingNetwork = initialUnderlyingNetwork
 
             val builder = Builder()
