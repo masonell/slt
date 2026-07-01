@@ -78,8 +78,8 @@ After a successful build, the following binaries are available in `target/releas
 
 | Binary | Description |
 |--------|-------------|
-| `client` | VPN client - establishes connections to the server and routes traffic through the TUN interface |
-| `server` | VPN server - handles client authentication, session management, and traffic routing |
+| `slt-client` | VPN client - establishes connections to the server and routes traffic through the TUN interface |
+| `slt-server` | VPN server - handles client authentication, session management, and traffic routing |
 | `slt` | CLI utility - generates keys, certificates, and manages configuration |
 
 ### Additional Tools
@@ -104,8 +104,8 @@ cargo install --path slt-cli --locked
 Or copy them manually:
 
 ```bash
-sudo cp target/release/client /usr/local/bin/slt-client
-sudo cp target/release/server /usr/local/bin/slt-server
+sudo cp target/release/slt-client /usr/local/bin/slt-client
+sudo cp target/release/slt-server /usr/local/bin/slt-server
 sudo cp target/release/slt /usr/local/bin/slt
 ```
 
@@ -115,8 +115,8 @@ Check that the binaries work:
 
 ```bash
 # If running from build directory
-./target/release/client --help
-./target/release/server --help
+./target/release/slt-client --help
+./target/release/slt-server --help
 ./target/release/slt --help
 
 # Or if installed to ~/.cargo/bin or /usr/local/bin
@@ -154,7 +154,7 @@ sudo ip link set tun0 up
 For the server only, grant privileged-port binding without root:
 
 ```bash
-sudo setcap cap_net_bind_service+ep target/release/server
+sudo setcap cap_net_bind_service+ep target/release/slt-server
 ```
 
 The client needs no capabilities once the interface is owned by its user.

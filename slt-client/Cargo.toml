@@ -9,7 +9,7 @@ path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
 [[bin]]
-name = "client"
+name = "slt-client"
 path = "src/main.rs"
 
 [dependencies]
