@@ -1,5 +1,7 @@
 //! TUN interface configuration shared by client and server.
 
+use std::net::Ipv4Addr;
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigError, MAX_TUN_MTU};
@@ -13,6 +15,12 @@ pub struct TunConfig {
     /// TUN interface MTU.
     #[serde(default = "default_tun_mtu")]
     pub tun_mtu: u16,
+    /// Local IPv4 address expected on the TUN interface.
+    #[serde(default = "default_tun_ipv4")]
+    pub tun_ipv4: Ipv4Addr,
+    /// IPv4 overlay subnet prefix length.
+    #[serde(default = "default_tun_prefix")]
+    pub tun_prefix: u8,
 }
 
 fn default_tun_name() -> String {
@@ -23,11 +31,21 @@ const fn default_tun_mtu() -> u16 {
     1280
 }
 
+const fn default_tun_ipv4() -> Ipv4Addr {
+    Ipv4Addr::new(10, 10, 0, 1)
+}
+
+const fn default_tun_prefix() -> u8 {
+    24
+}
+
 impl Default for TunConfig {
     fn default() -> Self {
         Self {
             tun_name: default_tun_name(),
             tun_mtu: default_tun_mtu(),
+            tun_ipv4: default_tun_ipv4(),
+            tun_prefix: default_tun_prefix(),
         }
     }
 }
@@ -40,6 +58,7 @@ impl TunConfig {
     /// Returns `ConfigError` if:
     /// - `tun_name` is empty
     /// - `tun_mtu` is zero or exceeds `MAX_TUN_MTU`
+    /// - `tun_prefix` is outside `1..=32`
     pub const fn validate(&self) -> Result<(), ConfigError> {
         if self.tun_name.is_empty() {
             return Err(ConfigError::EmptyTunName);
@@ -50,8 +69,30 @@ impl TunConfig {
                 max_tun_mtu: MAX_TUN_MTU,
             });
         }
+        if self.tun_prefix == 0 || self.tun_prefix > 32 {
+            return Err(ConfigError::InvalidTunPrefix {
+                tun_prefix: self.tun_prefix,
+            });
+        }
         Ok(())
     }
+
+    /// Return true when `addr` belongs to this TUN overlay subnet.
+    #[must_use]
+    pub fn contains_ipv4(&self, addr: Ipv4Addr) -> bool {
+        ipv4_network_bits(addr, self.tun_prefix)
+            == ipv4_network_bits(self.tun_ipv4, self.tun_prefix)
+    }
+}
+
+fn ipv4_network_bits(addr: Ipv4Addr, prefix: u8) -> u32 {
+    let bits = u32::from(addr);
+    let mask = match prefix {
+        0 => 0,
+        1..=32 => u32::MAX << (u32::BITS - u32::from(prefix)),
+        _ => u32::MAX,
+    };
+    bits & mask
 }
 
 #[cfg(test)]
@@ -62,6 +103,8 @@ mod tests {
         TunConfig {
             tun_name: "tun0".to_string(),
             tun_mtu: 1280,
+            tun_ipv4: Ipv4Addr::new(10, 10, 0, 1),
+            tun_prefix: 24,
         }
     }
 
@@ -96,6 +139,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_invalid_prefix() {
+        let mut config = test_tun_config();
+        config.tun_prefix = 33;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidTunPrefix { .. }));
+    }
+
+    #[test]
+    fn contains_ipv4_checks_configured_subnet() {
+        let config = test_tun_config();
+        assert!(config.contains_ipv4(Ipv4Addr::new(10, 10, 0, 2)));
+        assert!(!config.contains_ipv4(Ipv4Addr::new(10, 10, 1, 2)));
+    }
+
+    #[test]
     fn default_tun_mtu_is_valid() {
         let config = TunConfig::default();
         assert!(config.tun_mtu > 0);
@@ -108,6 +166,8 @@ mod tests {
         // not fail, and the result must still validate.
         let config: TunConfig = toml::from_str("tun_mtu = 1280").unwrap();
         assert_eq!(config.tun_name, "tun0");
+        assert_eq!(config.tun_ipv4, Ipv4Addr::new(10, 10, 0, 1));
+        assert_eq!(config.tun_prefix, 24);
         assert!(config.validate().is_ok());
     }
 

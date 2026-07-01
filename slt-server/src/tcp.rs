@@ -280,6 +280,8 @@ mod tests {
             tun: TunConfig {
                 tun_name: "tun0".to_string(),
                 tun_mtu: 1280,
+                tun_ipv4: Ipv4Addr::new(10, 10, 0, 1),
+                tun_prefix: 24,
             },
             timing: ServerTimingConfig {
                 ping_min: Duration::from_secs(10),

@@ -38,6 +38,8 @@ impl ClientConfig {
     /// - `EmptyHostname` if `hostname` is empty
     /// - `EmptyTunName` if `tun_name` is empty
     /// - `InvalidTunMtu` if `tun_mtu` is out of range
+    /// - `InvalidTunPrefix` if `tun_prefix` is out of range
+    /// - `ClientTunIpMismatch` if `tun_ipv4` differs from `assigned_ipv4`
     /// - `InvalidPingInterval` if `ping_min` > `ping_max`
     /// - `InvalidReconnectInterval` if `reconnect_min` > `reconnect_max`
     /// - `RequireUdpNeedsUpgrade` if `require_udp` is true but `enable_upgrade` is false
@@ -46,6 +48,12 @@ impl ClientConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.network.validate()?;
         self.tun.validate()?;
+        if self.tun.tun_ipv4 != self.identity.assigned_ipv4 {
+            return Err(ConfigError::ClientTunIpMismatch {
+                tun_ipv4: self.tun.tun_ipv4,
+                assigned_ipv4: self.identity.assigned_ipv4,
+            });
+        }
         self.timing.validate()?;
         if self.require_udp && !self.enable_upgrade {
             return Err(ConfigError::RequireUdpNeedsUpgrade);
@@ -94,6 +102,8 @@ mod tests {
             tun: TunConfig {
                 tun_name: "tun0".to_string(),
                 tun_mtu: 1280,
+                tun_ipv4: Ipv4Addr::new(10, 10, 0, 2),
+                tun_prefix: 24,
             },
             enable_upgrade: false,
             require_udp: false,
@@ -129,6 +139,14 @@ mod tests {
         config.tun.tun_name = String::new();
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::EmptyTunName));
+    }
+
+    #[test]
+    fn validate_rejects_tun_ip_identity_mismatch() {
+        let mut config = test_config();
+        config.tun.tun_ipv4 = Ipv4Addr::new(10, 10, 0, 3);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::ClientTunIpMismatch { .. }));
     }
 
     #[test]

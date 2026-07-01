@@ -27,6 +27,12 @@ const DEFAULT_TUN_NAME: &str = "tun0";
 /// Default TUN MTU.
 const DEFAULT_TUN_MTU: u16 = 1406;
 
+/// Default server TUN IPv4 address.
+const DEFAULT_TUN_IPV4: Ipv4Addr = Ipv4Addr::new(10, 10, 0, 1);
+
+/// Default TUN overlay prefix length.
+const DEFAULT_TUN_PREFIX: u8 = 24;
+
 /// Default session queue size.
 const DEFAULT_SESSION_QUEUE_SIZE: usize = 1024;
 
@@ -94,6 +100,8 @@ pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) ->
         tun: TunConfig {
             tun_name: DEFAULT_TUN_NAME.to_string(),
             tun_mtu: DEFAULT_TUN_MTU,
+            tun_ipv4: DEFAULT_TUN_IPV4,
+            tun_prefix: DEFAULT_TUN_PREFIX,
         },
         timing: ServerTimingConfig::default(),
         udp_nat_max_entries: 1024,

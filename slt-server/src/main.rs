@@ -81,12 +81,9 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     let quic = QuicEndpoint::bind(&config, registry.clone(), metrics.clone())?;
     let acceptor = build_tls_acceptor(&config)?;
     let authenticator = Authenticator::from_config(&config);
-    let tun = Arc::new(build_async_tun_device(
-        &config.tun.tun_name,
-        config.tun.tun_mtu,
-    )?);
-    if tun_offload_enabled() {
-        info!("TUN device created with GRO/GSO offload enabled");
+    let tun = Arc::new(build_async_tun_device(&config.tun)?);
+    if tun_offload_enabled(tun.as_ref()) {
+        info!("TUN device attached with GRO/GSO offload enabled");
     }
 
     // Channel for batched TUN writes

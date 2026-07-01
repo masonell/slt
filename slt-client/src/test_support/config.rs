@@ -53,6 +53,8 @@ pub fn test_config_with_identity(
         tun: TunConfig {
             tun_name: "tun0".to_string(),
             tun_mtu: 1280,
+            tun_ipv4: ipv4,
+            tun_prefix: 24,
         },
         enable_upgrade: false,
         require_udp: false,

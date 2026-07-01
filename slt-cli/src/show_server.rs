@@ -73,6 +73,10 @@ pub fn show_server(config_path: &Path, reveal_secrets: bool) -> Result<()> {
     println!("TUN:");
     println!("  Interface: {}", config.tun.tun_name);
     println!("  MTU:       {}", config.tun.tun_mtu);
+    println!(
+        "  IPv4:      {}/{}",
+        config.tun.tun_ipv4, config.tun.tun_prefix
+    );
     println!();
 
     // Timing settings
@@ -138,6 +142,8 @@ tls_key = { file = "server-key.pem" }
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.1"
+tun_prefix = 24
 
 [timing]
 ping_min = "10s"

@@ -59,6 +59,36 @@ pub enum ConfigError {
     /// TUN name is empty.
     #[error("tun_name must not be empty")]
     EmptyTunName,
+    /// TUN overlay prefix is invalid.
+    #[error("invalid tun_prefix {tun_prefix}; expected 1..=32")]
+    InvalidTunPrefix {
+        /// Configured TUN overlay prefix length.
+        tun_prefix: u8,
+    },
+    /// Client config has a TUN IP that differs from its assigned identity IP.
+    #[error("tun_ipv4 ({tun_ipv4}) must match assigned_ipv4 ({assigned_ipv4})")]
+    ClientTunIpMismatch {
+        /// Configured TUN interface address.
+        tun_ipv4: std::net::Ipv4Addr,
+        /// Assigned client identity address.
+        assigned_ipv4: std::net::Ipv4Addr,
+    },
+    /// Server client address is outside the configured TUN subnet.
+    #[error("client assigned_ipv4 {assigned_ipv4} is outside TUN subnet {tun_ipv4}/{tun_prefix}")]
+    ClientOutsideTunSubnet {
+        /// Client address.
+        assigned_ipv4: std::net::Ipv4Addr,
+        /// Server TUN interface address.
+        tun_ipv4: std::net::Ipv4Addr,
+        /// TUN overlay prefix length.
+        tun_prefix: u8,
+    },
+    /// Server client address equals the server's TUN interface address.
+    #[error("client assigned_ipv4 {assigned_ipv4} must not equal server tun_ipv4")]
+    ClientUsesTunAddress {
+        /// Client address.
+        assigned_ipv4: std::net::Ipv4Addr,
+    },
     /// Session queue size is zero.
     #[error("session_queue_size must be greater than zero")]
     ZeroSessionQueueSize,

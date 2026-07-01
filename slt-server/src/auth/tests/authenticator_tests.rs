@@ -35,7 +35,9 @@ fn authenticator_from_config_tracks_enabled_clients() {
         },
         tun: TunConfig {
             tun_name: "test0".to_string(),
-            tun_mtu: 1500,
+            tun_mtu: 1280,
+            tun_ipv4: Ipv4Addr::new(10, 0, 0, 1),
+            tun_prefix: 24,
         },
         timing: ServerTimingConfig {
             ping_min: std::time::Duration::from_secs(1),

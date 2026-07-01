@@ -49,6 +49,9 @@ impl ServerConfig {
     /// Returns `ConfigError` if any constraint is violated:
     /// - `EmptyTunName` if `tun_name` is empty
     /// - `InvalidTunMtu` if `tun_mtu` is out of range
+    /// - `InvalidTunPrefix` if `tun_prefix` is out of range
+    /// - `ClientOutsideTunSubnet` if a configured client IP is outside the TUN subnet
+    /// - `ClientUsesTunAddress` if a configured client IP equals `tun_ipv4`
     /// - `InvalidPingInterval` if `ping_min` > `ping_max`
     /// - `ZeroSessionQueueSize` if `session_queue_size` is zero
     /// - `ZeroUdpNatMaxEntries` if `udp_nat_max_entries` is zero
@@ -56,6 +59,20 @@ impl ServerConfig {
     /// - `TimeoutTooLarge` if any timeout exceeds 1 hour
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.tun.validate()?;
+        for client in &self.clients {
+            if client.assigned_ipv4 == self.tun.tun_ipv4 {
+                return Err(ConfigError::ClientUsesTunAddress {
+                    assigned_ipv4: client.assigned_ipv4,
+                });
+            }
+            if !self.tun.contains_ipv4(client.assigned_ipv4) {
+                return Err(ConfigError::ClientOutsideTunSubnet {
+                    assigned_ipv4: client.assigned_ipv4,
+                    tun_ipv4: self.tun.tun_ipv4,
+                    tun_prefix: self.tun.tun_prefix,
+                });
+            }
+        }
         self.timing.validate()?;
         if self.session_queue_size == 0 {
             return Err(ConfigError::ZeroSessionQueueSize);
@@ -103,6 +120,8 @@ mod tests {
             tun: TunConfig {
                 tun_name: "tun0".to_string(),
                 tun_mtu: 1280,
+                tun_ipv4: Ipv4Addr::new(10, 10, 0, 1),
+                tun_prefix: 24,
             },
             timing: ServerTimingConfig {
                 ping_min: Duration::from_secs(10),
@@ -133,6 +152,22 @@ mod tests {
         config.tun.tun_name = String::new();
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::EmptyTunName));
+    }
+
+    #[test]
+    fn validate_rejects_client_outside_tun_subnet() {
+        let mut config = test_config();
+        config.clients[0].assigned_ipv4 = Ipv4Addr::new(10, 10, 1, 2);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::ClientOutsideTunSubnet { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_client_using_server_tun_ip() {
+        let mut config = test_config();
+        config.clients[0].assigned_ipv4 = config.tun.tun_ipv4;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::ClientUsesTunAddress { .. }));
     }
 
     #[test]

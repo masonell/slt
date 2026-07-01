@@ -1,6 +1,6 @@
 //! Desktop `tun-rs` packet-I/O backend (Linux only).
 //!
-//! [`spawn_desktop`] creates a `tun-rs` device with GRO/GSO offload and spawns
+//! [`spawn_desktop`] attaches a `tun-rs` device with GRO/GSO offload and spawns
 //! the reader/writer tasks.
 
 use std::io;
@@ -11,7 +11,8 @@ use slt_core::config::ClientConfig;
 use slt_core::packet::extract_src_ipv4;
 use slt_core::proto::{Message, OwnedMessageBuf};
 use slt_core::transport::tun::{
-    DEFAULT_TUN_CHANNEL_SIZE, LinuxRecvBatch, LinuxSendBatch, build_async_tun_device,
+    DEFAULT_TUN_CHANNEL_SIZE, LinuxRecvBatch, LinuxSendBatch, TunAttachError,
+    build_async_tun_device,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -21,19 +22,16 @@ use tun_rs::AsyncDevice;
 
 use super::{TunChannels, TunHandles};
 
-/// Create the desktop TUN device and spawn its reader/writer tasks.
+/// Attach the desktop TUN device and spawn its reader/writer tasks.
 ///
 /// # Errors
 ///
-/// Returns an error if the `tun-rs` device cannot be created or configured.
+/// Returns an error if the `tun-rs` device cannot be attached or validated.
 pub fn spawn_desktop(
     config: &ClientConfig,
     cancel: CancellationToken,
-) -> io::Result<(TunHandles, TunChannels)> {
-    let tun = Arc::new(build_async_tun_device(
-        &config.tun.tun_name,
-        config.tun.tun_mtu,
-    )?);
+) -> Result<(TunHandles, TunChannels), TunAttachError> {
+    let tun = Arc::new(build_async_tun_device(&config.tun)?);
 
     Ok(spawn_tasks(
         tun,

@@ -5,6 +5,9 @@ use std::io;
 #[cfg(target_os = "linux")]
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
+#[cfg(target_os = "linux")]
+use crate::types::TunConfig;
+
 /// Default channel capacity used for TUN packet queues.
 pub const DEFAULT_TUN_CHANNEL_SIZE: usize = 256;
 /// Maximum IPv4 packet size handled by TUN paths.
@@ -27,24 +30,136 @@ pub fn tun_mtu_to_usize(mtu: u16) -> io::Result<usize> {
     Ok(usize::from(mtu))
 }
 
-/// Build an async TUN device with GRO/GSO offload enabled (Linux only).
+/// Error returned when attaching to a preconfigured Linux TUN device fails.
+#[cfg(target_os = "linux")]
+#[derive(Debug, thiserror::Error)]
+pub enum TunAttachError {
+    /// The TUN device could not be opened or attached by `tun-rs`.
+    #[error("failed to attach TUN {name}: {source}")]
+    Attach {
+        /// TUN interface name.
+        name: String,
+        /// Underlying attach error.
+        #[source]
+        source: io::Error,
+    },
+    /// The TUN interface could not be inspected after attach.
+    #[error("failed to inspect TUN {name}: {source}")]
+    Inspect {
+        /// TUN interface name.
+        name: String,
+        /// Underlying inspection error.
+        #[source]
+        source: io::Error,
+    },
+    /// The preconfigured interface MTU differs from config.
+    #[error("TUN {name} MTU is {actual}, expected {expected}")]
+    MtuMismatch {
+        /// TUN interface name.
+        name: String,
+        /// Actual interface MTU.
+        actual: u16,
+        /// Expected interface MTU.
+        expected: u16,
+    },
+    /// The preconfigured interface is not up/running.
+    #[error("TUN {name} is not up/running")]
+    NotRunning {
+        /// TUN interface name.
+        name: String,
+    },
+    /// The expected local overlay IPv4 address is missing from the interface.
+    #[error("TUN {name} is missing expected IPv4 address {expected}")]
+    MissingIpv4 {
+        /// TUN interface name.
+        name: String,
+        /// Expected local overlay IPv4 address.
+        expected: std::net::Ipv4Addr,
+    },
+    /// The attached file descriptor does not have required offload enabled.
+    #[error("TUN {name} does not have TCP GSO offload enabled for this fd")]
+    OffloadDisabled {
+        /// TUN interface name.
+        name: String,
+    },
+}
+
+/// Attach to a preconfigured async TUN device with GRO/GSO offload enabled (Linux only).
 ///
 /// # Errors
 ///
-/// Returns any error from `tun-rs` device creation.
+/// Returns an error when the device cannot be opened or its preconfigured
+/// state does not match `config`.
 #[cfg(target_os = "linux")]
-pub fn build_async_tun_device(name: &str, mtu: u16) -> io::Result<AsyncDevice> {
-    DeviceBuilder::new()
-        .name(name)
-        .mtu(mtu)
+pub fn build_async_tun_device(config: &TunConfig) -> Result<AsyncDevice, TunAttachError> {
+    let device = DeviceBuilder::new()
+        .name(&config.tun_name)
         .offload(true)
+        .inherit_enable_state()
         .build_async()
+        .map_err(|source| TunAttachError::Attach {
+            name: config.tun_name.clone(),
+            source,
+        })?;
+    validate_async_tun_device(&device, config)?;
+    Ok(device)
 }
 
-/// Whether Linux GRO/GSO offload is enabled by [`build_async_tun_device`].
+#[cfg(target_os = "linux")]
+fn validate_async_tun_device(
+    device: &AsyncDevice,
+    config: &TunConfig,
+) -> Result<(), TunAttachError> {
+    let actual_mtu = inspect_tun(config, || device.mtu())?;
+    if actual_mtu != config.tun_mtu {
+        return Err(TunAttachError::MtuMismatch {
+            name: config.tun_name.clone(),
+            actual: actual_mtu,
+            expected: config.tun_mtu,
+        });
+    }
+
+    let is_running = inspect_tun(config, || device.is_running())?;
+    if !is_running {
+        return Err(TunAttachError::NotRunning {
+            name: config.tun_name.clone(),
+        });
+    }
+
+    let addresses = inspect_tun(config, || device.addresses())?;
+    if !addresses.contains(&config.tun_ipv4.into()) {
+        return Err(TunAttachError::MissingIpv4 {
+            name: config.tun_name.clone(),
+            expected: config.tun_ipv4,
+        });
+    }
+
+    if !device.tcp_gso() {
+        return Err(TunAttachError::OffloadDisabled {
+            name: config.tun_name.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_tun<T>(
+    config: &TunConfig,
+    inspect: impl FnOnce() -> io::Result<T>,
+) -> Result<T, TunAttachError> {
+    inspect().map_err(|source| TunAttachError::Inspect {
+        name: config.tun_name.clone(),
+        source,
+    })
+}
+
+/// Whether Linux GRO/GSO offload is enabled on a device opened by
+/// [`build_async_tun_device`].
 #[must_use]
-pub const fn tun_offload_enabled() -> bool {
-    cfg!(target_os = "linux")
+#[cfg(target_os = "linux")]
+pub fn tun_offload_enabled(device: &AsyncDevice) -> bool {
+    device.tcp_gso()
 }
 
 #[cfg(target_os = "linux")]

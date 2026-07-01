@@ -54,6 +54,8 @@ pub fn build_client_config(
         tun: TunConfig {
             tun_name: tun_config.tun_name.clone(),
             tun_mtu: tun_config.tun_mtu,
+            tun_ipv4: assigned_ipv4,
+            tun_prefix: tun_config.tun_prefix,
         },
         enable_upgrade: true,
         require_udp: false,
@@ -77,6 +79,8 @@ mod tests {
             &TunConfig {
                 tun_name: "tun0".to_string(),
                 tun_mtu: 1280,
+                tun_ipv4: "10.10.0.1".parse().unwrap(),
+                tun_prefix: 24,
             },
         );
 
@@ -84,5 +88,7 @@ mod tests {
         assert_eq!(config.network.port, 443);
         assert_eq!(config.identity.assigned_ipv4.to_string(), "10.10.0.2");
         assert_eq!(config.tun.tun_name, "tun0");
+        assert_eq!(config.tun.tun_ipv4.to_string(), "10.10.0.2");
+        assert_eq!(config.tun.tun_prefix, 24);
     }
 }

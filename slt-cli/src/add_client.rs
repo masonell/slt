@@ -52,6 +52,16 @@ pub fn add_client(
     {
         bail!("IP address {assigned_ipv4} is already assigned to another client");
     }
+    if assigned_ipv4 == config.tun.tun_ipv4 {
+        bail!("IP address {assigned_ipv4} is reserved for the server TUN interface");
+    }
+    if !config.tun.contains_ipv4(assigned_ipv4) {
+        bail!(
+            "IP address {assigned_ipv4} is outside TUN subnet {}/{}",
+            config.tun.tun_ipv4,
+            config.tun.tun_prefix
+        );
+    }
 
     // Read server certificate content and determine domain BEFORE modifying config
     // This ensures we fail early if cert is unreadable or domain can't be extracted
@@ -157,6 +167,8 @@ tls_key = {{ file = "server-key.pem" }}
 [tun]
 tun_name = "tun0"
 tun_mtu = 1280
+tun_ipv4 = "10.10.0.1"
+tun_prefix = 24
 
 [timing]
 ping_min = "10s"
@@ -210,6 +222,17 @@ idle_timeout = "60s"
             config.clients[0].assigned_ipv4,
             Ipv4Addr::new(10, 10, 0, 100)
         );
+
+        let client_path = fs::read_dir(output_dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let client_toml = fs::read_to_string(client_path).unwrap();
+        let client_config = ClientConfig::from_toml_str(&client_toml).unwrap();
+        assert_eq!(client_config.tun.tun_ipv4, Ipv4Addr::new(10, 10, 0, 100));
+        assert_eq!(client_config.tun.tun_prefix, 24);
     }
 
     #[test]
@@ -252,6 +275,27 @@ idle_timeout = "60s"
             true,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_client_rejects_ip_outside_tun_subnet() {
+        let file = write_test_config();
+        let output_dir = TempDir::new().unwrap();
+
+        let result = add_client(
+            file.path(),
+            output_dir.path(),
+            Some("vpn.example.com"),
+            "10.10.1.50",
+            true,
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("outside TUN subnet")
+        );
     }
 
     #[test]
