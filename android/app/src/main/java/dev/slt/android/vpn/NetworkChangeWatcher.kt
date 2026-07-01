@@ -30,11 +30,14 @@ internal sealed interface UnderlyingNetworkEvent<out K> {
  * Transition state for underlying-network watching.
  *
  * [current] is the active underlying network the VPN established over, usually
- * captured before the VPN network is created. [primed] becomes `true` after the
+ * captured before the VPN network is created. [available] tracks already-seen
+ * non-VPN networks so losing the current network can fall back to another path
+ * without publishing a transient `null`. [primed] becomes `true` after the
  * initial callback burst from `registerNetworkCallback` has settled.
  */
 internal data class UnderlyingNetworkState<K>(
     val current: K?,
+    val available: List<K>,
     val primed: Boolean,
 )
 
@@ -60,7 +63,8 @@ internal data class UnderlyingNetworkTransition<K>(
  * - `Available(n)` for a network different from the current one — a handoff, or a
  *   recovery after the active network was lost — triggers a reconnect and becomes
  *   the new baseline.
- * - `Lost(n)` of the current network triggers a reconnect and clears the baseline.
+ * - `Lost(n)` of the current network triggers a reconnect and moves to another
+ *   available network when one is known; otherwise it clears the baseline.
  * - `Lost(n)` of a non-current network does nothing: a non-active network dropping
  *   does not change the active path.
  */
@@ -68,16 +72,29 @@ internal fun <K> applyUnderlyingNetworkEvent(
     event: UnderlyingNetworkEvent<K>,
     state: UnderlyingNetworkState<K>,
 ): UnderlyingNetworkTransition<K> {
+    val available = when (event) {
+        is UnderlyingNetworkEvent.Available ->
+            if (event.network in state.available) {
+                state.available
+            } else {
+                state.available + event.network
+            }
+        is UnderlyingNetworkEvent.Lost ->
+            state.available.filterNot { it == event.network }
+        UnderlyingNetworkEvent.PrimingComplete -> state.available
+    }
+
     if (!state.primed) {
         val current = when (event) {
             is UnderlyingNetworkEvent.Available -> state.current ?: event.network
             is UnderlyingNetworkEvent.Lost ->
-                if (event.network == state.current) null else state.current
+                if (event.network == state.current) available.firstOrNull() else state.current
             UnderlyingNetworkEvent.PrimingComplete -> state.current
         }
         return UnderlyingNetworkTransition(
             state = state.copy(
                 current = current,
+                available = available,
                 primed = event is UnderlyingNetworkEvent.PrimingComplete,
             ),
             networkChanged = current != state.current,
@@ -89,13 +106,13 @@ internal fun <K> applyUnderlyingNetworkEvent(
         is UnderlyingNetworkEvent.Available ->
             if (event.network != state.current) {
                 UnderlyingNetworkTransition(
-                    state = state.copy(current = event.network),
+                    state = state.copy(current = event.network, available = available),
                     networkChanged = true,
                     reconnect = true,
                 )
             } else {
                 UnderlyingNetworkTransition(
-                    state = state,
+                    state = state.copy(available = available),
                     networkChanged = false,
                     reconnect = false,
                 )
@@ -103,14 +120,15 @@ internal fun <K> applyUnderlyingNetworkEvent(
 
         is UnderlyingNetworkEvent.Lost ->
             if (event.network == state.current) {
+                val fallback = available.firstOrNull()
                 UnderlyingNetworkTransition(
-                    state = state.copy(current = null),
+                    state = state.copy(current = fallback, available = available),
                     networkChanged = true,
                     reconnect = true,
                 )
             } else {
                 UnderlyingNetworkTransition(
-                    state = state,
+                    state = state.copy(available = available),
                     networkChanged = false,
                     reconnect = false,
                 )
@@ -118,7 +136,7 @@ internal fun <K> applyUnderlyingNetworkEvent(
 
         UnderlyingNetworkEvent.PrimingComplete ->
             UnderlyingNetworkTransition(
-                state = state,
+                state = state.copy(available = available),
                 networkChanged = false,
                 reconnect = false,
             )
@@ -166,7 +184,11 @@ internal class NetworkChangeWatcher(
     private var registered = false
     private var pendingReconnectNetwork: Network? = null
     private var state: UnderlyingNetworkState<Network> =
-        UnderlyingNetworkState(current = initialNetwork, primed = false)
+        UnderlyingNetworkState(
+            current = initialNetwork,
+            available = listOfNotNull(initialNetwork),
+            primed = false,
+        )
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -182,7 +204,11 @@ internal class NetworkChangeWatcher(
     fun start() {
         synchronized(lock) {
             if (registered) return
-            state = UnderlyingNetworkState(current = initialNetwork, primed = false)
+            state = UnderlyingNetworkState(
+                current = initialNetwork,
+                available = listOfNotNull(initialNetwork),
+                primed = false,
+            )
             val manager = connectivityManager ?: run {
                 Log.w(TAG, "No ConnectivityManager; auto-reconnect disabled")
                 return
@@ -212,7 +238,7 @@ internal class NetworkChangeWatcher(
             handler.removeCallbacks(debounceRunnable)
             handler.removeCallbacks(primingCompleteRunnable)
             pendingReconnectNetwork = null
-            state = UnderlyingNetworkState(current = null, primed = false)
+            state = UnderlyingNetworkState(current = null, available = emptyList(), primed = false)
             if (!registered) return
             registered = false
             val manager = connectivityManager ?: return

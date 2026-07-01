@@ -27,8 +27,8 @@ class SltVpnService : VpnService() {
     @Volatile private var nativeSession: NativeSession? = null
     @Volatile private var nativeHandle: Long = 0
     @Volatile private var activeUnderlyingNetwork: Network? = null
+    @Volatile private var tornDown = false
     private var terminalStatusReported = false
-    private var tornDown = false
 
     private val stateLock = Any()
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
@@ -84,6 +84,7 @@ class SltVpnService : VpnService() {
         }
 
         try {
+            tornDown = false
             SltVpnStatusBus.markStarting()
             startForeground(
                 VpnNotificationFactory.NOTIFICATION_ID,
@@ -140,6 +141,9 @@ class SltVpnService : VpnService() {
     private fun publishUnderlyingNetwork(network: Network?) {
         synchronized(stateLock) {
             if (tunFd == null && nativeSession == null) {
+                return
+            }
+            if (tornDown) {
                 return
             }
             activeUnderlyingNetwork = network
@@ -250,7 +254,7 @@ class SltVpnService : VpnService() {
                 }
 
             override fun resolveHost(hostname: String): List<String> {
-                val network = activeUnderlyingNetwork
+                val network = currentUnderlyingNetwork()
                     ?: throw SltInteropException.Platform("No underlying network available for DNS")
                 return try {
                     val addresses = network.getAllByName(hostname)
@@ -275,7 +279,7 @@ class SltVpnService : VpnService() {
             return false
         }
 
-        val network = activeUnderlyingNetwork
+        val network = currentUnderlyingNetwork()
         if (network == null) {
             Log.w(TAG, "No underlying network available for SLT socket binding: fd=$fd kind=$kind")
             return false
@@ -285,6 +289,20 @@ class SltVpnService : VpnService() {
             network.bindSocket(dup.fileDescriptor)
         }
         return true
+    }
+
+    private fun currentUnderlyingNetwork(): Network? {
+        if (tornDown) {
+            return null
+        }
+        activeUnderlyingNetwork?.let { return it }
+
+        val fallback =
+            getSystemService(ConnectivityManager::class.java).findInitialUnderlyingNetwork(TAG)
+        if (fallback != null) {
+            publishUnderlyingNetwork(fallback)
+        }
+        return fallback
     }
 
     private fun buildNativeCallback(): NativeSessionCallback =

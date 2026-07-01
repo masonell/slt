@@ -9,7 +9,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UnderlyingNetworkTransitionTest {
-    private val unprimed = UnderlyingNetworkState<String>(current = null, primed = false)
+    private val unprimed = UnderlyingNetworkState<String>(
+        current = null,
+        available = emptyList(),
+        primed = false,
+    )
 
     @Test
     fun initialAvailableSetsFallbackBaselineWithoutReconnecting() {
@@ -35,7 +39,7 @@ class UnderlyingNetworkTransitionTest {
     fun primingCompletePrimesWithoutReconnecting() {
         val transition = applyUnderlyingNetworkEvent(
             UnderlyingNetworkEvent.PrimingComplete,
-            UnderlyingNetworkState(current = "wifi", primed = false),
+            state(current = "wifi", available = listOf("wifi"), primed = false),
         )
 
         assertFalse(transition.reconnect)
@@ -46,7 +50,7 @@ class UnderlyingNetworkTransitionTest {
 
     @Test
     fun initialExtraAvailableDoesNotReplaceCapturedBaselineOrReconnect() {
-        val capturedWifi = UnderlyingNetworkState(current = "wifi", primed = false)
+        val capturedWifi = state(current = "wifi", available = listOf("wifi"), primed = false)
 
         val transition = applyUnderlyingNetworkEvent(Available("cellular"), capturedWifi)
 
@@ -54,11 +58,12 @@ class UnderlyingNetworkTransitionTest {
         assertFalse(transition.networkChanged)
         assertFalse(transition.state.primed)
         assertEquals("wifi", transition.state.current)
+        assertEquals(listOf("wifi", "cellular"), transition.state.available)
     }
 
     @Test
     fun initialBurstDoesNotReconnectUntilPrimed() {
-        val capturedWifi = UnderlyingNetworkState(current = "wifi", primed = false)
+        val capturedWifi = state(current = "wifi", available = listOf("wifi"), primed = false)
         val extraAvailable = applyUnderlyingNetworkEvent(Available("cellular"), capturedWifi)
         val primed = applyUnderlyingNetworkEvent(
             UnderlyingNetworkEvent.PrimingComplete,
@@ -71,22 +76,24 @@ class UnderlyingNetworkTransitionTest {
         assertFalse(primed.networkChanged)
         assertTrue(primed.state.primed)
         assertEquals("wifi", primed.state.current)
+        assertEquals(listOf("wifi", "cellular"), primed.state.available)
     }
 
     @Test
     fun availableOfDifferentNetworkReconnectsAndUpdatesBaseline() {
-        val primed = UnderlyingNetworkState(current = "wifi", primed = true)
+        val primed = state(current = "wifi", available = listOf("wifi"), primed = true)
 
         val transition = applyUnderlyingNetworkEvent(Available("cellular"), primed)
 
         assertTrue(transition.reconnect)
         assertTrue(transition.networkChanged)
         assertEquals("cellular", transition.state.current)
+        assertEquals(listOf("wifi", "cellular"), transition.state.available)
     }
 
     @Test
     fun availableOfSameNetworkDoesNotReconnect() {
-        val primed = UnderlyingNetworkState(current = "wifi", primed = true)
+        val primed = state(current = "wifi", available = listOf("wifi"), primed = true)
 
         val transition = applyUnderlyingNetworkEvent(Available("wifi"), primed)
 
@@ -96,31 +103,53 @@ class UnderlyingNetworkTransitionTest {
     }
 
     @Test
-    fun lostOfCurrentNetworkReconnectsAndClearsBaseline() {
-        val primed = UnderlyingNetworkState(current = "wifi", primed = true)
+    fun lostOfCurrentNetworkReconnectsAndFallsBackToAvailableNetwork() {
+        val primed = state(
+            current = "wifi",
+            available = listOf("wifi", "cellular"),
+            primed = true,
+        )
+
+        val transition = applyUnderlyingNetworkEvent(Lost("wifi"), primed)
+
+        assertTrue(transition.reconnect)
+        assertTrue(transition.networkChanged)
+        assertEquals("cellular", transition.state.current)
+        assertEquals(listOf("cellular"), transition.state.available)
+    }
+
+    @Test
+    fun lostOfCurrentNetworkClearsBaselineWhenNoFallbackIsAvailable() {
+        val primed = state(current = "wifi", available = listOf("wifi"), primed = true)
 
         val transition = applyUnderlyingNetworkEvent(Lost("wifi"), primed)
 
         assertTrue(transition.reconnect)
         assertTrue(transition.networkChanged)
         assertNull(transition.state.current)
+        assertEquals(emptyList<String>(), transition.state.available)
     }
 
     @Test
     fun lostOfNonCurrentNetworkDoesNotReconnect() {
         // WiFi is the active path; cellular dropping must not spuriously reconnect.
-        val primed = UnderlyingNetworkState(current = "wifi", primed = true)
+        val primed = state(
+            current = "wifi",
+            available = listOf("wifi", "cellular"),
+            primed = true,
+        )
 
         val transition = applyUnderlyingNetworkEvent(Lost("cellular"), primed)
 
         assertFalse(transition.reconnect)
         assertFalse(transition.networkChanged)
         assertEquals("wifi", transition.state.current)
+        assertEquals(listOf("wifi"), transition.state.available)
     }
 
     @Test
     fun recoveryFromLostBaselineReconnects() {
-        val lost = UnderlyingNetworkState<String>(current = null, primed = true)
+        val lost = state<String>(current = null, available = emptyList(), primed = true)
 
         val transition = applyUnderlyingNetworkEvent(Available("cellular"), lost)
 
@@ -133,12 +162,24 @@ class UnderlyingNetworkTransitionTest {
     fun handoffThenLostOfOldNetworkDoesNotReconnectAgain() {
         // WiFi -> cellular handoff reconnects; the follow-up onLost(wifi) is a
         // non-current loss and must not fire a second transition.
-        val onCellular = UnderlyingNetworkState(current = "cellular", primed = true)
+        val onCellular = state(
+            current = "cellular",
+            available = listOf("wifi", "cellular"),
+            primed = true,
+        )
 
         val transition = applyUnderlyingNetworkEvent(Lost("wifi"), onCellular)
 
         assertFalse(transition.reconnect)
         assertFalse(transition.networkChanged)
         assertEquals("cellular", transition.state.current)
+        assertEquals(listOf("cellular"), transition.state.available)
     }
+
+    private fun <K> state(
+        current: K?,
+        available: List<K>,
+        primed: Boolean,
+    ): UnderlyingNetworkState<K> =
+        UnderlyingNetworkState(current = current, available = available, primed = primed)
 }
