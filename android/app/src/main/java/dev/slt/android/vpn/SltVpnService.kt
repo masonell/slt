@@ -16,6 +16,7 @@ import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.uniffi.ClientConfigSummary
 import dev.slt.android.uniffi.ClientEvent
+import dev.slt.android.uniffi.ClientEventKind
 import dev.slt.android.uniffi.NativeSession
 import dev.slt.android.uniffi.NativeSessionCallback
 import dev.slt.android.uniffi.PlatformServices
@@ -31,11 +32,15 @@ class SltVpnService : VpnService() {
     @Volatile private var nativeSession: NativeSession? = null
     @Volatile private var nativeHandle: Long = 0
     @Volatile private var activeUnderlyingNetwork: Network? = null
+    @Volatile private var activeClientToml: String? = null
+    @Volatile private var activeTunMtu: Int = 0
     @Volatile private var tornDown = false
     private var terminalStatusReported = false
+    private var nativeRestartAttempt = 0
 
     private val stateLock = Any()
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val nativeRestartRunnable = Runnable { restartNativeSessionAfterTerminalError() }
     private val profileApplier by lazy { VpnProfileApplier(this, TAG) }
     private val notificationFactory by lazy { VpnNotificationFactory(this) }
     private val dnsCachePrefs by lazy {
@@ -132,6 +137,8 @@ class SltVpnService : VpnService() {
             activeUnderlyingNetwork = initialUnderlyingNetwork
 
             tunFd = fd
+            activeClientToml = profile.clientToml
+            activeTunMtu = summary.tunMtu
             val session = startNativeSession(profile.clientToml, fd.fd, summary.tunMtu)
             nativeSession = session
             nativeHandle = session.handle()
@@ -199,11 +206,14 @@ class SltVpnService : VpnService() {
             return
         }
         tornDown = true
+        cancelNativeRestart()
         networkWatcher?.stop()
         networkWatcher = null
         activeUnderlyingNetwork = null
         stopNativeClient()
         closeTunFd()
+        activeClientToml = null
+        activeTunMtu = 0
         stopForegroundCompat()
     }
 
@@ -237,6 +247,11 @@ class SltVpnService : VpnService() {
         } catch (error: RuntimeException) {
             Log.w(TAG, "Failed to stop SLT native client: handle=$handle", error)
         }
+    }
+
+    private fun cancelNativeRestart() {
+        mainHandler.removeCallbacks(nativeRestartRunnable)
+        nativeRestartAttempt = 0
     }
 
     /// Start a fresh native client session. Rust owns the session handle/seq
@@ -463,17 +478,80 @@ class SltVpnService : VpnService() {
     /// perform platform teardown for terminal events. Non-terminal events only
     /// refine the status/phase/transport shown to the user.
     private fun handleNativeEvent(event: ClientEvent) {
-        when (SltVpnStatusBus.applyEvent(event)) {
+        when (val terminal = SltVpnStatusBus.applyEvent(event)) {
             NativeTerminal.None -> updateNotification()
             NativeTerminal.Stopped -> {
                 Log.i(TAG, "Native client stopped: handle=${event.handle}")
                 teardownAndStopSelf()
             }
-            NativeTerminal.Errored -> {
-                Log.e(TAG, "Native client reported a terminal error; stopping")
-                teardownAndStopSelf()
+            is NativeTerminal.Errored -> {
+                if (terminal.retryable) {
+                    Log.w(TAG, "Native client reported a retryable terminal error; restarting")
+                    scheduleNativeRestartAfterError(event)
+                } else {
+                    Log.e(TAG, "Native client reported a non-retryable terminal error; stopping")
+                    teardownAndStopSelf()
+                }
             }
         }
+
+        if (event.kind is ClientEventKind.Authenticated) {
+            nativeRestartAttempt = 0
+        }
+    }
+
+    private fun scheduleNativeRestartAfterError(event: ClientEvent) {
+        val detail = (event.kind as? ClientEventKind.Error)?.detail ?: "Native client error"
+        stopNativeClient()
+
+        if (tornDown || tunFd == null) {
+            failVpn("VPN tunnel unavailable after native error: $detail")
+            return
+        }
+
+        nativeRestartAttempt += 1
+        val delayMs = nativeRestartDelayMs(nativeRestartAttempt)
+        SltVpnStatusBus.markNativeRestartScheduled(
+            detail = detail,
+            attempt = nativeRestartAttempt.toULong(),
+            delayMs = delayMs.toULong(),
+        )
+        updateNotification()
+        mainHandler.removeCallbacks(nativeRestartRunnable)
+        mainHandler.postDelayed(nativeRestartRunnable, delayMs)
+    }
+
+    private fun restartNativeSessionAfterTerminalError() {
+        val fd = tunFd
+        val configToml = activeClientToml
+        val mtu = activeTunMtu
+
+        if (tornDown) {
+            return
+        }
+        if (nativeSession != null) {
+            return
+        }
+        if (fd == null || configToml == null || mtu <= 0) {
+            failVpn("VPN tunnel unavailable before native restart")
+            return
+        }
+
+        try {
+            val session = startNativeSession(configToml, fd.fd, mtu)
+            nativeSession = session
+            nativeHandle = session.handle()
+            Log.i(TAG, "Restarted SLT native client: handle=$nativeHandle attempt=$nativeRestartAttempt")
+            updateNotification()
+        } catch (error: Exception) {
+            failVpn(error.message ?: error::class.java.simpleName)
+        }
+    }
+
+    private fun nativeRestartDelayMs(attempt: Int): Long {
+        val shift = (attempt - 1).coerceIn(0, MAX_NATIVE_RESTART_SHIFT)
+        val delay = INITIAL_NATIVE_RESTART_DELAY_MS * (1L shl shift)
+        return delay.coerceAtMost(MAX_NATIVE_RESTART_DELAY_MS)
     }
 
     private fun closeTunFd() {
@@ -522,6 +600,9 @@ class SltVpnService : VpnService() {
         private const val CLIENT_ADDRESS_PREFIX = 32
         private const val DNS_CACHE_PREFS = "slt_dns_cache"
         private const val DNS_CACHE_MAX_AGE_MS = 24L * 60L * 60L * 1000L
+        private const val INITIAL_NATIVE_RESTART_DELAY_MS = 1_000L
+        private const val MAX_NATIVE_RESTART_DELAY_MS = 60_000L
+        private const val MAX_NATIVE_RESTART_SHIFT = 6
 
         fun startIntent(context: Context): Intent =
             Intent(context, SltVpnService::class.java).setAction(ACTION_START)

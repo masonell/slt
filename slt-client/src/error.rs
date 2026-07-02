@@ -53,7 +53,7 @@ pub enum Stage {
 /// the boring [`ErrorCode`] (for a mid-handshake failure) or the setup
 /// [`ErrorStack`] (for a pre-handshake setup failure), plus — when available —
 /// the captured X.509 verification error and underlying I/O error so cert
-/// failures can be distinguished from transient I/O in
+/// failures can be distinguished from transient transport loss in
 /// [`ConnectError::is_retriable`].
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
@@ -86,34 +86,38 @@ pub enum TlsError {
 }
 
 impl TlsError {
-    /// Whether this TLS failure looks like a transient I/O condition rather
+    /// Whether this TLS failure looks like a transient network condition rather
     /// than a cert/handshake fault.
     ///
     /// Used by [`ConnectError::is_retriable`] to avoid the latent bug where a
     /// certificate error (fatal, won't self-heal) is retried forever alongside
     /// transient TLS I/O. A captured X.509 verification error is always fatal.
-    /// Otherwise an underlying boring I/O error (e.g. connection reset
-    /// mid-handshake) is treated as transient; everything else (including SSL
-    /// protocol errors and an absent cause) is treated as a fatal handshake
-    /// fault — the safer default, since a retried cert error is the bug being
-    /// fixed.
+    /// Otherwise an underlying boring I/O error, `SSL_ERROR_SYSCALL`, or a
+    /// clean close mid-handshake is treated as transient. Everything else
+    /// (including SSL protocol errors and an absent cause) is treated as a
+    /// fatal handshake fault — the safer default, since a retried cert error is
+    /// the bug being fixed.
     #[must_use]
-    pub const fn is_transient_io(&self) -> bool {
+    pub fn is_transient_io(&self) -> bool {
         match self {
             // Setup failures are config/capability problems; not transient I/O.
             Self::Setup(_) => false,
             Self::Handshake {
+                code,
                 verify_error,
                 io_error_kind,
-                ..
             } => {
                 // A certificate verification failure is never transient.
                 if verify_error.is_some() {
                     return false;
                 }
                 // An underlying io::Error (e.g. connection reset mid-handshake)
-                // is transient; absent cause defaults to fatal.
+                // is transient. Boring may also report transport loss as
+                // SYSCALL/ZERO_RETURN without exposing an io::Error through
+                // tokio-boring, notably on weak mobile links.
                 io_error_kind.is_some()
+                    || *code == ErrorCode::SYSCALL
+                    || *code == ErrorCode::ZERO_RETURN
             }
         }
     }
@@ -440,8 +444,9 @@ mod tests {
     /// The TLS cert/transient-IO split — the headline correctness win of the
     /// typed policy — must classify each `TlsError` shape correctly. A captured
     /// X.509 verification error is always fatal (even when accompanied by an
-    /// I/O error); an I/O error without a cert fault is transient; everything
-    /// else (setup, bare SSL protocol errors) is fatal.
+    /// I/O error); an I/O error or Boring transport-loss code without a cert
+    /// fault is transient; everything else (setup, bare SSL protocol errors) is
+    /// fatal.
     #[test]
     fn tls_error_is_transient_io_classifies_each_shape() {
         // Setup fault → fatal.
@@ -472,6 +477,25 @@ mod tests {
                 code: ErrorCode::SYSCALL,
                 verify_error: None,
                 io_error_kind: Some(io::ErrorKind::ConnectionReset),
+            }
+            .is_transient_io()
+        );
+
+        // Boring may report mobile-link transport loss without surfacing an
+        // io::Error through tokio-boring.
+        assert!(
+            TlsError::Handshake {
+                code: ErrorCode::SYSCALL,
+                verify_error: None,
+                io_error_kind: None,
+            }
+            .is_transient_io()
+        );
+        assert!(
+            TlsError::Handshake {
+                code: ErrorCode::ZERO_RETURN,
+                verify_error: None,
+                io_error_kind: None,
             }
             .is_transient_io()
         );
@@ -561,6 +585,17 @@ mod tests {
                     code: ErrorCode::SYSCALL,
                     verify_error: None,
                     io_error_kind: Some(io::ErrorKind::ConnectionReset),
+                },
+            }
+            .is_retriable()
+        );
+        assert!(
+            ConnectError::TlsHandshake {
+                sni: "h".into(),
+                source: TlsError::Handshake {
+                    code: ErrorCode::SYSCALL,
+                    verify_error: None,
+                    io_error_kind: None,
                 },
             }
             .is_retriable()

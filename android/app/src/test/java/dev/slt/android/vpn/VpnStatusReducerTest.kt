@@ -109,13 +109,29 @@ class VpnStatusReducerTest {
     @Test
     fun error_is_terminal_and_records_detail() {
         val terminal =
-            SltVpnStatusBus.applyEvent(event(ClientEventKind.Error(detail = "auth rejected")))
+            SltVpnStatusBus.applyEvent(
+                event(ClientEventKind.Error(detail = "auth rejected", retryable = false)),
+            )
         val state = SltVpnStatusBus.state.value
 
         assertEquals(VpnStatus.Error, state.status)
         assertEquals(VpnPhase.Error, state.phase)
         assertEquals("auth rejected", state.lastError)
-        assertEquals(NativeTerminal.Errored, terminal)
+        assertEquals(NativeTerminal.Errored(retryable = false), terminal)
+    }
+
+    @Test
+    fun retryable_error_is_terminal_but_keeps_reconnecting_status() {
+        val terminal =
+            SltVpnStatusBus.applyEvent(
+                event(ClientEventKind.Error(detail = "native worker panicked", retryable = true)),
+            )
+        val state = SltVpnStatusBus.state.value
+
+        assertEquals(VpnStatus.Reconnecting, state.status)
+        assertEquals(VpnPhase.Reconnecting, state.phase)
+        assertEquals("native worker panicked", state.lastError)
+        assertEquals(NativeTerminal.Errored(retryable = true), terminal)
     }
 
     @Test

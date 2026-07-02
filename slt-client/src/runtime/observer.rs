@@ -57,6 +57,8 @@ pub enum ClientEventKind {
     Error {
         /// Human-readable error detail.
         detail: String,
+        /// Whether Android should keep the VPN up and restart native runtime.
+        retryable: bool,
     },
 
     // --- TCP / auth --------------------------------------------------------
@@ -388,6 +390,7 @@ mod tests {
         let sink = ObserverSink::noop();
         sink.emit(ClientEventKind::Error {
             detail: "ignored".to_string(),
+            retryable: false,
         });
         assert_eq!(sink.handle(), 0);
     }

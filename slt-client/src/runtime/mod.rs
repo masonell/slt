@@ -45,6 +45,25 @@ pub enum RuntimeError {
     Session(#[from] SessionError),
 }
 
+impl RuntimeError {
+    /// Whether Android should keep the VPN route installed and restart native
+    /// runtime after this terminal error.
+    #[must_use]
+    pub fn is_android_restart_retriable(&self) -> bool {
+        match self {
+            Self::Connect(err) => err.is_retriable(),
+            Self::Session(err) => matches!(
+                err.exit(),
+                session::SessionExit::TcpClosed
+                    | session::SessionExit::IdleTimeout
+                    | session::SessionExit::RemoteClose(_)
+                    | session::SessionExit::ConnectionError
+                    | session::SessionExit::NetworkChanged
+            ),
+        }
+    }
+}
+
 /// Run the client runtime until shutdown.
 ///
 /// # Errors
@@ -91,9 +110,6 @@ where
     tun_handles.shutdown().await;
     let _ = metrics_reporter.await;
 
-    // Convert once so the terminal event includes any cause chain ({:#}) and the
-    // return value is already `anyhow::Result`.
-    let result: anyhow::Result<()> = result.map_err(Into::into);
     match &result {
         Ok(()) => {
             observer.emit(ClientEventKind::Stopping);
@@ -104,10 +120,11 @@ where
             warn!(error = %err, "client runtime exited with error");
             observer.emit(ClientEventKind::Error {
                 detail: format!("{err:#}"),
+                retryable: err.is_android_restart_retriable(),
             });
         }
     }
-    result
+    result.map_err(Into::into)
 }
 
 /// Run the session loop until shutdown or fatal error.

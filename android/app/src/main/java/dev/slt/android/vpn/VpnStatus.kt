@@ -69,7 +69,7 @@ data class VpnUiState(
 sealed interface NativeTerminal {
     data object None : NativeTerminal
     data object Stopped : NativeTerminal
-    data object Errored : NativeTerminal
+    data class Errored(val retryable: Boolean) : NativeTerminal
 }
 
 /**
@@ -208,11 +208,23 @@ object SltVpnStatusBus {
             is ClientEventKind.Stopped ->
                 current.reset(VpnStatus.Stopped, VpnPhase.Stopped).copy(transport = null)
             is ClientEventKind.Error ->
-                current.copy(status = VpnStatus.Error, phase = VpnPhase.Error, lastError = kind.detail)
+                if (kind.retryable) {
+                    current.copy(
+                        status = VpnStatus.Reconnecting,
+                        phase = VpnPhase.Reconnecting,
+                        lastError = kind.detail,
+                    )
+                } else {
+                    current.copy(
+                        status = VpnStatus.Error,
+                        phase = VpnPhase.Error,
+                        lastError = kind.detail,
+                    )
+                }
         }
         return when (kind) {
             is ClientEventKind.Stopped -> NativeTerminal.Stopped
-            is ClientEventKind.Error -> NativeTerminal.Errored
+            is ClientEventKind.Error -> NativeTerminal.Errored(kind.retryable)
             else -> NativeTerminal.None
         }
     }
@@ -249,6 +261,18 @@ object SltVpnStatusBus {
     fun markError(detail: String) {
         mutableState.value =
             VpnUiState(status = VpnStatus.Error, phase = VpnPhase.Error, lastError = detail)
+    }
+
+    /** Native runtime exited but requested Android-level restart after backoff. */
+    fun markNativeRestartScheduled(detail: String, attempt: ULong, delayMs: ULong) {
+        mutableState.value =
+            mutableState.value.copy(
+                status = VpnStatus.Reconnecting,
+                phase = VpnPhase.Reconnecting,
+                reconnectAttempt = attempt,
+                reconnectDelayMs = delayMs,
+                lastError = detail,
+            )
     }
 
     /** VPN permission was denied or revoked. */

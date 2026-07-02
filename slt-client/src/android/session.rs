@@ -94,6 +94,7 @@ pub(super) fn start_session(
                 error!("native client worker panicked; handle={handle}");
                 sink.emit(ClientEventKind::Error {
                     detail: "native client worker panicked".to_string(),
+                    retryable: true,
                 });
             }
         })
@@ -343,7 +344,10 @@ fn run_native_session(
         Err(err) => {
             error!("Android client setup failed: {err}");
             info!("[session stop reason=error] handle={handle}");
-            sink.emit(ClientEventKind::Error { detail: err });
+            sink.emit(ClientEventKind::Error {
+                detail: err,
+                retryable: false,
+            });
         }
     }
 }
