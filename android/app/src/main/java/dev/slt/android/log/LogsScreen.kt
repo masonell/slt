@@ -57,6 +57,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 import kotlin.math.roundToInt
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -74,61 +75,14 @@ internal fun LogsScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    val tailer = remember { LogTailer() }
-    val lines = remember { mutableStateListOf<String>() }
-    // Newest first; index 0 is the live (active) file.
-    var availableFiles by remember { mutableStateOf(logStore.files().reversed()) }
-    var selectedName by remember { mutableStateOf(logStore.activeFile()?.name) }
-    var loaded by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
+    val logViewerState = rememberLogViewerState(logStore)
     val scope = rememberCoroutineScope()
-    val atBottom by remember {
+    val atBottom by remember(logViewerState) {
         derivedStateOf {
-            val info = listState.layoutInfo
+            val info = logViewerState.listState.layoutInfo
             val total = info.totalItemsCount
             val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
             total == 0 || lastVisible >= total - 2
-        }
-    }
-
-    val target: File? = availableFiles.firstOrNull { it.name == selectedName }
-
-    LaunchedEffect(selectedName) {
-        tailer.reset()
-        lines.clear()
-        loaded = false
-        while (isActive) {
-            val all = logStore.files()
-            availableFiles = all.reversed()
-            val file = all.firstOrNull { it.name == selectedName }
-            if (file == null) {
-                loaded = true
-            } else {
-                when (val result = tailer.poll(logStore, file)) {
-                    PollResult.Nothing -> Unit
-                    is PollResult.Updated -> {
-                        // Capture whether the viewer is at the bottom BEFORE mutating
-                        // lines: layoutInfo still reflects the old end here, so checking
-                        // now (rather than after addAll) keeps tail-follow working when a
-                        // poll brings many lines at once or loads an existing file.
-                        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-                        val shouldFollow = result.clearFirst ||
-                            lines.isEmpty() ||
-                            lastVisible >= lines.lastIndex - 1
-                        loaded = true
-                        if (result.clearFirst) lines.clear()
-                        if (result.lines.isNotEmpty()) {
-                            lines.addAll(result.lines)
-                        }
-                        if (shouldFollow && lines.isNotEmpty()) {
-                            // Jump instantly to a freshly loaded file; smooth-follow appends.
-                            if (result.clearFirst) listState.scrollToItem(lines.lastIndex)
-                            else listState.animateScrollToItem(lines.lastIndex)
-                        }
-                    }
-                }
-            }
-            delay(POLL_MS)
         }
     }
 
@@ -138,8 +92,12 @@ internal fun LogsScreen(
             if (!atBottom) {
                 FloatingActionButton(
                     onClick = {
-                        if (lines.isNotEmpty()) {
-                            scope.launch { listState.animateScrollToItem(lines.lastIndex) }
+                        if (logViewerState.lines.isNotEmpty()) {
+                            scope.launch {
+                                logViewerState.listState.animateScrollToItem(
+                                    logViewerState.lines.lastIndex,
+                                )
+                            }
                         }
                     },
                 ) {
@@ -166,19 +124,14 @@ internal fun LogsScreen(
                         onClick = {
                             val clipboard = context.getSystemService(ClipboardManager::class.java)
                             clipboard?.setPrimaryClip(
-                                ClipData.newPlainText("SLT log", lines.joinToString("\n")),
+                                ClipData.newPlainText("SLT log", logViewerState.copyText),
                             )
                             Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
                         },
                     ) {
                         Text("Copy")
                     }
-                    TextButton(onClick = {
-                        logStore.clear()
-                        selectedName = logStore.activeFile()?.name
-                        tailer.reset()
-                        lines.clear()
-                    }) {
+                    TextButton(onClick = logViewerState::clear) {
                         Text("Clear")
                     }
                 },
@@ -192,12 +145,12 @@ internal fun LogsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (availableFiles.size > 1) {
+            if (logViewerState.availableFiles.size > 1) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    itemsIndexed(availableFiles) { index, file ->
+                    itemsIndexed(logViewerState.availableFiles) { index, file ->
                         FilterChip(
-                            selected = file.name == selectedName,
-                            onClick = { selectedName = file.name },
+                            selected = file.name == logViewerState.selectedName,
+                            onClick = { logViewerState.selectFile(file.name) },
                             label = {
                                 Text(if (index == 0) "Live" else logDisplayName(file.name))
                             },
@@ -206,27 +159,27 @@ internal fun LogsScreen(
                 }
             }
             when {
-                !loaded -> Text(
+                !logViewerState.loaded -> Text(
                     text = "Loading…",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                target == null -> Text(
+                logViewerState.target == null -> Text(
                     text = "No log file yet.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                lines.isEmpty() -> Text(
+                logViewerState.lines.isEmpty() -> Text(
                     text = "No log lines.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 else -> Row(modifier = Modifier.fillMaxSize()) {
                     LazyColumn(
-                        state = listState,
+                        state = logViewerState.listState,
                         modifier = Modifier.weight(1f),
                     ) {
-                        items(lines) { line ->
+                        items(logViewerState.lines) { line ->
                             Text(
                                 text = line,
                                 style = MaterialTheme.typography.bodySmall,
@@ -235,12 +188,113 @@ internal fun LogsScreen(
                         }
                     }
                     LogScrollbar(
-                        listState = listState,
+                        listState = logViewerState.listState,
                         modifier = Modifier.padding(start = 8.dp),
                     )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun rememberLogViewerState(logStore: LogStore): LogViewerState {
+    val listState = rememberLazyListState()
+    val state = remember(logStore) {
+        LogViewerState(
+            logStore = logStore,
+            tailer = LogTailer(),
+            listState = listState,
+        )
+    }
+
+    LaunchedEffect(state, state.selectedName) {
+        state.pollSelectedFile()
+    }
+
+    return state
+}
+
+private class LogViewerState(
+    private val logStore: LogStore,
+    private val tailer: LogTailer,
+    val listState: LazyListState,
+) {
+    // Newest first; index 0 is the live (active) file.
+    var availableFiles by mutableStateOf(logStore.files().reversed())
+        private set
+
+    var selectedName by mutableStateOf(logStore.activeFile()?.name)
+        private set
+
+    val lines = mutableStateListOf<String>()
+
+    var loaded by mutableStateOf(false)
+        private set
+
+    val target: File?
+        get() = availableFiles.firstOrNull { it.name == selectedName }
+
+    val copyText: String
+        get() = lines.joinToString("\n")
+
+    fun selectFile(fileName: String) {
+        selectedName = fileName
+    }
+
+    fun clear() {
+        logStore.clear()
+        refreshAvailableFiles()
+        selectedName = logStore.activeFile()?.name
+        tailer.reset()
+        lines.clear()
+    }
+
+    suspend fun pollSelectedFile() {
+        tailer.reset()
+        lines.clear()
+        loaded = false
+        while (currentCoroutineContext().isActive) {
+            val all = logStore.files()
+            availableFiles = all.reversed()
+            val file = all.firstOrNull { it.name == selectedName }
+            if (file == null) {
+                loaded = true
+            } else {
+                updateFromPollResult(tailer.poll(logStore, file))
+            }
+            delay(POLL_MS)
+        }
+    }
+
+    private suspend fun updateFromPollResult(result: PollResult) {
+        when (result) {
+            PollResult.Nothing -> Unit
+            is PollResult.Updated -> {
+                // Capture whether the viewer is at the bottom BEFORE mutating
+                // lines: layoutInfo still reflects the old end here, so checking
+                // now (rather than after addAll) keeps tail-follow working when a
+                // poll brings many lines at once or loads an existing file.
+                val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                val shouldFollow = result.clearFirst ||
+                    lines.isEmpty() ||
+                    lastVisible >= lines.lastIndex - 1
+                loaded = true
+                if (result.clearFirst) lines.clear()
+                if (result.lines.isNotEmpty()) {
+                    lines.addAll(result.lines)
+                }
+                if (shouldFollow && lines.isNotEmpty()) {
+                    // Jump instantly to a freshly loaded file; smooth-follow appends.
+                    if (result.clearFirst) listState.scrollToItem(lines.lastIndex)
+                    else listState.animateScrollToItem(lines.lastIndex)
+                }
+            }
+        }
+    }
+
+    private fun refreshAvailableFiles() {
+        availableFiles = logStore.files().reversed()
     }
 }
 
