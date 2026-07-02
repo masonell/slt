@@ -4,8 +4,28 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val rustJniLibsDir = layout.buildDirectory.dir("generated/jniLibs/rust")
-val generatedUniFfiDir = layout.buildDirectory.dir("generated/source/uniffi/main/kotlin")
+val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
+val androidNdkHome = providers.environmentVariable("ANDROID_NDK_HOME")
+    .orElse(providers.environmentVariable("ANDROID_NDK_ROOT"))
+val debugAndroidAbis = listOf("arm64-v8a", "x86_64")
+val releaseAndroidAbis = listOf("arm64-v8a")
+val androidLibcxxTargets = mapOf(
+    "arm64-v8a" to "aarch64-linux-android",
+    "x86_64" to "x86_64-linux-android",
+)
+val rustAndroidBuildTypes = mapOf(
+    "debug" to debugAndroidAbis,
+    "release" to releaseAndroidAbis,
+)
+
+fun variantTaskSuffix(variantName: String): String =
+    variantName.replaceFirstChar { it.uppercase() }
+
+fun rustJniLibsDir(variantName: String) =
+    layout.buildDirectory.dir("generated/jniLibs/rust/$variantName")
+
+fun generatedUniFfiDir(variantName: String) =
+    layout.buildDirectory.dir("generated/source/uniffi/$variantName/kotlin")
 
 fun pinnedUniFfiVersion(workspaceDir: File): String {
     val cargoToml = workspaceDir.resolve("Cargo.toml").readText()
@@ -30,7 +50,29 @@ fun cargoWorkspaceVersion(workspaceDir: File): String {
         ?: error("could not find workspace package version in workspace Cargo.toml")
 }
 
-val appVersion = cargoWorkspaceVersion(rootProject.layout.projectDirectory.asFile.parentFile)
+fun copyAndroidLibcxxShared(ndkDir: String, jniLibsDir: File, abis: List<String>) {
+    val prebuiltDir = file(ndkDir)
+        .resolve("toolchains/llvm/prebuilt")
+        .listFiles()
+        ?.singleOrNull { it.isDirectory && it.resolve("sysroot").isDirectory }
+        ?: error("could not find LLVM prebuilt sysroot in Android NDK: $ndkDir")
+    val sysrootLibDir = prebuiltDir.resolve("sysroot/usr/lib")
+
+    abis.forEach { abi ->
+        val target = androidLibcxxTargets.getValue(abi)
+        val abiDir = jniLibsDir.resolve(abi)
+        val existingLibcxx = abiDir.resolve("libc++_shared.so")
+        if (existingLibcxx.exists() && !existingLibcxx.delete()) {
+            error("could not replace generated JNI lib: $existingLibcxx")
+        }
+        copy {
+            from(sysrootLibDir.resolve("$target/libc++_shared.so"))
+            into(abiDir)
+        }
+    }
+}
+
+val appVersion = cargoWorkspaceVersion(workspaceDir)
 val gitSha = runCatching {
     providers.exec {
         commandLine("git", "rev-parse", "--short", "HEAD")
@@ -48,9 +90,18 @@ android {
         versionCode = 1
         versionName = appVersion
         buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+    }
 
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+    buildTypes {
+        debug {
+            ndk {
+                abiFilters += debugAndroidAbis
+            }
+        }
+        release {
+            ndk {
+                abiFilters += releaseAndroidAbis
+            }
         }
     }
 
@@ -69,9 +120,11 @@ android {
     }
 
     sourceSets {
-        getByName("main") {
-            jniLibs.srcDir(rustJniLibsDir)
-            java.srcDir(generatedUniFfiDir)
+        rustAndroidBuildTypes.keys.forEach { variantName ->
+            getByName(variantName) {
+                jniLibs.srcDir(rustJniLibsDir(variantName))
+                java.srcDir(generatedUniFfiDir(variantName))
+            }
         }
     }
 
@@ -89,75 +142,66 @@ android {
             "GradleDependency",
             "OldTargetApi",
         )
+        disable += "ChromeOsAbiSupport"
     }
 }
 
-val buildRustNative by tasks.registering(Exec::class) {
-    val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
-    val androidNdkHome = providers.environmentVariable("ANDROID_NDK_HOME")
-        .orElse(providers.environmentVariable("ANDROID_NDK_ROOT"))
-
-    group = "build"
-    description = "Build Rust Android shared libraries for SLT."
-    workingDir = workspaceDir
-
-    inputs.property("androidNdkHome", androidNdkHome)
-    inputs.file(workspaceDir.resolve("Cargo.lock"))
-    inputs.file(workspaceDir.resolve("Cargo.toml"))
-    inputs.file(workspaceDir.resolve("slt-client/Cargo.toml"))
-    inputs.file(workspaceDir.resolve("slt-client/uniffi.toml"))
-    inputs.dir(workspaceDir.resolve("slt-client/src"))
-    inputs.file(workspaceDir.resolve("slt-core/Cargo.toml"))
-    inputs.dir(workspaceDir.resolve("slt-core/src"))
-    outputs.dir(rustJniLibsDir)
-
-    commandLine(
-        "cargo",
-        "ndk",
-        "-t",
-        "arm64-v8a",
-        "-t",
-        "x86_64",
-        "-o",
-        rustJniLibsDir.get().asFile.absolutePath,
-        "build",
-        "-p",
-        "slt-client",
-        "--release",
-        "--lib",
-    )
-
-    doLast {
-        val ndkDir = androidNdkHome.orNull
-            ?: error("ANDROID_NDK_HOME or ANDROID_NDK_ROOT must be set")
-        val prebuiltDir = file(ndkDir)
-            .resolve("toolchains/llvm/prebuilt")
-            .listFiles()
-            ?.singleOrNull { it.isDirectory && it.resolve("sysroot").isDirectory }
-            ?: error("could not find LLVM prebuilt sysroot in Android NDK: $ndkDir")
-        val sysrootLibDir = prebuiltDir.resolve("sysroot/usr/lib")
-        val libcxxTargets = mapOf(
-            "arm64-v8a" to "aarch64-linux-android",
-            "x86_64" to "x86_64-linux-android",
+fun registerBuildRustNativeTask(variantName: String, abis: List<String>) =
+    tasks.register<Exec>("buildRustNative${variantTaskSuffix(variantName)}") {
+        val outputDir = rustJniLibsDir(variantName)
+        val cargoArgs = mutableListOf(
+            "cargo",
+            "ndk",
         )
 
-        libcxxTargets.forEach { (abi, target) ->
-            val abiDir = rustJniLibsDir.get().asFile.resolve(abi)
-            val existingLibcxx = abiDir.resolve("libc++_shared.so")
-            if (existingLibcxx.exists() && !existingLibcxx.delete()) {
-                error("could not replace generated JNI lib: $existingLibcxx")
-            }
-            copy {
-                from(sysrootLibDir.resolve("$target/libc++_shared.so"))
-                into(abiDir)
-            }
+        abis.forEach { abi ->
+            cargoArgs += listOf("-t", abi)
+        }
+
+        cargoArgs += listOf(
+            "-o",
+            outputDir.get().asFile.absolutePath,
+            "build",
+            "-p",
+            "slt-client",
+        )
+
+        if (variantName == "release") {
+            cargoArgs += "--release"
+        }
+
+        cargoArgs += "--lib"
+
+        group = "build"
+        description = "Build $variantName Rust Android shared libraries for SLT."
+        workingDir = workspaceDir
+
+        inputs.property("androidNdkHome", androidNdkHome)
+        inputs.property("abis", abis)
+        inputs.property("profile", if (variantName == "release") "release" else "dev")
+        inputs.file(workspaceDir.resolve("Cargo.lock"))
+        inputs.file(workspaceDir.resolve("Cargo.toml"))
+        inputs.file(workspaceDir.resolve("slt-client/Cargo.toml"))
+        inputs.file(workspaceDir.resolve("slt-client/uniffi.toml"))
+        inputs.dir(workspaceDir.resolve("slt-client/src"))
+        inputs.file(workspaceDir.resolve("slt-core/Cargo.toml"))
+        inputs.dir(workspaceDir.resolve("slt-core/src"))
+        outputs.dir(outputDir)
+
+        doFirst {
+            outputDir.get().asFile.deleteRecursively()
+        }
+
+        commandLine(cargoArgs)
+
+        doLast {
+            val ndkDir = androidNdkHome.orNull
+                ?: error("ANDROID_NDK_HOME or ANDROID_NDK_ROOT must be set")
+            copyAndroidLibcxxShared(ndkDir, outputDir.get().asFile, abis)
         }
     }
-}
 
 val checkUniFfiBindgenVersion by tasks.registering {
-    val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
-
     group = "verification"
     description = "Check that uniffi-bindgen matches the pinned Rust UniFFI crate."
 
@@ -188,13 +232,15 @@ val checkUniFfiBindgenVersion by tasks.registering {
     }
 }
 
-val generateUniFfiBindings by tasks.registering(Exec::class) {
-    val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
-    val generatedDir = generatedUniFfiDir
-    val bindingLibrary = rustJniLibsDir.map { it.file("arm64-v8a/libslt_client.so") }
+fun registerGenerateUniFfiBindingsTask(
+    variantName: String,
+    buildRustNative: TaskProvider<Exec>,
+) = tasks.register<Exec>("generateUniFfiBindings${variantTaskSuffix(variantName)}") {
+    val generatedDir = generatedUniFfiDir(variantName)
+    val bindingLibrary = rustJniLibsDir(variantName).map { it.file("arm64-v8a/libslt_client.so") }
 
     group = "build"
-    description = "Generate Kotlin bindings for the SLT Rust UniFFI API."
+    description = "Generate $variantName Kotlin bindings for the SLT Rust UniFFI API."
     workingDir = workspaceDir
 
     dependsOn(buildRustNative)
@@ -224,12 +270,26 @@ val generateUniFfiBindings by tasks.registering(Exec::class) {
     )
 }
 
-tasks.named("preBuild") {
-    dependsOn(generateUniFfiBindings)
+val generateUniFfiBindingTasks = rustAndroidBuildTypes.mapValues { (variantName, abis) ->
+    val buildRustNative = registerBuildRustNativeTask(variantName, abis)
+    registerGenerateUniFfiBindingsTask(variantName, buildRustNative)
+}
+
+generateUniFfiBindingTasks.forEach { (variantName, generateUniFfiBindings) ->
+    val preBuildTaskName = "pre${variantTaskSuffix(variantName)}Build"
+    tasks.configureEach {
+        if (name == preBuildTaskName) {
+            dependsOn(generateUniFfiBindings)
+        }
+    }
 }
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    dependsOn(generateUniFfiBindings)
+    generateUniFfiBindingTasks.forEach { (variantName, generateUniFfiBindings) ->
+        if (name.contains(variantTaskSuffix(variantName))) {
+            dependsOn(generateUniFfiBindings)
+        }
+    }
 }
 
 dependencies {
