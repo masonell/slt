@@ -44,7 +44,10 @@ SLT requires the following public ports:
 
 ### Enable IP Forwarding
 
-VPN traffic must be forwarded between the TUN interface and the WAN interface. Enable IP forwarding:
+VPN traffic must be forwarded between the TUN interface and the WAN interface.
+The recommended systemd setup below runs `slt net up --ipv4-forward`, which
+sets `net.ipv4.ip_forward=1` during setup. If you are not using the shipped
+setup unit, enable forwarding yourself:
 
 ```bash
 # Check current value
@@ -85,34 +88,43 @@ For systemd services (recommended), configure limits in the service unit file in
 
 SLT attaches to an existing, preconfigured TUN device — it does not create, address, or bring up the interface itself. The interface must already exist with a name, overlay address, prefix, and MTU that match the `[tun]` section of `server.toml`. On startup SLT opens the named interface, enables GRO/GSO offload, and validates that the interface is running and that its MTU and configured IPv4 address match the config; it refuses to start if anything differs.
 
-Creating and addressing the interface requires `CAP_NET_ADMIN` (or root), but this is a one-time setup step — the running server process does not need it (see [Running as Non-Root](#running-as-non-root)).
+Creating and addressing the interface requires `CAP_NET_ADMIN` (or root), but
+the running server process does not need it (see [Running as Non-Root](#running-as-non-root)).
+Use `slt net` for this privileged setup so TUN name, address, prefix, and MTU
+come from the same `[tun]` section the server later validates.
 
 #### Create the Interface
 
-Create a persistent TUN interface owned by the user that will run SLT (here `slt`), assign the server's overlay gateway address, set the MTU, and bring it up:
+Create the TUN interface owned by the user that will run SLT (here `slt`),
+assign the server's overlay gateway address, set the MTU, enable IPv4
+forwarding, and install SLT-owned masquerade rules:
 
 ```bash
-# Create a persistent tun0 owned by the slt user
-sudo ip tuntap add dev tun0 mode tun user slt
-
-# Assign the overlay address from [tun] (tun_ipv4 / tun_prefix)
-sudo ip addr add 10.10.0.1/24 dev tun0
-
-# Set the MTU from [tun] (tun_mtu); slt init writes 1406
-sudo ip link set dev tun0 mtu 1406
-
-# Bring the interface up
-sudo ip link set tun0 up
+sudo slt net up \
+  --config /etc/slt/server.toml \
+  --user slt \
+  --group slt \
+  --ipv4-forward \
+  --masquerade
 ```
 
-Adjust `tun0`, `10.10.0.1/24`, and `1406` to match the `[tun]` values in your `server.toml`. Verify before starting SLT:
+Verify before starting SLT:
 
 ```bash
 ip -brief addr show tun0          # expect: tun0  UP  10.10.0.1/24
 ip link show tun0 | grep mtu      # expect: mtu 1406
+sudo nft list table inet slt      # expect SLT forward + masquerade rules
 ```
 
-> **Tip:** A persistent interface survives a server restart, so it only needs to be created once. Put the creation and addressing commands in a systemd oneshot service (or your provisioning tool) so they run at boot — SLT will simply attach on each start.
+To tear down the interface and SLT-owned nftables table:
+
+```bash
+sudo slt net down --config /etc/slt/server.toml --masquerade
+```
+
+> **Tip:** Use the shipped `slt-setup.service` so this privileged setup runs at
+> boot and is cleaned up when the server service stops. SLT itself will simply
+> attach on each start.
 
 The interface parameters all come from `server.toml`'s `[tun]` section:
 
@@ -174,105 +186,48 @@ See [Configuration Reference](../user-guide/configuration.md) for all options.
 
 ## NAT/Masquerade Configuration
 
-VPN clients need internet access through the server. Configure NAT/masquerading using nftables.
+VPN clients need internet access through the server. The recommended setup is
+to let `slt net up --masquerade` install an SLT-owned nftables table:
 
-### Identify Your WAN Interface
-
-```bash
-# List network interfaces
-ip link show
-
-# Find the interface with your public IP
-ip addr show | grep -A2 "inet.*global"
-```
-
-Common WAN interface names: `eth0`, `ens3`, `enp1s0`, `ens192`
-
-### nftables Configuration
-
-Create an nftables configuration that masquerades VPN traffic:
-
-```bash
-# Create nftables rules file
-sudo tee /etc/nftables.conf << 'EOF'
-#!/usr/sbin/nft -f
-
-# Flush existing rules
-flush ruleset
-
-# Base table
-table inet filter {
-    chain input {
-        type filter hook input priority 0; policy drop;
-
-        # Allow established/related connections
-        ct state established,related accept
-
-        # Allow loopback
-        iif lo accept
-
-        # Allow ICMP (ping)
-        ip protocol icmp accept
-        ip6 nexthdr icmpv6 accept
-
-        # Allow SSH (adjust port as needed)
-        tcp dport 22 accept
-
-        # Allow SLT public ports
-        tcp dport { 80, 443 } accept
-        udp dport 443 accept
-    }
-
-    chain forward {
-        type filter hook forward priority 0; policy drop;
-
-        # Allow forwarding for VPN traffic
+```nft
+table inet slt {
+    chain slt_forward {
+        type filter hook forward priority 0; policy accept;
         iifname "tun0" accept
         oifname "tun0" accept
     }
-
-    chain output {
-        type filter hook output priority 0; policy accept;
-    }
-}
-
-# NAT table for masquerading
-table ip nat {
-    chain postrouting {
+    chain slt_postrouting {
         type nat hook postrouting priority 100; policy accept;
-
-        # Masquerade VPN traffic going to WAN
-        # Replace eth0 with your WAN interface
-        ip saddr 10.10.0.0/24 oifname "eth0" masquerade
+        ip saddr 10.10.0.0/24 masquerade
     }
 }
-EOF
-
-# Apply the rules
-sudo nft -f /etc/nftables.conf
-
-# Enable nftables service
-sudo systemctl enable nftables
 ```
 
-### Manual nftables Commands
+The interface name and source subnet are derived from `/etc/slt/server.toml`'s
+`[tun]` section. `slt net down --masquerade` removes this table.
 
-If you prefer to add rules manually without a full configuration:
+If the host already runs its own nftables firewall with a **drop** forward
+policy, also allow the SLT tunnel interface there. Separate base chains do not
+override each other's verdicts.
+
+### Manual nftables Alternative
+
+If you do not use `slt net --masquerade`, add equivalent rules yourself:
 
 ```bash
-# Create a table for NAT
-sudo nft add table ip nat
-
-# Add masquerade rule (replace eth0 with your WAN interface)
-sudo nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; }
-sudo nft add rule ip nat postrouting ip saddr 10.10.0.0/24 oifname "eth0" masquerade
+sudo nft add table inet slt
+sudo nft add chain inet slt slt_forward { type filter hook forward priority 0 \; policy accept \; }
+sudo nft add rule inet slt slt_forward iifname "tun0" accept
+sudo nft add rule inet slt slt_forward oifname "tun0" accept
+sudo nft add chain inet slt slt_postrouting { type nat hook postrouting priority 100 \; policy accept \; }
+sudo nft add rule inet slt slt_postrouting ip saddr 10.10.0.0/24 masquerade
 ```
 
 ### Verify NAT Rules
 
 ```bash
-# List NAT rules
-sudo nft list table ip nat
+# List SLT rules
+sudo nft list table inet slt
 
 # Monitor NAT connections
 sudo conntrack -L 2>/dev/null | grep 10.10.0
@@ -395,7 +350,7 @@ which requires an `AF_NETLINK` socket, so the unit's settings must match the
 daemon's expectations. Shipping both together keeps them aligned:
 
 - `slt-setup.service` — privileged **oneshot** that creates and configures the
-  TUN, enables IPv4 forwarding, and installs NAT (`slt-net up`), then tears it
+  TUN, enables IPv4 forwarding, and installs NAT (`slt net up`), then tears it
   all down on stop.
 - `slt-server.service` — the unprivileged daemon (`User=slt`, only
   `CAP_NET_BIND_SERVICE`, no `CAP_NET_ADMIN`).
@@ -404,9 +359,8 @@ daemon's expectations. Shipping both together keeps them aligned:
 # Service account (binary + config already in place — see Prerequisites)
 sudo useradd -r -s /usr/sbin/nologin -M -d /nonexistent slt
 
-# Units + helper. The [tun] section of /etc/slt/server.toml MUST match the
-# SLT_* values baked into slt-setup.service (tun0, 10.10.0.1/24, mtu 1406).
-sudo install -m 0755 deploy/systemd/slt-net.sh          /usr/local/sbin/slt-net
+# Units. slt-setup.service reads TUN name/address/prefix/MTU from
+# /etc/slt/server.toml via `slt net`.
 sudo install -m 0644 deploy/systemd/slt-setup.service   /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/slt-server.service  /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -415,8 +369,9 @@ sudo systemctl status slt-server
 ```
 
 [`deploy/systemd/README.md`](../../deploy/systemd/README.md) has the full setup
-rationale, prerequisite checks, verification commands, and how to tune the
-TUN/NAT values via a drop-in override.
+rationale, prerequisite checks, verification commands, and how to tune
+deployment-local values via a drop-in override. TUN/NAT values come from
+`/etc/slt/server.toml`'s `[tun]` section.
 
 > If you edit the unit, keep it `Type=simple`, keep `AF_NETLINK` in
 > `RestrictAddressFamilies`, and keep the companion setup unit preconfiguring
@@ -472,7 +427,8 @@ EOF
 
 ### Firewall Rules
 
-The nftables configuration above provides basic firewall rules. Key points:
+The `slt net --masquerade` rules handle TUN forwarding and source NAT only; keep
+your host firewall responsible for public ingress policy. Key points:
 
 1. **Block internal ports** - Ports 8080 (nginx internal) must not be accessible from the internet
 2. **Allow only necessary public ports** - 80/tcp, 443/tcp, 443/udp
@@ -480,20 +436,18 @@ The nftables configuration above provides basic firewall rules. Key points:
 
 ### Running as Non-Root
 
-Because the TUN interface is preconfigured separately (see [TUN Device Preconfiguration](#tun-device-preconfiguration)), the running server needs no `CAP_NET_ADMIN`. The only privileged operation it performs is binding public port 443, which you can grant without running as root:
+Because the TUN interface is preconfigured separately (see [TUN Device Preconfiguration](#tun-device-preconfiguration)), the running server needs no `CAP_NET_ADMIN`. The shipped systemd unit grants only `CAP_NET_BIND_SERVICE` via `AmbientCapabilities`, which lets the daemon bind public port 443 without running as root. For a manual setup, the equivalent steps are:
 
 ```bash
 # Create slt user
 sudo useradd -r -s /usr/sbin/nologin -M slt
 
-# Allow binding privileged ports (443) without full root
+# Allow binding privileged ports (443) without full root.
+# Do not use this together with AmbientCapabilities in systemd; pick one.
 sudo setcap cap_net_bind_service+ep /usr/local/bin/slt-server
 
-# Preconfigure the TUN interface owned by the slt user (one-time)
-sudo ip tuntap add dev tun0 mode tun user slt
-sudo ip addr add 10.10.0.1/24 dev tun0
-sudo ip link set dev tun0 mtu 1406
-sudo ip link set tun0 up
+# Preconfigure the TUN interface owned by the slt user
+sudo slt net up --config /etc/slt/server.toml --user slt --group slt --ipv4-forward --masquerade
 
 # Set ownership of the config directory
 sudo chown -R slt:slt /etc/slt
@@ -503,7 +457,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart slt-server
 ```
 
-`setcap cap_net_bind_service+ep` on the binary is the file-based alternative to `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit — use one or the other, not both. The `user slt` on `ip tuntap add` grants the `slt` user permission to open and attach to the persistent interface.
+`setcap cap_net_bind_service+ep` on the binary is the file-based alternative to `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit — use one or the other, not both. The `--user slt --group slt` arguments grant the `slt` user permission to open and attach to the preconfigured TUN interface.
 
 ### Protecting Secrets
 
@@ -587,6 +541,9 @@ sudo modprobe tun
 # address, MTU, and UP state
 ip -brief addr show tun0          # expect: tun0  UP  10.10.0.1/24
 ip link show tun0 | grep mtu      # expect: mtu 1406
+
+# Recreate it from server.toml if needed
+sudo slt net up --config /etc/slt/server.toml --user slt --group slt --ipv4-forward --masquerade
 ```
 
 If the server logs an attach error, match it against the `[tun]` config:
@@ -605,8 +562,8 @@ If the server logs an attach error, match it against the `[tun]` config:
 # Check IP forwarding
 cat /proc/sys/net/ipv4/ip_forward
 
-# List NAT rules
-sudo nft list table ip nat
+# List SLT NAT/forwarding rules
+sudo nft list table inet slt
 
 # Monitor NAT connections
 sudo conntrack -L | grep 10.10.0

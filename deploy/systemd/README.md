@@ -27,17 +27,17 @@ Prerequisites:
 # 1. Dedicated, non-login service account
 sudo useradd -r -s /usr/sbin/nologin -M -d /nonexistent slt
 
-# 2. Binary + config (config [tun] must match the SLT_* defaults below)
+# 2. Binaries + config
+sudo install -m 0755 slt                         /usr/local/bin/slt
 sudo install -m 0755 slt-server                  /usr/local/bin/slt-server
 sudo install -d -m 0750 -o root -g slt           /etc/slt
 sudo install -m 0640 -o root -g slt server.toml  /etc/slt/server.toml
 # The slt user must be able to read any TLS cert/key referenced by the config.
 ```
 
-Install the units and helper:
+Install the units:
 
 ```sh
-sudo install -m 0755 slt-net.sh          /usr/local/sbin/slt-net
 sudo install -m 0644 slt-setup.service   /etc/systemd/system/
 sudo install -m 0644 slt-server.service  /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -59,17 +59,38 @@ journalctl -u slt-server -f
 
 ## Tuning
 
-Override the TUN/NAT values without editing files by setting them on
+TUN interface name, address, prefix, and MTU are read from `/etc/slt/server.toml`
+by `slt net`, so update the config's `[tun]` section to change them:
+
+```toml
+[tun]
+tun_name = "tun1"
+tun_mtu = 1406
+tun_ipv4 = "10.20.0.1"
+tun_prefix = 24
+```
+
+Override deployment-local values without editing files by setting them on
 `slt-setup.service`:
 
 ```sh
 sudo systemctl edit slt-setup.service
 # [Service]
-# Environment=SLT_IFACE=tun1 SLT_ADDR=10.20.0.1/24 SLT_MTU=1406 SLT_SUBNET=10.20.0.0/24 SLT_USER=slt SLT_GROUP=slt
+# Environment=SLT_CONFIG=/etc/slt/server.toml SLT_USER=slt SLT_GROUP=slt
 ```
 
-`server.toml`'s `[tun]` (`tun_name`, `tun_ipv4`, `tun_prefix`, `tun_mtu`) must
-agree with these, or the server will reject the interface on attach.
+The setup unit runs:
+
+```sh
+slt net up --config "$SLT_CONFIG" --user "$SLT_USER" --group "$SLT_GROUP" --ipv4-forward --masquerade
+slt net down --config "$SLT_CONFIG" --masquerade
+```
+
+`slt net` accepts either a server or client config because both use the same
+`[tun]` schema. `--masquerade` installs an SLT-owned nftables table with forward
+accept rules for the TUN interface and source NAT for the configured TUN subnet.
+`--ipv4-forward` enables `net.ipv4.ip_forward`; shutdown intentionally leaves the
+sysctl as-is because other services may rely on it.
 
 If the host runs its own nftables firewall with a **drop** forward policy, allow
 the tunnel interface there too — separate base chains do not override each

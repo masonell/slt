@@ -30,6 +30,8 @@ mod generate_keys;
 mod http_probe;
 mod init;
 mod list_clients;
+#[cfg(target_os = "linux")]
+mod net;
 mod remove_client;
 mod show_client;
 mod show_client_config;
@@ -169,6 +171,51 @@ enum Commands {
         /// Path to config file (server or client).
         config: String,
     },
+
+    /// Configure Linux networking from a config file's [tun] section.
+    #[cfg(target_os = "linux")]
+    Net {
+        #[command(subcommand)]
+        command: NetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+#[cfg(target_os = "linux")]
+enum NetCommand {
+    /// Create and configure the TUN interface.
+    Up {
+        /// Path to server or client config file.
+        #[arg(long, value_name = "FILE")]
+        config: String,
+
+        /// User that should own the TUN device.
+        #[arg(long, value_name = "USER")]
+        user: Option<String>,
+
+        /// Group that should own the TUN device.
+        #[arg(long, value_name = "GROUP")]
+        group: Option<String>,
+
+        /// Enable `net.ipv4.ip_forward`.
+        #[arg(long)]
+        ipv4_forward: bool,
+
+        /// Install SLT-owned nftables forward/masquerade rules for the TUN subnet.
+        #[arg(long)]
+        masquerade: bool,
+    },
+
+    /// Remove the TUN interface and optional SLT-owned nftables table.
+    Down {
+        /// Path to server or client config file.
+        #[arg(long, value_name = "FILE")]
+        config: String,
+
+        /// Remove the SLT-owned nftables forward/masquerade table.
+        #[arg(long)]
+        masquerade: bool,
+    },
 }
 
 fn main() {
@@ -255,6 +302,35 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Validate { config } => {
             let path = PathBuf::from(&config);
             validate::validate(&path, !cli.quiet)
+        }
+        #[cfg(target_os = "linux")]
+        Commands::Net { command } => run_net(command, cli.quiet),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_net(command: NetCommand, quiet: bool) -> Result<()> {
+    match command {
+        NetCommand::Up {
+            config,
+            user,
+            group,
+            ipv4_forward,
+            masquerade,
+        } => {
+            let path = PathBuf::from(&config);
+            net::up(
+                &path,
+                user.as_deref(),
+                group.as_deref(),
+                ipv4_forward,
+                masquerade,
+                quiet,
+            )
+        }
+        NetCommand::Down { config, masquerade } => {
+            let path = PathBuf::from(&config);
+            net::down(&path, masquerade, quiet)
         }
     }
 }
