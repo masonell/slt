@@ -1,0 +1,63 @@
+# slt-server.service
+#
+# Runs the SLT front door as an unprivileged user with the single ambient
+# capability it needs: binding :443 (CAP_NET_BIND_SERVICE). It deliberately has
+# NO CAP_NET_ADMIN — the TUN device is preconfigured and owned by this account
+# by slt-setup.service, so the long-running daemon holds no network-admin power.
+
+[Unit]
+Description=SLT VPN server front door
+Requires=slt-setup.service
+After=slt-setup.service network-online.target
+# If networking is torn down out-of-band, stop the server too.
+BindsTo=slt-setup.service
+
+[Service]
+Type=simple
+User=slt
+Group=slt
+
+# --- least privilege: the only capability the daemon needs ---
+# Do NOT also `setcap` the binary — pick one. AmbientCapabilities keeps the
+# capability out of the file system and scoped to this service.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+Environment=RUST_LOG=slt=info
+WorkingDirectory=/etc/slt
+ExecStart=/usr/local/bin/slt-server --config /etc/slt/server.toml
+
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=1048576
+
+# --- hardening ---
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+# AF_NETLINK is required at startup: the daemon validates the TUN's addresses
+# via getifaddrs(3), which glibc implements over a NETLINK_ROUTE socket. Without
+# it, socket(AF_NETLINK,...) fails with EAFNOSUPPORT (errno 97) and the daemon
+# refuses to attach to tun0. Dropping AF_NETLINK reintroduces that bug.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+RemoveIPC=true
+# The TUN char device is the only device the daemon opens (to attach to the
+# preconfigured interface); everything else (incl. /dev/urandom) comes from the
+# static node set.
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+
+[Install]
+WantedBy=multi-user.target

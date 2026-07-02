@@ -386,59 +386,43 @@ RUST_LOG=debug sudo /usr/local/bin/slt-server --config /etc/slt/server.toml
 
 ### Systemd Service (Recommended)
 
-Create a systemd service for automatic startup and management:
+SLT ships hardened, least-privilege systemd units in
+[`deploy/systemd/`](../../deploy/systemd/), and they are the single source of
+truth — install the shipped files rather than maintaining a separate
+hand-written unit. The server validates the TUN interface on startup (name,
+address, MTU, up-state, offload) and queries its addresses via `getifaddrs`,
+which requires an `AF_NETLINK` socket, so the unit's settings must match the
+daemon's expectations. Shipping both together keeps them aligned:
+
+- `slt-setup.service` — privileged **oneshot** that creates and configures the
+  TUN, enables IPv4 forwarding, and installs NAT (`slt-net up`), then tears it
+  all down on stop.
+- `slt-server.service` — the unprivileged daemon (`User=slt`, only
+  `CAP_NET_BIND_SERVICE`, no `CAP_NET_ADMIN`).
 
 ```bash
-sudo tee /etc/systemd/system/slt-server.service << 'EOF'
-[Unit]
-Description=SLT VPN Server
-Documentation=https://github.com/your-org/slt
-After=network-online.target nftables.service
-Wants=network-online.target
+# Service account (binary + config already in place — see Prerequisites)
+sudo useradd -r -s /usr/sbin/nologin -M -d /nonexistent slt
 
-[Service]
-Type=notify
-# Run as an unprivileged user. The TUN interface is preconfigured separately
-# (see "TUN Device Preconfiguration"); SLT only needs to bind port 443.
-User=slt
-Group=slt
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-# File limits for many connections
-LimitNOFILE=65536
-
-# Environment
-Environment=RUST_LOG=info
-
-# Executable
-ExecStart=/usr/local/bin/slt-server --config /etc/slt/server.toml
-Restart=on-failure
-RestartSec=5
-
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/run /var/log/slt
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Create log directory (if using file logging)
-sudo mkdir -p /var/log/slt
-
-# Reload systemd
+# Units + helper. The [tun] section of /etc/slt/server.toml MUST match the
+# SLT_* values baked into slt-setup.service (tun0, 10.10.0.1/24, mtu 1406).
+sudo install -m 0755 deploy/systemd/slt-net.sh          /usr/local/sbin/slt-net
+sudo install -m 0644 deploy/systemd/slt-setup.service   /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/slt-server.service  /etc/systemd/system/
 sudo systemctl daemon-reload
-
-# Enable and start
-sudo systemctl enable slt-server
-sudo systemctl start slt-server
-
-# Check status
+sudo systemctl enable --now slt-server.service   # pulls in slt-setup via Requires=
 sudo systemctl status slt-server
 ```
+
+[`deploy/systemd/README.md`](../../deploy/systemd/README.md) has the full setup
+rationale, prerequisite checks, verification commands, and how to tune the
+TUN/NAT values via a drop-in override.
+
+> If you edit the unit, keep it `Type=simple`, keep `AF_NETLINK` in
+> `RestrictAddressFamilies`, and keep the companion setup unit preconfiguring
+> the TUN. Dropping `AF_NETLINK` produces `Inspect { name: "tun0" }` with
+> `EAFNOSUPPORT`; using `Type=notify` hangs activation; skipping the TUN setup
+> fails the attach validation.
 
 ### Log Management
 

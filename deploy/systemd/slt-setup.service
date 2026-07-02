@@ -1,0 +1,27 @@
+# slt-setup.service
+#
+# Privileged one-shot that prepares networking for slt-server: creates and
+# configures the TUN device, enables IPv4 forwarding, and installs NAT. Runs as
+# root. Its ExecStop reverses everything, so cleanup happens whenever the server
+# is stopped, restarted, or the system shuts down (see PartOf= below).
+
+[Unit]
+Description=SLT VPN networking setup (TUN, IPv4 forwarding, NAT)
+Wants=network-online.target
+After=network-online.target
+Before=slt-server.service
+# Follow slt-server's stop/restart so teardown runs automatically when the
+# server is stopped or restarted (and on system shutdown).
+PartOf=slt-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# These MUST match the [tun] section of /etc/slt/server.toml, since the server
+# validates interface name/address/MTU/up-state when it attaches.
+Environment=SLT_IFACE=tun0 SLT_ADDR=10.10.0.1/24 SLT_MTU=1406 SLT_SUBNET=10.10.0.0/24 SLT_USER=slt SLT_GROUP=slt
+ExecStart=/usr/local/sbin/slt-net up
+ExecStop=/usr/local/sbin/slt-net down
+
+[Install]
+WantedBy=multi-user.target
