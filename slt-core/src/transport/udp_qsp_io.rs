@@ -6,6 +6,7 @@ use std::net::{SocketAddr, UdpSocket};
 
 use quinn_udp::{BATCH_SIZE, RecvMeta, Transmit, UdpSockRef, UdpSocketState};
 use tokio::io::unix::AsyncFd;
+use tokio::net::UdpSocket as TokioUdpSocket;
 
 use super::gro_datagram_ranges;
 use crate::crypto::udp_qsp::{PeerUpdate, SessionIo};
@@ -245,6 +246,111 @@ impl PeerUpdate for UdpQspIo {
     }
 }
 
+/// Plain Unix UDP-QSP socket backend without UDP GRO/GSO helpers.
+///
+/// The backend owns a duplicated nonblocking UDP socket and sends one UDP-QSP
+/// packet per UDP datagram. Android uses this path because protected,
+/// network-bound VPN sockets can fail on cellular networks when using the
+/// offload-oriented `sendmsg`/`recvmsg` path.
+#[derive(Debug)]
+pub struct PlainUdpQspIo {
+    socket: TokioUdpSocket,
+    peer: SocketAddr,
+    recv_buf: Vec<u8>,
+}
+
+impl PlainUdpQspIo {
+    /// Create a plain UDP-QSP backend over a nonblocking UDP socket and peer address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket cannot be configured as nonblocking or
+    /// registered with Tokio's readiness driver.
+    pub fn new(socket: UdpSocket, peer: SocketAddr) -> io::Result<Self> {
+        socket.set_nonblocking(true)?;
+        let socket = TokioUdpSocket::from_std(socket)?;
+        Ok(Self {
+            socket,
+            peer,
+            recv_buf: vec![0u8; MAX_DATAGRAM],
+        })
+    }
+
+    /// Return the accepted receive peer and outbound transmit destination.
+    #[must_use]
+    pub const fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+
+    /// Update the accepted receive peer and outbound transmit destination.
+    pub const fn set_peer(&mut self, peer: SocketAddr) {
+        self.peer = peer;
+    }
+
+    async fn send_packet(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP-QSP packet must not be empty",
+            ));
+        }
+        if bytes.len() > MAX_DATAGRAM {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP-QSP packet exceeds datagram buffer limit",
+            ));
+        }
+
+        self.socket.send_to(bytes, self.peer).await?;
+        Ok(())
+    }
+
+    async fn recv_packet(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let (len, from) = self.recv_datagram().await?;
+            if from != self.peer {
+                continue;
+            }
+            if len > buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "UDP-QSP datagram exceeds caller buffer",
+                ));
+            }
+            buf[..len].copy_from_slice(&self.recv_buf[..len]);
+            return Ok(len);
+        }
+    }
+
+    async fn recv_datagram(&mut self) -> io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(&mut self.recv_buf).await
+    }
+}
+
+impl SessionIo for PlainUdpQspIo {
+    async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.send_packet(bytes).await
+    }
+
+    async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.recv_packet(buf).await
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn has_pending_flush(&self) -> bool {
+        false
+    }
+}
+
+impl PeerUpdate for PlainUdpQspIo {
+    fn set_peer(&mut self, peer: SocketAddr) {
+        Self::set_peer(self, peer);
+    }
+}
+
 const fn max_gso_segments_for_size(socket_max_segments: usize, segment_size: usize) -> usize {
     let socket_max_segments = if socket_max_segments == 0 {
         1
@@ -326,6 +432,24 @@ mod tests {
         assert!(tx.has_pending_flush());
         tx.flush().await?;
         assert!(!tx.has_pending_flush());
+
+        let mut buf = [0u8; 64];
+        let len = timeout(Duration::from_secs(1), rx.recv(&mut buf)).await??;
+        assert_eq!(&buf[..len], b"packet");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plain_backend_sends_immediately_without_pending_flush() -> io::Result<()> {
+        let (a, b) = socket_pair()?;
+        let a_addr = a.local_addr()?;
+        let b_addr = b.local_addr()?;
+        let mut tx = PlainUdpQspIo::new(a, b_addr)?;
+        let mut rx = PlainUdpQspIo::new(b, a_addr)?;
+
+        tx.send(b"packet").await?;
+        assert!(!tx.has_pending_flush());
+        tx.flush().await?;
 
         let mut buf = [0u8; 64];
         let len = timeout(Duration::from_secs(1), rx.recv(&mut buf)).await??;

@@ -7,7 +7,7 @@ pub mod tun;
 pub mod udp_qsp_io;
 
 #[cfg(all(unix, feature = "udp-io"))]
-pub use udp_qsp_io::UdpQspIo;
+pub use udp_qsp_io::{PlainUdpQspIo, UdpQspIo};
 
 /// Byte ranges of individual datagrams within a GRO-coalesced receive buffer.
 ///

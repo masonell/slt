@@ -1,14 +1,16 @@
 use std::io;
 use std::net::SocketAddr;
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 use std::os::fd::AsFd;
 use std::sync::Arc;
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
 pub use ClientUdpIo as ClientUdpQspIo;
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, SessionIo};
 use slt_core::proto::{FrameError, MessageError};
-#[cfg(unix)]
+#[cfg(target_os = "android")]
+pub use slt_core::transport::PlainUdpQspIo as ClientUdpQspIo;
+#[cfg(target_os = "linux")]
 pub use slt_core::transport::UdpQspIo as ClientUdpQspIo;
 use tokio::net::UdpSocket;
 use tracing::{info, trace, warn};
@@ -170,13 +172,13 @@ impl UdpQspError {
 }
 
 /// Client-side UDP-QSP socket I/O backed by a `tokio::net::UdpSocket`.
-#[cfg(any(test, not(unix)))]
+#[cfg(any(test, not(any(target_os = "android", target_os = "linux"))))]
 pub struct ClientUdpIo {
     socket: Arc<UdpSocket>,
     peer: SocketAddr,
 }
 
-#[cfg(any(test, not(unix)))]
+#[cfg(any(test, not(any(target_os = "android", target_os = "linux"))))]
 impl ClientUdpIo {
     /// Create a new UDP-QSP I/O wrapper for traffic to/from `peer`.
     #[must_use]
@@ -184,7 +186,7 @@ impl ClientUdpIo {
         Self { socket, peer }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
     /// Return the accepted receive peer and outbound transmit destination.
     #[must_use]
     pub const fn peer(&self) -> SocketAddr {
@@ -192,7 +194,7 @@ impl ClientUdpIo {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "android", target_os = "linux"))]
 pub fn client_udp_qsp_io(socket: &Arc<UdpSocket>, peer: SocketAddr) -> io::Result<ClientUdpQspIo> {
     let fd = socket.as_fd().try_clone_to_owned()?;
     let socket = std::net::UdpSocket::from(fd);
@@ -200,12 +202,12 @@ pub fn client_udp_qsp_io(socket: &Arc<UdpSocket>, peer: SocketAddr) -> io::Resul
     ClientUdpQspIo::new(socket, peer)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
 pub fn client_udp_qsp_io(socket: &Arc<UdpSocket>, peer: SocketAddr) -> io::Result<ClientUdpQspIo> {
     Ok(ClientUdpQspIo::new(socket.clone(), peer))
 }
 
-#[cfg(any(test, not(unix)))]
+#[cfg(any(test, not(any(target_os = "android", target_os = "linux"))))]
 impl SessionIo for ClientUdpIo {
     async fn send<'a>(&'a mut self, bytes: &'a [u8]) -> io::Result<()> {
         let _ = self.socket.send_to(bytes, self.peer).await?;
@@ -1441,7 +1443,7 @@ mod real_socket_tests {
 
     /// On Unix the client transport wraps the GSO `UdpQspIo` backend, so a data
     /// write buffers into the send slab and is only transmitted once `flush` runs.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn write_message_buffers_until_flush_over_gso_backend() {
         use std::time::Duration;
