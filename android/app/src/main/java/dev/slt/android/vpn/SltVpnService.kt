@@ -6,45 +6,79 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.VpnService
 import android.os.Handler
-import android.os.ParcelFileDescriptor
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.util.Log
-import androidx.core.content.edit
 import dev.slt.android.ConfigValidationResult
 import dev.slt.android.SltNative
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.uniffi.ClientConfigSummary
-import dev.slt.android.uniffi.ClientEvent
-import dev.slt.android.uniffi.ClientEventKind
-import dev.slt.android.uniffi.NativeSession
-import dev.slt.android.uniffi.NativeSessionCallback
-import dev.slt.android.uniffi.PlatformServices
-import dev.slt.android.uniffi.SltInteropException
-import dev.slt.android.uniffi.SocketKind
 import kotlinx.coroutines.runBlocking
-import org.json.JSONArray
-import org.json.JSONException
-import kotlin.concurrent.thread
 
 class SltVpnService : VpnService() {
-    @Volatile private var tunFd: ParcelFileDescriptor? = null
-    @Volatile private var nativeSession: NativeSession? = null
-    @Volatile private var nativeHandle: Long = 0
-    @Volatile private var activeUnderlyingNetwork: Network? = null
-    @Volatile private var activeClientToml: String? = null
-    @Volatile private var activeTunMtu: Int = 0
+    @Volatile private var activeTunnel: ActiveTunnel? = null
     @Volatile private var tornDown = false
     private var terminalStatusReported = false
-    private var nativeRestartAttempt = 0
 
     private val stateLock = Any()
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
-    private val nativeRestartRunnable = Runnable { restartNativeSessionAfterTerminalError() }
     private val profileApplier by lazy { VpnProfileApplier(this, TAG) }
     private val notificationFactory by lazy { VpnNotificationFactory(this) }
-    private val dnsCachePrefs by lazy {
-        getSharedPreferences(DNS_CACHE_PREFS, Context.MODE_PRIVATE)
+    private val dnsCache by lazy {
+        DnsResolutionCache(
+            getSharedPreferences(DnsResolutionCache.PREFS_NAME, Context.MODE_PRIVATE),
+            TAG,
+        )
+    }
+    private val dnsResolver by lazy {
+        UnderlyingNetworkDnsResolver(
+            cache = dnsCache,
+            currentUnderlyingNetworks = ::currentUnderlyingNetworks,
+            publishUnderlyingNetwork = ::publishUnderlyingNetwork,
+            logTag = TAG,
+        )
+    }
+    private val platformServices by lazy {
+        VpnRuntimePlatformServices(
+            protect = ::protect,
+            currentUnderlyingNetworks = ::currentUnderlyingNetworks,
+            publishUnderlyingNetwork = ::publishUnderlyingNetwork,
+            dnsResolver = dnsResolver,
+            logTag = TAG,
+        )
+    }
+    private val nativeController by lazy {
+        NativeSessionSupervisor(
+            mainHandler = mainHandler,
+            platformServices = platformServices::build,
+            callbacks = object : NativeSessionSupervisor.Callbacks {
+                override fun onStopped(handle: ULong) {
+                    teardownAndStopSelf()
+                }
+
+                override fun onFatalError(detail: String) {
+                    if (SltVpnStatusBus.state.value.status != VpnStatus.Error) {
+                        SltVpnStatusBus.markError(detail)
+                    }
+                    teardownAndStopSelf()
+                }
+
+                override fun onRetryScheduled(detail: String, attempt: Int, delayMs: Long) {
+                    SltVpnStatusBus.markNativeRestartScheduled(
+                        detail = detail,
+                        attempt = attempt.toULong(),
+                        delayMs = delayMs.toULong(),
+                    )
+                    updateNotification()
+                }
+
+                override fun onNotificationRefresh() {
+                    updateNotification()
+                }
+            },
+            logTag = TAG,
+        )
     }
     private var networkWatcher: NetworkChangeWatcher? = null
 
@@ -80,7 +114,7 @@ class SltVpnService : VpnService() {
         terminalStatusReported = false
         notificationFactory.ensureChannel()
 
-        if (tunFd != null) {
+        if (activeTunnel != null) {
             // Tunnel is already established; refresh the foreground notification
             // and stay in the current (possibly Reconnecting/Starting/Handoff) status.
             val status = SltVpnStatusBus.state.value.status
@@ -105,9 +139,10 @@ class SltVpnService : VpnService() {
             SltNative.load()
             val profile = loadActiveProfile()
             val summary = validateProfile(profile)
-            warmDnsCacheAsync(summary.serverHost)
+            dnsResolver.warmAsync(summary.serverHost)
+            val connectivityManager = getSystemService(ConnectivityManager::class.java)
             val preEstablishUnderlyingNetwork =
-                getSystemService(ConnectivityManager::class.java).findInitialUnderlyingNetwork(TAG)
+                connectivityManager.findInitialUnderlyingNetwork(TAG)
 
             val builder = Builder()
                 .setSession(profile.metadata.name)
@@ -123,7 +158,7 @@ class SltVpnService : VpnService() {
             }
 
             val initialUnderlyingNetwork =
-                getSystemService(ConnectivityManager::class.java).findInitialUnderlyingNetwork(TAG)
+                connectivityManager.findInitialUnderlyingNetwork(TAG)
                     ?: preEstablishUnderlyingNetwork
             if (initialUnderlyingNetwork == null) {
                 try {
@@ -134,19 +169,27 @@ class SltVpnService : VpnService() {
                 failVpn("No non-VPN network available; stop the other VPN and try again")
                 return
             }
-            activeUnderlyingNetwork = initialUnderlyingNetwork
 
-            tunFd = fd
-            activeClientToml = profile.clientToml
-            activeTunMtu = summary.tunMtu
-            val session = startNativeSession(profile.clientToml, fd.fd, summary.tunMtu)
-            nativeSession = session
-            nativeHandle = session.handle()
+            synchronized(stateLock) {
+                activeTunnel = ActiveTunnel(
+                    fd = fd,
+                    clientToml = profile.clientToml,
+                    tunMtu = summary.tunMtu,
+                    underlyingNetwork = initialUnderlyingNetwork,
+                )
+            }
+            val session = nativeController.start(
+                NativeSessionConfig(
+                    clientToml = profile.clientToml,
+                    tunFd = fd.fd,
+                    tunMtu = summary.tunMtu,
+                ),
+            )
             Log.i(
                 TAG,
                 "SLT VPN tunnel established; awaiting native auth: " +
                     "profile=${profile.metadata.name} fd=${fd.fd} " +
-                    "${summary.assignedIpv4}/$CLIENT_ADDRESS_PREFIX native=$nativeHandle",
+                    "${summary.assignedIpv4}/$CLIENT_ADDRESS_PREFIX native=${session.handle()}",
             )
             // Stay Starting until the runtime emits Authenticated (-> Running).
             updateNotification()
@@ -168,13 +211,11 @@ class SltVpnService : VpnService() {
 
     private fun publishUnderlyingNetwork(network: Network?) {
         synchronized(stateLock) {
-            if (tunFd == null && nativeSession == null) {
-                return
-            }
+            val tunnel = activeTunnel ?: return
             if (tornDown) {
                 return
             }
-            activeUnderlyingNetwork = network
+            activeTunnel = tunnel.copy(underlyingNetwork = network)
         }
     }
 
@@ -200,20 +241,16 @@ class SltVpnService : VpnService() {
     /// the terminal-event path, `stopVpn`, and `onDestroy` can all drive a tear
     /// down, so the first call does the work and later calls are no-ops (rather
     /// than relying on every sub-helper being null-safe). The store
-    /// ([SltVpnStatusBus]) owns status; this owns the VPN/TUN/native lifecycle.
+    /// ([SltVpnStatusBus]) owns status; this owns the VPN/TUN lifecycle.
     private fun teardown() {
         if (tornDown) {
             return
         }
         tornDown = true
-        cancelNativeRestart()
         networkWatcher?.stop()
         networkWatcher = null
-        activeUnderlyingNetwork = null
-        stopNativeClient()
+        nativeController.stop()
         closeTunFd()
-        activeClientToml = null
-        activeTunMtu = 0
         stopForegroundCompat()
     }
 
@@ -232,334 +269,44 @@ class SltVpnService : VpnService() {
         stopSelf()
     }
 
-    private fun stopNativeClient() {
-        val session = nativeSession
-        val handle = nativeHandle
-        nativeSession = null
-        nativeHandle = 0L
-        if (session == null) {
-            return
-        }
-
-        try {
-            SltNative.stop(session)
-            Log.i(TAG, "SLT native client stopped: handle=$handle")
-        } catch (error: RuntimeException) {
-            Log.w(TAG, "Failed to stop SLT native client: handle=$handle", error)
-        }
-    }
-
-    private fun cancelNativeRestart() {
-        mainHandler.removeCallbacks(nativeRestartRunnable)
-        nativeRestartAttempt = 0
-    }
-
-    /// Start a fresh native client session. Rust owns the session handle/seq
-    /// identity; stale callbacks are rejected by `handle` in `buildNativeCallback`.
-    private fun startNativeSession(configToml: String, tunFd: Int, mtu: Int): NativeSession {
-        val platformServices = buildPlatformServices()
-        return SltNative.start(configToml, tunFd, mtu, platformServices, buildNativeCallback())
-    }
-
     /// Notify Rust that the underlying network changed. Rust owns reconnect and
     /// path recovery policy; Kotlin only maintains Android platform state.
     private fun notifyNetworkChanged(network: Network?) {
-        val session = synchronized(stateLock) {
-            val current = nativeSession ?: return
-            if (tunFd == null) {
+        synchronized(stateLock) {
+            val tunnel = activeTunnel ?: return
+            if (tornDown) {
                 return
             }
-            activeUnderlyingNetwork = network
-            current
+            activeTunnel = tunnel.copy(underlyingNetwork = network)
         }
-        Log.i(TAG, "Underlying network changed; notifying native runtime")
-        SltNative.networkChanged(session)
-    }
-
-    private fun buildPlatformServices(): PlatformServices =
-        object : PlatformServices {
-            override fun protectSocket(fd: Int, kind: SocketKind): Boolean =
-                try {
-                    protectAndBindSocket(fd, kind)
-                } catch (error: RuntimeException) {
-                    Log.w(TAG, "Failed to protect SLT socket: fd=$fd kind=$kind", error)
-                    false
-                } catch (error: Exception) {
-                    Log.w(TAG, "Failed to bind SLT socket: fd=$fd kind=$kind", error)
-                    false
-                }
-
-            override fun resolveHost(hostname: String): List<String> {
-                return resolveHostOnUnderlyingNetworks(hostname)
-            }
-        }
-
-    private fun resolveHostOnUnderlyingNetworks(hostname: String): List<String> {
-        val networks = currentUnderlyingNetworks()
-        if (networks.isEmpty()) {
-            throw SltInteropException.Platform("No underlying network available for DNS")
-        }
-
-        val failures = mutableListOf<String>()
-        val resolved = resolveHostOnNetworks(hostname, networks, failures)
-        if (resolved != null) {
-            publishUnderlyingNetwork(resolved.network)
-            cacheResolvedAddresses(hostname, resolved.addresses)
-            return resolved.addresses
-        }
-
-        val cached = cachedResolvedAddresses(hostname)
-        if (cached.isNotEmpty()) {
-            Log.w(TAG, "Using cached DNS result for $hostname after live DNS failed")
-            return cached
-        }
-
-        throw SltInteropException.Platform(
-            "Failed to resolve $hostname on underlying networks: ${failures.joinToString("; ")}",
-        )
-    }
-
-    private fun warmDnsCache(hostname: String) {
-        val failures = mutableListOf<String>()
-        val resolved = resolveHostOnNetworks(hostname, currentUnderlyingNetworks(), failures)
-        if (resolved != null) {
-            cacheResolvedAddresses(hostname, resolved.addresses)
-            return
-        }
-        Log.w(TAG, "Could not warm DNS cache for $hostname: ${failures.joinToString("; ")}")
-    }
-
-    private fun warmDnsCacheAsync(hostname: String) {
-        thread(name = "slt-dns-cache-warm", isDaemon = true) {
-            try {
-                warmDnsCache(hostname)
-            } catch (error: Exception) {
-                Log.w(TAG, "DNS cache warmup failed for $hostname", error)
-            }
-        }
-    }
-
-    private data class ResolvedHost(
-        val network: Network,
-        val addresses: List<String>,
-    )
-
-    private fun resolveHostOnNetworks(
-        hostname: String,
-        networks: List<Network>,
-        failures: MutableList<String>,
-    ): ResolvedHost? {
-        for (network in networks) {
-            try {
-                val addresses = network.getAllByName(hostname)
-                    .mapNotNull { it.hostAddress }
-                if (addresses.isNotEmpty()) {
-                    return ResolvedHost(network, addresses)
-                }
-                failures += "network=$network: no addresses returned"
-            } catch (error: Exception) {
-                Log.w(TAG, "Failed to resolve $hostname on underlying network=$network", error)
-                failures += "network=$network: ${error.message ?: error::class.java.simpleName}"
-            }
-        }
-        return null
-    }
-
-    private fun cacheResolvedAddresses(hostname: String, addresses: List<String>) {
-        if (addresses.isEmpty()) {
-            return
-        }
-        val payload = JSONArray()
-        addresses.forEach { address -> payload.put(address) }
-        dnsCachePrefs.edit {
-            putString(dnsCacheAddressesKey(hostname), payload.toString())
-            putLong(dnsCacheTimestampKey(hostname), System.currentTimeMillis())
-        }
-    }
-
-    private fun cachedResolvedAddresses(hostname: String): List<String> {
-        val timestamp = dnsCachePrefs.getLong(dnsCacheTimestampKey(hostname), 0L)
-        if (timestamp == 0L || System.currentTimeMillis() - timestamp > DNS_CACHE_MAX_AGE_MS) {
-            dnsCachePrefs.edit {
-                remove(dnsCacheAddressesKey(hostname))
-                remove(dnsCacheTimestampKey(hostname))
-            }
-            return emptyList()
-        }
-
-        val raw = dnsCachePrefs.getString(dnsCacheAddressesKey(hostname), null)
-            ?: return emptyList()
-        return try {
-            val payload = JSONArray(raw)
-            buildList {
-                for (index in 0 until payload.length()) {
-                    val address = payload.optString(index)
-                    if (address.isNotBlank()) {
-                        add(address)
-                    }
-                }
-            }
-        } catch (error: JSONException) {
-            Log.w(TAG, "Dropping malformed DNS cache entry for $hostname", error)
-            dnsCachePrefs.edit {
-                remove(dnsCacheAddressesKey(hostname))
-                remove(dnsCacheTimestampKey(hostname))
-            }
-            emptyList()
-        }
-    }
-
-    private fun dnsCacheAddressesKey(hostname: String): String =
-        "addresses:${hostname.lowercase()}"
-
-    private fun dnsCacheTimestampKey(hostname: String): String =
-        "timestamp:${hostname.lowercase()}"
-
-    private fun protectAndBindSocket(fd: Int, kind: SocketKind): Boolean {
-        val protected = protect(fd)
-        if (!protected) {
-            Log.w(TAG, "Android refused to protect SLT socket: fd=$fd kind=$kind")
-            return false
-        }
-
-        val network = currentUnderlyingNetwork()
-        if (network == null) {
-            Log.w(TAG, "No underlying network available for SLT socket binding: fd=$fd kind=$kind")
-            return false
-        }
-
-        ParcelFileDescriptor.fromFd(fd).use { dup ->
-            network.bindSocket(dup.fileDescriptor)
-        }
-        return true
-    }
-
-    private fun currentUnderlyingNetwork(): Network? {
-        return currentUnderlyingNetworks().firstOrNull()
+        nativeController.notifyNetworkChanged()
     }
 
     private fun currentUnderlyingNetworks(): List<Network> {
-        if (tornDown) {
-            return emptyList()
+        val tunnelNetwork = synchronized(stateLock) {
+            if (tornDown) {
+                return emptyList()
+            }
+            activeTunnel?.underlyingNetwork
         }
 
         val networks = (
-            listOfNotNull(activeUnderlyingNetwork) +
+            listOfNotNull(tunnelNetwork) +
                 getSystemService(ConnectivityManager::class.java).findUnderlyingNetworks(TAG)
             ).distinct()
         networks.firstOrNull()?.let(::publishUnderlyingNetwork)
         return networks
     }
 
-    private fun buildNativeCallback(): NativeSessionCallback =
-        object : NativeSessionCallback {
-            override fun onEvent(event: ClientEvent) {
-                mainHandler.post {
-                    // The event `handle` is the sole identity source: stale
-                    // callbacks from a previous session carry a different handle
-                    // (Rust assigns globally unique handles from a monotonic
-                    // counter), so a mismatch safely rejects them. The current
-                    // session's own events always see the correct handle because
-                    // `nativeHandle` is assigned on this main thread right after
-                    // `start_session` returns, and `mainHandler.post` defers
-                    // every callback until the current main-thread work (such as
-                    // `startVpn`) finishes — so the assignment always wins the
-                    // race. After a stop, `nativeHandle` is 0 and all events are
-                    // rejected (status is already terminal).
-                    if (event.handle.toLong() != nativeHandle) {
-                        return@post
-                    }
-                    handleNativeEvent(event)
-                }
-            }
-        }
-
-    /// Reduce a typed native event to UI state (owned by [SltVpnStatusBus]) and
-    /// perform platform teardown for terminal events. Non-terminal events only
-    /// refine the status/phase/transport shown to the user.
-    private fun handleNativeEvent(event: ClientEvent) {
-        when (val terminal = SltVpnStatusBus.applyEvent(event)) {
-            NativeTerminal.None -> updateNotification()
-            NativeTerminal.Stopped -> {
-                Log.i(TAG, "Native client stopped: handle=${event.handle}")
-                teardownAndStopSelf()
-            }
-            is NativeTerminal.Errored -> {
-                if (terminal.retryable) {
-                    Log.w(TAG, "Native client reported a retryable terminal error; restarting")
-                    scheduleNativeRestartAfterError(event)
-                } else {
-                    Log.e(TAG, "Native client reported a non-retryable terminal error; stopping")
-                    teardownAndStopSelf()
-                }
-            }
-        }
-
-        if (event.kind is ClientEventKind.Authenticated) {
-            nativeRestartAttempt = 0
-        }
-    }
-
-    private fun scheduleNativeRestartAfterError(event: ClientEvent) {
-        val detail = (event.kind as? ClientEventKind.Error)?.detail ?: "Native client error"
-        stopNativeClient()
-
-        if (tornDown || tunFd == null) {
-            failVpn("VPN tunnel unavailable after native error: $detail")
-            return
-        }
-
-        nativeRestartAttempt += 1
-        val delayMs = nativeRestartDelayMs(nativeRestartAttempt)
-        SltVpnStatusBus.markNativeRestartScheduled(
-            detail = detail,
-            attempt = nativeRestartAttempt.toULong(),
-            delayMs = delayMs.toULong(),
-        )
-        updateNotification()
-        mainHandler.removeCallbacks(nativeRestartRunnable)
-        mainHandler.postDelayed(nativeRestartRunnable, delayMs)
-    }
-
-    private fun restartNativeSessionAfterTerminalError() {
-        val fd = tunFd
-        val configToml = activeClientToml
-        val mtu = activeTunMtu
-
-        if (tornDown) {
-            return
-        }
-        if (nativeSession != null) {
-            return
-        }
-        if (fd == null || configToml == null || mtu <= 0) {
-            failVpn("VPN tunnel unavailable before native restart")
-            return
-        }
-
-        try {
-            val session = startNativeSession(configToml, fd.fd, mtu)
-            nativeSession = session
-            nativeHandle = session.handle()
-            Log.i(TAG, "Restarted SLT native client: handle=$nativeHandle attempt=$nativeRestartAttempt")
-            updateNotification()
-        } catch (error: Exception) {
-            failVpn(error.message ?: error::class.java.simpleName)
-        }
-    }
-
-    private fun nativeRestartDelayMs(attempt: Int): Long {
-        val shift = (attempt - 1).coerceIn(0, MAX_NATIVE_RESTART_SHIFT)
-        val delay = INITIAL_NATIVE_RESTART_DELAY_MS * (1L shl shift)
-        return delay.coerceAtMost(MAX_NATIVE_RESTART_DELAY_MS)
-    }
-
     private fun closeTunFd() {
-        val fd = tunFd ?: return
-        tunFd = null
+        val tunnel = synchronized(stateLock) {
+            val current = activeTunnel ?: return
+            activeTunnel = null
+            current
+        }
 
         try {
-            fd.close()
+            tunnel.fd.close()
             Log.i(TAG, "SLT VPN fd closed")
         } catch (error: RuntimeException) {
             Log.w(TAG, "Failed to close SLT VPN fd", error)
@@ -573,7 +320,7 @@ class SltVpnService : VpnService() {
     }
 
     /// Terse notification wording. Deliberately shorter than the in-app
-    /// `StatusLine.statusLabel` (e.g. "Starting" vs "Connecting…"); the
+    /// `StatusLine.statusLabel` (e.g. "Starting" vs "Connecting..."); the
     /// foreground notification is a platform surface, so its text is derived
     /// here rather than in the UI layer.
     private fun notificationText(status: VpnStatus): String =
@@ -592,17 +339,19 @@ class SltVpnService : VpnService() {
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
+    private data class ActiveTunnel(
+        val fd: ParcelFileDescriptor,
+        val clientToml: String,
+        val tunMtu: Int,
+        val underlyingNetwork: Network?,
+    )
+
     companion object {
         const val ACTION_START = "dev.slt.android.action.START"
         const val ACTION_STOP = "dev.slt.android.action.STOP"
 
         private const val TAG = "SltVpnService"
         private const val CLIENT_ADDRESS_PREFIX = 32
-        private const val DNS_CACHE_PREFS = "slt_dns_cache"
-        private const val DNS_CACHE_MAX_AGE_MS = 24L * 60L * 60L * 1000L
-        private const val INITIAL_NATIVE_RESTART_DELAY_MS = 1_000L
-        private const val MAX_NATIVE_RESTART_DELAY_MS = 60_000L
-        private const val MAX_NATIVE_RESTART_SHIFT = 6
 
         fun startIntent(context: Context): Intent =
             Intent(context, SltVpnService::class.java).setAction(ACTION_START)
