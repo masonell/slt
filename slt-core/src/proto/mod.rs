@@ -1,5 +1,7 @@
 //! VPN protocol framing, message types, and payload schemas.
 
+/// AUTH message construction (signature context + payload builder).
+pub mod auth;
 /// Frame encoding/decoding.
 pub mod framing;
 /// Message helpers built on top of frames.
@@ -9,6 +11,8 @@ pub mod payloads;
 /// Message type identifiers.
 pub mod types;
 
+/// AUTH message construction.
+pub use auth::{AUTH_CHALLENGE_LABEL, auth_signature_context, build_auth_payload};
 /// Frame encoding/decoding and frame types.
 pub use framing::{Frame, FrameError, HEADER_LEN, OwnedMessageBuf, decode_frame, encode_frame};
 /// Message-level helpers and limits.

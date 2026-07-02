@@ -158,11 +158,8 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
-        let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-        tcp.ssl()
-            .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-            .map_err(|source| AuthError::ChallengeExport { source })?;
-        Ok(challenge)
+        slt_core::crypto::export_auth_challenge(tcp.ssl())
+            .map_err(|source| AuthError::ChallengeExport { source })
     }
 
     async fn run_auth_flow<S, F>(

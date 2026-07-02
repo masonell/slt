@@ -44,11 +44,7 @@ pub(super) fn make_payload(
     challenge: [u8; AUTH_CHALLENGE_LEN],
     signing_key: &SigningKey,
 ) -> AuthPayload {
-    let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
-    context.extend_from_slice(b"slt-auth-v1");
-    context.extend_from_slice(client_id.as_bytes());
-    context.extend_from_slice(&assigned_ipv4.octets());
-    context.extend_from_slice(&challenge);
+    let context = slt_core::proto::auth_signature_context(&client_id, assigned_ipv4, &challenge);
     let signature = signing_key.sign(&context).to_bytes();
     AuthPayload {
         client_id,

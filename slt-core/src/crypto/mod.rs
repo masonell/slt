@@ -4,6 +4,7 @@ pub mod client_hello;
 pub mod udp_qsp;
 
 use std::io::{Cursor, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use boring::error::ErrorStack;
@@ -11,11 +12,12 @@ use boring::ssl::{
     CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef,
 };
 use boring::x509::X509;
-use boring::x509::verify::X509VerifyFlags;
+use boring::x509::verify::{X509CheckFlags, X509VerifyFlags};
 use boring_sys as ffi;
 use brotli::enc::BrotliEncoderParams;
 use foreign_types::ForeignTypeRef;
 
+use crate::proto::{AUTH_CHALLENGE_LABEL, AUTH_CHALLENGE_LEN};
 use crate::types::TlsMaterial;
 
 const ALPN_H2_HTTP1: &[u8] = b"\x02h2\x08http/1.1";
@@ -307,6 +309,38 @@ pub fn configure_client_chrome_ssl(ssl: &mut SslRef) -> Result<(), ErrorStack> {
     ssl.set_permute_extensions(true);
     configure_alps(ssl, b"h2", &[], true)?;
     Ok(())
+}
+
+/// Derive the AUTH challenge from a TLS session via the keying-material exporter.
+///
+/// Both peers export with [`AUTH_CHALLENGE_LABEL`], so they derive identical challenge
+/// bytes; this helper fixes the label and length in one place.
+///
+/// # Errors
+///
+/// Returns the boring [`ErrorStack`] if `SSL_export_keying_material` fails.
+pub fn export_auth_challenge(ssl: &SslRef) -> Result<[u8; AUTH_CHALLENGE_LEN], ErrorStack> {
+    let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
+    ssl.export_keying_material(&mut challenge, AUTH_CHALLENGE_LABEL, None)?;
+    Ok(challenge)
+}
+
+/// Configure certificate hostname verification against `host`.
+///
+/// Sets the expected peer name on the verify parameter (DNS name or IP literal), with
+/// partial wildcards disabled. Combined with `PEER` verification this rejects certificates
+/// whose chain is trusted but whose subject/SAN name does not match `host`.
+///
+/// # Errors
+///
+/// Returns the boring [`ErrorStack`] if setting the expected host/IP fails.
+pub fn configure_hostname_verification(ssl: &mut SslRef, host: &str) -> Result<(), ErrorStack> {
+    let param = ssl.param_mut();
+    param.set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
+    match host.parse::<IpAddr>() {
+        Ok(ip) => param.set_ip(ip),
+        Err(_) => param.set_host(host),
+    }
 }
 
 fn configure_quic_client_ssl(ssl: &mut SslRef) -> Result<(), ErrorStack> {

@@ -215,11 +215,7 @@ async fn auth_phase_successful_authentication() {
     let (server_tls, mut client_tls) = tls_pair().await;
     let limits = MessageLimits::from_mtu(1500);
 
-    let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-    server_tls
-        .ssl()
-        .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-        .unwrap();
+    let challenge = slt_core::crypto::export_auth_challenge(server_tls.ssl()).unwrap();
 
     let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
 
@@ -264,11 +260,7 @@ async fn auth_phase_failed_authentication_sends_auth_fail() {
     let (server_tls, mut client_tls) = tls_pair().await;
     let limits = MessageLimits::from_mtu(1500);
 
-    let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-    server_tls
-        .ssl()
-        .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-        .unwrap();
+    let challenge = slt_core::crypto::export_auth_challenge(server_tls.ssl()).unwrap();
 
     let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
 
@@ -321,11 +313,7 @@ async fn auth_phase_replaces_existing_session() {
     let (server_tls, mut client_tls) = tls_pair().await;
     let limits = MessageLimits::from_mtu(1500);
 
-    let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-    server_tls
-        .ssl()
-        .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-        .unwrap();
+    let challenge = slt_core::crypto::export_auth_challenge(server_tls.ssl()).unwrap();
 
     let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
 

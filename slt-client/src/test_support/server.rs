@@ -141,12 +141,8 @@ impl MockTlsServer {
 
     /// Export keying material for auth challenge verification.
     pub fn export_keying_material(&mut self) -> io::Result<[u8; AUTH_CHALLENGE_LEN]> {
-        let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-        self.stream
-            .ssl()
-            .export_keying_material(&mut challenge, "slt-auth-challenge", None)
-            .map_err(|err| io::Error::other(format!("tls key export failed: {err}")))?;
-        Ok(challenge)
+        slt_core::crypto::export_auth_challenge(self.stream.ssl())
+            .map_err(|err| io::Error::other(format!("tls key export failed: {err}")))
     }
 
     /// Read until a message is available and return it.
@@ -323,11 +319,11 @@ fn verify_auth_signature(
     use ed25519_dalek::SigningKey;
 
     // Build verification context
-    let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
-    context.extend_from_slice(b"slt-auth-v1");
-    context.extend_from_slice(payload.client_id.as_bytes());
-    context.extend_from_slice(&payload.assigned_ipv4.octets());
-    context.extend_from_slice(&challenge);
+    let context = slt_core::proto::auth_signature_context(
+        &payload.client_id,
+        payload.assigned_ipv4,
+        &challenge,
+    );
 
     // Derive verifying key from the config's private key
     let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
@@ -351,16 +347,8 @@ mod tests {
     async fn tls_server_pair_completes_handshake() {
         let (client, server) = tls_server_pair().await;
         // Both sides should be able to export keying material (handshake completed)
-        let mut client_challenge = [0u8; AUTH_CHALLENGE_LEN];
-        let mut server_challenge = [0u8; AUTH_CHALLENGE_LEN];
-        client
-            .ssl()
-            .export_keying_material(&mut client_challenge, "slt-auth-challenge", None)
-            .unwrap();
-        server
-            .ssl()
-            .export_keying_material(&mut server_challenge, "slt-auth-challenge", None)
-            .unwrap();
+        let client_challenge = slt_core::crypto::export_auth_challenge(client.ssl()).unwrap();
+        let server_challenge = slt_core::crypto::export_auth_challenge(server.ssl()).unwrap();
         // Both sides should derive the same challenge from the TLS session
         assert_eq!(client_challenge, server_challenge);
     }
@@ -380,14 +368,7 @@ mod tests {
         let mut server = MockTlsServer::new(server);
 
         // Client sends AUTH
-        let challenge = {
-            let mut ch = [0u8; AUTH_CHALLENGE_LEN];
-            client
-                .ssl()
-                .export_keying_material(&mut ch, "slt-auth-challenge", None)
-                .unwrap();
-            ch
-        };
+        let challenge = slt_core::crypto::export_auth_challenge(client.ssl()).unwrap();
 
         let auth_payload = crate::auth::build_auth_payload(&config, challenge);
         let mut payload_buf = Vec::new();

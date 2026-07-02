@@ -82,11 +82,7 @@ impl Authenticator {
 ///
 /// # Signature Context
 ///
-/// The signature is verified over a concatenated context string containing:
-/// - `"slt-auth-v1"` (11 bytes)
-/// - Client ID (16 bytes)
-/// - Assigned IPv4 octets (4 bytes)
-/// - Challenge bytes (variable)
+/// Verified over the bytes produced by [`slt_core::proto::auth_signature_context`].
 pub(super) fn verify_auth_payload(
     authenticator: &Authenticator,
     payload: &AuthPayload,
@@ -110,11 +106,11 @@ pub(super) fn verify_auth_payload(
         return Err(AuthFailCode::ChallengeInvalid);
     }
 
-    let mut context = Vec::with_capacity(11 + 16 + 4 + challenge.len());
-    context.extend_from_slice(b"slt-auth-v1");
-    context.extend_from_slice(payload.client_id.as_bytes());
-    context.extend_from_slice(&payload.assigned_ipv4.octets());
-    context.extend_from_slice(challenge);
+    let context = slt_core::proto::auth_signature_context(
+        &payload.client_id,
+        payload.assigned_ipv4,
+        challenge,
+    );
 
     let key = VerifyingKey::from_bytes(client.pubkey_ed25519.as_bytes()).map_err(|_| {
         trace!(client_id = %payload.client_id, "failed to parse verifying key");

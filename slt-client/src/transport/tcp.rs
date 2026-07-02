@@ -1,16 +1,16 @@
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
 use boring::error::ErrorStack;
 use boring::ssl::{Ssl, SslRef, SslVerifyMode};
-use boring::x509::verify::X509CheckFlags;
 use slt_core::config::ClientConfig;
 use slt_core::crypto::client_hello::client_hello_session_id_callback;
 use slt_core::crypto::{
-    configure_ca_store, configure_client_chrome_ssl, tcp_client_chrome_ctx_builder,
+    configure_ca_store, configure_client_chrome_ssl, configure_hostname_verification,
+    tcp_client_chrome_ctx_builder,
 };
 use slt_core::transport::tcp::{
     IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
@@ -262,15 +262,6 @@ where
             peer: addr,
             source: e,
         })
-}
-
-fn configure_hostname_verification(ssl: &mut Ssl, host: &str) -> Result<(), ErrorStack> {
-    let param = ssl.param_mut();
-    param.set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
-    match host.parse::<IpAddr>() {
-        Ok(ip) => param.set_ip(ip),
-        Err(_) => param.set_host(host),
-    }
 }
 
 /// Wrap a TLS setup [`ErrorStack`] as a fatal [`ConnectError::TlsHandshake`].
