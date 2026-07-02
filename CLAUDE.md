@@ -58,6 +58,8 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 - Format Rust with `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate`
 - Android code is Kotlin + Jetpack Compose; keep Kotlin/XML formatted with Android Studio defaults until a checked-in formatter is added.
 - All `pub` items must have doc comments
+- **Comments and docs describe current behavior only.** No historical narration ("previously", "used to", "now uses" as a then→now contrast, "older versions", "replaced", changelog-style asides). When a constraint needs a *why*, state the constraint and its current effect — not the bug or incident that motivated it.
+- **Every comment must earn its place.** Add non-obvious context (the *why*, a protocol/spec invariant, a hidden gotcha), not the *what* the code already states. If a comment only paraphrases the next line(s), delete it.
 - Descriptive names (e.g., `configure_client_chrome_ssl`, `quic_client_chrome_config`)
 - Tests colocated with code using `#[cfg(test)]`
 - Favor real protocol artifacts in tests over mock data
@@ -70,6 +72,7 @@ TCP connect -> TLS handshake -> AUTH/AUTH_OK -> (optional QUIC discovery) -> REG
 ## Commit Guidelines
 
 - Use Conventional Commit messages: `<type>(<scope>): <subject>` (e.g., `feat(slt-core): add udp-qsp key phase tracking`).
+- Commit subject and body describe the **final state**, not the journey — no "was X, now Y", "previously", "replaces", or "this changes A to B". Describe the resulting behavior as if it were always so.
 - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
 - Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy --all-targets/test).
 - Run `cargo build`, `cargo test`, and `cargo clippy --all-targets` before finalizing
