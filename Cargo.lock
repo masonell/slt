@@ -1765,9 +1765,11 @@ name = "slt-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "boring",
  "clap",
  "ed25519-dalek",
  "hex",
+ "quiche",
  "rand",
  "rcgen",
  "serde",

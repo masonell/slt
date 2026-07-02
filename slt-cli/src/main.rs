@@ -21,11 +21,13 @@ use clap::{Parser, Subcommand};
 
 mod add_client;
 mod cert;
+mod check_server;
 mod client_config;
 mod client_id;
 mod config_io;
 mod generate_certs;
 mod generate_keys;
+mod http_probe;
 mod init;
 mod list_clients;
 mod remove_client;
@@ -187,8 +189,12 @@ fn run(cli: Cli) -> Result<()> {
             let config_path = PathBuf::from(&config_dir);
             init::init(&config_path, &domain, inline_certs, cli.quiet)
         }
-        Commands::CheckServer { .. } => {
-            todo!("check-server")
+        Commands::CheckServer {
+            domain,
+            client_config,
+        } => {
+            let client_config_path = client_config.as_deref().map(PathBuf::from);
+            check_server::check_server(&domain, client_config_path.as_deref(), cli.quiet)
         }
         Commands::ShowServer {
             config,
