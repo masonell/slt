@@ -26,6 +26,9 @@ internal class NativeSessionSupervisor(
 
     private var restartConfig: NativeSessionConfig? = null
     private var nativeRestartAttempt = 0
+    // Once this Start request has authenticated, later native terminal errors
+    // should keep the VPN route installed and retry at the Android boundary.
+    private var authenticatedSinceStart = false
     private val nativeRestartRunnable = Runnable { restartNativeSessionAfterTerminalError() }
 
     val handle: Long
@@ -36,12 +39,14 @@ internal class NativeSessionSupervisor(
 
     fun start(config: NativeSessionConfig): NativeSession {
         cancelRestart()
+        authenticatedSinceStart = false
         restartConfig = config
         return startSession(config)
     }
 
     fun stop() {
         cancelRestart()
+        authenticatedSinceStart = false
         restartConfig = null
         stopNativeClient()
     }
@@ -118,8 +123,12 @@ internal class NativeSessionSupervisor(
                 callbacks.onStopped(event.handle)
             }
             is NativeTerminal.Errored -> {
-                if (terminal.retryable) {
-                    Log.w(logTag, "Native client reported a retryable terminal error; restarting")
+                if (shouldRestartAfterTerminalError(terminal)) {
+                    Log.w(
+                        logTag,
+                        "Native client terminal error will restart: " +
+                            "retryable=${terminal.retryable} authenticatedSinceStart=$authenticatedSinceStart",
+                    )
                     scheduleNativeRestartAfterError(event)
                 } else {
                     Log.e(logTag, "Native client reported a non-retryable terminal error; stopping")
@@ -129,9 +138,16 @@ internal class NativeSessionSupervisor(
         }
 
         if (event.kind is ClientEventKind.Authenticated) {
+            authenticatedSinceStart = true
             nativeRestartAttempt = 0
         }
     }
+
+    private fun shouldRestartAfterTerminalError(terminal: NativeTerminal.Errored): Boolean =
+        shouldRestartTerminalNativeError(
+            retryable = terminal.retryable,
+            authenticatedSinceStart = authenticatedSinceStart,
+        )
 
     private fun scheduleNativeRestartAfterError(event: ClientEvent) {
         val detail = (event.kind as? ClientEventKind.Error)?.detail ?: "Native client error"
@@ -190,3 +206,8 @@ internal class NativeSessionSupervisor(
         private const val MAX_NATIVE_RESTART_SHIFT = 6
     }
 }
+
+internal fun shouldRestartTerminalNativeError(
+    retryable: Boolean,
+    authenticatedSinceStart: Boolean,
+): Boolean = retryable || authenticatedSinceStart
