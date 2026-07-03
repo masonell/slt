@@ -392,4 +392,18 @@ mod tests {
             CipherSuite::ChaCha20Poly1305
         );
     }
+
+    #[test]
+    fn auto_cipher_selection_follows_aes_acceleration() {
+        // `select` takes the acceleration probe as a parameter, so the auto decision
+        // is deterministic for a given feature set without touching real hardware.
+        assert_eq!(
+            ClientUdpQspCipher::Auto.select(true),
+            CipherSuite::Aes128Gcm
+        );
+        assert_eq!(
+            ClientUdpQspCipher::Auto.select(false),
+            CipherSuite::ChaCha20Poly1305
+        );
+    }
 }

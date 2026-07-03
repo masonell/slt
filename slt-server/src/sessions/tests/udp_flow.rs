@@ -113,6 +113,105 @@ async fn session_switches_to_udp_after_switch_ack() {
 }
 
 #[tokio::test]
+async fn session_switches_to_udp_with_chacha20_poly1305() {
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
+        spawn_session().await;
+
+    let dcid = Cid::from([0xCE; MAX_DCID_LEN]);
+    let scid = Cid::from([0xDE; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::ChaCha20Poly1305);
+
+    let mut reg_buf = Vec::new();
+    register.encode(&mut reg_buf).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+    assert!(matches!(message, Message::RegisterOk { .. }));
+
+    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let peer = SocketAddr::from(([127, 0, 0, 1], 44445));
+
+    let server_expected_pn = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x2200,
+    )
+    .await;
+
+    // Uplink: a ChaCha20-protected DATA frame must decrypt and reach TUN.
+    let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 64), 12);
+    let mut data_frame = Vec::new();
+    encode_message(
+        Message::Data {
+            packet: &uplink_packet,
+        },
+        &mut data_frame,
+    )
+    .unwrap();
+    let udp_packet = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx + 1,
+            register.key_phase,
+            &data_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer,
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: udp_packet,
+    }))
+    .await
+    .unwrap();
+
+    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, uplink_packet);
+
+    // Downlink: TUN egress must be protected with ChaCha20 and decrypt cleanly.
+    let downlink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 65), 12);
+    tx.send(SessionEvent::TunPacket(downlink_packet.clone()))
+        .await
+        .unwrap();
+
+    let packet = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let opened = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &packet,
+            server_expected_pn,
+        )
+        .unwrap();
+    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+    assert_eq!(consumed, opened.payload.len());
+    match message {
+        Message::Data { packet } => assert_eq!(packet, downlink_packet.as_slice()),
+        _ => panic!("expected udp data over chacha20 transport"),
+    }
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    let _ = join.await.unwrap();
+}
+
+#[tokio::test]
 async fn session_handles_udp_pong() {
     let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
