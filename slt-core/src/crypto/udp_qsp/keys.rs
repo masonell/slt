@@ -13,7 +13,10 @@ use super::packet::{
 };
 use super::pn::{packet_number_len, reconstruct_packet_number};
 use super::{AEAD_TAG_LEN, HP_MASK_LEN, HP_SAMPLE_LEN, QspCryptoError};
-use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
+use crate::proto::{
+    AEAD_IV_LEN, AEAD_KEY_LEN, CHACHA20_POLY1305_KEY_LEN, CipherSuite, HP_KEY_LEN,
+    RegisterCidPayload,
+};
 
 #[derive(Clone, Copy)]
 struct CipherConfig {
@@ -25,11 +28,13 @@ struct CipherConfig {
 #[derive(Clone, Copy)]
 enum AeadKind {
     Aes128Gcm,
+    ChaCha20Poly1305,
 }
 
 #[derive(Clone, Copy)]
 enum HeaderProtectionKind {
     Aes128,
+    ChaCha20,
 }
 
 impl AeadKind {
@@ -40,12 +45,17 @@ impl AeadKind {
                 // SAFETY: BoringSSL returns a process-global algorithm descriptor.
                 ffi::EVP_aead_aes_128_gcm()
             },
+            Self::ChaCha20Poly1305 => unsafe {
+                // SAFETY: BoringSSL returns a process-global algorithm descriptor.
+                ffi::EVP_aead_chacha20_poly1305()
+            },
         }
     }
 
     const fn key_len(self) -> usize {
         match self {
             Self::Aes128Gcm => AEAD_KEY_LEN,
+            Self::ChaCha20Poly1305 => CHACHA20_POLY1305_KEY_LEN,
         }
     }
 }
@@ -54,19 +64,24 @@ impl HeaderProtectionKind {
     const fn key_len(self) -> usize {
         match self {
             Self::Aes128 => HP_KEY_LEN,
+            Self::ChaCha20 => CHACHA20_POLY1305_KEY_LEN,
         }
     }
 }
 
 impl CipherConfig {
-    const fn for_suite(cipher: CipherSuite) -> Result<Self, QspCryptoError> {
+    const fn for_suite(cipher: CipherSuite) -> Self {
         match cipher {
-            CipherSuite::Aes128Gcm => Ok(Self {
+            CipherSuite::Aes128Gcm => Self {
                 hp: HeaderProtectionKind::Aes128,
                 aead: AeadKind::Aes128Gcm,
                 iv_len: AEAD_IV_LEN,
-            }),
-            CipherSuite::ChaCha20Poly1305 => Err(QspCryptoError::UnsupportedCipher),
+            },
+            CipherSuite::ChaCha20Poly1305 => Self {
+                hp: HeaderProtectionKind::ChaCha20,
+                aead: AeadKind::ChaCha20Poly1305,
+                iv_len: AEAD_IV_LEN,
+            },
         }
     }
 
@@ -83,14 +98,14 @@ impl CipherConfig {
     }
 }
 
-struct HeaderProtectionKey {
-    key: Vec<u8>,
-    kind: HeaderProtectionKind,
-    algorithm: HeaderProtectionAlgorithm,
-}
-
-enum HeaderProtectionAlgorithm {
-    Aes128 { encrypt_key: ffi::AES_KEY },
+enum HeaderProtectionKey {
+    Aes128 {
+        key: Vec<u8>,
+        encrypt_key: Box<ffi::AES_KEY>,
+    },
+    ChaCha20 {
+        key: Vec<u8>,
+    },
 }
 
 impl HeaderProtectionKey {
@@ -99,26 +114,29 @@ impl HeaderProtectionKey {
             return Err(QspCryptoError::CryptoFail);
         }
 
-        let mut encrypt_key = MaybeUninit::<ffi::AES_KEY>::zeroed();
-        let key_bits = u32::try_from(key.len() * 8).map_err(|_| QspCryptoError::CryptoFail)?;
-        let rc = unsafe {
-            // SAFETY: `key` is exactly 128 bits and `encrypt_key` points to valid writable memory.
-            ffi::AES_set_encrypt_key(key.as_ptr(), key_bits, encrypt_key.as_mut_ptr())
-        };
-        if rc != 0 {
-            return Err(QspCryptoError::CryptoFail);
-        }
+        match kind {
+            HeaderProtectionKind::Aes128 => {
+                let mut encrypt_key = MaybeUninit::<ffi::AES_KEY>::zeroed();
+                let key_bits =
+                    u32::try_from(key.len() * 8).map_err(|_| QspCryptoError::CryptoFail)?;
+                let rc = unsafe {
+                    // SAFETY: `key` is exactly 128 bits and `encrypt_key` points to valid writable memory.
+                    ffi::AES_set_encrypt_key(key.as_ptr(), key_bits, encrypt_key.as_mut_ptr())
+                };
+                if rc != 0 {
+                    return Err(QspCryptoError::CryptoFail);
+                }
 
-        Ok(Self {
-            key: key.to_vec(),
-            kind,
-            algorithm: HeaderProtectionAlgorithm::Aes128 {
-                encrypt_key: unsafe {
-                    // SAFETY: `AES_set_encrypt_key` returned success and initialized the key schedule.
-                    encrypt_key.assume_init()
-                },
-            },
-        })
+                Ok(Self::Aes128 {
+                    key: key.to_vec(),
+                    encrypt_key: Box::new(unsafe {
+                        // SAFETY: `AES_set_encrypt_key` returned success and initialized the key schedule.
+                        encrypt_key.assume_init()
+                    }),
+                })
+            }
+            HeaderProtectionKind::ChaCha20 => Ok(Self::ChaCha20 { key: key.to_vec() }),
+        }
     }
 
     fn mask(&self, sample: &[u8]) -> Result<[u8; HP_MASK_LEN], QspCryptoError> {
@@ -126,23 +144,57 @@ impl HeaderProtectionKey {
             return Err(QspCryptoError::PacketTooShort);
         }
 
-        let mut out = [0u8; HP_SAMPLE_LEN];
-        match &self.algorithm {
-            HeaderProtectionAlgorithm::Aes128 { encrypt_key } => unsafe {
-                // SAFETY: input and output are each 16-byte blocks and key schedule is initialized.
-                ffi::AES_encrypt(sample.as_ptr(), out.as_mut_ptr(), encrypt_key);
-            },
-        }
+        match self {
+            Self::Aes128 { encrypt_key, .. } => {
+                let mut out = [0u8; HP_SAMPLE_LEN];
+                unsafe {
+                    // SAFETY: input and output are each 16-byte blocks and key schedule is initialized.
+                    ffi::AES_encrypt(sample.as_ptr(), out.as_mut_ptr(), encrypt_key.as_ref());
+                }
 
-        let mut mask = [0u8; HP_MASK_LEN];
-        mask.copy_from_slice(&out[..HP_MASK_LEN]);
-        Ok(mask)
+                let mut mask = [0u8; HP_MASK_LEN];
+                mask.copy_from_slice(&out[..HP_MASK_LEN]);
+                Ok(mask)
+            }
+            Self::ChaCha20 { key } => {
+                let counter = u32::from_le_bytes(
+                    sample[..4]
+                        .try_into()
+                        .map_err(|_| QspCryptoError::PacketTooShort)?,
+                );
+                let plaintext = [0u8; HP_MASK_LEN];
+                let mut mask = [0u8; HP_MASK_LEN];
+                unsafe {
+                    // SAFETY: output/input are valid for 5 bytes, key is 32 bytes, and nonce is the
+                    // remaining 12 bytes of the 16-byte HP sample.
+                    ffi::CRYPTO_chacha_20(
+                        mask.as_mut_ptr(),
+                        plaintext.as_ptr(),
+                        plaintext.len(),
+                        key.as_ptr(),
+                        sample[4..].as_ptr(),
+                        counter,
+                    );
+                }
+                Ok(mask)
+            }
+        }
+    }
+
+    fn key_material(&self) -> &[u8] {
+        match self {
+            Self::Aes128 { key, .. } | Self::ChaCha20 { key } => key,
+        }
     }
 }
 
 impl Clone for HeaderProtectionKey {
     fn clone(&self) -> Self {
-        Self::new(self.kind, &self.key).expect("HP key material must remain valid")
+        match self {
+            Self::Aes128 { key, .. } => Self::new(HeaderProtectionKind::Aes128, key),
+            Self::ChaCha20 { key } => Self::new(HeaderProtectionKind::ChaCha20, key),
+        }
+        .expect("HP key material must remain valid")
     }
 }
 
@@ -355,8 +407,8 @@ impl UdpQspKeys {
     ///
     /// # Errors
     ///
-    /// Returns `QspCryptoError::UnsupportedCipher` if the cipher suite is not
-    /// `Aes128Gcm`.
+    /// Returns an error if the cipher suite is unsupported or crypto key
+    /// initialization fails.
     pub fn new(
         cipher: CipherSuite,
         hp_tx: [u8; HP_KEY_LEN],
@@ -386,7 +438,7 @@ impl UdpQspKeys {
         iv_tx: &[u8],
         iv_rx: &[u8],
     ) -> Result<Self, QspCryptoError> {
-        let config = CipherConfig::for_suite(cipher)?;
+        let config = CipherConfig::for_suite(cipher);
 
         Ok(Self {
             cipher,
@@ -405,8 +457,8 @@ impl UdpQspKeys {
     ///
     /// # Errors
     ///
-    /// Returns `QspCryptoError::UnsupportedCipher` if the cipher suite is not
-    /// `Aes128Gcm`.
+    /// Returns an error if the cipher suite is unsupported or crypto key
+    /// initialization fails.
     pub fn from_register(payload: &RegisterCidPayload) -> Result<Self, QspCryptoError> {
         Self::new_from_key_material(
             payload.cipher,
@@ -420,7 +472,7 @@ impl UdpQspKeys {
     }
 
     pub(crate) fn with_next_tx_keys(&self) -> Result<Self, QspCryptoError> {
-        let config = CipherConfig::for_suite(self.cipher)?;
+        let config = CipherConfig::for_suite(self.cipher);
         Ok(Self {
             cipher: self.cipher,
             tx: derive_direction_keys(&self.tx, config)?,
@@ -429,7 +481,7 @@ impl UdpQspKeys {
     }
 
     pub(crate) fn with_next_rx_keys(&self) -> Result<Self, QspCryptoError> {
-        let config = CipherConfig::for_suite(self.cipher)?;
+        let config = CipherConfig::for_suite(self.cipher);
         Ok(Self {
             cipher: self.cipher,
             tx: self.tx.clone(),
@@ -613,7 +665,7 @@ fn derive_direction_keys(
     config: CipherConfig,
 ) -> Result<DirectionKeys, QspCryptoError> {
     let mut ikm = Vec::with_capacity(config.hp_key_len() + config.aead_key_len() + config.iv_len());
-    ikm.extend_from_slice(&current.hp.key);
+    ikm.extend_from_slice(current.hp.key_material());
     ikm.extend_from_slice(&current.aead.key);
     ikm.extend_from_slice(&current.aead.iv);
 
@@ -678,7 +730,9 @@ fn hkdf_expand_sha256_vec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN};
+    use crate::proto::{
+        AEAD_IV_LEN, AEAD_KEY_LEN, CHACHA20_POLY1305_KEY_LEN, CipherSuite, HP_KEY_LEN,
+    };
 
     /// Create keys where TX == RX for self-contained roundtrip tests.
     fn make_symmetric_keys() -> UdpQspKeys {
@@ -708,6 +762,34 @@ mod tests {
         .unwrap()
     }
 
+    /// Create ChaCha20-Poly1305 keys where TX == RX for self-contained roundtrip tests.
+    fn make_symmetric_chacha_keys() -> UdpQspKeys {
+        UdpQspKeys::new_from_key_material(
+            CipherSuite::ChaCha20Poly1305,
+            &[0xAA; CHACHA20_POLY1305_KEY_LEN],
+            &[0xAA; CHACHA20_POLY1305_KEY_LEN],
+            &[0xBB; CHACHA20_POLY1305_KEY_LEN],
+            &[0xBB; CHACHA20_POLY1305_KEY_LEN],
+            &[0xCC; AEAD_IV_LEN],
+            &[0xCC; AEAD_IV_LEN],
+        )
+        .unwrap()
+    }
+
+    /// Create ChaCha20-Poly1305 keys with distinct TX/RX for direction-specific tests.
+    fn make_directional_chacha_keys() -> UdpQspKeys {
+        UdpQspKeys::new_from_key_material(
+            CipherSuite::ChaCha20Poly1305,
+            &[0x11; CHACHA20_POLY1305_KEY_LEN],
+            &[0x22; CHACHA20_POLY1305_KEY_LEN],
+            &[0x33; CHACHA20_POLY1305_KEY_LEN],
+            &[0x44; CHACHA20_POLY1305_KEY_LEN],
+            &[0x55; AEAD_IV_LEN],
+            &[0x66; AEAD_IV_LEN],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn new_keys_with_aes128gcm_succeeds() {
         let keys = UdpQspKeys::new(
@@ -723,17 +805,46 @@ mod tests {
     }
 
     #[test]
-    fn new_keys_rejects_unsupported_cipher() {
-        let keys = UdpQspKeys::new(
+    fn new_keys_with_chacha20_poly1305_succeeds() {
+        let keys = UdpQspKeys::new_from_key_material(
             CipherSuite::ChaCha20Poly1305,
-            [0u8; HP_KEY_LEN],
-            [0u8; HP_KEY_LEN],
-            [0u8; AEAD_KEY_LEN],
-            [0u8; AEAD_KEY_LEN],
-            [0u8; AEAD_IV_LEN],
-            [0u8; AEAD_IV_LEN],
+            &[0u8; CHACHA20_POLY1305_KEY_LEN],
+            &[0u8; CHACHA20_POLY1305_KEY_LEN],
+            &[0u8; CHACHA20_POLY1305_KEY_LEN],
+            &[0u8; CHACHA20_POLY1305_KEY_LEN],
+            &[0u8; AEAD_IV_LEN],
+            &[0u8; AEAD_IV_LEN],
         );
-        assert!(matches!(keys, Err(QspCryptoError::UnsupportedCipher)));
+        assert!(keys.is_ok());
+    }
+
+    #[test]
+    fn chacha20_poly1305_protect_and_open_roundtrip() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"hello with chacha20-poly1305";
+        let pn = 7;
+
+        let keys = make_symmetric_chacha_keys();
+        let protected = keys.protect(&dcid, pn, true, plaintext).unwrap();
+
+        let opened = keys.open(dcid.len(), &protected, pn).unwrap();
+        assert_eq!(opened.pn, pn);
+        assert!(opened.key_phase);
+        assert_eq!(opened.payload, plaintext);
+    }
+
+    #[test]
+    fn chacha20_poly1305_rejects_wrong_key_lengths() {
+        let keys = UdpQspKeys::new_from_key_material(
+            CipherSuite::ChaCha20Poly1305,
+            &[0u8; HP_KEY_LEN],
+            &[0u8; CHACHA20_POLY1305_KEY_LEN],
+            &[0u8; CHACHA20_POLY1305_KEY_LEN],
+            &[0u8; CHACHA20_POLY1305_KEY_LEN],
+            &[0u8; AEAD_IV_LEN],
+            &[0u8; AEAD_IV_LEN],
+        );
+        assert!(matches!(keys, Err(QspCryptoError::CryptoFail)));
     }
 
     #[test]
@@ -876,6 +987,64 @@ mod tests {
             packet_orig, packet_next,
             "same TX keys should produce identical ciphertext"
         );
+    }
+
+    #[test]
+    fn chacha20_poly1305_tx_key_rotation_changes_encrypt_keys() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        let keys = make_directional_chacha_keys();
+        let next_keys = keys.with_next_tx_keys().unwrap();
+
+        let packet_original = keys.protect(&dcid, pn, false, plaintext).unwrap();
+        let packet_rotated = next_keys.protect(&dcid, pn, true, plaintext).unwrap();
+
+        assert_ne!(
+            packet_original, packet_rotated,
+            "rotated ChaCha TX keys should produce different ciphertext"
+        );
+    }
+
+    #[test]
+    fn chacha20_poly1305_rx_key_rotation_derives_working_next_keys() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        let keys = make_symmetric_chacha_keys();
+        let tx_next = keys.with_next_tx_keys().unwrap();
+        let rx_next = keys.with_next_rx_keys().unwrap();
+        let packet = tx_next.protect(&dcid, pn, true, plaintext).unwrap();
+
+        let opened = rx_next.open(dcid.len(), &packet, pn).unwrap();
+        assert_eq!(opened.payload, plaintext);
+        assert!(opened.key_phase);
+    }
+
+    #[test]
+    fn chacha20_poly1305_old_and_new_phase_packets_use_matching_keys() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"test payload";
+        let pn = 42;
+
+        let keys = make_symmetric_chacha_keys();
+        let tx_next = keys.with_next_tx_keys().unwrap();
+        let rx_next = keys.with_next_rx_keys().unwrap();
+
+        let old_phase = keys.protect(&dcid, pn, false, plaintext).unwrap();
+        let new_phase = tx_next.protect(&dcid, pn, true, plaintext).unwrap();
+
+        let opened_old = keys.open(dcid.len(), &old_phase, pn).unwrap();
+        let opened_new = rx_next.open(dcid.len(), &new_phase, pn).unwrap();
+        assert_eq!(opened_old.payload, plaintext);
+        assert!(!opened_old.key_phase);
+        assert_eq!(opened_new.payload, plaintext);
+        assert!(opened_new.key_phase);
+
+        assert!(keys.open(dcid.len(), &new_phase, pn).is_err());
+        assert!(rx_next.open(dcid.len(), &old_phase, pn).is_err());
     }
 
     #[test]

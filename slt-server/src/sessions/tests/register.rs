@@ -140,7 +140,7 @@ async fn session_register_rejects_invalid_cid() {
 }
 
 #[tokio::test]
-async fn session_register_rejects_invalid_keys() {
+async fn session_register_accepts_chacha20_poly1305() {
     let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
@@ -161,13 +161,7 @@ async fn session_register_rejects_invalid_keys() {
     .unwrap()
     .unwrap();
     let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
-    match message {
-        Message::RegisterFail { payload } => {
-            let fail = RegisterFailPayload::decode(payload).unwrap();
-            assert_eq!(fail.code, RegisterFailCode::InvalidKeys);
-        }
-        _ => panic!("expected register fail"),
-    }
+    assert!(matches!(message, Message::RegisterOk { .. }));
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
