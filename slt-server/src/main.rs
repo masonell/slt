@@ -32,6 +32,8 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+const DEFAULT_TRACING_FILTER: &str = "slt_server=info,slt_core=info";
+
 /// Command-line arguments for the SLT server.
 ///
 /// Parsed using `clap` from command-line invocation.
@@ -64,7 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("slt=info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_TRACING_FILTER));
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
@@ -620,5 +623,16 @@ async fn run_tun_writer(
             estimated_coalesced_packets = ?estimated_coalesced_packets,
             "tun writer batch stats"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_TRACING_FILTER;
+
+    #[test]
+    fn default_tracing_filter_includes_server_and_core_targets() {
+        assert!(DEFAULT_TRACING_FILTER.contains("slt_server=info"));
+        assert!(DEFAULT_TRACING_FILTER.contains("slt_core=info"));
     }
 }

@@ -11,13 +11,15 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+const DEFAULT_TRACING_FILTER: &str = "slt_client=info,slt_core=info";
+
 #[derive(Parser, Debug)]
 #[command(about = "Run the SLT client.", version)]
 struct Args {
     /// Path to the client configuration file (TOML).
     #[arg(long, value_name = "PATH")]
     config: PathBuf,
-    /// Optional tracing filter override (e.g., "slt=debug").
+    /// Optional tracing filter override (e.g., "`slt_client=debug,slt_core=debug`").
     #[arg(long, value_name = "FILTER")]
     log: Option<String>,
 }
@@ -71,7 +73,10 @@ async fn main() -> anyhow::Result<()> {
 
 fn init_tracing(filter: Option<&str>) {
     let filter = filter.map_or_else(
-        || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("slt=info")),
+        || {
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(DEFAULT_TRACING_FILTER))
+        },
         EnvFilter::new,
     );
     tracing_subscriber::registry()
@@ -118,5 +123,16 @@ const fn tls_material_source_opt(material: Option<&TlsMaterial>) -> &'static str
     match material {
         Some(m) => tls_material_source(m),
         None => "system",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_TRACING_FILTER;
+
+    #[test]
+    fn default_tracing_filter_includes_client_and_core_targets() {
+        assert!(DEFAULT_TRACING_FILTER.contains("slt_client=info"));
+        assert!(DEFAULT_TRACING_FILTER.contains("slt_core=info"));
     }
 }
