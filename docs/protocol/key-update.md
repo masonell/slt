@@ -96,7 +96,16 @@ This large margin ensures:
 ## 4. HKDF Key Derivation
 
 New keys are derived from current keys using HKDF-SHA256. The derivation is deterministic,
-so both endpoints compute identical next-generation keys.
+so both endpoints compute identical next-generation keys. Output lengths follow the active
+cipher suite: AES-128-GCM derives 16-byte HP and AEAD keys, ChaCha20-Poly1305 derives
+32-byte HP and AEAD keys; both derive a 12-byte IV.
+
+### Per-Suite Sizes
+
+| Suite | HP key | AEAD key | IV | IKM (`hp || aead || iv`) |
+|-------|-------:|---------:|---:|-------------------------:|
+| AES-128-GCM        | 16 | 16 | 12 | 44 bytes |
+| ChaCha20-Poly1305  | 32 | 32 | 12 | 76 bytes |
 
 ### Context Strings and Labels
 
@@ -117,7 +126,9 @@ Concatenate current directional keys:
 
 ```rust
 ikm = hp_key || aead_key || iv
-// Length: 16 + 16 + 12 = 44 bytes
+// Length: hp_len + aead_len + 12
+//   AES-128-GCM:       16 + 16 + 12 = 44 bytes
+//   ChaCha20-Poly1305: 32 + 32 + 12 = 76 bytes
 ```
 
 **Step 2: HKDF-Extract**
@@ -131,23 +142,24 @@ The current IV is used as the salt. The output PRK is 32 bytes.
 
 **Step 3: HKDF-Expand**
 
-Derive each new key component with its specific info label:
+Derive each new key component with its specific info label, expanding to the active
+suite's lengths:
 
 ```rust
-new_hp_key   = HKDF-Expand-SHA256(prk, KEY_UPDATE_HP_INFO, 16)
-new_aead_key = HKDF-Expand-SHA256(prk, KEY_UPDATE_AEAD_INFO, 16)
-new_iv       = HKDF-Expand-SHA256(prk, KEY_UPDATE_IV_INFO, 12)
+new_hp_key   = HKDF-Expand-SHA256(prk, KEY_UPDATE_HP_INFO,   hp_len)   // 16 or 32
+new_aead_key = HKDF-Expand-SHA256(prk, KEY_UPDATE_AEAD_INFO, aead_len) // 16 or 32
+new_iv       = HKDF-Expand-SHA256(prk, KEY_UPDATE_IV_INFO,   12)
 ```
 
 ### What Gets Rotated
 
 Each directional rekey rotates all three key components:
 
-| Component | Length | Purpose |
-|-----------|--------|---------|
-| HP key | 16 bytes | Header protection (AES-128-ECB) |
-| AEAD key | 16 bytes | Payload encryption (AES-128-GCM) |
-| IV | 12 bytes | Nonce construction |
+| Component | AES-128-GCM | ChaCha20-Poly1305 | Purpose |
+|-----------|------------:|------------------:|---------|
+| HP key | 16 bytes | 32 bytes | Header protection (AES-128-ECB / ChaCha20) |
+| AEAD key | 16 bytes | 32 bytes | Payload encryption (AES-128-GCM / ChaCha20-Poly1305) |
+| IV | 12 bytes | 12 bytes | Nonce construction |
 
 TX and RX directions rekey independently. When the TX direction rotates, the RX keys
 remain unchanged, and vice versa.
@@ -161,11 +173,11 @@ fn derive_direction_keys(
     current: &DirectionKeys,
     config: CipherConfig,
 ) -> Result<DirectionKeys, QspCryptoError> {
-    // Assemble IKM
-    let mut ikm = [0u8; HP_KEY_LEN + AEAD_KEY_LEN + AEAD_IV_LEN];
-    ikm[..HP_KEY_LEN].copy_from_slice(&current.hp.key);
-    ikm[HP_KEY_LEN..HP_KEY_LEN + AEAD_KEY_LEN].copy_from_slice(&current.aead.key);
-    ikm[HP_KEY_LEN + AEAD_KEY_LEN..].copy_from_slice(&current.aead.iv);
+    // Assemble IKM with suite-specific lengths
+    let mut ikm = Vec::with_capacity(config.hp_key_len() + config.aead_key_len() + config.iv_len());
+    ikm.extend_from_slice(current.hp.key_material());
+    ikm.extend_from_slice(&current.aead.key);
+    ikm.extend_from_slice(&current.aead.iv);
 
     // Extract
     let mut extract_input = Vec::with_capacity(KEY_UPDATE_CONTEXT.len() + ikm.len());
@@ -173,12 +185,16 @@ fn derive_direction_keys(
     extract_input.extend_from_slice(&ikm);
     let prk = hkdf_extract_sha256(&current.aead.iv, &extract_input)?;
 
-    // Expand
+    // Expand to suite-specific lengths
+    let next_iv = hkdf_expand_sha256_vec(&prk, KEY_UPDATE_IV_INFO, config.iv_len())?;
     Ok(DirectionKeys {
-        hp: HeaderProtectionKey::new(hkdf_expand_sha256::<HP_KEY_LEN>(&prk, KEY_UPDATE_HP_INFO)?)?,
+        hp: HeaderProtectionKey::new(
+            config.hp,
+            &hkdf_expand_sha256_vec(&prk, KEY_UPDATE_HP_INFO, config.hp_key_len())?,
+        )?,
         aead: PacketKey::new(
-            hkdf_expand_sha256::<AEAD_KEY_LEN>(&prk, KEY_UPDATE_AEAD_INFO)?,
-            hkdf_expand_sha256::<AEAD_IV_LEN>(&prk, KEY_UPDATE_IV_INFO)?,
+            &hkdf_expand_sha256_vec(&prk, KEY_UPDATE_AEAD_INFO, config.aead_key_len())?,
+            &next_iv,
             config.aead,
         )?,
     })

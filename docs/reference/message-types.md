@@ -7,7 +7,7 @@
 | `0x01`  | AUTH            | C->S      | 116 bytes    | Client authentication request            |
 | `0x02`  | AUTH_OK         | S->C      | 0 bytes      | Authentication accepted                  |
 | `0x03`  | AUTH_FAIL       | S->C      | 1 byte       | Authentication rejected                  |
-| `0x04`  | REGISTER_CID    | C->S      | 128-148 bytes | Register UDP-QSP CID and keys            |
+| `0x04`  | REGISTER_CID    | C->S      | 128-148 bytes (AES) / 192-212 bytes (ChaCha) | Register UDP-QSP CID and keys        |
 | `0x05`  | REGISTER_OK     | S->C      | 21 bytes     | CID registration accepted                |
 | `0x06`  | REGISTER_FAIL   | S->C      | 1 byte       | CID registration rejected                |
 | `0x07`  | PING            | Both      | 8 bytes      | Keepalive ping                           |
@@ -55,10 +55,13 @@
 
 ## Cipher Suites
 
-| ID     | Name               | Status    |
-|--------|--------------------| --------- |
-| `0x01` | AES-128-GCM        | Required  |
-| `0x02` | ChaCha20-Poly1305  | Reserved  |
+| ID     | Name               | Status    | HP key | AEAD key |
+|--------|--------------------| --------- | ------ | -------- |
+| `0x01` | AES-128-GCM        | Supported | 16     | 16       |
+| `0x02` | ChaCha20-Poly1305  | Supported | 32     | 32       |
+
+Both suites use a 12-byte IV and a 16-byte tag. The client selects the suite in
+`REGISTER_CID`; the server accepts it if permitted by its `allowed_ciphers` policy.
 
 ## Constants
 
@@ -79,11 +82,12 @@
 
 ### Key Material
 
-| Constant      | Value | Description               |
-|---------------|-------|---------------------------|
-| `HP_KEY_LEN`  | 16    | Header protection key     |
-| `AEAD_KEY_LEN`| 16    | AEAD encryption key       |
-| `AEAD_IV_LEN` | 12    | AEAD initialization vector|
+| Constant                   | Value | Description                                  |
+|----------------------------|-------|----------------------------------------------|
+| `HP_KEY_LEN`               | 16    | Header protection key length (AES-128-GCM)   |
+| `AEAD_KEY_LEN`             | 16    | AEAD key length (AES-128-GCM)                |
+| `CHACHA20_POLY1305_KEY_LEN`| 32    | HP/AEAD key length (ChaCha20-Poly1305)       |
+| `AEAD_IV_LEN`              | 12    | AEAD initialization vector (both suites)     |
 
 ### Frame Format
 

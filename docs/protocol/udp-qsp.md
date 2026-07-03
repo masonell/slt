@@ -62,7 +62,11 @@ The Destination Connection ID (DCID) identifies the receiving endpoint. For UDP-
 ## 3. Header Protection (HP)
 
 Header protection obscures the first byte (except the fixed bit's position) and the
-packet number bytes using AES-128-ECB.
+packet number bytes. The mask algorithm follows the cipher suite selected in
+`REGISTER_CID`:
+
+- AES-128-GCM uses AES-128-ECB mask derivation (QUIC's AES HP).
+- ChaCha20-Poly1305 uses a single-block ChaCha20 mask derivation (QUIC's ChaCha HP).
 
 ### Constants
 
@@ -70,7 +74,8 @@ packet number bytes using AES-128-ECB.
 |----------|-------|--------|
 | `HP_SAMPLE_LEN` | 16 bytes | `slt-core/src/crypto/udp_qsp/mod.rs` |
 | `HP_MASK_LEN` | 5 bytes | `slt-core/src/crypto/udp_qsp/mod.rs` |
-| `HP_KEY_LEN` | 16 bytes | `slt-core/src/proto/mod.rs` |
+| `HP_KEY_LEN` | 16 bytes (AES-128-GCM) | `slt-core/src/proto/mod.rs` |
+| `CHACHA20_POLY1305_KEY_LEN` | 32 bytes (ChaCha20-Poly1305) | `slt-core/src/proto/mod.rs` |
 
 ### Sample Location
 
@@ -86,12 +91,26 @@ is available for the mask derivation.
 
 ### Mask Derivation
 
+**AES-128-GCM**
+
 ```
 mask = AES-128-ECB-encrypt(hp_key, sample)[0..5]
 ```
 
-The 16-byte sample is encrypted with AES-128-ECB using the HP key. The first 5 bytes
-of the output form the mask.
+The 16-byte sample is encrypted with AES-128-ECB using the 16-byte HP key. The first
+5 bytes of the output form the mask.
+
+**ChaCha20-Poly1305**
+
+```
+counter = u32::from_le_bytes(sample[0..4])
+nonce   = sample[4..16]
+mask    = CRYPTO_chacha_20(hp_key, nonce, counter, zeros[0..5])
+```
+
+The 16-byte sample is split into a 4-byte little-endian counter and a 12-byte nonce.
+`CRYPTO_chacha_20` encrypts five zero bytes to produce the 5-byte mask. This matches
+QUIC's ChaCha20 header protection.
 
 ### Applying the Mask
 
@@ -116,15 +135,21 @@ counter.
 
 | Constant | Value | Source |
 |----------|-------|--------|
-| `AEAD_TAG_LEN` | 16 bytes | `slt-core/src/crypto/udp_qsp/mod.rs` |
-| `AEAD_KEY_LEN` | 16 bytes | `slt-core/src/proto/mod.rs` |
-| `AEAD_IV_LEN` | 12 bytes | `slt-core/src/proto/mod.rs` |
+| `AEAD_TAG_LEN` | 16 bytes (both suites) | `slt-core/src/crypto/udp_qsp/mod.rs` |
+| `AEAD_KEY_LEN` | 16 bytes (AES-128-GCM) | `slt-core/src/proto/mod.rs` |
+| `CHACHA20_POLY1305_KEY_LEN` | 32 bytes (ChaCha20-Poly1305) | `slt-core/src/proto/mod.rs` |
+| `AEAD_IV_LEN` | 12 bytes (both suites) | `slt-core/src/proto/mod.rs` |
 
-### Cipher Suite
+### Cipher Suites
 
-**AES-128-GCM** is the only supported cipher (tag length: 16 bytes).
+| Cipher constant | `cipher` | AEAD | Key | Tag |
+|-----------------|----------|------|----:|----:|
+| `CipherSuite::Aes128Gcm` | 0x01 | AES-128-GCM (BoringSSL `EVP_aead_aes_128_gcm`) | 16 | 16 |
+| `CipherSuite::ChaCha20Poly1305` | 0x02 | ChaCha20-Poly1305 (BoringSSL `EVP_aead_chacha20_poly1305`) | 32 | 16 |
 
-Cipher constant: `CipherSuite::Aes128Gcm = 0x01`
+Both suites use a 96-bit nonce and a 128-bit authentication tag. The cipher is chosen
+by the client in `REGISTER_CID` and accepted by the server subject to its
+`allowed_ciphers` policy.
 
 ### Nonce Construction
 
@@ -155,8 +180,10 @@ protection is applied.
 ### Encryption Output
 
 ```
-ciphertext || tag = AES-128-GCM-Seal(key, nonce, ad, plaintext)
+ciphertext || tag = AEAD-Seal(key, nonce, ad, plaintext)
 ```
+
+`AEAD-Seal` is AES-128-GCM or ChaCha20-Poly1305 per the negotiated suite.
 
 ## 5. Padding Requirements
 
@@ -317,7 +344,7 @@ On packet receipt:
 
 ### Key Derivation
 
-New keys are derived using HKDF-SHA256:
+New keys are derived using HKDF-SHA256 with suite-specific output lengths:
 
 ```rust
 // Context for key derivation
@@ -327,13 +354,16 @@ const KEY_UPDATE_AEAD_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/aead";
 const KEY_UPDATE_IV_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/iv";
 
 // Extract: PRK = HMAC-SHA256(iv, context || ikm)
-// where ikm = hp_key || aead_key || iv
+// where ikm = hp_key || aead_key || iv (lengths follow the active suite)
 
 // Expand: output = HKDF-Expand-SHA256(PRK, info)
-new_hp_key = HKDF-Expand(PRK, KEY_UPDATE_HP_INFO, 16)
-new_aead_key = HKDF-Expand(PRK, KEY_UPDATE_AEAD_INFO, 16)
-new_iv = HKDF-Expand(PRK, KEY_UPDATE_IV_INFO, 12)
+new_hp_key   = HKDF-Expand(PRK, KEY_UPDATE_HP_INFO,   hp_len)   // 16 (AES) or 32 (ChaCha)
+new_aead_key = HKDF-Expand(PRK, KEY_UPDATE_AEAD_INFO, aead_len) // 16 (AES) or 32 (ChaCha)
+new_iv       = HKDF-Expand(PRK, KEY_UPDATE_IV_INFO,   12)
 ```
+
+See [key-update.md](key-update.md) for the full derivation, including per-suite IKM
+and output lengths.
 
 ## 9. UDP-QSP Payload Format
 
