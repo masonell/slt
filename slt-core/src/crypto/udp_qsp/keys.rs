@@ -17,12 +17,19 @@ use crate::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterC
 
 #[derive(Clone, Copy)]
 struct CipherConfig {
+    hp: HeaderProtectionKind,
     aead: AeadKind,
+    iv_len: usize,
 }
 
 #[derive(Clone, Copy)]
 enum AeadKind {
     Aes128Gcm,
+}
+
+#[derive(Clone, Copy)]
+enum HeaderProtectionKind {
+    Aes128,
 }
 
 impl AeadKind {
@@ -35,28 +42,65 @@ impl AeadKind {
             },
         }
     }
+
+    const fn key_len(self) -> usize {
+        match self {
+            Self::Aes128Gcm => AEAD_KEY_LEN,
+        }
+    }
+}
+
+impl HeaderProtectionKind {
+    const fn key_len(self) -> usize {
+        match self {
+            Self::Aes128 => HP_KEY_LEN,
+        }
+    }
 }
 
 impl CipherConfig {
     const fn for_suite(cipher: CipherSuite) -> Result<Self, QspCryptoError> {
         match cipher {
             CipherSuite::Aes128Gcm => Ok(Self {
+                hp: HeaderProtectionKind::Aes128,
                 aead: AeadKind::Aes128Gcm,
+                iv_len: AEAD_IV_LEN,
             }),
             CipherSuite::ChaCha20Poly1305 => Err(QspCryptoError::UnsupportedCipher),
         }
     }
+
+    const fn hp_key_len(self) -> usize {
+        self.hp.key_len()
+    }
+
+    const fn aead_key_len(self) -> usize {
+        self.aead.key_len()
+    }
+
+    const fn iv_len(self) -> usize {
+        self.iv_len
+    }
 }
 
 struct HeaderProtectionKey {
-    key: [u8; HP_KEY_LEN],
-    encrypt_key: ffi::AES_KEY,
+    key: Vec<u8>,
+    kind: HeaderProtectionKind,
+    algorithm: HeaderProtectionAlgorithm,
+}
+
+enum HeaderProtectionAlgorithm {
+    Aes128 { encrypt_key: ffi::AES_KEY },
 }
 
 impl HeaderProtectionKey {
-    fn new(key: [u8; HP_KEY_LEN]) -> Result<Self, QspCryptoError> {
+    fn new(kind: HeaderProtectionKind, key: &[u8]) -> Result<Self, QspCryptoError> {
+        if key.len() != kind.key_len() {
+            return Err(QspCryptoError::CryptoFail);
+        }
+
         let mut encrypt_key = MaybeUninit::<ffi::AES_KEY>::zeroed();
-        let key_bits = u32::try_from(HP_KEY_LEN * 8).map_err(|_| QspCryptoError::CryptoFail)?;
+        let key_bits = u32::try_from(key.len() * 8).map_err(|_| QspCryptoError::CryptoFail)?;
         let rc = unsafe {
             // SAFETY: `key` is exactly 128 bits and `encrypt_key` points to valid writable memory.
             ffi::AES_set_encrypt_key(key.as_ptr(), key_bits, encrypt_key.as_mut_ptr())
@@ -66,10 +110,13 @@ impl HeaderProtectionKey {
         }
 
         Ok(Self {
-            key,
-            encrypt_key: unsafe {
-                // SAFETY: `AES_set_encrypt_key` returned success and initialized the key schedule.
-                encrypt_key.assume_init()
+            key: key.to_vec(),
+            kind,
+            algorithm: HeaderProtectionAlgorithm::Aes128 {
+                encrypt_key: unsafe {
+                    // SAFETY: `AES_set_encrypt_key` returned success and initialized the key schedule.
+                    encrypt_key.assume_init()
+                },
             },
         })
     }
@@ -80,13 +127,11 @@ impl HeaderProtectionKey {
         }
 
         let mut out = [0u8; HP_SAMPLE_LEN];
-        unsafe {
-            // SAFETY: input and output are each 16-byte blocks and key schedule is initialized.
-            ffi::AES_encrypt(
-                sample.as_ptr(),
-                out.as_mut_ptr(),
-                &raw const self.encrypt_key,
-            );
+        match &self.algorithm {
+            HeaderProtectionAlgorithm::Aes128 { encrypt_key } => unsafe {
+                // SAFETY: input and output are each 16-byte blocks and key schedule is initialized.
+                ffi::AES_encrypt(sample.as_ptr(), out.as_mut_ptr(), encrypt_key);
+            },
         }
 
         let mut mask = [0u8; HP_MASK_LEN];
@@ -97,25 +142,30 @@ impl HeaderProtectionKey {
 
 impl Clone for HeaderProtectionKey {
     fn clone(&self) -> Self {
-        Self::new(self.key).expect("HP key material must remain a valid AES-128 key")
+        Self::new(self.kind, &self.key).expect("HP key material must remain valid")
     }
 }
 
 struct PacketKey {
-    key: [u8; AEAD_KEY_LEN],
+    key: Vec<u8>,
     iv: [u8; AEAD_IV_LEN],
     aead: AeadKind,
     ctx: AeadContext,
 }
 
 impl PacketKey {
-    fn new(
-        key: [u8; AEAD_KEY_LEN],
-        iv: [u8; AEAD_IV_LEN],
-        aead: AeadKind,
-    ) -> Result<Self, QspCryptoError> {
-        let ctx = AeadContext::new(aead, &key)?;
-        Ok(Self { key, iv, aead, ctx })
+    fn new(key: &[u8], iv: &[u8], aead: AeadKind) -> Result<Self, QspCryptoError> {
+        if iv.len() != AEAD_IV_LEN {
+            return Err(QspCryptoError::CryptoFail);
+        }
+        let iv = iv.try_into().map_err(|_| QspCryptoError::CryptoFail)?;
+        let ctx = AeadContext::new(aead, key)?;
+        Ok(Self {
+            key: key.to_vec(),
+            iv,
+            aead,
+            ctx,
+        })
     }
 
     fn seal_into(
@@ -164,7 +214,7 @@ impl PacketKey {
 
 impl Clone for PacketKey {
     fn clone(&self) -> Self {
-        Self::new(self.key, self.iv, self.aead)
+        Self::new(&self.key, &self.iv, self.aead)
             .expect("AEAD key material must remain valid for cloned PacketKey")
     }
 }
@@ -188,7 +238,11 @@ unsafe impl Send for AeadContext {}
 unsafe impl Sync for AeadContext {}
 
 impl AeadContext {
-    fn new(aead: AeadKind, key: &[u8; AEAD_KEY_LEN]) -> Result<Self, QspCryptoError> {
+    fn new(aead: AeadKind, key: &[u8]) -> Result<Self, QspCryptoError> {
+        if key.len() != aead.key_len() {
+            return Err(QspCryptoError::CryptoFail);
+        }
+
         let aead_ptr = aead.as_ptr();
         if aead_ptr.is_null() {
             return Err(QspCryptoError::CryptoFail);
@@ -312,16 +366,28 @@ impl UdpQspKeys {
         iv_tx: [u8; AEAD_IV_LEN],
         iv_rx: [u8; AEAD_IV_LEN],
     ) -> Result<Self, QspCryptoError> {
+        Self::new_from_key_material(cipher, &hp_tx, &hp_rx, &aead_tx, &aead_rx, &iv_tx, &iv_rx)
+    }
+
+    fn new_from_key_material(
+        cipher: CipherSuite,
+        hp_tx: &[u8],
+        hp_rx: &[u8],
+        aead_tx: &[u8],
+        aead_rx: &[u8],
+        iv_tx: &[u8],
+        iv_rx: &[u8],
+    ) -> Result<Self, QspCryptoError> {
         let config = CipherConfig::for_suite(cipher)?;
 
         Ok(Self {
             cipher,
             tx: DirectionKeys {
-                hp: HeaderProtectionKey::new(hp_tx)?,
+                hp: HeaderProtectionKey::new(config.hp, hp_tx)?,
                 aead: PacketKey::new(aead_tx, iv_tx, config.aead)?,
             },
             rx: DirectionKeys {
-                hp: HeaderProtectionKey::new(hp_rx)?,
+                hp: HeaderProtectionKey::new(config.hp, hp_rx)?,
                 aead: PacketKey::new(aead_rx, iv_rx, config.aead)?,
             },
         })
@@ -538,21 +604,25 @@ fn derive_direction_keys(
     current: &DirectionKeys,
     config: CipherConfig,
 ) -> Result<DirectionKeys, QspCryptoError> {
-    let mut ikm = [0u8; HP_KEY_LEN + AEAD_KEY_LEN + AEAD_IV_LEN];
-    ikm[..HP_KEY_LEN].copy_from_slice(&current.hp.key);
-    ikm[HP_KEY_LEN..HP_KEY_LEN + AEAD_KEY_LEN].copy_from_slice(&current.aead.key);
-    ikm[HP_KEY_LEN + AEAD_KEY_LEN..].copy_from_slice(&current.aead.iv);
+    let mut ikm = Vec::with_capacity(config.hp_key_len() + config.aead_key_len() + config.iv_len());
+    ikm.extend_from_slice(&current.hp.key);
+    ikm.extend_from_slice(&current.aead.key);
+    ikm.extend_from_slice(&current.aead.iv);
 
     let mut extract_input = Vec::with_capacity(KEY_UPDATE_CONTEXT.len() + ikm.len());
     extract_input.extend_from_slice(KEY_UPDATE_CONTEXT);
     extract_input.extend_from_slice(&ikm);
     let prk = hkdf_extract_sha256(&current.aead.iv, &extract_input)?;
 
+    let next_iv = hkdf_expand_sha256_vec(&prk, KEY_UPDATE_IV_INFO, config.iv_len())?;
     Ok(DirectionKeys {
-        hp: HeaderProtectionKey::new(hkdf_expand_sha256::<HP_KEY_LEN>(&prk, KEY_UPDATE_HP_INFO)?)?,
+        hp: HeaderProtectionKey::new(
+            config.hp,
+            &hkdf_expand_sha256_vec(&prk, KEY_UPDATE_HP_INFO, config.hp_key_len())?,
+        )?,
         aead: PacketKey::new(
-            hkdf_expand_sha256::<AEAD_KEY_LEN>(&prk, KEY_UPDATE_AEAD_INFO)?,
-            hkdf_expand_sha256::<AEAD_IV_LEN>(&prk, KEY_UPDATE_IV_INFO)?,
+            &hkdf_expand_sha256_vec(&prk, KEY_UPDATE_AEAD_INFO, config.aead_key_len())?,
+            &next_iv,
             config.aead,
         )?,
     })
@@ -562,21 +632,21 @@ fn hkdf_extract_sha256(salt: &[u8], ikm: &[u8]) -> Result<[u8; 32], QspCryptoErr
     hmac_sha256(salt, ikm).map_err(|_| QspCryptoError::CryptoFail)
 }
 
-fn hkdf_expand_sha256<const N: usize>(
+fn hkdf_expand_sha256_vec(
     prk: &[u8; 32],
     info: &[u8],
-) -> Result<[u8; N], QspCryptoError> {
-    let mut out = [0u8; N];
-    if N == 0 {
-        return Ok(out);
+    len: usize,
+) -> Result<Vec<u8>, QspCryptoError> {
+    if len == 0 {
+        return Ok(Vec::new());
     }
 
-    let mut generated = 0usize;
+    let mut out = Vec::with_capacity(len);
     let mut prev = [0u8; 32];
     let mut prev_len = 0usize;
     let mut counter = 1u8;
 
-    while generated < N {
+    while out.len() < len {
         let mut input = Vec::with_capacity(prev_len + info.len() + 1);
         if prev_len != 0 {
             input.extend_from_slice(&prev[..prev_len]);
@@ -587,10 +657,9 @@ fn hkdf_expand_sha256<const N: usize>(
         prev = hmac_sha256(prk, &input).map_err(|_| QspCryptoError::CryptoFail)?;
         prev_len = prev.len();
 
-        let remaining = N - generated;
+        let remaining = len - out.len();
         let take = remaining.min(prev_len);
-        out[generated..generated + take].copy_from_slice(&prev[..take]);
-        generated += take;
+        out.extend_from_slice(&prev[..take]);
 
         counter = counter.checked_add(1).ok_or(QspCryptoError::CryptoFail)?;
     }
@@ -876,13 +945,13 @@ mod tests {
         let info = b"test info";
 
         // Test various output lengths
-        let out16: [u8; 16] = hkdf_expand_sha256(&prk, info).unwrap();
+        let out16 = hkdf_expand_sha256_vec(&prk, info, 16).unwrap();
         assert_eq!(out16.len(), 16);
 
-        let out32: [u8; 32] = hkdf_expand_sha256(&prk, info).unwrap();
+        let out32 = hkdf_expand_sha256_vec(&prk, info, 32).unwrap();
         assert_eq!(out32.len(), 32);
 
-        let out64: [u8; 64] = hkdf_expand_sha256(&prk, info).unwrap();
+        let out64 = hkdf_expand_sha256_vec(&prk, info, 64).unwrap();
         assert_eq!(out64.len(), 64);
     }
 
@@ -891,8 +960,8 @@ mod tests {
         let prk = [0x42u8; 32];
         let info = b"test info";
 
-        let out1: [u8; 32] = hkdf_expand_sha256(&prk, info).unwrap();
-        let out2: [u8; 32] = hkdf_expand_sha256(&prk, info).unwrap();
+        let out1 = hkdf_expand_sha256_vec(&prk, info, 32).unwrap();
+        let out2 = hkdf_expand_sha256_vec(&prk, info, 32).unwrap();
 
         assert_eq!(out1, out2, "HKDF expand should be deterministic");
     }
@@ -901,8 +970,8 @@ mod tests {
     fn hkdf_expand_different_info_produces_different_output() {
         let prk = [0x42u8; 32];
 
-        let out1: [u8; 32] = hkdf_expand_sha256(&prk, b"info 1").unwrap();
-        let out2: [u8; 32] = hkdf_expand_sha256(&prk, b"info 2").unwrap();
+        let out1 = hkdf_expand_sha256_vec(&prk, b"info 1", 32).unwrap();
+        let out2 = hkdf_expand_sha256_vec(&prk, b"info 2", 32).unwrap();
 
         assert_ne!(out1, out2, "different info should produce different output");
     }
@@ -913,8 +982,8 @@ mod tests {
         let prk2 = [0x24u8; 32];
         let info = b"test info";
 
-        let out1: [u8; 32] = hkdf_expand_sha256(&prk1, info).unwrap();
-        let out2: [u8; 32] = hkdf_expand_sha256(&prk2, info).unwrap();
+        let out1 = hkdf_expand_sha256_vec(&prk1, info, 32).unwrap();
+        let out2 = hkdf_expand_sha256_vec(&prk2, info, 32).unwrap();
 
         assert_ne!(out1, out2, "different PRK should produce different output");
     }
