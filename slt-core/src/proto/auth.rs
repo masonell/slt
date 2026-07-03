@@ -107,6 +107,7 @@ mod tests {
                 tun_ipv4: ipv4,
                 tun_prefix: 24,
             },
+            transport: Default::default(),
             enable_upgrade: false,
             require_udp: false,
             timing: ClientTimingConfig::default(),

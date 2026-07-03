@@ -202,6 +202,9 @@ tun_prefix = 24
 enable_upgrade = true
 require_udp = false
 
+[transport.udp_qsp]
+cipher = "auto"
+
 [timing]
 ping_min = "10s"
 ping_max = "30s"
@@ -256,6 +259,15 @@ reconnect_max = "5s"
 | `enable_upgrade` | boolean | No | `false` | Enable QUIC DCID discovery and UDP-QSP upgrade. |
 | `require_udp` | boolean | No | `false` | Require UDP upgrade success; if upgrade times out, fail the session. Requires `enable_upgrade = true`. |
 
+#### UDP-QSP Transport Section
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `cipher` | string | No | `auto` | UDP-QSP packet protection cipher. Use `auto`, `aes-128-gcm`, or `chacha20-poly1305`. |
+
+`auto` selects AES-128-GCM when native AES-GCM acceleration is available and
+ChaCha20-Poly1305 otherwise.
+
 #### Timing Section
 
 | Field | Type | Required | Default | Description |
@@ -302,6 +314,9 @@ tun_prefix = 24
 # Transport options (top-level fields)
 enable_upgrade = true
 require_udp = false
+
+[transport.udp_qsp]
+cipher = "auto"
 
 [timing]
 ping_min = "10s"

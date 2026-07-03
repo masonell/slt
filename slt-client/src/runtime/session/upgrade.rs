@@ -116,7 +116,13 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             _ => return SessionControl::Continue,
         };
 
-        match register::start_udp_qsp_registration(&mut self.tcp, &quic_ids).await {
+        match register::start_udp_qsp_registration(
+            &mut self.tcp,
+            &quic_ids,
+            self.config.transport.udp_qsp.cipher,
+        )
+        .await
+        {
             Ok(prepared) => {
                 let deadline = Instant::now() + self.config.timing.register_timeout;
                 if let UdpState::Pending { registration, .. } = &mut self.udp_state {

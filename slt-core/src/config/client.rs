@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{ConfigError, ConfigLoadError};
 use crate::types::{
-    ClientIdentity, ClientNetworkConfig, ClientTimingConfig, ClientTlsConfig, TunConfig,
+    ClientIdentity, ClientNetworkConfig, ClientTimingConfig, ClientTlsConfig,
+    ClientTransportConfig, TunConfig,
 };
 
 /// Static client configuration.
@@ -18,6 +19,9 @@ pub struct ClientConfig {
     pub identity: ClientIdentity,
     /// TUN interface settings.
     pub tun: TunConfig,
+    /// Transport-specific settings.
+    #[serde(default)]
+    pub transport: ClientTransportConfig,
     /// Enable QUIC DCID discovery and UDP-QSP upgrade.
     #[serde(default)]
     pub enable_upgrade: bool,
@@ -80,7 +84,10 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
+    use crate::types::{
+        ClientId, ClientTransportConfig, ClientUdpQspCipher, PrivKeyEd25519, SharedSecret,
+        TlsMaterial,
+    };
 
     fn test_config() -> ClientConfig {
         ClientConfig {
@@ -105,6 +112,7 @@ mod tests {
                 tun_ipv4: Ipv4Addr::new(10, 10, 0, 2),
                 tun_prefix: 24,
             },
+            transport: ClientTransportConfig::default(),
             enable_upgrade: false,
             require_udp: false,
             timing: ClientTimingConfig {
@@ -176,5 +184,65 @@ mod tests {
         config.require_udp = true;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::RequireUdpNeedsUpgrade));
+    }
+
+    #[test]
+    fn serde_defaults_transport_cipher_to_auto_when_omitted() {
+        let raw = r#"
+            [network]
+            hostname = "example.com"
+            port = 443
+
+            [tls]
+            tls_ca = ""
+
+            [identity]
+            client_id = "00000000000000000000000000000000"
+            shared_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+            assigned_ipv4 = "10.10.0.2"
+            privkey_ed25519 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+            [tun]
+            tun_name = "tun0"
+            tun_mtu = 1280
+            tun_ipv4 = "10.10.0.2"
+            tun_prefix = 24
+        "#;
+
+        let config = ClientConfig::from_toml_str(raw).unwrap();
+        assert_eq!(config.transport.udp_qsp.cipher, ClientUdpQspCipher::Auto);
+    }
+
+    #[test]
+    fn serde_parses_udp_qsp_cipher_selection() {
+        let raw = r#"
+            [network]
+            hostname = "example.com"
+            port = 443
+
+            [tls]
+            tls_ca = ""
+
+            [identity]
+            client_id = "00000000000000000000000000000000"
+            shared_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+            assigned_ipv4 = "10.10.0.2"
+            privkey_ed25519 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+            [tun]
+            tun_name = "tun0"
+            tun_mtu = 1280
+            tun_ipv4 = "10.10.0.2"
+            tun_prefix = 24
+
+            [transport.udp_qsp]
+            cipher = "chacha20-poly1305"
+        "#;
+
+        let config = ClientConfig::from_toml_str(raw).unwrap();
+        assert_eq!(
+            config.transport.udp_qsp.cipher,
+            ClientUdpQspCipher::ChaCha20Poly1305
+        );
     }
 }

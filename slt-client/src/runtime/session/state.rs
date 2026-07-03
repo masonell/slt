@@ -304,6 +304,8 @@ mod tests {
     mod pending_state {
         use std::time::{Duration, Instant};
 
+        use slt_core::proto::CipherSuite;
+
         use super::*;
         use crate::test_support::mock_quic_ids_sync;
 
@@ -356,7 +358,11 @@ mod tests {
             let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
-                crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
+                crate::runtime::register::prepare_udp_qsp_registration(
+                    &quic_ids,
+                    CipherSuite::Aes128Gcm,
+                )
+                .unwrap()
             });
             let registration = Some(Box::new(PendingUdpQspRegistration {
                 prepared,
@@ -377,7 +383,11 @@ mod tests {
             let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
-                crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
+                crate::runtime::register::prepare_udp_qsp_registration(
+                    &quic_ids,
+                    CipherSuite::Aes128Gcm,
+                )
+                .unwrap()
             });
             let registration = Some(Box::new(PendingUdpQspRegistration {
                 prepared,
@@ -399,7 +409,11 @@ mod tests {
             let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
-                crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
+                crate::runtime::register::prepare_udp_qsp_registration(
+                    &quic_ids,
+                    CipherSuite::Aes128Gcm,
+                )
+                .unwrap()
             });
             let registration = Some(Box::new(PendingUdpQspRegistration { prepared, deadline }));
             let state = UdpState::Pending {
@@ -417,7 +431,11 @@ mod tests {
             let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
-                crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
+                crate::runtime::register::prepare_udp_qsp_registration(
+                    &quic_ids,
+                    CipherSuite::Aes128Gcm,
+                )
+                .unwrap()
             });
             let registration = Some(Box::new(PendingUdpQspRegistration {
                 prepared,
@@ -606,7 +624,11 @@ mod tests {
             let quic_ids = mock_quic_ids_sync();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let prepared = rt.block_on(async {
-                crate::runtime::register::prepare_udp_qsp_registration(&quic_ids).unwrap()
+                crate::runtime::register::prepare_udp_qsp_registration(
+                    &quic_ids,
+                    CipherSuite::Aes128Gcm,
+                )
+                .unwrap()
             });
             let registration = Some(Box::new(PendingUdpQspRegistration {
                 prepared,

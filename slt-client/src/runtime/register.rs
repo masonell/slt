@@ -1,8 +1,7 @@
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
-use slt_core::proto::{
-    AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, RegisterCidPayload,
-};
+use slt_core::proto::{AEAD_IV_LEN, CipherSuite, Message, RegisterCidPayload};
+use slt_core::types::ClientUdpQspCipher;
 
 use crate::runtime::session::SessionError;
 use crate::transport::quic_discovery as quic;
@@ -38,12 +37,12 @@ pub(super) struct PreparedUdpQspRegistration {
 /// - Payload encoding fails
 pub(super) fn prepare_udp_qsp_registration(
     ids: &quic::QuicIds,
+    cipher: CipherSuite,
 ) -> Result<PreparedUdpQspRegistration, SessionError> {
-    let cipher = CipherSuite::Aes128Gcm;
-    let hp_c2s = random_array::<HP_KEY_LEN>()?;
-    let hp_s2c = random_array::<HP_KEY_LEN>()?;
-    let aead_c2s = random_array::<AEAD_KEY_LEN>()?;
-    let aead_s2c = random_array::<AEAD_KEY_LEN>()?;
+    let hp_c2s = random_bytes(cipher.hp_key_len())?;
+    let hp_s2c = random_bytes(cipher.hp_key_len())?;
+    let aead_c2s = random_bytes(cipher.aead_key_len())?;
+    let aead_s2c = random_bytes(cipher.aead_key_len())?;
     let iv_c2s = random_array::<AEAD_IV_LEN>()?;
     let iv_s2c = random_array::<AEAD_IV_LEN>()?;
     let pn_start_s2c = u64::from(fastrand::u32(..));
@@ -54,10 +53,10 @@ pub(super) fn prepare_udp_qsp_registration(
         client_to_server_cid: ids.dcid,
         server_to_client_cid: ids.scid,
         cipher,
-        hp_tx: hp_s2c.to_vec(),
-        hp_rx: hp_c2s.to_vec(),
-        aead_tx: aead_s2c.to_vec(),
-        aead_rx: aead_c2s.to_vec(),
+        hp_tx: hp_s2c,
+        hp_rx: hp_c2s,
+        aead_tx: aead_s2c,
+        aead_rx: aead_c2s,
         iv_tx: iv_s2c,
         iv_rx: iv_c2s,
         pn_start: pn_start_s2c,
@@ -69,14 +68,14 @@ pub(super) fn prepare_udp_qsp_registration(
     payload.encode(&mut payload_buf)?;
 
     // Reverse key directions: the payload is expressed in the server's (tx/rx) terms.
-    let keys = UdpQspKeys::new_from_key_material(
+    let keys = UdpQspKeys::new(
         cipher,
         &payload.hp_rx,
         &payload.hp_tx,
         &payload.aead_rx,
         &payload.aead_tx,
-        &payload.iv_rx,
-        &payload.iv_tx,
+        payload.iv_rx,
+        payload.iv_tx,
     )?;
 
     let io = client_udp_qsp_io(&ids.socket, ids.peer)?;
@@ -110,8 +109,10 @@ pub(super) fn prepare_udp_qsp_registration(
 pub(super) async fn start_udp_qsp_registration(
     tcp: &mut TcpTransport,
     ids: &quic::QuicIds,
+    cipher_policy: ClientUdpQspCipher,
 ) -> Result<PreparedUdpQspRegistration, SessionError> {
-    let prepared = prepare_udp_qsp_registration(ids)?;
+    let cipher = select_udp_qsp_cipher(cipher_policy);
+    let prepared = prepare_udp_qsp_registration(ids, cipher)?;
     tcp.write_message(Message::RegisterCid {
         payload: &prepared.payload_buf,
     })
@@ -130,10 +131,53 @@ fn random_array<const N: usize>() -> Result<[u8; N], SessionError> {
     Ok(bytes)
 }
 
+fn random_bytes(len: usize) -> Result<Vec<u8>, SessionError> {
+    let mut bytes = vec![0u8; len];
+    rand_bytes(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn select_udp_qsp_cipher(policy: ClientUdpQspCipher) -> CipherSuite {
+    policy.select(aes_gcm_acceleration_available())
+}
+
+fn aes_gcm_acceleration_available() -> bool {
+    aes_gcm_acceleration_available_for_target()
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn aes_gcm_acceleration_available_for_target() -> bool {
+    std::arch::is_x86_feature_detected!("aes") && std::arch::is_x86_feature_detected!("pclmulqdq")
+}
+
+#[cfg(target_arch = "aarch64")]
+fn aes_gcm_acceleration_available_for_target() -> bool {
+    std::arch::is_aarch64_feature_detected!("aes")
+        && std::arch::is_aarch64_feature_detected!("pmull")
+}
+
+#[cfg(target_arch = "arm")]
+fn aes_gcm_acceleration_available_for_target() -> bool {
+    std::arch::is_arm_feature_detected!("aes") && std::arch::is_arm_feature_detected!("pmull")
+}
+
+#[cfg(not(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm"
+)))]
+const fn aes_gcm_acceleration_available_for_target() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
-    use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
-    use slt_core::types::MAX_DCID_LEN;
+    use slt_core::proto::{
+        AEAD_IV_LEN, AEAD_KEY_LEN, CHACHA20_POLY1305_KEY_LEN, CipherSuite, HP_KEY_LEN,
+        RegisterCidPayload,
+    };
+    use slt_core::types::{ClientUdpQspCipher, MAX_DCID_LEN};
 
     use super::*;
     use crate::test_support::mock_quic_ids;
@@ -141,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_registration_returns_valid_structure() {
         let ids = mock_quic_ids().await;
-        let result = prepare_udp_qsp_registration(&ids);
+        let result = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm);
 
         assert!(result.is_ok());
         let prepared = result.unwrap();
@@ -152,7 +196,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_registration_payload_is_decodable() {
         let ids = mock_quic_ids().await;
-        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let prepared = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm).unwrap();
 
         // The payload_buf should be decodable as a RegisterCidPayload
         let decoded = RegisterCidPayload::decode(&prepared.payload_buf);
@@ -164,14 +208,28 @@ mod tests {
         assert_eq!(decoded.client_to_server_cid, ids.dcid);
         assert_eq!(decoded.server_to_client_cid, ids.scid);
 
-        // Cipher should be AES-128-GCM (the only cipher currently used)
+        // Cipher should match the requested suite.
         assert_eq!(decoded.cipher, CipherSuite::Aes128Gcm);
+    }
+
+    #[tokio::test]
+    async fn prepare_registration_payload_uses_requested_chacha_cipher() {
+        let ids = mock_quic_ids().await;
+        let prepared = prepare_udp_qsp_registration(&ids, CipherSuite::ChaCha20Poly1305).unwrap();
+        let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
+
+        assert_eq!(decoded.cipher, CipherSuite::ChaCha20Poly1305);
+        assert_eq!(decoded.hp_tx.len(), CHACHA20_POLY1305_KEY_LEN);
+        assert_eq!(decoded.hp_rx.len(), CHACHA20_POLY1305_KEY_LEN);
+        assert_eq!(decoded.aead_tx.len(), CHACHA20_POLY1305_KEY_LEN);
+        assert_eq!(decoded.aead_rx.len(), CHACHA20_POLY1305_KEY_LEN);
+        assert!(prepared.session.is_some());
     }
 
     #[tokio::test]
     async fn prepare_registration_payload_wire_format() {
         let ids = mock_quic_ids().await;
-        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let prepared = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm).unwrap();
         let payload = &prepared.payload_buf;
 
         // Verify minimum payload length
@@ -216,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_registration_key_direction_reversal() {
         let ids = mock_quic_ids().await;
-        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let prepared = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm).unwrap();
 
         // Decode the payload to examine the keys
         let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
@@ -243,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_registration_packet_numbers_in_valid_range() {
         let ids = mock_quic_ids().await;
-        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let prepared = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm).unwrap();
         let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
 
         // Packet numbers are generated from fastrand::u32(..), so should be in u32 range
@@ -254,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_registration_key_phase_is_false() {
         let ids = mock_quic_ids().await;
-        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let prepared = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm).unwrap();
         let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
 
         // Initial key phase should always be false (0)
@@ -264,7 +322,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_registration_payload_matches_encode() {
         let ids = mock_quic_ids().await;
-        let prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let prepared = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm).unwrap();
 
         // Decode and re-encode to verify roundtrip consistency
         let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
@@ -278,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn prepared_registration_session_can_be_taken() {
         let ids = mock_quic_ids().await;
-        let mut prepared = prepare_udp_qsp_registration(&ids).unwrap();
+        let mut prepared = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm).unwrap();
 
         // Session should be Some initially
         assert!(prepared.session.is_some());
@@ -314,5 +372,24 @@ mod tests {
 
         // Probability of all zeros is astronomically low
         assert!(arr.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn random_bytes_produces_requested_length() {
+        let bytes = random_bytes(32).unwrap();
+        assert_eq!(bytes.len(), 32);
+        assert!(bytes.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn explicit_cipher_selection_respects_policy() {
+        assert_eq!(
+            ClientUdpQspCipher::Aes128Gcm.select(false),
+            CipherSuite::Aes128Gcm
+        );
+        assert_eq!(
+            ClientUdpQspCipher::ChaCha20Poly1305.select(true),
+            CipherSuite::ChaCha20Poly1305
+        );
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 use slt_core::config::ClientConfig;
 use slt_core::types::{
     ClientId, ClientIdentity, ClientNetworkConfig, ClientTimingConfig, ClientTlsConfig,
-    PrivKeyEd25519, SharedSecret, TlsMaterial, TunConfig,
+    ClientTransportConfig, PrivKeyEd25519, SharedSecret, TlsMaterial, TunConfig,
 };
 
 /// Create a test `ClientConfig` with default values.
@@ -56,6 +56,7 @@ pub fn test_config_with_identity(
             tun_ipv4: ipv4,
             tun_prefix: 24,
         },
+        transport: ClientTransportConfig::default(),
         enable_upgrade: false,
         require_udp: false,
         timing: default_timing(),

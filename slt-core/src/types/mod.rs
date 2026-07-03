@@ -11,7 +11,10 @@ pub mod tls_material;
 pub mod tun_config;
 
 pub use cid::{Cid, CidPrefix, MAX_DCID_LEN, QUIC_DCID_PREFIX_LEN};
-pub use client_config::{ClientIdentity, ClientNetworkConfig, ClientTimingConfig, ClientTlsConfig};
+pub use client_config::{
+    ClientIdentity, ClientNetworkConfig, ClientTimingConfig, ClientTlsConfig,
+    ClientTransportConfig, ClientUdpQspCipher, ClientUdpQspConfig,
+};
 pub use client_id::ClientId;
 pub use ed25519::{PrivKeyEd25519, PubKeyEd25519};
 pub use server_config::{ServerClient, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig};

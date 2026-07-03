@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigError, validate_ping_interval, validate_timeout};
+use crate::proto::CipherSuite;
 use crate::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
 
 /// Client network configuration.
@@ -59,6 +60,50 @@ pub struct ClientIdentity {
     pub assigned_ipv4: Ipv4Addr,
     /// Ed25519 private key used for authentication.
     pub privkey_ed25519: PrivKeyEd25519,
+}
+
+/// Client-side UDP-QSP cipher selection policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ClientUdpQspCipher {
+    /// Select AES-128-GCM when native AES-GCM acceleration is available,
+    /// otherwise select ChaCha20-Poly1305.
+    #[serde(rename = "auto")]
+    #[default]
+    Auto,
+    /// Always use AES-128-GCM.
+    #[serde(rename = "aes-128-gcm")]
+    Aes128Gcm,
+    /// Always use ChaCha20-Poly1305.
+    #[serde(rename = "chacha20-poly1305")]
+    ChaCha20Poly1305,
+}
+
+impl ClientUdpQspCipher {
+    /// Resolve this policy to a concrete UDP-QSP cipher suite.
+    #[must_use]
+    pub const fn select(self, aes_gcm_accelerated: bool) -> CipherSuite {
+        match self {
+            Self::Auto if aes_gcm_accelerated => CipherSuite::Aes128Gcm,
+            Self::Auto | Self::ChaCha20Poly1305 => CipherSuite::ChaCha20Poly1305,
+            Self::Aes128Gcm => CipherSuite::Aes128Gcm,
+        }
+    }
+}
+
+/// Client UDP-QSP transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ClientUdpQspConfig {
+    /// Packet protection cipher selection policy.
+    #[serde(default)]
+    pub cipher: ClientUdpQspCipher,
+}
+
+/// Client transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ClientTransportConfig {
+    /// UDP-QSP transport settings.
+    #[serde(default)]
+    pub udp_qsp: ClientUdpQspConfig,
 }
 
 /// Client timing configuration with defaults and validation.
@@ -213,6 +258,30 @@ mod tests {
         assert_eq!(
             config.quic_discovery_timeout,
             crate::config::DEFAULT_QUIC_DISCOVERY_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn udp_qsp_cipher_selection_resolves_auto_from_aes_acceleration() {
+        assert_eq!(
+            ClientUdpQspCipher::Auto.select(true),
+            CipherSuite::Aes128Gcm
+        );
+        assert_eq!(
+            ClientUdpQspCipher::Auto.select(false),
+            CipherSuite::ChaCha20Poly1305
+        );
+    }
+
+    #[test]
+    fn udp_qsp_cipher_selection_respects_explicit_cipher() {
+        assert_eq!(
+            ClientUdpQspCipher::Aes128Gcm.select(false),
+            CipherSuite::Aes128Gcm
+        );
+        assert_eq!(
+            ClientUdpQspCipher::ChaCha20Poly1305.select(true),
+            CipherSuite::ChaCha20Poly1305
         );
     }
 

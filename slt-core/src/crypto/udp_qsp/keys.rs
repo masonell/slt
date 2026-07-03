@@ -403,24 +403,6 @@ impl fmt::Debug for UdpQspKeys {
 }
 
 impl UdpQspKeys {
-    /// Build UDP-QSP keys from raw key material.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the cipher suite is unsupported or crypto key
-    /// initialization fails.
-    pub fn new(
-        cipher: CipherSuite,
-        hp_tx: [u8; HP_KEY_LEN],
-        hp_rx: [u8; HP_KEY_LEN],
-        aead_tx: [u8; AEAD_KEY_LEN],
-        aead_rx: [u8; AEAD_KEY_LEN],
-        iv_tx: [u8; AEAD_IV_LEN],
-        iv_rx: [u8; AEAD_IV_LEN],
-    ) -> Result<Self, QspCryptoError> {
-        Self::new_from_key_material(cipher, &hp_tx, &hp_rx, &aead_tx, &aead_rx, &iv_tx, &iv_rx)
-    }
-
     /// Build UDP-QSP keys from raw key material slices.
     ///
     /// # Errors
@@ -429,16 +411,22 @@ impl UdpQspKeys {
     /// - The cipher suite is unsupported
     /// - Key or IV material lengths do not match the cipher suite
     /// - Crypto key initialization fails
-    pub fn new_from_key_material(
+    pub fn new(
         cipher: CipherSuite,
-        hp_tx: &[u8],
-        hp_rx: &[u8],
-        aead_tx: &[u8],
-        aead_rx: &[u8],
-        iv_tx: &[u8],
-        iv_rx: &[u8],
+        hp_tx: impl AsRef<[u8]>,
+        hp_rx: impl AsRef<[u8]>,
+        aead_tx: impl AsRef<[u8]>,
+        aead_rx: impl AsRef<[u8]>,
+        iv_tx: impl AsRef<[u8]>,
+        iv_rx: impl AsRef<[u8]>,
     ) -> Result<Self, QspCryptoError> {
         let config = CipherConfig::for_suite(cipher);
+        let hp_tx = hp_tx.as_ref();
+        let hp_rx = hp_rx.as_ref();
+        let aead_tx = aead_tx.as_ref();
+        let aead_rx = aead_rx.as_ref();
+        let iv_tx = iv_tx.as_ref();
+        let iv_rx = iv_rx.as_ref();
 
         Ok(Self {
             cipher,
@@ -460,14 +448,14 @@ impl UdpQspKeys {
     /// Returns an error if the cipher suite is unsupported or crypto key
     /// initialization fails.
     pub fn from_register(payload: &RegisterCidPayload) -> Result<Self, QspCryptoError> {
-        Self::new_from_key_material(
+        Self::new(
             payload.cipher,
             &payload.hp_tx,
             &payload.hp_rx,
             &payload.aead_tx,
             &payload.aead_rx,
-            &payload.iv_tx,
-            &payload.iv_rx,
+            payload.iv_tx,
+            payload.iv_rx,
         )
     }
 
@@ -764,7 +752,7 @@ mod tests {
 
     /// Create ChaCha20-Poly1305 keys where TX == RX for self-contained roundtrip tests.
     fn make_symmetric_chacha_keys() -> UdpQspKeys {
-        UdpQspKeys::new_from_key_material(
+        UdpQspKeys::new(
             CipherSuite::ChaCha20Poly1305,
             &[0xAA; CHACHA20_POLY1305_KEY_LEN],
             &[0xAA; CHACHA20_POLY1305_KEY_LEN],
@@ -778,7 +766,7 @@ mod tests {
 
     /// Create ChaCha20-Poly1305 keys with distinct TX/RX for direction-specific tests.
     fn make_directional_chacha_keys() -> UdpQspKeys {
-        UdpQspKeys::new_from_key_material(
+        UdpQspKeys::new(
             CipherSuite::ChaCha20Poly1305,
             &[0x11; CHACHA20_POLY1305_KEY_LEN],
             &[0x22; CHACHA20_POLY1305_KEY_LEN],
@@ -806,7 +794,7 @@ mod tests {
 
     #[test]
     fn new_keys_with_chacha20_poly1305_succeeds() {
-        let keys = UdpQspKeys::new_from_key_material(
+        let keys = UdpQspKeys::new(
             CipherSuite::ChaCha20Poly1305,
             &[0u8; CHACHA20_POLY1305_KEY_LEN],
             &[0u8; CHACHA20_POLY1305_KEY_LEN],
@@ -835,7 +823,7 @@ mod tests {
 
     #[test]
     fn chacha20_poly1305_rejects_wrong_key_lengths() {
-        let keys = UdpQspKeys::new_from_key_material(
+        let keys = UdpQspKeys::new(
             CipherSuite::ChaCha20Poly1305,
             &[0u8; HP_KEY_LEN],
             &[0u8; CHACHA20_POLY1305_KEY_LEN],

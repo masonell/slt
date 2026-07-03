@@ -57,6 +57,7 @@ pub fn build_client_config(
             tun_ipv4: assigned_ipv4,
             tun_prefix: tun_config.tun_prefix,
         },
+        transport: slt_core::types::ClientTransportConfig::default(),
         enable_upgrade: true,
         require_udp: false,
         timing: ClientTimingConfig::default(),

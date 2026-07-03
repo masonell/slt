@@ -116,6 +116,7 @@ enabled = true
 | `tls` | table | Yes | - | See below |
 | `identity` | table | Yes | - | See below |
 | `tun` | table | Yes | - | See below |
+| `transport` | table | No | defaults apply | See below |
 | `enable_upgrade` | boolean | No | `false` | - |
 | `require_udp` | boolean | No | `false` | requires `enable_upgrade = true` |
 | `timing` | table | No | defaults apply | See below |
@@ -156,6 +157,15 @@ with a matching name, address, prefix, MTU, and UP state before SLT starts.
 | `tun_ipv4` | IPv4 address | No | `10.10.0.1` | must equal this client's `assigned_ipv4` |
 | `tun_prefix` | integer | No | `24` | 1-32; overlay subnet prefix length |
 
+### `[transport.udp_qsp]` (Client)
+
+| Field | Type | Required | Default | Constraints |
+|-------|------|----------|---------|-------------|
+| `cipher` | string | No | `"auto"` | `"auto"`, `"aes-128-gcm"`, or `"chacha20-poly1305"` |
+
+`auto` selects AES-128-GCM when native AES-GCM acceleration is available and
+ChaCha20-Poly1305 otherwise.
+
 ### `[timing]` (Client)
 
 | Field | Type | Required | Default | Constraints |
@@ -194,6 +204,9 @@ tun_prefix = 24
 
 enable_upgrade = true
 require_udp = false
+
+[transport.udp_qsp]
+cipher = "auto"
 
 [timing]
 ping_min = "10s"
