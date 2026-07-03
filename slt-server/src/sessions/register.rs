@@ -2,9 +2,10 @@
 
 use std::net::SocketAddr;
 
-use slt_core::crypto::udp_qsp::UdpQspKeys;
+use slt_core::crypto::udp_qsp::{QspCryptoError, UdpQspKeys};
 use slt_core::proto::{
-    Message, RegisterCidPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload,
+    Message, PayloadError, RegisterCidPayload, RegisterFailCode, RegisterFailPayload,
+    RegisterOkPayload,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, warn};
@@ -49,30 +50,55 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         &mut self,
         payload: &[u8],
     ) -> Result<SessionControl, SessionError> {
-        let Ok(register) = RegisterCidPayload::decode(payload) else {
-            warn!(
-                session_id = self.session_id,
-                client_id = %self.client_id,
-                active_transport = ?self.active_transport,
-                reason = "decode_failed",
-                "register_cid rejected"
-            );
-            self.send_register_fail(RegisterFailCode::InvalidCid)
-                .await?;
-            return Ok(SessionControl::Continue);
+        let register = match RegisterCidPayload::decode(payload) {
+            Ok(register) => register,
+            Err(err) => {
+                let code = register_decode_fail_code(&err);
+                warn!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    active_transport = ?self.active_transport,
+                    reason = "decode_failed",
+                    error = %err,
+                    code = ?code,
+                    "register_cid rejected"
+                );
+                self.send_register_fail(code).await?;
+                return Ok(SessionControl::Continue);
+            }
         };
 
-        let Ok(keys) = UdpQspKeys::from_register(&register) else {
+        if !self.udp_qsp_config.allows(register.cipher) {
             warn!(
                 session_id = self.session_id,
                 client_id = %self.client_id,
                 active_transport = ?self.active_transport,
-                reason = "invalid_keys",
+                cipher = ?register.cipher,
+                reason = "cipher_disallowed",
                 "register_cid rejected"
             );
-            self.send_register_fail(RegisterFailCode::InvalidKeys)
+            self.send_register_fail(RegisterFailCode::InvalidCipher)
                 .await?;
             return Ok(SessionControl::Continue);
+        }
+
+        let keys = match UdpQspKeys::from_register(&register) {
+            Ok(keys) => keys,
+            Err(err) => {
+                let code = crypto_fail_code(err);
+                warn!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    active_transport = ?self.active_transport,
+                    cipher = ?register.cipher,
+                    reason = "invalid_keys",
+                    error = %err,
+                    code = ?code,
+                    "register_cid rejected"
+                );
+                self.send_register_fail(code).await?;
+                return Ok(SessionControl::Continue);
+            }
         };
 
         let Some(dcid_prefix) = register.client_to_server_cid.prefix().ok() else {
@@ -173,5 +199,31 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         payload.encode(&mut buf);
         self.send_message(Message::RegisterFail { payload: &buf })
             .await
+    }
+}
+
+const fn register_decode_fail_code(err: &PayloadError) -> RegisterFailCode {
+    match err {
+        PayloadError::InvalidCipher(_) => RegisterFailCode::InvalidCipher,
+        PayloadError::LengthMismatch { .. } | PayloadError::InvalidKeyPhase(_) => {
+            RegisterFailCode::InvalidKeys
+        }
+        PayloadError::LengthTooShort { .. }
+        | PayloadError::InvalidClientToServerCidLen(_)
+        | PayloadError::InvalidServerToClientCidLen(_)
+        | PayloadError::InvalidAuthFailCode(_)
+        | PayloadError::InvalidRegisterFailCode(_)
+        | PayloadError::InvalidCloseCode(_) => RegisterFailCode::InvalidCid,
+    }
+}
+
+const fn crypto_fail_code(err: QspCryptoError) -> RegisterFailCode {
+    match err {
+        QspCryptoError::UnsupportedCipher => RegisterFailCode::InvalidCipher,
+        QspCryptoError::PacketTooShort
+        | QspCryptoError::InvalidHeader
+        | QspCryptoError::InvalidPacketNumber
+        | QspCryptoError::CryptoFail
+        | QspCryptoError::InvalidCid => RegisterFailCode::InvalidKeys,
     }
 }

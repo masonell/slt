@@ -17,7 +17,10 @@ pub use client_config::{
 };
 pub use client_id::ClientId;
 pub use ed25519::{PrivKeyEd25519, PubKeyEd25519};
-pub use server_config::{ServerClient, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig};
+pub use server_config::{
+    ServerClient, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, ServerTransportConfig,
+    ServerUdpQspCipher, ServerUdpQspConfig,
+};
 pub use shared_secret::SharedSecret;
 pub use tls_material::TlsMaterial;
 pub use tun_config::TunConfig;

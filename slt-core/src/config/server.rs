@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{ConfigError, ConfigLoadError};
 use crate::types::{
-    ServerClient, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, SharedSecret, TunConfig,
+    ServerClient, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, ServerTransportConfig,
+    SharedSecret, TunConfig,
 };
 
 /// Default UDP NAT max entries.
@@ -31,6 +32,9 @@ pub struct ServerConfig {
     /// Timing configuration.
     #[serde(default)]
     pub timing: ServerTimingConfig,
+    /// Transport-specific settings.
+    #[serde(default)]
+    pub transport: ServerTransportConfig,
     /// Max number of UDP NAT peers to keep for nginx forwarding.
     #[serde(default = "default_udp_nat_max_entries")]
     pub udp_nat_max_entries: usize,
@@ -53,6 +57,7 @@ impl ServerConfig {
     /// - `ClientOutsideTunSubnet` if a configured client IP is outside the TUN subnet
     /// - `ClientUsesTunAddress` if a configured client IP equals `tun_ipv4`
     /// - `InvalidPingInterval` if `ping_min` > `ping_max`
+    /// - `EmptyUdpQspAllowedCiphers` if UDP-QSP has no allowed cipher suites
     /// - `ZeroSessionQueueSize` if `session_queue_size` is zero
     /// - `ZeroUdpNatMaxEntries` if `udp_nat_max_entries` is zero
     /// - `ZeroTimeout` if any timeout is zero
@@ -74,6 +79,7 @@ impl ServerConfig {
             }
         }
         self.timing.validate()?;
+        self.transport.validate()?;
         if self.session_queue_size == 0 {
             return Err(ConfigError::ZeroSessionQueueSize);
         }
@@ -102,7 +108,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::types::{ClientId, PubKeyEd25519, SharedSecret, TlsMaterial};
+    use crate::proto::CipherSuite;
+    use crate::types::{ClientId, PubKeyEd25519, ServerUdpQspCipher, SharedSecret, TlsMaterial};
 
     fn test_config() -> ServerConfig {
         ServerConfig {
@@ -130,6 +137,7 @@ mod tests {
                 idle_timeout: Duration::from_mins(1),
                 metrics_interval: Duration::from_mins(5),
             },
+            transport: ServerTransportConfig::default(),
             udp_nat_max_entries: 1024,
             session_queue_size: 256,
             clients: vec![ServerClient {
@@ -194,5 +202,125 @@ mod tests {
         config.timing.ping_max = Duration::from_secs(10);
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPingInterval { .. }));
+    }
+
+    #[test]
+    fn serde_defaults_transport_allowed_ciphers_when_omitted() {
+        let raw = r#"
+            server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+
+            [network]
+            listen_tcp = "0.0.0.0:443"
+            listen_udp = "0.0.0.0:443"
+            nginx_tcp_upstream = "127.0.0.1:8080"
+            nginx_udp_upstream = "127.0.0.1:8080"
+
+            [tls]
+            tls_cert = ""
+            tls_key = ""
+
+            [tun]
+            tun_name = "tun0"
+            tun_mtu = 1280
+            tun_ipv4 = "10.10.0.1"
+            tun_prefix = 24
+
+            [[clients]]
+            client_id = "00000000000000000000000000000000"
+            pubkey_ed25519 = "0000000000000000000000000000000000000000000000000000000000000000"
+            assigned_ipv4 = "10.10.0.2"
+        "#;
+
+        let config = ServerConfig::from_toml_str(raw).unwrap();
+        assert!(config.transport.udp_qsp.allows(CipherSuite::Aes128Gcm));
+        assert!(
+            config
+                .transport
+                .udp_qsp
+                .allows(CipherSuite::ChaCha20Poly1305)
+        );
+    }
+
+    #[test]
+    fn serde_parses_udp_qsp_allowed_ciphers() {
+        let raw = r#"
+            server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+
+            [network]
+            listen_tcp = "0.0.0.0:443"
+            listen_udp = "0.0.0.0:443"
+            nginx_tcp_upstream = "127.0.0.1:8080"
+            nginx_udp_upstream = "127.0.0.1:8080"
+
+            [tls]
+            tls_cert = ""
+            tls_key = ""
+
+            [tun]
+            tun_name = "tun0"
+            tun_mtu = 1280
+            tun_ipv4 = "10.10.0.1"
+            tun_prefix = 24
+
+            [transport.udp_qsp]
+            allowed_ciphers = ["chacha20-poly1305"]
+
+            [[clients]]
+            client_id = "00000000000000000000000000000000"
+            pubkey_ed25519 = "0000000000000000000000000000000000000000000000000000000000000000"
+            assigned_ipv4 = "10.10.0.2"
+        "#;
+
+        let config = ServerConfig::from_toml_str(raw).unwrap();
+        assert_eq!(
+            config.transport.udp_qsp.allowed_ciphers,
+            vec![ServerUdpQspCipher::ChaCha20Poly1305]
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_udp_qsp_allowed_ciphers() {
+        let mut config = test_config();
+        config.transport.udp_qsp.allowed_ciphers.clear();
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::EmptyUdpQspAllowedCiphers));
+    }
+
+    #[test]
+    fn serde_rejects_empty_udp_qsp_allowed_ciphers() {
+        let raw = r#"
+            server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+
+            [network]
+            listen_tcp = "0.0.0.0:443"
+            listen_udp = "0.0.0.0:443"
+            nginx_tcp_upstream = "127.0.0.1:8080"
+            nginx_udp_upstream = "127.0.0.1:8080"
+
+            [tls]
+            tls_cert = ""
+            tls_key = ""
+
+            [tun]
+            tun_name = "tun0"
+            tun_mtu = 1280
+            tun_ipv4 = "10.10.0.1"
+            tun_prefix = 24
+
+            [transport.udp_qsp]
+            allowed_ciphers = []
+
+            [[clients]]
+            client_id = "00000000000000000000000000000000"
+            pubkey_ed25519 = "0000000000000000000000000000000000000000000000000000000000000000"
+            assigned_ipv4 = "10.10.0.2"
+        "#;
+
+        let err = ServerConfig::from_toml_str(raw).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigLoadError::Validate(ConfigError::EmptyUdpQspAllowedCiphers)
+        ));
     }
 }

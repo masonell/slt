@@ -9,7 +9,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use slt_core::config::ServerConfig;
 use slt_core::types::{
-    ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, SharedSecret, TlsMaterial, TunConfig,
+    ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, ServerTransportConfig, SharedSecret,
+    TlsMaterial, TunConfig,
 };
 
 use crate::config_io::save_server_config;
@@ -104,6 +105,7 @@ pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) ->
             tun_prefix: DEFAULT_TUN_PREFIX,
         },
         timing: ServerTimingConfig::default(),
+        transport: ServerTransportConfig::default(),
         udp_nat_max_entries: 1024,
         session_queue_size: DEFAULT_SESSION_QUEUE_SIZE,
         clients: Vec::new(),

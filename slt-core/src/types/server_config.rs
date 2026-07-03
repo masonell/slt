@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigError, validate_ping_interval, validate_timeout};
+use crate::proto::CipherSuite;
 use crate::types::{ClientId, PubKeyEd25519, TlsMaterial};
 
 /// Server network configuration.
@@ -46,6 +47,93 @@ pub struct ServerClient {
 
 const fn default_enabled() -> bool {
     true
+}
+
+/// Server-side UDP-QSP cipher allowlist entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerUdpQspCipher {
+    /// Allow AES-128-GCM.
+    #[serde(rename = "aes-128-gcm")]
+    Aes128Gcm,
+    /// Allow ChaCha20-Poly1305.
+    #[serde(rename = "chacha20-poly1305")]
+    ChaCha20Poly1305,
+}
+
+impl ServerUdpQspCipher {
+    /// Returns the protocol cipher suite represented by this allowlist entry.
+    #[must_use]
+    pub const fn suite(self) -> CipherSuite {
+        match self {
+            Self::Aes128Gcm => CipherSuite::Aes128Gcm,
+            Self::ChaCha20Poly1305 => CipherSuite::ChaCha20Poly1305,
+        }
+    }
+}
+
+fn default_allowed_udp_qsp_ciphers() -> Vec<ServerUdpQspCipher> {
+    vec![
+        ServerUdpQspCipher::Aes128Gcm,
+        ServerUdpQspCipher::ChaCha20Poly1305,
+    ]
+}
+
+/// Server UDP-QSP transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerUdpQspConfig {
+    /// Cipher suites accepted from client `REGISTER_CID` requests.
+    #[serde(default = "default_allowed_udp_qsp_ciphers")]
+    pub allowed_ciphers: Vec<ServerUdpQspCipher>,
+}
+
+impl Default for ServerUdpQspConfig {
+    fn default() -> Self {
+        Self {
+            allowed_ciphers: default_allowed_udp_qsp_ciphers(),
+        }
+    }
+}
+
+impl ServerUdpQspConfig {
+    /// Validate UDP-QSP transport configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::EmptyUdpQspAllowedCiphers`] if no cipher suites
+    /// are allowed.
+    pub const fn validate(&self) -> Result<(), ConfigError> {
+        if self.allowed_ciphers.is_empty() {
+            return Err(ConfigError::EmptyUdpQspAllowedCiphers);
+        }
+        Ok(())
+    }
+
+    /// Returns true if `cipher` is allowed by server policy.
+    #[must_use]
+    pub fn allows(&self, cipher: CipherSuite) -> bool {
+        self.allowed_ciphers
+            .iter()
+            .any(|allowed| allowed.suite() == cipher)
+    }
+}
+
+/// Server transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ServerTransportConfig {
+    /// UDP-QSP transport settings.
+    #[serde(default)]
+    pub udp_qsp: ServerUdpQspConfig,
+}
+
+impl ServerTransportConfig {
+    /// Validate server transport configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigError` if a nested transport setting is invalid.
+    pub const fn validate(&self) -> Result<(), ConfigError> {
+        self.udp_qsp.validate()
+    }
 }
 
 /// Server timing configuration with defaults and validation.
@@ -128,6 +216,36 @@ mod tests {
     fn validate_accepts_valid_timing_config() {
         let config = test_timing_config();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn udp_qsp_allowed_ciphers_default_to_supported_suites() {
+        let config = ServerUdpQspConfig::default();
+        assert!(config.allows(CipherSuite::Aes128Gcm));
+        assert!(config.allows(CipherSuite::ChaCha20Poly1305));
+    }
+
+    #[test]
+    fn udp_qsp_allowed_ciphers_can_restrict_suites() {
+        let config: ServerUdpQspConfig = toml::from_str(
+            r#"
+            allowed_ciphers = ["aes-128-gcm"]
+            "#,
+        )
+        .unwrap();
+
+        assert!(config.allows(CipherSuite::Aes128Gcm));
+        assert!(!config.allows(CipherSuite::ChaCha20Poly1305));
+    }
+
+    #[test]
+    fn validate_rejects_empty_udp_qsp_allowed_ciphers() {
+        let config = ServerUdpQspConfig {
+            allowed_ciphers: Vec::new(),
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::EmptyUdpQspAllowedCiphers));
     }
 
     #[test]

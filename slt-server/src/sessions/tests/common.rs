@@ -9,7 +9,7 @@ use slt_core::proto::{
     UpgradeProbePayload, decode_message, encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
-use slt_core::types::Cid;
+use slt_core::types::{Cid, ServerUdpQspConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
@@ -44,10 +44,27 @@ pub(super) type SpawnSessionWithPeerCaptureResult = (
 );
 
 pub(super) async fn spawn_session() -> SpawnSessionResult {
-    spawn_session_with_timeouts(default_session_timeouts()).await
+    spawn_session_with_timeouts_and_udp_qsp_config(
+        default_session_timeouts(),
+        ServerUdpQspConfig::default(),
+    )
+    .await
 }
 
 pub(super) async fn spawn_session_with_timeouts(timeouts: SessionTimeouts) -> SpawnSessionResult {
+    spawn_session_with_timeouts_and_udp_qsp_config(timeouts, ServerUdpQspConfig::default()).await
+}
+
+pub(super) async fn spawn_session_with_udp_qsp_config(
+    udp_qsp_config: ServerUdpQspConfig,
+) -> SpawnSessionResult {
+    spawn_session_with_timeouts_and_udp_qsp_config(default_session_timeouts(), udp_qsp_config).await
+}
+
+async fn spawn_session_with_timeouts_and_udp_qsp_config(
+    timeouts: SessionTimeouts,
+    udp_qsp_config: ServerUdpQspConfig,
+) -> SpawnSessionResult {
     let (server_tls, client_tls) = tls_pair().await;
     let (tun, tun_rx) = TestTun::new(8);
     let (udp, udp_rx) = TestUdpSocket::new(16);
@@ -72,6 +89,7 @@ pub(super) async fn spawn_session_with_timeouts(timeouts: SessionTimeouts) -> Sp
         rx,
         limits,
         timeouts,
+        udp_qsp_config,
     );
     let join = tokio::spawn(async move { session.run().await });
     (
@@ -104,6 +122,7 @@ pub(super) async fn spawn_session_with_peer_capture() -> SpawnSessionWithPeerCap
         rx,
         limits,
         default_session_timeouts(),
+        ServerUdpQspConfig::default(),
     );
     let join = tokio::spawn(async move { session.run().await });
     (

@@ -251,7 +251,7 @@ mod tests {
     use slt_core::testing::generate_client_hello_tls_record;
     use slt_core::types::{
         ClientId, PubKeyEd25519, ServerClient, ServerNetworkConfig, ServerTimingConfig,
-        ServerTlsConfig, SharedSecret, TlsMaterial, TunConfig,
+        ServerTlsConfig, ServerTransportConfig, SharedSecret, TlsMaterial, TunConfig,
     };
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpListener, TcpStream};
@@ -290,6 +290,7 @@ mod tests {
                 idle_timeout: Duration::from_mins(1),
                 metrics_interval: Duration::from_mins(5),
             },
+            transport: ServerTransportConfig::default(),
             udp_nat_max_entries: 1024,
             session_queue_size: 256,
             clients: vec![ServerClient {

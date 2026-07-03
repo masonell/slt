@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use slt_core::proto::MessageLimits;
-use slt_core::types::{ClientId, ServerClient};
+use slt_core::types::{ClientId, ServerClient, ServerUdpQspConfig};
 
 use crate::auth::{AuthHandlerBase, Authenticator, SessionManager};
 use crate::metrics::Metrics;
@@ -104,6 +104,7 @@ impl TestAuthHandlerBuilder {
             MessageLimits::from_mtu(1500),
             self.timeouts,
             self.session_queue_size,
+            ServerUdpQspConfig::default(),
         );
 
         let handler =
@@ -149,6 +150,7 @@ impl TestAuthHandlerBuilder {
             MessageLimits::from_mtu(1500),
             self.timeouts,
             self.session_queue_size,
+            ServerUdpQspConfig::default(),
         );
 
         let handler =

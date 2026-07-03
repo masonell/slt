@@ -96,6 +96,9 @@ pub enum ConfigError {
     /// UDP NAT max entries is zero.
     #[error("udp_nat_max_entries must be greater than zero")]
     ZeroUdpNatMaxEntries,
+    /// Server UDP-QSP cipher allowlist is empty.
+    #[error("transport.udp_qsp.allowed_ciphers must contain at least one cipher suite")]
+    EmptyUdpQspAllowedCiphers,
     /// `require_udp` cannot be enabled when UDP upgrade is disabled.
     #[error("require_udp=true requires enable_upgrade=true")]
     RequireUdpNeedsUpgrade,
@@ -220,6 +223,14 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("udp_nat_max_entries"));
         assert!(msg.contains("greater than zero"));
+    }
+
+    #[test]
+    fn config_error_empty_udp_qsp_allowed_ciphers_display() {
+        let err = ConfigError::EmptyUdpQspAllowedCiphers;
+        let msg = err.to_string();
+        assert!(msg.contains("transport.udp_qsp.allowed_ciphers"));
+        assert!(msg.contains("at least one"));
     }
 
     #[test]

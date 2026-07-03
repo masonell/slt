@@ -19,6 +19,7 @@ use slt_core::proto::{
     CloseCode, ClosePayload, Message, MessageLimits, PingPayload, encode_message,
 };
 use slt_core::transport::UdpQspIo;
+use slt_core::types::ServerUdpQspConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tracing::{debug, info, trace};
@@ -95,6 +96,7 @@ pub struct ClientSessionBase<
     rx: SessionRx,
     limits: MessageLimits,
     timeouts: SessionTimeouts,
+    udp_qsp_config: ServerUdpQspConfig,
     udp_write_buf: Vec<u8>,
     udp_opened_payload_buf: Vec<u8>,
     /// Whether the TCP connection is still usable. Set to false when TCP closes
@@ -129,6 +131,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         rx: SessionRx,
         limits: MessageLimits,
         timeouts: SessionTimeouts,
+        udp_qsp_config: ServerUdpQspConfig,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -149,6 +152,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             rx,
             limits,
             timeouts,
+            udp_qsp_config,
             udp_write_buf: Vec::new(),
             udp_opened_payload_buf: Vec::new(),
             tcp_alive: true,

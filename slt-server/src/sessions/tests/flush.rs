@@ -17,7 +17,7 @@ use slt_core::proto::{
     encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
-use slt_core::types::{Cid, MAX_DCID_LEN};
+use slt_core::types::{Cid, MAX_DCID_LEN, ServerUdpQspConfig};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
@@ -142,6 +142,7 @@ async fn spawn_session_buffering() -> BufferingSpawnResult {
         rx,
         limits,
         default_session_timeouts(),
+        ServerUdpQspConfig::default(),
     );
     let join = tokio::spawn(async move { session.run().await });
     (join, client_tls, tx, bytes_rx, sent, limits, assigned)

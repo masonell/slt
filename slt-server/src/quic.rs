@@ -610,7 +610,7 @@ mod tests {
     use slt_core::transport::gro_datagram_ranges;
     use slt_core::types::{
         QUIC_DCID_PREFIX_LEN, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig,
-        SharedSecret, TlsMaterial, TunConfig,
+        ServerTransportConfig, SharedSecret, TlsMaterial, TunConfig,
     };
     use tokio::sync::mpsc;
     use tokio::time::{Instant, timeout, timeout_at};
@@ -675,6 +675,7 @@ mod tests {
                 idle_timeout: Duration::from_mins(1),
                 metrics_interval: Duration::from_mins(5),
             },
+            transport: ServerTransportConfig::default(),
             udp_nat_max_entries: 1024,
             session_queue_size: 256,
             clients: vec![],

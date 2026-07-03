@@ -5,7 +5,7 @@ use slt_core::proto::MessageLimits;
 use slt_core::transport::UdpQspIo;
 #[cfg(test)]
 use slt_core::transport::tcp::TcpChannel;
-use slt_core::types::ClientId;
+use slt_core::types::{ClientId, ServerUdpQspConfig};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, error};
@@ -36,6 +36,7 @@ pub struct SessionManager<T: TunDeviceIo> {
     limits: MessageLimits,
     session_timeouts: SessionTimeouts,
     session_queue_size: usize,
+    udp_qsp_config: ServerUdpQspConfig,
 }
 
 impl<T: TunDeviceIo> SessionManager<T> {
@@ -50,6 +51,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
         limits: MessageLimits,
         session_timeouts: SessionTimeouts,
         session_queue_size: usize,
+        udp_qsp_config: ServerUdpQspConfig,
     ) -> Self {
         Self {
             registry,
@@ -59,6 +61,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             limits,
             session_timeouts,
             session_queue_size,
+            udp_qsp_config,
         }
     }
 
@@ -135,6 +138,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             rx,
             self.limits,
             self.session_timeouts,
+            self.udp_qsp_config.clone(),
         );
 
         tokio::spawn(async move {
@@ -212,6 +216,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             rx,
             self.limits,
             self.session_timeouts,
+            self.udp_qsp_config.clone(),
         );
 
         tokio::spawn(async move {

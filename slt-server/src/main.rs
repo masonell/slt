@@ -107,6 +107,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         limits,
         session_timeouts,
         config.session_queue_size,
+        config.transport.udp_qsp.clone(),
     );
     let auth_handler = Arc::new(AuthHandlerBase::<TunSender>::new(
         acceptor,

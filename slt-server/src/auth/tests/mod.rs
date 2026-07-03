@@ -9,7 +9,7 @@ use slt_core::proto::{
 };
 use slt_core::types::{
     ClientId, PubKeyEd25519, ServerClient, ServerNetworkConfig, ServerTimingConfig,
-    ServerTlsConfig, SharedSecret, TlsMaterial, TunConfig,
+    ServerTlsConfig, ServerTransportConfig, SharedSecret, TlsMaterial, TunConfig,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, timeout};
