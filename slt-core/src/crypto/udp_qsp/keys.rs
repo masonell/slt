@@ -369,7 +369,15 @@ impl UdpQspKeys {
         Self::new_from_key_material(cipher, &hp_tx, &hp_rx, &aead_tx, &aead_rx, &iv_tx, &iv_rx)
     }
 
-    fn new_from_key_material(
+    /// Build UDP-QSP keys from raw key material slices.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The cipher suite is unsupported
+    /// - Key or IV material lengths do not match the cipher suite
+    /// - Crypto key initialization fails
+    pub fn new_from_key_material(
         cipher: CipherSuite,
         hp_tx: &[u8],
         hp_rx: &[u8],
@@ -400,14 +408,14 @@ impl UdpQspKeys {
     /// Returns `QspCryptoError::UnsupportedCipher` if the cipher suite is not
     /// `Aes128Gcm`.
     pub fn from_register(payload: &RegisterCidPayload) -> Result<Self, QspCryptoError> {
-        Self::new(
+        Self::new_from_key_material(
             payload.cipher,
-            payload.hp_tx,
-            payload.hp_rx,
-            payload.aead_tx,
-            payload.aead_rx,
-            payload.iv_tx,
-            payload.iv_rx,
+            &payload.hp_tx,
+            &payload.hp_rx,
+            &payload.aead_tx,
+            &payload.aead_rx,
+            &payload.iv_tx,
+            &payload.iv_rx,
         )
     }
 

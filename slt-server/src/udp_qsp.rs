@@ -249,7 +249,7 @@ impl CidMap {
 
 #[cfg(test)]
 mod tests {
-    use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, RegisterCidPayload};
+    use slt_core::proto::{AEAD_IV_LEN, CipherSuite, RegisterCidPayload};
     use slt_core::types::{Cid, MAX_DCID_LEN};
 
     use super::*;
@@ -261,10 +261,10 @@ mod tests {
             client_to_server_cid: c2s_cid,
             server_to_client_cid: s2c_cid,
             cipher: CipherSuite::Aes128Gcm,
-            hp_tx: [0x01; HP_KEY_LEN],
-            hp_rx: [0x02; HP_KEY_LEN],
-            aead_tx: [0x03; AEAD_KEY_LEN],
-            aead_rx: [0x04; AEAD_KEY_LEN],
+            hp_tx: vec![0x01; CipherSuite::Aes128Gcm.hp_key_len()],
+            hp_rx: vec![0x02; CipherSuite::Aes128Gcm.hp_key_len()],
+            aead_tx: vec![0x03; CipherSuite::Aes128Gcm.aead_key_len()],
+            aead_rx: vec![0x04; CipherSuite::Aes128Gcm.aead_key_len()],
             iv_tx: [0x05; AEAD_IV_LEN],
             iv_rx: [0x06; AEAD_IV_LEN],
             pn_start: 0,
@@ -299,7 +299,7 @@ mod tests {
         let payload_collision = RegisterCidPayload {
             client_to_server_cid: c2s_cid,
             server_to_client_cid: s2c_cid,
-            ..payload
+            ..payload.clone()
         };
 
         let entry = CidEntry::from_register(7, &payload, 0, false).unwrap();

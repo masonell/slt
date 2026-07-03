@@ -20,11 +20,12 @@ pub use message::{Message, MessageError, MessageLimits, decode_message, encode_m
 /// Payload schemas, constants, and codes.
 pub use payloads::{
     AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_CHALLENGE_LEN, AUTH_PAYLOAD_LEN, AUTH_SIGNATURE_LEN,
-    AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, CLOSE_PAYLOAD_LEN, CipherSuite,
-    CloseCode, ClosePayload, HP_KEY_LEN, MAX_CONTROL_FRAME_LEN, PING_PAYLOAD_LEN, PayloadError,
-    PingPayload, PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload,
-    RegisterOkPayload, SwitchAckPayload, SwitchToUdpPayload, UPGRADE_ID_PAYLOAD_LEN,
-    UPGRADE_PROBE_PAYLOAD_LEN, UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
+    AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, CHACHA20_POLY1305_KEY_LEN,
+    CLOSE_PAYLOAD_LEN, CipherSuite, CloseCode, ClosePayload, HP_KEY_LEN, MAX_AEAD_KEY_LEN,
+    MAX_CONTROL_FRAME_LEN, MAX_HP_KEY_LEN, PING_PAYLOAD_LEN, PayloadError, PingPayload,
+    PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload,
+    SwitchAckPayload, SwitchToUdpPayload, UPGRADE_ID_PAYLOAD_LEN, UPGRADE_PROBE_PAYLOAD_LEN,
+    UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
 };
 /// Message type identifiers.
 pub use types::MessageType;

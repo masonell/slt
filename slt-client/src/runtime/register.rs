@@ -54,10 +54,10 @@ pub(super) fn prepare_udp_qsp_registration(
         client_to_server_cid: ids.dcid,
         server_to_client_cid: ids.scid,
         cipher,
-        hp_tx: hp_s2c,
-        hp_rx: hp_c2s,
-        aead_tx: aead_s2c,
-        aead_rx: aead_c2s,
+        hp_tx: hp_s2c.to_vec(),
+        hp_rx: hp_c2s.to_vec(),
+        aead_tx: aead_s2c.to_vec(),
+        aead_rx: aead_c2s.to_vec(),
         iv_tx: iv_s2c,
         iv_rx: iv_c2s,
         pn_start: pn_start_s2c,
@@ -69,14 +69,14 @@ pub(super) fn prepare_udp_qsp_registration(
     payload.encode(&mut payload_buf)?;
 
     // Reverse key directions: the payload is expressed in the server's (tx/rx) terms.
-    let keys = UdpQspKeys::new(
+    let keys = UdpQspKeys::new_from_key_material(
         cipher,
-        payload.hp_rx,
-        payload.hp_tx,
-        payload.aead_rx,
-        payload.aead_tx,
-        payload.iv_rx,
-        payload.iv_tx,
+        &payload.hp_rx,
+        &payload.hp_tx,
+        &payload.aead_rx,
+        &payload.aead_tx,
+        &payload.iv_rx,
+        &payload.iv_tx,
     )?;
 
     let io = client_udp_qsp_io(&ids.socket, ids.peer)?;

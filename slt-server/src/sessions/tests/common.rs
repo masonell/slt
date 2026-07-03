@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, MessageLimits, PingPayload,
-    PongPayload, RegisterCidPayload, SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload,
-    UpgradeProbeAckPayload, UpgradeProbePayload, decode_message, encode_message,
+    AEAD_IV_LEN, CipherSuite, Message, MessageLimits, PingPayload, PongPayload, RegisterCidPayload,
+    SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
+    UpgradeProbePayload, decode_message, encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::Cid;
@@ -171,10 +171,10 @@ pub(super) fn make_register_payload(
         client_to_server_cid,
         server_to_client_cid,
         cipher,
-        hp_tx: [0x11; HP_KEY_LEN],
-        hp_rx: [0x11; HP_KEY_LEN],
-        aead_tx: [0x22; AEAD_KEY_LEN],
-        aead_rx: [0x22; AEAD_KEY_LEN],
+        hp_tx: vec![0x11; cipher.hp_key_len()],
+        hp_rx: vec![0x11; cipher.hp_key_len()],
+        aead_tx: vec![0x22; cipher.aead_key_len()],
+        aead_rx: vec![0x22; cipher.aead_key_len()],
         iv_tx: [0x33; AEAD_IV_LEN],
         iv_rx: [0x33; AEAD_IV_LEN],
         pn_start: 0,
