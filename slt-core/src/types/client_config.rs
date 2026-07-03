@@ -82,6 +82,12 @@ pub struct ClientTimingConfig {
         with = "humantime_serde"
     )]
     pub register_timeout: Duration,
+    /// Timeout for the full QUIC DCID discovery attempt.
+    #[serde(
+        default = "crate::config::default_quic_discovery_timeout",
+        with = "humantime_serde"
+    )]
+    pub quic_discovery_timeout: Duration,
     /// Session idle timeout (no activity before disconnect).
     #[serde(
         default = "crate::config::default_idle_timeout",
@@ -106,13 +112,15 @@ impl Default for ClientTimingConfig {
     fn default() -> Self {
         use crate::config::{
             default_auth_timeout, default_idle_timeout, default_ping_max, default_ping_min,
-            default_reconnect_max, default_reconnect_min, default_register_timeout,
+            default_quic_discovery_timeout, default_reconnect_max, default_reconnect_min,
+            default_register_timeout,
         };
         Self {
             ping_min: default_ping_min(),
             ping_max: default_ping_max(),
             auth_timeout: default_auth_timeout(),
             register_timeout: default_register_timeout(),
+            quic_discovery_timeout: default_quic_discovery_timeout(),
             idle_timeout: default_idle_timeout(),
             reconnect_min: default_reconnect_min(),
             reconnect_max: default_reconnect_max(),
@@ -139,6 +147,7 @@ impl ClientTimingConfig {
         }
         validate_timeout("auth_timeout", self.auth_timeout)?;
         validate_timeout("register_timeout", self.register_timeout)?;
+        validate_timeout("quic_discovery_timeout", self.quic_discovery_timeout)?;
         validate_timeout("idle_timeout", self.idle_timeout)?;
         Ok(())
     }
@@ -162,6 +171,7 @@ mod tests {
             ping_max: Duration::from_secs(20),
             auth_timeout: Duration::from_secs(10),
             register_timeout: Duration::from_secs(10),
+            quic_discovery_timeout: Duration::from_secs(15),
             idle_timeout: Duration::from_mins(1),
             reconnect_min: Duration::from_millis(200),
             reconnect_max: Duration::from_secs(5),
@@ -186,6 +196,15 @@ mod tests {
     fn validate_accepts_valid_timing_config() {
         let config = test_timing_config();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn serde_defaults_quic_discovery_timeout_when_omitted() {
+        let config: ClientTimingConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            config.quic_discovery_timeout,
+            crate::config::DEFAULT_QUIC_DISCOVERY_TIMEOUT
+        );
     }
 
     #[test]
@@ -220,6 +239,19 @@ mod tests {
         config.auth_timeout = Duration::ZERO;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::ZeroTimeout { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_zero_quic_discovery_timeout() {
+        let mut config = test_timing_config();
+        config.quic_discovery_timeout = Duration::ZERO;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroTimeout {
+                field: "quic_discovery_timeout"
+            }
+        ));
     }
 
     #[test]

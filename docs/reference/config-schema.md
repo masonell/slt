@@ -162,6 +162,7 @@ with a matching name, address, prefix, MTU, and UP state before SLT starts.
 | `ping_max` | duration | No | `"30s"` | - |
 | `auth_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `register_timeout` | duration | No | `"10s"` | > 0, <= 1h |
+| `quic_discovery_timeout` | duration | No | `"15s"` | > 0, <= 1h |
 | `idle_timeout` | duration | No | `"5m"` | > 0, <= 1h |
 | `reconnect_min` | duration | No | `"200ms"` | <= `reconnect_max` |
 | `reconnect_max` | duration | No | `"5s"` | - |
@@ -196,6 +197,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 register_timeout = "10s"
+quic_discovery_timeout = "15s"
 idle_timeout = "5m"
 reconnect_min = "200ms"
 reconnect_max = "5s"

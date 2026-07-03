@@ -484,11 +484,12 @@ On session termination:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| auth_timeout | 30s | Time for client to send valid AUTH |
+| auth_timeout | 10s | Time for client to send valid AUTH |
 | idle_timeout | 300s | Max idle time before disconnect |
 | ping_min | 10s | Minimum keepalive interval |
 | ping_max | 30s | Maximum keepalive interval |
-| register_timeout | 30s | Time for REGISTER_OK/FAIL response |
+| register_timeout | 10s | Time for REGISTER_OK/FAIL response |
+| quic_discovery_timeout | 15s | Time for full QUIC DCID discovery attempt |
 
 ### 6.2 Ping Scheduling
 

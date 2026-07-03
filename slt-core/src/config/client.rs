@@ -112,6 +112,7 @@ mod tests {
                 ping_max: Duration::from_secs(20),
                 auth_timeout: Duration::from_secs(10),
                 register_timeout: Duration::from_secs(10),
+                quic_discovery_timeout: Duration::from_secs(15),
                 idle_timeout: Duration::from_mins(1),
                 reconnect_min: Duration::from_millis(200),
                 reconnect_max: Duration::from_secs(5),

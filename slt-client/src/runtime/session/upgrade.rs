@@ -8,6 +8,7 @@ use slt_core::proto::{
     SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
 };
 use tokio::task::JoinHandle;
+use tokio::time;
 use tracing::{debug, info, trace, warn};
 
 use super::error::SessionError;
@@ -54,15 +55,24 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         let peer = self.peer;
         let socket_protector = self.services.socket_protector().clone();
         let host_resolver = self.services.host_resolver().clone();
+        let discovery_timeout = self.config.timing.quic_discovery_timeout;
 
         tokio::spawn(async move {
+            debug!(
+                timeout_ms = discovery_timeout.as_millis(),
+                peer = ?peer,
+                "starting quic dcid discovery"
+            );
             let result = tokio::select! {
                 () = cancel.cancelled() => return None,
-                result = quic::discover_quic_ids(&config, &cancel, peer, &socket_protector, &host_resolver) => result,
+                result = time::timeout(
+                    discovery_timeout,
+                    quic::discover_quic_ids(&config, &cancel, peer, &socket_protector, &host_resolver),
+                ) => result,
             };
 
             match result {
-                Ok(ids) => {
+                Ok(Ok(ids)) => {
                     info!(
                         dcid_len = ids.dcid.len(),
                         scid_len = ids.scid.len(),
@@ -70,8 +80,15 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                     );
                     Some(ids)
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     warn!(error = %err, "quic dcid discovery failed");
+                    None
+                }
+                Err(_) => {
+                    warn!(
+                        timeout_ms = discovery_timeout.as_millis(),
+                        "quic dcid discovery timed out"
+                    );
                     None
                 }
             }

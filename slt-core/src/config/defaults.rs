@@ -17,6 +17,9 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 /// Default UDP-QSP registration timeout (client only).
 pub const DEFAULT_REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Default QUIC DCID discovery timeout (client only).
+pub const DEFAULT_QUIC_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Default minimum reconnect backoff delay (client only).
 pub const DEFAULT_RECONNECT_MIN: Duration = Duration::from_millis(200);
 
@@ -51,6 +54,12 @@ pub const fn default_idle_timeout() -> Duration {
 #[must_use]
 pub const fn default_register_timeout() -> Duration {
     DEFAULT_REGISTER_TIMEOUT
+}
+
+/// Returns the default QUIC DCID discovery timeout (client only).
+#[must_use]
+pub const fn default_quic_discovery_timeout() -> Duration {
+    DEFAULT_QUIC_DISCOVERY_TIMEOUT
 }
 
 /// Returns the default minimum reconnect backoff delay (client only).
