@@ -1,5 +1,7 @@
 package dev.slt.android.ui.profile
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -22,11 +24,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.slt.android.ConfigValidationResult
+import kotlinx.coroutines.launch
 
 /**
  * Raw SLT client TOML editor. Edits a local buffer; the Apply action validates
@@ -42,17 +47,34 @@ internal fun TomlEditorScreen(
     onCancel: () -> Unit,
     onCopy: (String) -> Unit,
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var buffer by remember { mutableStateOf(initialToml) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
-    LaunchedEffect(error) {
-        error?.let {
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            runCatching { context.readImportedText(uri) }
+                .onSuccess {
+                    buffer = it
+                    message = "Config imported"
+                }
+                .onFailure { importError ->
+                    message = importError.message ?: "Could not import config"
+                }
+        }
+    }
+    LaunchedEffect(message) {
+        message?.let {
             snackbarHostState.showSnackbar(
                 message = it,
                 actionLabel = "Dismiss",
                 duration = SnackbarDuration.Short,
             )
-            error = null
+            message = null
         }
     }
 
@@ -70,6 +92,9 @@ internal fun TomlEditorScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = { importLauncher.launch(importTextMimeTypes) }) {
+                        Text("Import")
+                    }
                     TextButton(onClick = { onCopy(buffer) }) {
                         Text("Copy")
                     }
@@ -77,7 +102,7 @@ internal fun TomlEditorScreen(
                         val result = validate(buffer)
                         when (result) {
                             is ConfigValidationResult.Valid -> onApply(buffer, result)
-                            is ConfigValidationResult.Invalid -> error = result.message
+                            is ConfigValidationResult.Invalid -> message = result.message
                         }
                     }) {
                         Text("Apply")

@@ -1,5 +1,7 @@
 package dev.slt.android.ui.profile
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,15 +35,18 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.slt.android.profile.VpnRouteRule
 import dev.slt.android.profile.rules.exportVpnRouteRules
 import dev.slt.android.profile.rules.parseVpnRouteRules
 import dev.slt.android.ui.UiMessage
+import kotlinx.coroutines.launch
 
 /**
  * VPN route editor. Edits a local buffer (newline-separated CIDRs with optional
@@ -56,12 +61,38 @@ internal fun RouteEditorScreen(
     onCopy: (String) -> Unit,
     onCancel: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var buffer by remember { mutableStateOf(initialText) }
     var editorMode by remember { mutableStateOf(RouteEditorMode.List) }
     var newRouteCidr by remember { mutableStateOf("") }
     var newRouteExcluded by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<UiMessage?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            runCatching { context.readImportedText(uri) }
+                .onSuccess { importedText ->
+                    runCatching { exportVpnRouteRules(parseVpnRouteRules(importedText)) }
+                        .onSuccess { normalized ->
+                            buffer = normalized
+                            editorMode = RouteEditorMode.List
+                            message = UiMessage.info("Routes imported")
+                        }
+                        .onFailure { error ->
+                            buffer = importedText
+                            editorMode = RouteEditorMode.Text
+                            message = UiMessage.error(error.message ?: "Invalid routes")
+                        }
+                }
+                .onFailure { error ->
+                    message = UiMessage.error(error.message ?: "Could not import routes")
+                }
+        }
+    }
     LaunchedEffect(message) {
         message?.let {
             snackbarHostState.showSnackbar(
@@ -113,6 +144,9 @@ internal fun RouteEditorScreen(
                     }
                 },
                 actions = {
+                    TextButton(onClick = { importLauncher.launch(importTextMimeTypes) }) {
+                        Text("Import")
+                    }
                     TextButton(onClick = { copyRoutes() }) {
                         Text("Copy")
                     }
