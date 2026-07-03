@@ -85,6 +85,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "60s"
+metrics_interval = "5m"
 "#
         );
         file.write_all(config.as_bytes()).unwrap();

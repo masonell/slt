@@ -86,7 +86,11 @@ where
     S: ClientRuntimeServices,
 {
     let metrics = Arc::new(Metrics::default());
-    let metrics_reporter = spawn_metrics_task(metrics.clone(), cancel.clone());
+    let metrics_reporter = spawn_metrics_task(
+        metrics.clone(),
+        cancel.clone(),
+        config.timing.metrics_interval,
+    );
 
     // The runtime owns the full lifecycle event stream: Starting..Stopped/Error.
     // The bridge no longer emits these (only pre-run_client setup failures).
@@ -390,9 +394,10 @@ fn handle_session_exit(outcome: SessionOutcome, cancel: &CancellationToken) -> S
 fn spawn_metrics_task(
     metrics: Arc<Metrics>,
     cancel: CancellationToken,
+    metrics_interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(30));
+        let mut interval = time::interval(metrics_interval);
         loop {
             tokio::select! {
                 () = cancel.cancelled() => return,

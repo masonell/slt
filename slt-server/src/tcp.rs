@@ -288,6 +288,7 @@ mod tests {
                 ping_max: Duration::from_secs(20),
                 auth_timeout: Duration::from_secs(10),
                 idle_timeout: Duration::from_mins(1),
+                metrics_interval: Duration::from_mins(5),
             },
             udp_nat_max_entries: 1024,
             session_queue_size: 256,

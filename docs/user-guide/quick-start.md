@@ -175,6 +175,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "5m"
+metrics_interval = "5m"
 
 # Client entries are added by `slt add-client`
 [[clients]]
@@ -217,6 +218,7 @@ require_udp = false     # Don't fail if UDP upgrade fails
 [timing]
 ping_min = "10s"
 ping_max = "30s"
+metrics_interval = "5m"
 ```
 
 ## Common Issues

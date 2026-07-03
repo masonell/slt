@@ -81,6 +81,7 @@ pub fn default_timing() -> ClientTimingConfig {
         register_timeout: Duration::from_secs(10),
         quic_discovery_timeout: Duration::from_secs(15),
         idle_timeout: Duration::from_mins(1),
+        metrics_interval: Duration::from_mins(5),
         reconnect_min: Duration::from_millis(200),
         reconnect_max: Duration::from_secs(5),
     }

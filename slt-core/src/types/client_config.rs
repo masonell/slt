@@ -94,6 +94,12 @@ pub struct ClientTimingConfig {
         with = "humantime_serde"
     )]
     pub idle_timeout: Duration,
+    /// Metrics snapshot reporting interval.
+    #[serde(
+        default = "crate::config::default_metrics_interval",
+        with = "humantime_serde"
+    )]
+    pub metrics_interval: Duration,
     /// Minimum reconnect backoff delay.
     #[serde(
         default = "crate::config::default_reconnect_min",
@@ -111,9 +117,9 @@ pub struct ClientTimingConfig {
 impl Default for ClientTimingConfig {
     fn default() -> Self {
         use crate::config::{
-            default_auth_timeout, default_idle_timeout, default_ping_max, default_ping_min,
-            default_quic_discovery_timeout, default_reconnect_max, default_reconnect_min,
-            default_register_timeout,
+            default_auth_timeout, default_idle_timeout, default_metrics_interval, default_ping_max,
+            default_ping_min, default_quic_discovery_timeout, default_reconnect_max,
+            default_reconnect_min, default_register_timeout,
         };
         Self {
             ping_min: default_ping_min(),
@@ -122,6 +128,7 @@ impl Default for ClientTimingConfig {
             register_timeout: default_register_timeout(),
             quic_discovery_timeout: default_quic_discovery_timeout(),
             idle_timeout: default_idle_timeout(),
+            metrics_interval: default_metrics_interval(),
             reconnect_min: default_reconnect_min(),
             reconnect_max: default_reconnect_max(),
         }
@@ -149,6 +156,7 @@ impl ClientTimingConfig {
         validate_timeout("register_timeout", self.register_timeout)?;
         validate_timeout("quic_discovery_timeout", self.quic_discovery_timeout)?;
         validate_timeout("idle_timeout", self.idle_timeout)?;
+        validate_timeout("metrics_interval", self.metrics_interval)?;
         Ok(())
     }
 }
@@ -173,6 +181,7 @@ mod tests {
             register_timeout: Duration::from_secs(10),
             quic_discovery_timeout: Duration::from_secs(15),
             idle_timeout: Duration::from_mins(1),
+            metrics_interval: Duration::from_mins(5),
             reconnect_min: Duration::from_millis(200),
             reconnect_max: Duration::from_secs(5),
         }
@@ -204,6 +213,15 @@ mod tests {
         assert_eq!(
             config.quic_discovery_timeout,
             crate::config::DEFAULT_QUIC_DISCOVERY_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn serde_defaults_metrics_interval_when_omitted() {
+        let config: ClientTimingConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            config.metrics_interval,
+            crate::config::DEFAULT_METRICS_INTERVAL
         );
     }
 
@@ -250,6 +268,19 @@ mod tests {
             err,
             ConfigError::ZeroTimeout {
                 field: "quic_discovery_timeout"
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_metrics_interval() {
+        let mut config = test_timing_config();
+        config.metrics_interval = Duration::ZERO;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroTimeout {
+                field: "metrics_interval"
             }
         ));
     }

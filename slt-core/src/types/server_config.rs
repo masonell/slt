@@ -69,18 +69,26 @@ pub struct ServerTimingConfig {
         with = "humantime_serde"
     )]
     pub idle_timeout: Duration,
+    /// Metrics snapshot reporting interval.
+    #[serde(
+        default = "crate::config::default_metrics_interval",
+        with = "humantime_serde"
+    )]
+    pub metrics_interval: Duration,
 }
 
 impl Default for ServerTimingConfig {
     fn default() -> Self {
         use crate::config::{
-            default_auth_timeout, default_idle_timeout, default_ping_max, default_ping_min,
+            default_auth_timeout, default_idle_timeout, default_metrics_interval, default_ping_max,
+            default_ping_min,
         };
         Self {
             ping_min: default_ping_min(),
             ping_max: default_ping_max(),
             auth_timeout: default_auth_timeout(),
             idle_timeout: default_idle_timeout(),
+            metrics_interval: default_metrics_interval(),
         }
     }
 }
@@ -97,6 +105,7 @@ impl ServerTimingConfig {
         validate_ping_interval(self.ping_min, self.ping_max)?;
         validate_timeout("auth_timeout", self.auth_timeout)?;
         validate_timeout("idle_timeout", self.idle_timeout)?;
+        validate_timeout("metrics_interval", self.metrics_interval)?;
         Ok(())
     }
 }
@@ -111,6 +120,7 @@ mod tests {
             ping_max: Duration::from_secs(20),
             auth_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_mins(1),
+            metrics_interval: Duration::from_mins(5),
         }
     }
 
@@ -143,6 +153,28 @@ mod tests {
         config.auth_timeout = Duration::ZERO;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::ZeroTimeout { .. }));
+    }
+
+    #[test]
+    fn serde_defaults_metrics_interval_when_omitted() {
+        let config: ServerTimingConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            config.metrics_interval,
+            crate::config::DEFAULT_METRICS_INTERVAL
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_metrics_interval() {
+        let mut config = test_timing_config();
+        config.metrics_interval = Duration::ZERO;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroTimeout {
+                field: "metrics_interval"
+            }
+        ));
     }
 
     #[test]

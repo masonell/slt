@@ -83,6 +83,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "60s"
+metrics_interval = "5m"
 
 [[clients]]
 client_id = "0102030405060708090a0b0c0d0e0f10"

@@ -42,6 +42,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "5m"
+metrics_interval = "5m"
 
 udp_nat_max_entries = 1024
 session_queue_size = 256
@@ -101,6 +102,7 @@ enabled = true
 | `ping_max` | duration | No | `30s` | Maximum ping interval. |
 | `auth_timeout` | duration | No | `10s` | Timeout for authentication handshake. Must be > 0 and <= 1 hour. |
 | `idle_timeout` | duration | No | `5m` | Idle connection timeout. Must be > 0 and <= 1 hour. |
+| `metrics_interval` | duration | No | `5m` | Metrics snapshot logging interval. Must be > 0 and <= 1 hour. |
 
 #### Clients Section
 
@@ -140,6 +142,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "5m"
+metrics_interval = "5m"
 
 udp_nat_max_entries = 1024
 session_queue_size = 256
@@ -206,6 +209,7 @@ auth_timeout = "10s"
 register_timeout = "10s"
 quic_discovery_timeout = "15s"
 idle_timeout = "5m"
+metrics_interval = "5m"
 reconnect_min = "200ms"
 reconnect_max = "5s"
 ```
@@ -262,6 +266,7 @@ reconnect_max = "5s"
 | `register_timeout` | duration | No | `10s` | Timeout for UDP-QSP registration. Must be > 0 and <= 1 hour. |
 | `quic_discovery_timeout` | duration | No | `15s` | Timeout for the full QUIC DCID discovery attempt. Must be > 0 and <= 1 hour. |
 | `idle_timeout` | duration | No | `5m` | Session idle timeout. Must be > 0 and <= 1 hour. |
+| `metrics_interval` | duration | No | `5m` | Metrics snapshot logging interval. Must be > 0 and <= 1 hour. |
 | `reconnect_min` | duration | No | `200ms` | Minimum reconnect backoff delay. Must be <= `reconnect_max`. |
 | `reconnect_max` | duration | No | `5s` | Maximum reconnect backoff delay. |
 
@@ -305,6 +310,7 @@ auth_timeout = "10s"
 register_timeout = "10s"
 quic_discovery_timeout = "15s"
 idle_timeout = "5m"
+metrics_interval = "5m"
 reconnect_min = "200ms"
 reconnect_max = "5s"
 ```
@@ -520,6 +526,7 @@ auth_timeout = "5s"
 register_timeout = "5s"
 quic_discovery_timeout = "8s"
 idle_timeout = "2m"
+metrics_interval = "5m"
 reconnect_min = "100ms"
 reconnect_max = "2s"
 ```
@@ -536,6 +543,7 @@ auth_timeout = "30s"
 register_timeout = "30s"
 quic_discovery_timeout = "45s"
 idle_timeout = "10m"
+metrics_interval = "5m"
 reconnect_min = "500ms"
 reconnect_max = "30s"
 ```

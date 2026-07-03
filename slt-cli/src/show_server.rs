@@ -85,6 +85,7 @@ pub fn show_server(config_path: &Path, reveal_secrets: bool) -> Result<()> {
     println!("  Ping Max:       {:?}", config.timing.ping_max);
     println!("  Auth Timeout:   {:?}", config.timing.auth_timeout);
     println!("  Idle Timeout:   {:?}", config.timing.idle_timeout);
+    println!("  Metrics Intvl:  {:?}", config.timing.metrics_interval);
     println!();
 
     // Advanced settings
@@ -150,6 +151,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "60s"
+metrics_interval = "5m"
 
 [[clients]]
 client_id = "0102030405060708090a0b0c0d0e0f10"

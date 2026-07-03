@@ -14,6 +14,9 @@ pub const DEFAULT_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default idle timeout.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 
+/// Default metrics reporting interval.
+pub const DEFAULT_METRICS_INTERVAL: Duration = Duration::from_mins(5);
+
 /// Default UDP-QSP registration timeout (client only).
 pub const DEFAULT_REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -48,6 +51,12 @@ pub const fn default_auth_timeout() -> Duration {
 #[must_use]
 pub const fn default_idle_timeout() -> Duration {
     DEFAULT_IDLE_TIMEOUT
+}
+
+/// Returns the default metrics reporting interval.
+#[must_use]
+pub const fn default_metrics_interval() -> Duration {
+    DEFAULT_METRICS_INTERVAL
 }
 
 /// Returns the default UDP-QSP registration timeout (client only).

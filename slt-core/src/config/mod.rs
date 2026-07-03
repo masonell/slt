@@ -9,11 +9,11 @@ use std::time::Duration;
 
 pub use client::ClientConfig;
 pub use defaults::{
-    DEFAULT_AUTH_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_PING_MAX, DEFAULT_PING_MIN,
-    DEFAULT_QUIC_DISCOVERY_TIMEOUT, DEFAULT_RECONNECT_MAX, DEFAULT_RECONNECT_MIN,
-    DEFAULT_REGISTER_TIMEOUT, default_auth_timeout, default_idle_timeout, default_ping_max,
-    default_ping_min, default_quic_discovery_timeout, default_reconnect_max, default_reconnect_min,
-    default_register_timeout,
+    DEFAULT_AUTH_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_METRICS_INTERVAL, DEFAULT_PING_MAX,
+    DEFAULT_PING_MIN, DEFAULT_QUIC_DISCOVERY_TIMEOUT, DEFAULT_RECONNECT_MAX, DEFAULT_RECONNECT_MIN,
+    DEFAULT_REGISTER_TIMEOUT, default_auth_timeout, default_idle_timeout, default_metrics_interval,
+    default_ping_max, default_ping_min, default_quic_discovery_timeout, default_reconnect_max,
+    default_reconnect_min, default_register_timeout,
 };
 pub use server::ServerConfig;
 use thiserror::Error;

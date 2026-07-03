@@ -130,7 +130,8 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         cancel.clone(),
         config.tun.tun_mtu,
     );
-    let mut metrics_task = spawn_metrics_task(metrics, cancel.clone());
+    let mut metrics_task =
+        spawn_metrics_task(metrics, cancel.clone(), config.timing.metrics_interval);
 
     let trigger = tokio::select! {
         res = &mut tcp_task => ShutdownTrigger::WorkerFailed { task: "tcp", result: res },
@@ -339,12 +340,13 @@ fn spawn_tun_tasks(
 
 /// Spawns the metrics reporting task.
 ///
-/// Periodically logs a snapshot of all metric counters at 30-second intervals.
+/// Periodically logs a snapshot of all metric counters.
 ///
 /// # Arguments
 ///
 /// * `metrics` - Metrics tracker to read snapshots from
 /// * `cancel` - Token to signal graceful shutdown
+/// * `metrics_interval` - Duration between metrics snapshots
 ///
 /// # Returns
 ///
@@ -352,9 +354,10 @@ fn spawn_tun_tasks(
 fn spawn_metrics_task(
     metrics: Arc<Metrics>,
     cancel: CancellationToken,
+    metrics_interval: Duration,
 ) -> tokio::task::JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(30));
+        let mut interval = time::interval(metrics_interval);
         loop {
             tokio::select! {
                 () = cancel.cancelled() => return Ok(()),
