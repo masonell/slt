@@ -1,50 +1,40 @@
 # SLT
 
-A VPN that multiplexes with web traffic on ports 80/443.
+A VPN that tunnels through HTTPS on port 443 and shares the port with ordinary web traffic, so VPN use is hard to distinguish from normal browsing.
 
-## What is SLT?
+## How it works
 
-SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on ports 80/443. This allows VPN traffic to coexist with normal HTTPS traffic on the same server, making it harder to distinguish VPN usage from regular web browsing.
+SLT runs alongside nginx on the same host, sharing ports 80 and 443:
 
-## Key Features
+- **Traffic classification.** The server inspects each TLS ClientHello for an HMAC token in the `legacy_session_id` field. Connections carrying a valid token are VPN sessions; everything else is transparently forwarded to nginx as decoy web traffic.
+- **UDP-QSP data transport.** After authenticating over TLS, VPN data moves to UDP/443 using QUIC-shaped short-header packets protected with AES-128-GCM or ChaCha20-Poly1305. This reuses the QUIC wire format for header protection and AEAD framing without running a QUIC handshake.
+- **WireGuard-style tooling.** The `slt` CLI handles key and certificate generation, project initialization, client provisioning, config validation, and TUN/network setup.
 
-- **Traffic Multiplexing** - VPN and web traffic share ports 80/443 seamlessly
-- **UDP-QSP** - High-performance data transport using QUIC-shaped packet protection
-- **WireGuard-like UX** - Simple CLI tools for key generation and configuration
-- **nginx Coexistence** - Non-VPN traffic is forwarded to nginx for regular web hosting
+See [System Design](docs/architecture/overview.md) and the [Protocol Reference](docs/protocol/wire-format.md) for details.
 
 ## Status
 
-**Early-stage development** - APIs and configuration may change. Not ready for production use.
+**Early-stage development.** APIs and configuration may change. Not ready for production use.
 
 ## Documentation
 
-Full documentation is available in [docs/README.md](docs/README.md).
+- [Quick Start](docs/user-guide/quick-start.md) — bring up a server and client end to end
+- [User Guide](docs/user-guide/README.md) — installation, configuration, troubleshooting
+- [Deployment](docs/deployment/README.md) — server/client setup and nginx integration
+- [Architecture](docs/architecture/README.md) — design, traffic classification, transport security
+- [Protocol](docs/protocol/README.md) — wire format, messages, UDP-QSP, connection flow
 
-## Quick Start
+## Components
 
-```bash
-# Generate server keys
-slt-cli generate-keys --server
+| Crate | Role |
+|-------|------|
+| `slt-core` | Protocol definitions, crypto primitives, configuration, packet parsing |
+| `slt-server` | VPN server: TCP/UDP front doors, auth, sessions, TUN integration |
+| `slt-client` | VPN client: connection establishment, transport switching, TUN I/O |
+| `slt-cli` | The `slt` management CLI: init, keys/certs, client management, validation, `net` setup |
+| `slt-tools` | Helper CLIs for generating TLS/QUIC ClientHello packets |
 
-# Generate server certificates
-slt-cli generate-certs
-
-# Preconfigure the TUN device once (root); address/MTU must match [tun]
-sudo ip tuntap add dev tun0 mode tun
-sudo ip addr add 10.10.0.1/24 dev tun0
-sudo ip link set dev tun0 mtu 1406
-sudo ip link set tun0 up
-
-# Start the server (root or CAP_NET_BIND_SERVICE binds port 443)
-sudo slt-server
-
-# Generate client keys and connect
-slt-cli generate-keys --client
-slt-client
-```
-
-See the [User Guide](docs/user-guide/README.md) for detailed setup instructions.
+An Android client (Kotlin/Compose) lives under [`android/`](android/).
 
 ## License
 
