@@ -73,30 +73,21 @@ SLT attaches to an existing, preconfigured TUN device — it does not create, ad
 
 Creating and addressing the interface requires `CAP_NET_ADMIN` (or root), but this is a one-time setup step — the running client process needs none of it (see [Running the Client](#running-the-client)).
 
-The client's overlay address is its `assigned_ipv4` (from `[identity]`), and `tun_ipv4` in `[tun]` must equal it. Create a persistent interface owned by the user that will run SLT (here `slt`):
+The client's overlay address is its `assigned_ipv4` (from `[identity]`), and `tun_ipv4` in `[tun]` must equal it. Create and configure a persistent interface owned by the user that will run SLT (here `slt`) from the `[tun]` section of `client.toml`:
 
 ```bash
-# Create a persistent tun0 owned by the slt user
-sudo ip tuntap add dev tun0 mode tun user slt
-
-# Assign the client's overlay address (must match assigned_ipv4 / tun_prefix)
-sudo ip addr add 10.10.0.2/24 dev tun0
-
-# Set the MTU from [tun] (tun_mtu); slt add-client copies the server's 1406
-sudo ip link set dev tun0 mtu 1406
-
-# Bring the interface up
-sudo ip link set tun0 up
+# Create and configure tun0 from client.toml's [tun], owned by the slt user
+sudo slt net up --config /etc/slt/client.toml --user slt --group slt
 ```
 
-Adjust `tun0`, `10.10.0.2/24`, and `1406` to match your `client.toml`. Verify before starting the client:
+`slt net up` reads `tun_name`, `tun_ipv4`/`tun_prefix`, and `tun_mtu` straight from the config, so the interface always matches `[tun]`. To remove the interface completely (for example when uninstalling), run `sudo slt net down --config /etc/slt/client.toml`; normal client restarts keep the persistent interface in place. Verify before starting the client:
 
 ```bash
 ip -brief addr show tun0          # expect: tun0  UP  10.10.0.2/24
 ip link show tun0 | grep mtu      # expect: mtu 1406
 ```
 
-> **Tip:** A persistent interface survives a client restart, so it only needs to be created once. Put the creation and addressing commands in a script or provisioning step so they run before the client starts — SLT will simply attach on each start.
+> **Tip:** A persistent interface survives a client restart, so it only needs to be created once. Run `slt net up` from a provisioning step or the service's `ExecStartPre` so the interface is ready before the client starts — SLT simply attaches on each start.
 
 ### TUN Module Verification
 
@@ -595,7 +586,7 @@ The client needs no `CAP_NET_ADMIN`. It only needs to open the preconfigured TUN
 ```bash
 # Confirm the interface exists and is owned by your user (set at preconfiguration)
 ip -brief addr show tun0
-sudo ip tuntap add dev tun0 mode tun user slt   # if not already owned by slt
+sudo slt net up --config /etc/slt/client.toml --user slt --group slt   # recreate if missing
 
 # /dev/net/tun must be accessible
 ls -la /dev/net/tun
@@ -633,7 +624,7 @@ Match the startup error against the `[tun]` config:
 |-----------------|-------|
 | `failed to attach TUN tun0` | Interface does not exist, or the user cannot open `/dev/net/tun` |
 | `TUN tun0 MTU is X, expected Y` | `tun_mtu` differs from the interface MTU |
-| `TUN tun0 is not up/running` | Interface was not brought up (`ip link set tun0 up`) |
+| `TUN tun0 is not up/running` | Interface was not brought up (run `slt net up`) |
 | `TUN tun0 is missing expected IPv4 address …` | Interface lacks the configured `tun_ipv4` (must equal `assigned_ipv4`) |
 | `TUN tun0 does not have TCP GSO offload enabled for this fd` | Offload could not be enabled on attach (kernel/TUN driver) |
 

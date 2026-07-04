@@ -75,13 +75,10 @@ On the client machine, save this file securely (e.g., `~/slt-client.toml`).
 
 ## Step 4: Start the Server
 
-SLT attaches to a preconfigured TUN device, so create it first (one-time; root). The address, prefix, and MTU must match the `[tun]` section of `server.toml`:
+SLT attaches to a preconfigured TUN device. Configure it from `server.toml`'s `[tun]` section, and enable IPv4 forwarding plus NAT for tunneled traffic (one-time; root):
 
 ```bash
-sudo ip tuntap add dev tun0 mode tun
-sudo ip addr add 10.10.0.1/24 dev tun0     # match tun_ipv4 / tun_prefix
-sudo ip link set dev tun0 mtu 1406         # match tun_mtu (init generates 1406)
-sudo ip link set tun0 up
+sudo slt net up --config /etc/slt/server.toml --ipv4-forward --masquerade
 ```
 
 Then start the SLT server (root or `CAP_NET_BIND_SERVICE` is needed to bind port 443):
@@ -100,13 +97,10 @@ The server is now listening on port 443 for both TCP and UDP connections.
 
 ## Step 5: Start the Client
 
-On your client machine, preconfigure the TUN device first (one-time; root). The address must equal the client's `assigned_ipv4`, and the prefix/MTU must match `[tun]`:
+On your client machine, preconfigure the TUN device from the client config's `[tun]` section, owned by your user (one-time; root):
 
 ```bash
-sudo ip tuntap add dev tun0 mode tun user "$USER"
-sudo ip addr add 10.10.0.2/24 dev tun0     # equals assigned_ipv4 / tun_prefix
-sudo ip link set dev tun0 mtu 1406         # match tun_mtu
-sudo ip link set tun0 up
+sudo slt net up --config ~/slt-client.toml --user "$USER"
 ```
 
 Then start the SLT client (no root needed — the interface is owned by your user):
@@ -225,14 +219,14 @@ metrics_interval = "5m"
 
 ### Permission Denied
 
-If the server or client cannot attach to the TUN interface, the interface does not exist yet or your user cannot open it. Preconfigure it first — the address and MTU must match `[tun]`:
+If the server or client cannot attach to the TUN interface, the interface does not exist yet or your user cannot open it. Preconfigure it from the config's `[tun]` section (one-time; root):
 
 ```bash
-# Preconfigure the interface (one-time, root)
-sudo ip tuntap add dev tun0 mode tun user "$USER"
-sudo ip addr add 10.10.0.2/24 dev tun0      # use the server's tun_ipv4 on the server
-sudo ip link set dev tun0 mtu 1406           # match tun_mtu
-sudo ip link set tun0 up
+# Client: configure the interface owned by your user
+sudo slt net up --config ~/slt-client.toml --user "$USER"
+
+# Server: also enable forwarding and NAT for tunneled traffic
+sudo slt net up --config /etc/slt/server.toml --ipv4-forward --masquerade
 ```
 
 The server still needs root (or `CAP_NET_BIND_SERVICE`) to bind port 443; the client needs none once the interface is owned by its user.

@@ -144,11 +144,8 @@ If the BoringSSL build fails:
 SLT attaches to a preconfigured TUN interface and needs no `CAP_NET_ADMIN` at runtime. Permission errors at startup usually mean the interface has not been preconfigured, or your user cannot open it:
 
 ```bash
-# Preconfigure the interface once (root); owner = your user
-sudo ip tuntap add dev tun0 mode tun user "$USER"
-sudo ip addr add 10.10.0.2/24 dev tun0     # match [tun] tun_ipv4 / tun_prefix
-sudo ip link set dev tun0 mtu 1406         # match [tun] tun_mtu
-sudo ip link set tun0 up
+# Preconfigure the interface once (root), reading [tun] from the config; owner = your user
+sudo slt net up --config /etc/slt/client.toml --user "$USER"
 ```
 
 For the server only, grant privileged-port binding without root:
