@@ -2,6 +2,7 @@
 name = "slt-client"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [lib]
 name = "slt_client"

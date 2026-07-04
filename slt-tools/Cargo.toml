@@ -2,6 +2,7 @@
 name = "slt-tools"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "quic_client_hello"

@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("app.cash.licensee")
 }
 
 val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
@@ -144,6 +145,11 @@ android {
         )
         disable += "ChromeOsAbiSupport"
     }
+}
+
+licensee {
+    allow("Apache-2.0")
+    bundleAndroidAsset = true
 }
 
 fun registerBuildRustNativeTask(variantName: String, abis: List<String>) =

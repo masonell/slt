@@ -38,4 +38,7 @@ An Android client (Kotlin/Compose) lives under [`android/`](android/).
 
 ## License
 
-Not yet specified.
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Third-party code under [`vendor/`](vendor/) retains its upstream licenses; see
+the license files inside each vendored package.

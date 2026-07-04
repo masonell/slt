@@ -92,6 +92,21 @@
             doCheck = false;
           };
 
+          cargo-deny = pkgs.rustPlatform.buildRustPackage rec {
+            pname = "cargo-deny";
+            version = "0.19.9";
+
+            src = pkgs.fetchCrate {
+              inherit pname version;
+              hash = "sha256-umxJEz4wPgYHWkdBMxCZEs4JDXyKcMt1m3T7U9MFN+Y=";
+            };
+
+            cargoLock = {
+              lockFileContents = builtins.readFile "${src}/Cargo.lock";
+            };
+            doCheck = false;
+          };
+
           rustToolchain = pkgs.rust-bin.stable."1.96.0".default.override {
             extensions = [
               "clippy"
@@ -125,6 +140,7 @@
             nssTools
             tshark
             rusty-hook
+            cargo-deny
           ];
 
           androidPackages = with pkgs; [

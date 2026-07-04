@@ -1,0 +1,62 @@
+# cargo-deny configuration.
+#
+#   cargo deny check            # full run: licenses + advisories + bans + sources (CI)
+#   cargo deny check licenses   # fast, deterministic gate used by the pre-commit hook
+#
+# [licenses] is the enforced gate: only permissive licenses are allowed, so a
+# dependency update cannot silently pull in copyleft (GPL/AGPL/LGPL/MPL/SSPL)
+# and impose distribution constraints the project does not have.
+
+[graph]
+# Audit the full feature set so feature-gated deps cannot hide a bad license.
+all-features = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# A yanked crate in the lockfile is almost always unintended.
+yanked = "deny"
+# RUSTSEC-2024-0436: `paste` is unmaintained but only appears transitively via
+# Linux TUN/netlink support (`tun-rs` -> `netlink-packet-*`). There is no patched
+# `paste` release, and current upstream netlink crates still depend on it.
+ignore = ["RUSTSEC-2024-0436"]
+
+[licenses]
+confidence-threshold = 0.8
+# Permissive licenses only. Copyleft (GPL/AGPL/LGPL/MPL/SSPL/EUPL) and
+# share-alike (CC-BY-*) are intentionally absent; adding them would change the
+# project's distribution terms. Any license not listed here is denied.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+]
+
+# UniFFI (the Android bridge) is MPL-2.0, weak file-level copyleft. Allowed only
+# for these crates; everywhere else keeps the strict no-copyleft policy.
+exceptions = [
+    { allow = ["MPL-2.0"], name = "uniffi", version = "*" },
+    { allow = ["MPL-2.0"], name = "uniffi_core", version = "*" },
+    { allow = ["MPL-2.0"], name = "uniffi_internal_macros", version = "*" },
+    { allow = ["MPL-2.0"], name = "uniffi_macros", version = "*" },
+    { allow = ["MPL-2.0"], name = "uniffi_meta", version = "*" },
+    { allow = ["MPL-2.0"], name = "uniffi_pipeline", version = "*" },
+]
+
+[bans]
+# Duplicate versions are common in large graphs and usually harmless; surface
+# them for review without blocking.
+multiple-versions = "warn"
+
+[sources]
+# Warn (not deny) so registry-index URL format changes do not break the check.
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
