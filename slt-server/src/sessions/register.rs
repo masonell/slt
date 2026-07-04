@@ -164,6 +164,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             session_id = self.session_id,
             client_id = %self.client_id,
             active_transport = ?self.active_transport,
+            cipher = ?register.cipher,
             dcid_prefix = ?dcid_prefix,
             scid = ?register.server_to_client_cid,
             "register_cid accepted"

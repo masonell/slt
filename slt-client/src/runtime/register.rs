@@ -20,6 +20,8 @@ pub(super) struct PreparedUdpQspRegistration {
     pub(super) payload_buf: Vec<u8>,
     /// Matching UDP-QSP session to install once registration succeeds.
     pub(super) session: Option<QuicQspSession<ClientUdpQspIo>>,
+    /// Resolved cipher suite carried in the `REGISTER_CID` payload.
+    pub(super) cipher: CipherSuite,
 }
 
 /// Builds a `REGISTER_CID` payload and a matching UDP-QSP session.
@@ -92,6 +94,7 @@ pub(super) fn prepare_udp_qsp_registration(
     Ok(PreparedUdpQspRegistration {
         payload_buf,
         session: Some(session),
+        cipher,
     })
 }
 

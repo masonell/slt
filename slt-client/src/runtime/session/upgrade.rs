@@ -272,7 +272,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         &mut self,
         payload: &[u8],
     ) -> Result<SessionControl, SessionError> {
-        let (quic_ids, session) = {
+        let (quic_ids, session, cipher) = {
             let UdpState::Pending {
                 quic_ids,
                 registration,
@@ -306,10 +306,12 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                     detail: "udp-qsp session missing".into(),
                 }
             })?;
-            (quic_ids, session)
+            let cipher = in_flight.prepared.cipher;
+            (quic_ids, session, cipher)
         };
 
         info!(
+            cipher = ?cipher,
             dcid_len = quic_ids.dcid.len(),
             scid_len = quic_ids.scid.len(),
             peer = %quic_ids.peer,
