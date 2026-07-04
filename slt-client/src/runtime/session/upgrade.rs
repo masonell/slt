@@ -4,9 +4,11 @@ use std::io;
 use std::time::Instant;
 
 use slt_core::proto::{
-    Message, PingPayload, RegisterFailPayload, RegisterOkPayload, SwitchAckPayload,
-    SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
+    Message, PingPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload,
+    SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
+    UpgradeProbePayload,
 };
+use slt_core::types::ClientUdpQspCipher;
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{debug, info, trace, warn};
@@ -116,12 +118,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             _ => return SessionControl::Continue,
         };
 
-        match register::start_udp_qsp_registration(
-            &mut self.tcp,
-            &quic_ids,
-            self.config.transport.udp_qsp.cipher,
-        )
-        .await
+        match register::start_udp_qsp_registration(&mut self.tcp, &quic_ids, self.udp_cipher_policy)
+            .await
         {
             Ok(prepared) => {
                 let deadline = Instant::now() + self.config.timing.register_timeout;
@@ -357,10 +355,26 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         let fail = RegisterFailPayload::decode(payload)?;
         warn!(code = ?fail.code, "register_cid rejected");
         self.metrics.inc_udp_register_failure();
-        if self.config.require_udp {
+
+        // One-shot auto fallback: under `auto`, an `InvalidCipher` rejection means
+        // the server's allowlist excludes the suite that was picked. Retry once
+        // with the other explicit suite before giving up. Gating on the effective
+        // policy still being `Auto` makes this self-disabling -- after the flip it
+        // holds an explicit suite, so a second `InvalidCipher` will not flip again.
+        if fail.code == RegisterFailCode::InvalidCipher
+            && self.config.transport.udp_qsp.cipher == ClientUdpQspCipher::Auto
+            && self.udp_cipher_policy == ClientUdpQspCipher::Auto
+        {
+            self.udp_cipher_policy = register::auto_fallback_policy();
+            warn!(
+                cipher = ?self.udp_cipher_policy,
+                "server rejected auto-selected cipher; retrying with the other suite"
+            );
+        } else if self.config.require_udp {
             warn!(code = ?fail.code, "register_cid rejected with require_udp=true");
             return Ok(SessionControl::Close(SessionExit::UdpUpgradeRequired));
         }
+
         self.services
             .observer()
             .emit(ClientEventKind::UdpRegisterFailed {

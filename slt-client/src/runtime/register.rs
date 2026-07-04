@@ -141,6 +141,26 @@ fn select_udp_qsp_cipher(policy: ClientUdpQspCipher) -> CipherSuite {
     policy.select(aes_gcm_acceleration_available())
 }
 
+/// Returns the explicit cipher policy for the suite other than `tried`.
+///
+/// Used as the one-shot fallback when a server rejects an auto-selected suite:
+/// given the suite `auto` resolved to, this yields the other explicit suite.
+const fn other_explicit_policy(tried: CipherSuite) -> ClientUdpQspCipher {
+    match tried {
+        CipherSuite::Aes128Gcm => ClientUdpQspCipher::ChaCha20Poly1305,
+        CipherSuite::ChaCha20Poly1305 => ClientUdpQspCipher::Aes128Gcm,
+    }
+}
+
+/// The explicit cipher policy for the suite `auto` did not select.
+///
+/// This is the fallback policy installed when a server rejects the auto-selected
+/// suite with `InvalidCipher`, so the next `REGISTER_CID` retries with the other
+/// supported suite.
+pub(super) fn auto_fallback_policy() -> ClientUdpQspCipher {
+    other_explicit_policy(select_udp_qsp_cipher(ClientUdpQspCipher::Auto))
+}
+
 fn aes_gcm_acceleration_available() -> bool {
     aes_gcm_acceleration_available_for_target()
 }
@@ -405,5 +425,32 @@ mod tests {
             ClientUdpQspCipher::Auto.select(false),
             CipherSuite::ChaCha20Poly1305
         );
+    }
+
+    #[test]
+    fn other_explicit_policy_returns_the_opposite_suite() {
+        assert_eq!(
+            other_explicit_policy(CipherSuite::Aes128Gcm),
+            ClientUdpQspCipher::ChaCha20Poly1305
+        );
+        assert_eq!(
+            other_explicit_policy(CipherSuite::ChaCha20Poly1305),
+            ClientUdpQspCipher::Aes128Gcm
+        );
+    }
+
+    #[test]
+    fn auto_fallback_policy_is_the_suite_auto_did_not_select() {
+        // The fallback is, by construction, the explicit policy whose resolved
+        // suite differs from the one `auto` picks on this host.
+        let fallback = auto_fallback_policy();
+        let auto_picked = select_udp_qsp_cipher(ClientUdpQspCipher::Auto);
+        assert_ne!(fallback.select(true), auto_picked);
+        assert_ne!(fallback.select(false), auto_picked);
+        // And it must be one of the two explicit policies.
+        assert!(matches!(
+            fallback,
+            ClientUdpQspCipher::Aes128Gcm | ClientUdpQspCipher::ChaCha20Poly1305
+        ));
     }
 }

@@ -26,6 +26,7 @@ pub(super) use event::SessionExit;
 use event::{SessionControl, SessionEvent};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{CloseCode, Message, MessageLimits};
+use slt_core::types::ClientUdpQspCipher;
 use state::{ActiveTransport, UdpState, UdpUpgradeState};
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -60,6 +61,11 @@ pub(super) struct ClientSession<'a, S: ClientRuntimeServices> {
     udp_state: UdpState,
     udp_upgrade: UdpUpgradeState,
     udp_upgrade_backoff: ReconnectBackoff,
+    /// Effective UDP-QSP cipher policy for the current connection. Starts as a
+    /// copy of the configured policy; under `auto`, flips once to the other
+    /// explicit suite if the server rejects the auto-selected suite with
+    /// `InvalidCipher`.
+    udp_cipher_policy: ClientUdpQspCipher,
     discovery_task: Option<JoinHandle<Option<quic::QuicIds>>>,
     metrics: Arc<Metrics>,
     /// Whether the TCP connection is still usable. Set to false when TCP closes
@@ -161,6 +167,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                 config.timing.reconnect_min,
                 config.timing.reconnect_max,
             ),
+            udp_cipher_policy: config.transport.udp_qsp.cipher,
             discovery_task: None,
             metrics,
             services,
