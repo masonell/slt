@@ -45,6 +45,7 @@ env:
   CARGO_ZIGBUILD_VERSION: "0.23.0"
   ZIGLANG_VERSION: "0.16.0"
   UNIFFI_BINDGEN_VERSION: "0.32.0"
+  ANDROID_BUILD_TOOLS_VERSION: "35.0.0"
   # Tag (or manual input) used to name artifacts and the release.
   VERSION: ${{ github.event.inputs.tag || github.ref_name }}
 
@@ -132,7 +133,7 @@ jobs:
       - name: Set up Android SDK and NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "platforms;android-35 build-tools;35.0.0 ndk;${{ env.ANDROID_NDK_VERSION }}"
+          packages: "platforms;android-35 build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }} ndk;${{ env.ANDROID_NDK_VERSION }}"
 
       - name: Export NDK location
         run: |
@@ -268,12 +269,15 @@ jobs:
       - name: Set up Android SDK and NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "platforms;android-35 build-tools;35.0.0 ndk;${{ env.ANDROID_NDK_VERSION }}"
+          packages: "platforms;android-35 build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }} ndk;${{ env.ANDROID_NDK_VERSION }}"
 
-      - name: Export NDK location
+      - name: Export Android SDK tool locations
         run: |
+          build_tools="$ANDROID_HOME/build-tools/${{ env.ANDROID_BUILD_TOOLS_VERSION }}"
+          [ -x "$build_tools/apksigner" ] || { echo "::error::apksigner not found in $build_tools"; exit 1; }
           ndk="$ANDROID_HOME/ndk/${{ env.ANDROID_NDK_VERSION }}"
           [ -d "$ndk" ] || { echo "::error::NDK $ndk not found after setup"; exit 1; }
+          echo "ANDROID_BUILD_TOOLS=$build_tools" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
 
@@ -302,7 +306,7 @@ jobs:
             echo "::error::could not find a signed release APK"
             exit 1
           fi
-          apksigner verify --verbose --print-certs "$apk"
+          "$ANDROID_BUILD_TOOLS/apksigner" verify --verbose --print-certs "$apk"
           android_licenses="android/app/build/reports/licensee/androidRelease/artifacts.json"
           android_license_validation="android/app/build/reports/licensee/androidRelease/validation.txt"
           if [ ! -f "$android_licenses" ] || [ ! -f "$android_license_validation" ]; then
