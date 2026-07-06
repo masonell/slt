@@ -1,5 +1,8 @@
 //! Configuration file I/O utilities.
 
+use std::fs::{self, OpenOptions, Permissions};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -58,9 +61,7 @@ pub fn load_server_config(path: &Path) -> Result<ServerConfig> {
 /// Returns an error if the config cannot be serialized or written.
 pub fn save_server_config(path: &Path, config: &ServerConfig) -> Result<()> {
     let contents = toml::to_string_pretty(config).context("failed to serialize server config")?;
-
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write server config to {}", path.display()))
+    write_restricted(path, &contents, "server config")
 }
 
 /// Load a client config from a file.
@@ -84,14 +85,42 @@ pub fn load_client_config(path: &Path) -> Result<ClientConfig> {
 /// Returns an error if the config cannot be serialized or written.
 pub fn save_client_config(path: &Path, config: &ClientConfig) -> Result<()> {
     let contents = toml::to_string_pretty(config).context("failed to serialize client config")?;
+    write_restricted(path, &contents, "client config")
+}
 
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write client config to {}", path.display()))
+/// Write `contents` to `path` with owner-only (`0600`) permissions.
+///
+/// Server and client configs embed secret material — the classification
+/// `server_secret`, per-client shared secrets, and the Ed25519 private key —
+/// so they are written with the same restricted permissions as `server-key.pem`
+/// instead of the process umask default (typically `0644`).
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened, written, or have its
+/// permissions set.
+fn write_restricted(path: &Path, contents: &str, label: &str) -> Result<()> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut f| f.write_all(contents.as_bytes()))
+        .with_context(|| format!("failed to write {label} to {}", path.display()))?;
+
+    // `.mode()` applies only at creation; overwriting an existing file inherits
+    // its prior mode, so re-pin `0600` to cover the overwrite path.
+    fs::set_permissions(path, Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     use tempfile::NamedTempFile;
 
@@ -133,5 +162,34 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("failed to parse client config"));
+    }
+
+    #[test]
+    fn write_restricted_sets_owner_only_permissions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("secret.toml");
+
+        write_restricted(&path, "secret = true", "test config").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret = true");
+    }
+
+    #[test]
+    fn write_restricted_repins_mode_when_overwriting_world_readable_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("secret.toml");
+
+        // Seed a world-readable file, simulating an existing config from before
+        // the restricted-permission write existed.
+        std::fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
+
+        write_restricted(&path, "new", "test config").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 }
