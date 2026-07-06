@@ -69,6 +69,10 @@ enum Commands {
         /// Embed certificates in config instead of file references.
         #[arg(long)]
         inline_certs: bool,
+
+        /// Overwrite existing config, certificates, and keys.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Validate deployed server setup.
@@ -161,6 +165,10 @@ enum Commands {
         /// Server domain name.
         #[arg(long, value_name = "DOMAIN")]
         domain: String,
+
+        /// Overwrite existing certificates and keys.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Generate Ed25519 keypair.
@@ -232,9 +240,10 @@ fn run(cli: Cli) -> Result<()> {
             config_dir,
             domain,
             inline_certs,
+            force,
         } => {
             let config_path = PathBuf::from(&config_dir);
-            init::init(&config_path, &domain, inline_certs, cli.quiet)
+            init::init(&config_path, &domain, inline_certs, force, cli.quiet)
         }
         Commands::CheckServer {
             domain,
@@ -291,9 +300,13 @@ fn run(cli: Cli) -> Result<()> {
             let config_path = PathBuf::from(&config);
             remove_client::remove_client(&config_path, &client_id, cli.quiet)
         }
-        Commands::GenerateCerts { config_dir, domain } => {
+        Commands::GenerateCerts {
+            config_dir,
+            domain,
+            force,
+        } => {
             let config_path = PathBuf::from(&config_dir);
-            generate_certs::generate_certs(&config_path, &domain, cli.quiet)
+            generate_certs::generate_certs(&config_path, &domain, force, cli.quiet)
         }
         Commands::GenerateKeys => {
             generate_keys::generate_keys();

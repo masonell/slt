@@ -36,6 +36,13 @@ By default, certificates are referenced by file path. Use `--inline-certs` to em
 sudo slt init --config-dir /etc/slt --domain vpn.example.com --inline-certs
 ```
 
+`slt init` refuses to overwrite an existing `server.toml`, CA, or server key, since regenerating them invalidates every deployed client config. Pass `--force` to overwrite:
+
+```bash
+# Regenerate everything from scratch (invalidates existing client configs)
+sudo slt init --config-dir /etc/slt --domain vpn.example.com --force
+```
+
 ## Step 2: Add a Client
 
 Add a client configuration to the server. This generates client credentials and outputs a client config file.

@@ -6,7 +6,7 @@ use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use slt_core::config::ServerConfig;
 use slt_core::types::{
     ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, ServerTransportConfig, SharedSecret,
@@ -42,13 +42,24 @@ const DEFAULT_SESSION_QUEUE_SIZE: usize = 1024;
 /// Creates the config directory if it doesn't exist, generates certificates,
 /// and creates a `server.toml` with sensible defaults.
 ///
+/// When `force` is `false`, refuses to overwrite an existing `server.toml` or
+/// any existing certificate/key file, since re-initializing regenerates the
+/// shared secret and CA and invalidates every deployed client config.
+///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The directory cannot be created
+/// - Existing files would be overwritten without `force`
 /// - Certificate generation fails
 /// - The config file cannot be written
-pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) -> Result<()> {
+pub fn init(
+    config_dir: &Path,
+    domain: &str,
+    inline_certs: bool,
+    force: bool,
+    quiet: bool,
+) -> Result<()> {
     if !config_dir.exists() {
         fs::create_dir_all(config_dir)
             .with_context(|| format!("failed to create directory {}", config_dir.display()))?;
@@ -57,7 +68,17 @@ pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) ->
         }
     }
 
-    generate_certs::generate_certs(config_dir, domain, quiet)?;
+    let config_path = config_dir.join("server.toml");
+    if config_path.exists() && !force {
+        bail!(
+            "server config already exists at {}; re-running `slt init` regenerates the shared \
+             secret, CA, and server key, invalidating every deployed client config. \
+             Re-run with --force to overwrite.",
+            config_path.display(),
+        );
+    }
+
+    generate_certs::generate_certs(config_dir, domain, force, quiet)?;
 
     let mut secret_bytes = [0u8; 32];
     rand::fill(&mut secret_bytes);
@@ -110,7 +131,6 @@ pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) ->
         .validate()
         .context("generated config failed validation")?;
 
-    let config_path = config_dir.join("server.toml");
     save_server_config(&config_path, &config)?;
 
     if !quiet {
@@ -145,7 +165,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("vpn-config");
 
-        init(&config_dir, "example.com", false, true).unwrap();
+        init(&config_dir, "example.com", false, false, true).unwrap();
 
         assert!(config_dir.exists());
         assert!(config_dir.join("server.toml").exists());
@@ -159,7 +179,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("vpn-config-inline");
 
-        init(&config_dir, "example.com", true, true).unwrap();
+        init(&config_dir, "example.com", true, false, true).unwrap();
 
         let config_content = fs::read_to_string(config_dir.join("server.toml")).unwrap();
         // Inline certs should contain PEM markers directly in the config
@@ -172,7 +192,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("vpn-config-file");
 
-        init(&config_dir, "example.com", false, true).unwrap();
+        init(&config_dir, "example.com", false, false, true).unwrap();
 
         let config_content = fs::read_to_string(config_dir.join("server.toml")).unwrap();
         // File refs should have { file = "..." } format
@@ -185,7 +205,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("vpn-config-valid");
 
-        init(&config_dir, "example.com", false, true).unwrap();
+        init(&config_dir, "example.com", false, false, true).unwrap();
 
         // Load and validate the config
         let config_path = config_dir.join("server.toml");
@@ -195,5 +215,35 @@ mod tests {
         assert!(config.validate().is_ok());
         assert!(config.clients.is_empty());
         assert_eq!(config.tun.tun_name, "tun0");
+    }
+
+    #[test]
+    fn init_refuses_existing_config_without_force() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("vpn-config-existing");
+
+        init(&config_dir, "example.com", false, false, true).unwrap();
+
+        // A second init without --force must bail and leave the original files intact.
+        let result = init(&config_dir, "example.com", false, false, true);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("server.toml"));
+        assert!(err.contains("--force"));
+    }
+
+    #[test]
+    fn init_force_overwrites_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("vpn-config-force");
+
+        init(&config_dir, "example.com", false, false, true).unwrap();
+        let before = fs::read_to_string(config_dir.join("server-key.pem")).unwrap();
+
+        init(&config_dir, "example.com", false, true, true).unwrap();
+
+        // --force regenerates the server key.
+        let after = fs::read_to_string(config_dir.join("server-key.pem")).unwrap();
+        assert_ne!(before, after);
     }
 }

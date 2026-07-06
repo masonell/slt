@@ -25,19 +25,45 @@ const CERT_VALIDITY_YEARS: i64 = 10;
 /// - `server.pem`: Server certificate signed by CA
 /// - `server-key.pem`: Server private key
 ///
+/// When `force` is `false`, refuses to overwrite any existing certificate or
+/// key file, since regenerating the CA and server key invalidates every
+/// deployed client config.
+///
 /// # Errors
 ///
-/// Returns an error if the directory doesn't exist or file writing fails.
-pub fn generate_certs(config_dir: &Path, domain: &str, quiet: bool) -> Result<()> {
+/// Returns an error if the directory doesn't exist, existing material would be
+/// overwritten without `force`, or file writing fails.
+pub fn generate_certs(config_dir: &Path, domain: &str, force: bool, quiet: bool) -> Result<()> {
     if !config_dir.exists() {
         bail!("config directory does not exist: {}", config_dir.display());
     }
 
-    let (ca_cert_pem, server_cert_pem, server_key_pem) = generate_cert_chain(domain)?;
-
     let ca_path = config_dir.join("ca.pem");
     let server_path = config_dir.join("server.pem");
     let key_path = config_dir.join("server-key.pem");
+
+    if !force {
+        let existing: Vec<&str> = [
+            ("ca.pem", ca_path.exists()),
+            ("server.pem", server_path.exists()),
+            ("server-key.pem", key_path.exists()),
+        ]
+        .into_iter()
+        .filter(|(_, exists)| *exists)
+        .map(|(name, _)| name)
+        .collect();
+        if !existing.is_empty() {
+            bail!(
+                "existing certificate material found in {}: {}; \
+                 regenerating the CA and server key invalidates every deployed client config. \
+                 Re-run with --force to overwrite.",
+                config_dir.display(),
+                existing.join(", "),
+            );
+        }
+    }
+
+    let (ca_cert_pem, server_cert_pem, server_key_pem) = generate_cert_chain(domain)?;
 
     std::fs::write(&ca_path, &ca_cert_pem)
         .with_context(|| format!("failed to write {}", ca_path.display()))?;
@@ -142,7 +168,40 @@ mod tests {
 
     #[test]
     fn generate_certs_fails_on_missing_dir() {
-        let result = generate_certs(Path::new("/nonexistent/path"), "localhost", true);
+        let result = generate_certs(Path::new("/nonexistent/path"), "localhost", false, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn generate_certs_refuses_to_overwrite_without_force() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config_dir = temp_dir.path();
+
+        std::fs::write(config_dir.join("server-key.pem"), "preexisting key").unwrap();
+
+        let result = generate_certs(config_dir, "localhost", false, true);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("server-key.pem"));
+        assert!(err.contains("--force"));
+
+        // Unchanged: not overwritten when the call refuses.
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("server-key.pem")).unwrap(),
+            "preexisting key"
+        );
+    }
+
+    #[test]
+    fn generate_certs_overwrites_with_force() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config_dir = temp_dir.path();
+
+        std::fs::write(config_dir.join("ca.pem"), "preexisting ca").unwrap();
+
+        generate_certs(config_dir, "localhost", true, true).unwrap();
+
+        let ca = std::fs::read_to_string(config_dir.join("ca.pem")).unwrap();
+        assert!(ca.contains("-----BEGIN CERTIFICATE-----"));
     }
 }
