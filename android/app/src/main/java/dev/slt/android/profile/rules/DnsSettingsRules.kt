@@ -99,5 +99,5 @@ private fun parseNumericDnsServer(server: String, lineNumber: Int): String {
     require(address is Inet4Address || address is Inet6Address) {
         "Line $lineNumber: DNS server must be a numeric IP address"
     }
-    return address.hostAddress
+    return checkNotNull(address.hostAddress) { "DNS server address has no host address" }
 }

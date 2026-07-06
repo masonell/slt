@@ -207,6 +207,7 @@ android {
         // reports without making normal lint fail.
         informational += setOf(
             "GradleDependency",
+            "NewerVersionAvailable",
             "OldTargetApi",
         )
         disable += "ChromeOsAbiSupport"
@@ -379,7 +380,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("net.java.dev.jna:jna:5.19.1@aar")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
