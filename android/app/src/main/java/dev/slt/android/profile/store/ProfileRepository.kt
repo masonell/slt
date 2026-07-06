@@ -53,8 +53,8 @@ class ProfileRepository(context: Context) {
                 error("could not create profile directory: $dir")
             }
 
-            clientTomlFile(dir).writeText(clientToml)
-            metadataFile(dir).writeText(profileMetadata.toProfileJson().toString(2))
+            writeTextAtomic(clientTomlFile(dir), clientToml)
+            writeTextAtomic(metadataFile(dir), profileMetadata.toProfileJson().toString(2))
 
             val profile = SltProfile(profileId, clientToml, profileMetadata)
             if (activeProfileId() == null) {
@@ -164,6 +164,19 @@ class ProfileRepository(context: Context) {
     private fun clientTomlFile(dir: File): File = File(dir, "client.toml")
 
     private fun metadataFile(dir: File): File = File(dir, "metadata.json")
+
+    private fun writeTextAtomic(target: File, text: String) {
+        // Stage to a sibling .tmp file and rename, so an interrupt during either
+        // write cannot leave a truncated file that loads as Corrupt. renameTo
+        // uses rename(2), which atomically replaces the destination on the same
+        // filesystem.
+        val tmp = File(target.parentFile, "${target.name}.tmp")
+        tmp.writeText(text)
+        if (!tmp.renameTo(target)) {
+            tmp.delete()
+            error("could not commit profile file: ${target.path}")
+        }
+    }
 
     private sealed interface ProfileLoadResult {
         data class Loaded(val profile: SltProfile) : ProfileLoadResult

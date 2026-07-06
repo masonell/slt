@@ -95,26 +95,59 @@ pub fn save_client_config(path: &Path, config: &ClientConfig) -> Result<()> {
 /// so they are written with the same restricted permissions as `server-key.pem`
 /// instead of the process umask default (typically `0644`).
 ///
+/// The write is staged to a sibling `<path>.tmp` file and committed with an
+/// atomic `rename`, so an interrupt or crash between the write and the commit
+/// leaves any existing config intact rather than truncating it. The temp file
+/// is a sibling so the `rename` stays on one filesystem, where it is atomic.
+///
 /// # Errors
 ///
-/// Returns an error if the file cannot be opened, written, or have its
-/// permissions set.
+/// Returns an error if the temp file cannot be opened, written, or renamed
+/// onto `path`.
 fn write_restricted(path: &Path, contents: &str, label: &str) -> Result<()> {
-    OpenOptions::new()
+    let tmp_path = tmp_path_for(path);
+    let result = write_temp_and_rename(&tmp_path, path, contents);
+    if result.is_err() {
+        // Avoid leaving a truncated temp file behind after a failed commit.
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result.with_context(|| format!("failed to write {label} to {}", path.display()))
+}
+
+/// Build the sibling `<path>.tmp` staging path used for an atomic write.
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    PathBuf::from(tmp)
+}
+
+/// Write `contents` to `tmp_path` with mode `0600`, then atomically rename it
+/// onto `final_path`.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error if any step fails.
+fn write_temp_and_rename(
+    tmp_path: &Path,
+    final_path: &Path,
+    contents: &str,
+) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .mode(0o600)
-        .open(path)
-        .and_then(|mut f| f.write_all(contents.as_bytes()))
-        .with_context(|| format!("failed to write {label} to {}", path.display()))?;
+        .open(tmp_path)?;
 
-    // `.mode()` applies only at creation; overwriting an existing file inherits
-    // its prior mode, so re-pin `0600` to cover the overwrite path.
-    fs::set_permissions(path, Permissions::from_mode(0o600))
-        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+    // `.mode()` only applies when the file is created, so a stale temp file left
+    // behind by a crashed prior write keeps its old (possibly world-readable)
+    // mode. The file is still empty here, so clamp it to `0600` before writing
+    // any secret bytes: a local reader never sees secret content in a readable
+    // window, and a chmod failure aborts before the secret is written at all.
+    fs::set_permissions(tmp_path, Permissions::from_mode(0o600))?;
 
-    Ok(())
+    file.write_all(contents.as_bytes())?;
+    fs::rename(tmp_path, final_path)
 }
 
 #[cfg(test)]
@@ -191,5 +224,34 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn write_restricted_renames_away_temp_on_success() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("secret.toml");
+        let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
+
+        write_restricted(&path, "secret = true", "test config").unwrap();
+
+        assert!(!tmp_path.exists(), "temp file should be renamed away");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret = true");
+    }
+
+    #[test]
+    fn write_restricted_clamps_stale_world_readable_temp_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("secret.toml");
+        let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
+
+        // Simulate a stale, world-readable temp file left by a crashed prior run.
+        std::fs::write(&tmp_path, "stale").unwrap();
+        fs::set_permissions(&tmp_path, Permissions::from_mode(0o644)).unwrap();
+
+        write_restricted(&path, "secret = true", "test config").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret = true");
     }
 }
