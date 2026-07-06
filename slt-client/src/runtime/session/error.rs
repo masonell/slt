@@ -667,9 +667,8 @@ mod tests {
     /// Composed routing for `UdpQsp(Qsp(PacketNumberOverflow))`, pinned
     /// directly. `representative_cases()` covers only the `Replay` (recoverable)
     /// and `DeadChannel` (fatal) `UdpQsp` shapes by design — overflow is a
-    /// distinct shape whose doc/code drift went uncaught in earlier review, so
-    /// it gets a dedicated assertion here rather than disturbing the
-    /// `representative_cases` invariant.
+    /// distinct shape, so it gets a dedicated assertion here rather than
+    /// disturbing the `representative_cases` invariant.
     ///
     /// Overflow is a UDP-path transport error that is fatal (non-recoverable)
     /// and NOT the dead-channel signal — i.e. at the session layer it reaches

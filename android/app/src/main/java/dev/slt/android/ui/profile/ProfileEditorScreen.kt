@@ -118,26 +118,21 @@ internal fun ProfileEditorScreen(
     }
 }
 
-/** Applies a committed TOML edit and closes the nested editor. */
 private fun ProfileEditorState.commitToml(
     toml: String,
     validation: ConfigValidationResult,
 ): ProfileEditorState = copy(toml = toml, validation = validation).withClosedNestedScreen()
 
-/** Applies a committed routes edit and closes the nested editor. */
 private fun ProfileEditorState.commitRoutes(routeText: String): ProfileEditorState =
     copy(routeText = routeText).withClosedNestedScreen()
 
-/** Applies a committed DNS edit and closes the nested editor. */
 private fun ProfileEditorState.commitDns(mode: DnsMode, dnsText: String): ProfileEditorState =
     copy(dnsMode = mode, dnsText = dnsText).withClosedNestedScreen()
 
-/** Applies a committed app-rules edit and closes the nested editor. */
 private fun ProfileEditorState.commitApps(
     mode: AppVpnMode,
     packageNames: List<String>,
 ): ProfileEditorState = copy(appMode = mode, selectedPackageNames = packageNames).withClosedNestedScreen()
 
-/** Applies a committed test-URLs edit and closes the nested editor. */
 private fun ProfileEditorState.commitTestUrls(testUrlsText: String): ProfileEditorState =
     copy(testUrlsText = testUrlsText).withClosedNestedScreen()

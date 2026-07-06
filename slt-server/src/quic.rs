@@ -277,7 +277,7 @@ impl QuicEndpoint {
                         )
                     }) {
                         Ok(Ok(m)) => self.dispatch_recv_batch(&mut state, &cancel, m).await?,
-                        Ok(Err(e)) => return Err(e), // fatal recv error
+                        Ok(Err(e)) => return Err(e),
                         Err(_) => {} // WouldBlock: readiness auto-cleared (Ok(0) never happens on Linux)
                     }
                 }

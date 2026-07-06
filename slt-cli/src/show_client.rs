@@ -23,10 +23,8 @@ use crate::config_io::load_server_config;
 pub fn show_client(config_path: &Path, client_id: &str, quiet: bool) -> Result<()> {
     let config = load_server_config(config_path)?;
 
-    // Parse client ID from hex
     let client_id_bytes = parse_client_id(client_id)?;
 
-    // Find the client
     let client = config
         .clients
         .iter()

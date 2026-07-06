@@ -89,14 +89,14 @@ impl TlsError {
     /// Whether this TLS failure looks like a transient network condition rather
     /// than a cert/handshake fault.
     ///
-    /// Used by [`ConnectError::is_retriable`] to avoid the latent bug where a
-    /// certificate error (fatal, won't self-heal) is retried forever alongside
-    /// transient TLS I/O. A captured X.509 verification error is always fatal.
+    /// Used by [`ConnectError::is_retriable`]. A certificate error is fatal:
+    /// it never self-heals, so it must not be retried alongside transient TLS
+    /// I/O. A captured X.509 verification error is therefore always fatal.
     /// Otherwise an underlying boring I/O error, `SSL_ERROR_SYSCALL`, or a
     /// clean close mid-handshake is treated as transient. Everything else
     /// (including SSL protocol errors and an absent cause) is treated as a
-    /// fatal handshake fault — the safer default, since a retried cert error is
-    /// the bug being fixed.
+    /// fatal handshake fault — the safer default, since a retried cert error
+    /// would loop forever without recovering.
     #[must_use]
     pub fn is_transient_io(&self) -> bool {
         match self {

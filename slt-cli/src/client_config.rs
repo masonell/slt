@@ -41,7 +41,6 @@ pub fn build_client_config(
             ip: None,
         },
         tls: ClientTlsConfig {
-            // Embed server cert inline for pinning (works with `PARTIAL_CHAIN` flag)
             tls_ca: TlsMaterial::Pem(tls_server_cert_pem.to_string()),
             quic_ca: None,
         },

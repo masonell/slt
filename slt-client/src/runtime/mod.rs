@@ -93,9 +93,9 @@ where
     );
 
     // The runtime owns the full lifecycle event stream: Starting..Stopped/Error.
-    // The bridge no longer emits these (only pre-run_client setup failures).
-    // Keep a cheap clone of the observer sink for the terminal events emitted
-    // after `run_sessions` borrows `services`.
+    // The bridge emits only pre-`run_client` setup failures. Keep a cheap clone
+    // of the observer sink for the terminal events emitted after `run_sessions`
+    // borrows `services`.
     let observer = services.observer().clone();
     observer.emit(ClientEventKind::Starting);
     observer.emit(ClientEventKind::TunReady);

@@ -36,20 +36,16 @@ pub fn show_client_config(
 ) -> Result<()> {
     let config = load_server_config(config_path)?;
 
-    // Parse client ID from hex
     let client_id_bytes = parse_client_id(client_id)?;
 
-    // Find the client
     let client = config
         .clients
         .iter()
         .find(|c| c.client_id == ClientId(client_id_bytes))
         .context(format!("client {client_id} not found"))?;
 
-    // Read server certificate content (for domain extraction and inlining in client config)
     let cert_pem = read_cert_content(config_path, &config.tls.tls_cert)?;
 
-    // Determine domain: use provided value, or extract from cert
     let domain = if let Some(d) = domain {
         d.to_string()
     } else {
@@ -70,7 +66,6 @@ pub fn show_client_config(
         return Ok(());
     }
 
-    // Output TOML to stdout with warning header
     println!("# WARNING: Private key is a PLACEHOLDER (all zeros).");
     println!("# Replace privkey_ed25519 with the original key from client creation.");
     println!();

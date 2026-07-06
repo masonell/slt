@@ -373,7 +373,7 @@ mod tests {
             matches!(err, MessageError::Frame(FrameError::UnknownType(0xAB))),
             "From<FrameError> must produce MessageError::Frame, got {err:?}"
         );
-        // MessageError is now an Error: its own Display carries the structured
+        // MessageError is an Error: its own Display carries the structured
         // detail (the variant is #[error(transparent)], so it delegates to
         // FrameError's Display). The structured values survive to the terminal
         // {:#} render — the property the design requires ("preserve, don't

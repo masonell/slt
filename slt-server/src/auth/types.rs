@@ -28,7 +28,7 @@ impl AuthPhaseResult {
     /// should increment the auth-failures metric.
     ///
     /// Only `Rejected` counts: the failure-path conditions (timeout, disconnect,
-    /// TLS fault) are now typed `AuthError` (in `super::error`) and are counted
+    /// TLS fault) are typed `AuthError` (in `super::error`) and are counted
     /// by the handler's error path, not here.
     pub(super) const fn is_failure(self) -> bool {
         matches!(self, Self::Rejected(_))

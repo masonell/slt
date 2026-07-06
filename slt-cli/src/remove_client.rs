@@ -24,11 +24,9 @@ use crate::config_io::{load_server_config, save_server_config};
 pub fn remove_client(config_path: &Path, client_id: &str, quiet: bool) -> Result<()> {
     let mut config = load_server_config(config_path)?;
 
-    // Parse client ID from hex
     let client_id_bytes = parse_client_id(client_id)?;
     let target_id = ClientId(client_id_bytes);
 
-    // Find and remove the client
     let original_len = config.clients.len();
     config.clients.retain(|c| c.client_id != target_id);
 
@@ -36,7 +34,6 @@ pub fn remove_client(config_path: &Path, client_id: &str, quiet: bool) -> Result
         bail!("client {client_id} not found");
     }
 
-    // Save updated config
     save_server_config(config_path, &config)?;
 
     if !quiet {

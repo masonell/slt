@@ -19,7 +19,7 @@ internal sealed interface UnderlyingNetworkEvent<out K> {
     /** A new underlying network became available. */
     data class Available<K>(val network: K) : UnderlyingNetworkEvent<K>
 
-    /** A previously available underlying network was lost. */
+    /** A tracked underlying network is no longer available. */
     data class Lost<K>(val network: K) : UnderlyingNetworkEvent<K>
 
     /** The initial callback burst after registration has settled. */
@@ -161,7 +161,6 @@ internal fun <K> applyUnderlyingNetworkEvent(
  * The transition rules live in [applyUnderlyingNetworkEvent], which is pure and
  * unit-tested independently of the Android framework.
  *
- * @param context used to obtain the [ConnectivityManager].
  * @param onUnderlyingNetworkChanged invoked when the current underlying network
  * changes, including during the initial priming window.
  * @param onReconnect invoked on the main looper with the current underlying

@@ -707,12 +707,10 @@ mod tests {
     #[test]
     fn packet_number_overflow_preserves_shape_and_is_fatal() {
         // Packet-number overflow is FATAL: the TX pn space is exhausted, so the
-        // session cannot send again on this UDP path. The runtime routing is
-        // unchanged from old: the flattening layer mapped this to
-        // `QuotaExceeded`, which `handle_udp_error` routed to TCP fallback (or
-        // close) — NOT a drop — and the typed fatal classification here routes
-        // identically. Dropping overflow would lose packets on a session that
-        // can no longer send, so fatal keeps the TCP-fallback routing. The
+        // session cannot send again on this UDP path. The runtime routes it
+        // through `handle_udp_error` to TCP fallback (or close if TCP is also
+        // dead) — NOT a drop. Dropping overflow would lose packets on a session
+        // that can no longer send, so fatal keeps the TCP-fallback routing. The
         // session reconnects for a fresh pn space only once it re-establishes,
         // not as an immediate consequence of the overflow.
         let err: UdpQspError = QspSessionError::PacketNumberOverflow.into();
@@ -1074,8 +1072,10 @@ mod tests {
         }
     }
 
-    /// `is_dead_channel` is the typed replacement for the session's old
-    /// `io::ErrorKind::ConnectionAborted` check on the UDP path.
+    /// `is_dead_channel` is the typed signal the session uses to distinguish a
+    /// UDP key-divergence condition (too many consecutive decrypt failures)
+    /// from transient `io::ErrorKind::ConnectionAborted` socket I/O on the UDP
+    /// path.
     #[test]
     fn is_dead_channel_only_matches_dead_channel() {
         assert!(UdpQspError::from(QspSessionError::DeadChannel).is_dead_channel());

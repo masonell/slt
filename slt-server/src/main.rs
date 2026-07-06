@@ -35,8 +35,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 const DEFAULT_TRACING_FILTER: &str = "slt_server=info,slt_core=info";
 
 /// Command-line arguments for the SLT server.
-///
-/// Parsed using `clap` from command-line invocation.
 #[derive(Parser, Debug)]
 #[command(about = "Run the SLT server front door.", version)]
 struct Args {

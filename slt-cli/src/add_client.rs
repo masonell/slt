@@ -39,12 +39,10 @@ pub fn add_client(
 ) -> Result<()> {
     let mut config = load_server_config(config_path)?;
 
-    // Parse and validate IP address
     let assigned_ipv4: Ipv4Addr = ip
         .parse()
         .with_context(|| format!("invalid IP address: {ip}"))?;
 
-    // Check if IP is already in use
     if config
         .clients
         .iter()
@@ -63,8 +61,7 @@ pub fn add_client(
         );
     }
 
-    // Read server certificate content and determine domain BEFORE modifying config
-    // This ensures we fail early if cert is unreadable or domain can't be extracted
+    // Fail before mutating config: cert must be readable and a concrete domain resolvable.
     let cert_pem = read_cert_content(config_path, &config.tls.tls_cert)?;
     let domain = if let Some(d) = domain {
         d.to_string()
@@ -72,17 +69,14 @@ pub fn add_client(
         extract_domain_from_cert(&cert_pem)?
     };
 
-    // Generate client ID (16 random bytes)
     let mut client_id_bytes = [0u8; 16];
     rand::fill(&mut client_id_bytes);
     let client_id = ClientId(client_id_bytes);
 
-    // Check for client ID collision (extremely unlikely but defensive)
     if config.clients.iter().any(|c| c.client_id == client_id) {
         bail!("client ID collision detected (extremely unlikely, please try again)");
     }
 
-    // Generate Ed25519 keypair
     let mut key_bytes = [0u8; 32];
     rand::fill(&mut key_bytes);
     let signing_key = SigningKey::from_bytes(&key_bytes);
@@ -91,7 +85,7 @@ pub fn add_client(
     let privkey = PrivKeyEd25519(signing_key.to_bytes());
     let pubkey = PubKeyEd25519(verifying_key.to_bytes());
 
-    // Build client config with embedded server cert (certificate pinning)
+    // Server cert is embedded inline so the client pins it rather than trusting a CA chain.
     let client_config = build_client_config(
         config.server_secret,
         client_id,
@@ -102,19 +96,17 @@ pub fn add_client(
         &config.tun,
     );
 
-    // Create output directory if needed
     if !output_dir.exists() {
         fs::create_dir_all(output_dir).with_context(|| {
             format!("failed to create output directory {}", output_dir.display())
         })?;
     }
 
-    // Write client config file FIRST - if this fails, server config is unchanged
+    // Write the client config before mutating the server config so a failure leaves server state unchanged.
     let client_filename = format!("client-{client_id}.toml");
     let client_path = output_dir.join(&client_filename);
     save_client_config(&client_path, &client_config)?;
 
-    // Now update server config
     let server_client = ServerClient {
         client_id,
         pubkey_ed25519: pubkey,

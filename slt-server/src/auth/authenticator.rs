@@ -39,7 +39,6 @@ impl Authenticator {
         self.clients_config.get(client_id)
     }
 
-    /// Returns true if the client exists and is enabled.
     #[must_use]
     pub fn is_enabled(&self, client_id: &ClientId) -> bool {
         self.clients_config

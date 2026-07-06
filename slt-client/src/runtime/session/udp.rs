@@ -457,11 +457,12 @@ mod tests {
         }
     }
 
-    /// The "udp-qsp transport missing" sites now report
+    /// The "udp-qsp transport missing" sites report
     /// `SessionError::ProtocolViolation` (a client-state inconsistency:
     /// `as_active_mut()` that should be `Some`) rather than the generic
-    /// `Io(BrokenPipe)`. Both reconnect today; `ProtocolViolation` is more
-    /// faithful. Pin the new shape.
+    /// `Io(BrokenPipe)`. Both reconnect; `ProtocolViolation` is more faithful
+    /// to the actual cause (a client-state bug, not a socket condition). Pin
+    /// that shape.
     #[test]
     fn udp_transport_missing_is_protocol_violation() {
         use crate::runtime::session::SessionExit;

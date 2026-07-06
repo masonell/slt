@@ -110,12 +110,10 @@ impl TcpFrontDoor {
                     Ok(verdict @ Verdict::Drop) => {
                         debug!(client_addr = %addr, verdict = ?verdict, "dropping connection");
                         metrics.inc_dropped();
-                        // Drop the connection.
                     }
                     Err(e) => {
                         warn!(client_addr = %addr, error = %e, "classification error, dropping connection");
                         metrics.inc_dropped();
-                        // Drop the connection.
                     }
                 }
             });

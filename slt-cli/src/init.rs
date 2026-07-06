@@ -49,7 +49,6 @@ const DEFAULT_SESSION_QUEUE_SIZE: usize = 1024;
 /// - Certificate generation fails
 /// - The config file cannot be written
 pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) -> Result<()> {
-    // Create config directory if it doesn't exist
     if !config_dir.exists() {
         fs::create_dir_all(config_dir)
             .with_context(|| format!("failed to create directory {}", config_dir.display()))?;
@@ -58,15 +57,12 @@ pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) ->
         }
     }
 
-    // Generate certificates
     generate_certs::generate_certs(config_dir, domain, quiet)?;
 
-    // Generate random server secret
     let mut secret_bytes = [0u8; 32];
     rand::fill(&mut secret_bytes);
     let server_secret = SharedSecret(secret_bytes);
 
-    // Load certificate content if inline mode
     let (tls_cert, tls_key) = if inline_certs {
         let cert_path = config_dir.join("server.pem");
         let key_path = config_dir.join("server-key.pem");
@@ -88,7 +84,6 @@ pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) ->
         )
     };
 
-    // Build server config with sensible defaults
     let config = ServerConfig {
         server_secret,
         network: ServerNetworkConfig {
@@ -111,12 +106,10 @@ pub fn init(config_dir: &Path, domain: &str, inline_certs: bool, quiet: bool) ->
         clients: Vec::new(),
     };
 
-    // Validate before saving
     config
         .validate()
         .context("generated config failed validation")?;
 
-    // Save server config
     let config_path = config_dir.join("server.toml");
     save_server_config(&config_path, &config)?;
 

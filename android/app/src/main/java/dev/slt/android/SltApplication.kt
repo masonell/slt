@@ -15,8 +15,8 @@ class SltApplication : Application() {
         val logStore = LogStore(this)
         val path = logStore.newFilePath()
         if (!SltNative.initLogSink(path)) {
-            // The only Logcat use: surface an init failure (the old per-message
-            // Rust -> Logcat path is gone; Rust logs go to the file).
+            // The only Logcat use in the app: Rust tracing drains to the file
+            // sink, so a sink init failure has no other observability path.
             Log.e(TAG, "Failed to initialize Rust log sink at $path")
         }
         logStore.sweep()

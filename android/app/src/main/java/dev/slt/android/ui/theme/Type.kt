@@ -10,7 +10,6 @@ import androidx.compose.ui.text.font.FontFamily
  * provided for raw-text surfaces (TOML editor, logs, config fields).
  */
 
-/** Monospace family for raw-text surfaces: TOML editor, logs, config fields. */
 val Mono: FontFamily = FontFamily.Monospace
 
 internal val SltTypography = Typography()

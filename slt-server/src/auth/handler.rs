@@ -79,10 +79,10 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     ///
     /// This is the binary entry-point boundary: the typed `AuthError` from the
     /// internal auth flow is converted to `io::Error` here (via its `From` impl)
-    /// so the historical `handle()` -> `io::Result<()>` contract is preserved
-    /// for the TCP front-door task and the metrics tests that assert on
-    /// `ErrorKind`. The structured error is preserved as the `io::Error`'s inner
-    /// source, so the cause chain survives for `{:#}` and the log.
+    /// to satisfy the TCP front-door task's `io::Result<()>` contract and the
+    /// metrics tests that assert on `ErrorKind`. The structured error is carried
+    /// as the `io::Error`'s inner source, so the cause chain survives for
+    /// `{:#}` and the log.
     ///
     /// # Errors
     ///
@@ -351,8 +351,8 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// Both the success outcomes (`Ok(AuthPhaseResult)`) and the failure path
     /// (`Err(AuthError)`) can represent an auth attempt whose result should be
     /// counted: an on-protocol `Rejected(code)` increments failures the same way
-    /// a transport/decode failure does (preserving the historical metric
-    /// semantics where every `is_failure()` outcome counted).
+    /// a transport/decode failure does, so every auth attempt that does not
+    /// authenticate is reflected in the auth-failures counter.
     fn record_result(&self, result: &Result<AuthPhaseResult, AuthError>) {
         match result {
             Ok(outcome) => {

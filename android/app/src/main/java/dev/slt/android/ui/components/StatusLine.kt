@@ -37,10 +37,6 @@ import dev.slt.android.vpn.VpnStatus
 import dev.slt.android.vpn.VpnUiState
 import kotlinx.coroutines.delay
 
-/// Minimum height reserved for a single status line, present whether or not the
-/// line has text. Keeping every line's slot constant makes the whole [StatusLine]
-/// a fixed height, so the hero (and the Start/Stop button above it) never shifts
-/// as lines appear and disappear.
 private val ReservedLineHeight = 20.dp
 
 /// Cap on a status line's width so long errors wrap instead of running off-screen.
