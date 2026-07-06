@@ -8,7 +8,7 @@ All VPN messages use a simple length-prefixed framing:
 
 ```
 +------+------+------+------+------+------+------...---+
-| TYPE | LEN (4 bytes, big-endian) |    PAYLOAD       |
+| TYPE | LEN (4 bytes, big-endian) |    PAYLOAD        |
 +------+------+------+------+------+------+------...---+
   u8              u32                      LEN bytes
 ```

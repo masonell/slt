@@ -8,9 +8,9 @@ All multi-byte integers are encoded in big-endian (network) byte order.
 All VPN messages are framed as:
 
 ```
-+--------+--------+--------+--------+--------+------------------+
-| TYPE   | LEN (u32, big-endian)      | PAYLOAD (LEN bytes)    |
-+--------+--------+--------+--------+--------+------------------+
++--------+--------+--------+--------+--------+---------------------+
+| TYPE   | LEN (u32, big-endian)             | PAYLOAD (LEN bytes) |
++--------+--------+--------+--------+--------+---------------------+
    1 byte              4 bytes                LEN bytes
 ```
 

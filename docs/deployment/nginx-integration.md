@@ -152,13 +152,13 @@ When a regular HTTPS client connects to port 443/tcp:
 6. **Response** travels back through SLT to the client
 
 ```
-Client                    SLT                      nginx
-  |                        |                         |
-  |---- TLS ClientHello -->|                         |
-  |                        |--- connect 127.0.0.1:8080 -->|
-  |                        |---- forward bytes ----->|
-  |                        |<--- response bytes -----|
-  |<--- TLS response ------|                         |
+Client                             SLT                              nginx
+  |                                 |                                 |
+  |-- TLS ClientHello ------------->|                                 |
+  |                                 |-- connect 127.0.0.1:8080 ------>|
+  |                                 |-- forward bytes --------------->|
+  |                                 |<-------------- response bytes --|
+  |<---------------- TLS response --|                                 |
 ```
 
 ### UDP Flow: SLT NAT to nginx
@@ -177,14 +177,14 @@ When a regular HTTP/3 client sends QUIC packets to port 443/udp:
 7. **Response** travels back through SLT's NAT to the client
 
 ```
-Client                    SLT                      nginx
-  |                        |                         |
-  |-- QUIC Initial (public:443) -->|                |
-  |                        |-- NAT translate -->     |
-  |                        |-- forward to 127.0.0.1:8080 -->|
-  |                        |                         |
-  |                        |<-- QUIC response -------|
-  |<-- NAT translate -------|                        |
+Client                             SLT                              nginx
+  |                                 |                                 |
+  |-- QUIC Initial (public:443) --->|                                 |
+  |                                 |-- NAT translate --------------->|
+  |                                 |-- forward to 127.0.0.1:8080 --->|
+  |                                 |                                 |
+  |                                 |<--------------- QUIC response --|
+  |<--------------- NAT translate --|                                 |
 ```
 
 For established QUIC connections, short-header packets are also forwarded unless the DCID matches a registered VPN client.

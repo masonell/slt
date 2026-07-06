@@ -93,8 +93,8 @@ Before UDP upgrade can begin:
 ```
 Client                                    Server
   |                                         |
-  |  [Prerequisites: TCP authenticated,    |
-  |   QUIC discovery complete]             |
+  |  [Prerequisites: TCP authenticated,     |
+  |   QUIC discovery complete]              |
   |                                         |
   |  1. REGISTER_CID over TCP               |
   |    - client_to_server_cid (20 bytes)    |
@@ -115,7 +115,7 @@ Client                                    Server
   |                                         |
   |  [UDP-QSP session now registered]       |
   |                                         |
-  |  4. UPGRADE_PROBE (UDP)                  |
+  |  4. UPGRADE_PROBE (UDP)                 |
   |    - upgrade_id (8 bytes)               |
   |    - nonce (8 bytes)                    |
   |---------------------------------------->|
@@ -123,28 +123,28 @@ Client                                    Server
   |                                         |     - CID lookup succeeds
   |                                         |     - AEAD decryption passes
   |                                         |
-  |  6. UPGRADE_PROBE_ACK (UDP)              |
+  |  6. UPGRADE_PROBE_ACK (UDP)             |
   |<----------------------------------------|
   |                                         |
   |  [UDP path validated]                   |
   |                                         |
-  |  7. UDP_READY (TCP)                      |
+  |  7. UDP_READY (TCP)                     |
   |    - upgrade_id                         |
   |---------------------------------------->|
   |                                         |
-  |  8. SWITCH_TO_UDP (TCP)                  |
+  |  8. SWITCH_TO_UDP (TCP)                 |
   |    - upgrade_id                         |
   |<----------------------------------------|
   |                                         |
-  |  9. SWITCH_ACK (TCP)                     |
+  |  9. SWITCH_ACK (TCP)                    |
   |    - upgrade_id                         |
   |---------------------------------------->|
   |                                         |
-  |  10. PING barrier (TCP)                  |
+  |  10. PING barrier (TCP)                 |
   |    - barrier_nonce                      |
   |---------------------------------------->|
   |                                         |
-  |  11. PONG barrier (TCP)                  |
+  |  11. PONG barrier (TCP)                 |
   |    - barrier_nonce                      |
   |<----------------------------------------|
   |                                         |
@@ -168,12 +168,12 @@ Client                                    Server
         | register_ok                    | discovery_fail
         v                                |
 +-------------------+  register_fail  +-------------------+
-|  Active (UDP-QSP) |-------------->|     Pending       |
-+-------------------+             +-------------------+
+|  Active (UDP-QSP) |---------------->|     Pending       |
++-------------------+                 +-------------------+
         |                                ^
         | upgrade_start                  | register_retry
         v                                |
-+-------------------+             +------+------+
++-------------------+             +-------------+
 |    Upgrading      |             |             |
 +-------------------+             |             |
         |                         |             |
