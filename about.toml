@@ -1,0 +1,17 @@
+# cargo-about configuration for the Rust dependency tree (which also includes
+# the vendored path deps boring-sys and quiche). `accepted` is the license
+# policy: `cargo about` fails if any dependency resolves to a license not in
+# this list, so extend it when a permissively-licensed dep brings a new SPDX id.
+
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "MPL-2.0",
+]

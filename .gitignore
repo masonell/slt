@@ -14,10 +14,8 @@
 /result
 /result-*
 /local
+/target-cross
 /android/.gradle
 /android/build
 /android/app/build
 /android/local.properties
-/android/gradle
-/android/gradlew
-/android/gradlew.bat

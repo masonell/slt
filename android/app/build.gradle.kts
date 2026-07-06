@@ -8,6 +8,11 @@ plugins {
 val workspaceDir = rootProject.layout.projectDirectory.asFile.parentFile
 val androidNdkHome = providers.environmentVariable("ANDROID_NDK_HOME")
     .orElse(providers.environmentVariable("ANDROID_NDK_ROOT"))
+
+// Release signing is injected via environment variables (set by CI from
+// repository secrets). When unset, the release build is left unsigned so
+// local development builds keep working without the keystore.
+val releaseKeystoreFile = providers.environmentVariable("SLT_KEYSTORE_FILE").orNull
 val debugAndroidAbis = listOf("arm64-v8a", "x86_64")
 val releaseAndroidAbis = listOf("arm64-v8a")
 val androidLibcxxTargets = mapOf(
@@ -51,6 +56,47 @@ fun cargoWorkspaceVersion(workspaceDir: File): String {
         ?: error("could not find workspace package version in workspace Cargo.toml")
 }
 
+fun androidPrereleaseCode(prerelease: String?): Int {
+    if (prerelease == null) {
+        return 99
+    }
+
+    val match = Regex("""^(alpha|beta|rc)\.?(\d+)$""", RegexOption.IGNORE_CASE)
+        .matchEntire(prerelease)
+        ?: error("Android versionCode derivation supports alphaN, betaN, and rcN prereleases: $prerelease")
+    val channel = match.groupValues[1].lowercase()
+    val ordinal = match.groupValues[2].toInt()
+    require(ordinal in 1..29) {
+        "Android prerelease ordinal must be between 1 and 29: $prerelease"
+    }
+    return when (channel) {
+        "alpha" -> ordinal
+        "beta" -> 30 + ordinal
+        "rc" -> 60 + ordinal
+        else -> error("unsupported Android prerelease channel: $channel")
+    }
+}
+
+fun androidVersionCodeFromSemver(version: String): Int {
+    val match = Regex("""^(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?(?:\+.*)?$""").matchEntire(version)
+        ?: error("workspace package version is not SemVer-like: $version")
+    val major = match.groupValues[1].toInt()
+    val minor = match.groupValues[2].toInt()
+    val patch = match.groupValues[3].toInt()
+    val prerelease = match.groupValues[4].ifBlank { null }
+    require(minor <= 999 && patch <= 999) {
+        "Android versionCode derivation expects minor and patch <= 999: $version"
+    }
+    val versionCode = major.toLong() * 100_000_000 +
+        minor.toLong() * 100_000 +
+        patch.toLong() * 100 +
+        androidPrereleaseCode(prerelease).toLong()
+    require(versionCode <= Int.MAX_VALUE) {
+        "Android versionCode exceeds Int.MAX_VALUE: $versionCode"
+    }
+    return versionCode.toInt()
+}
+
 fun copyAndroidLibcxxShared(ndkDir: String, jniLibsDir: File, abis: List<String>) {
     val prebuiltDir = file(ndkDir)
         .resolve("toolchains/llvm/prebuilt")
@@ -74,6 +120,13 @@ fun copyAndroidLibcxxShared(ndkDir: String, jniLibsDir: File, abis: List<String>
 }
 
 val appVersion = cargoWorkspaceVersion(workspaceDir)
+val appVersionCode = providers.environmentVariable("SLT_ANDROID_VERSION_CODE")
+    .orNull
+    ?.let { it.toIntOrNull() ?: error("SLT_ANDROID_VERSION_CODE must be an integer: $it") }
+    ?: androidVersionCodeFromSemver(appVersion)
+require(appVersionCode > 0) {
+    "Android versionCode must be positive: $appVersionCode"
+}
 val gitSha = runCatching {
     providers.exec {
         commandLine("git", "rev-parse", "--short", "HEAD")
@@ -88,9 +141,20 @@ android {
         applicationId = "dev.slt.android"
         minSdk = 33
         targetSdk = 35
-        versionCode = 1
+        versionCode = appVersionCode
         versionName = appVersion
         buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+    }
+
+    signingConfigs {
+        create("release") {
+            if (releaseKeystoreFile != null) {
+                storeFile = file(releaseKeystoreFile)
+                storePassword = providers.environmentVariable("SLT_STORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("SLT_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("SLT_KEY_PASSWORD").get()
+            }
+        }
     }
 
     buildTypes {
@@ -100,6 +164,8 @@ android {
             }
         }
         release {
+            signingConfig =
+                releaseKeystoreFile?.let { signingConfigs.getByName("release") }
             ndk {
                 abiFilters += releaseAndroidAbis
             }
@@ -168,6 +234,7 @@ fun registerBuildRustNativeTask(variantName: String, abis: List<String>) =
             "-o",
             outputDir.get().asFile.absolutePath,
             "build",
+            "--locked",
             "-p",
             "slt-client",
         )
