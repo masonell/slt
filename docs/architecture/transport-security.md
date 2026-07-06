@@ -61,7 +61,7 @@ over the decrypted stream. This is where authentication (AUTH/AUTH_OK) occurs.
 
 **Unknown connections**: Connections that fail the classifier check are passed
 through to nginx without TLS termination. The wrapper pipes bytes
-bidirectionally between the client and nginx's TLS endpoint on `127.0.0.1:8443`.
+bidirectionally between the client and nginx's TLS endpoint on `127.0.0.1:8080`.
 This ensures real HTTPS and HTTP/3 traffic reaches nginx unchanged.
 
 ## 3. UDP-QSP Security (QUIC-shaped, Custom)

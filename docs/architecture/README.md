@@ -1,6 +1,6 @@
 # SLT Architecture
 
-This section covers the high-level system design of SLT, a VPN implementation that multiplexes VPN traffic with standard web traffic on ports 80/443.
+This section covers the high-level system design of SLT, a VPN implementation that multiplexes VPN traffic with standard web traffic on port 443 (TCP and UDP).
 
 ## Documentation
 

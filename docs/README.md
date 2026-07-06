@@ -1,6 +1,6 @@
 # SLT Documentation
 
-SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on ports 80/443. This allows VPN traffic to coexist with normal HTTPS traffic on the same server, making it harder to distinguish VPN usage from regular web browsing.
+SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on port 443 (TCP and UDP). Port 80 is left to nginx, which serves plain HTTP and redirects to HTTPS. This allows VPN traffic to coexist with normal HTTPS/QUIC traffic on the same server, making it harder to distinguish VPN usage from regular web browsing.
 
 ## Documentation Index
 

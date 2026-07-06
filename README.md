@@ -4,7 +4,7 @@ A VPN that tunnels through HTTPS on port 443 and shares the port with ordinary w
 
 ## How it works
 
-SLT runs alongside nginx on the same host, sharing ports 80 and 443:
+SLT runs alongside nginx on the same host. SLT owns port 443 (TCP and UDP) and classifies traffic there; nginx owns port 80 (plain HTTP, redirecting to HTTPS) and also receives the non-VPN traffic SLT forwards from 443:
 
 - **Traffic classification.** The server inspects each TLS ClientHello for an HMAC token in the `legacy_session_id` field. Connections carrying a valid token are VPN sessions; everything else is transparently forwarded to nginx as decoy web traffic.
 - **UDP-QSP data transport.** After authenticating over TLS, VPN data moves to UDP/443 using QUIC-shaped short-header packets protected with AES-128-GCM or ChaCha20-Poly1305. This reuses the QUIC wire format for header protection and AEAD framing without running a QUIC handshake.

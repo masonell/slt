@@ -2,8 +2,8 @@
 
 ## 1. Overview
 
-The SLT server multiplexes VPN traffic and standard web traffic on the same public
-ports (80/443 TCP, 443 UDP). Traffic classification determines whether an incoming
+The SLT server multiplexes VPN traffic and standard web traffic on port 443
+(443/TCP, 443/UDP). Traffic classification determines whether an incoming
 connection or datagram should be:
 
 - **CLAIM**: Route to the VPN handler for authentication and tunnel processing.
@@ -118,21 +118,6 @@ The implementation in `slt-core/src/classifier.rs` uses a streaming parser that:
 - `EXT_KEY_SHARE = 0x0033`
 - `GROUP_X25519 = 0x001d`
 
-### 2.5 Verification Against Code
-
-The algorithm description above matches the implementation in `classify_tcp_client_hello()`:
-
-| Step | Spec | Code |
-|------|------|------|
-| Record type check | content_type == 0x16 | `TLS_HANDSHAKE_CONTENT_TYPE` constant, checked in `next_record()` |
-| Handshake type check | type == 0x01 | `HANDSHAKE_TYPE_CLIENT_HELLO` constant, line 83 |
-| Session ID length | == 32 | `LEGACY_SESSION_ID_LEN` constant, line 108 |
-| Part 1 verification | HMAC(random[:16]) | `hmac_sha256(secret, &random[..RANDOM_PREFIX_LEN])` at line 117 |
-| Part 2 verification | HMAC(key_share) | `hmac_sha256(secret, &key_share)` at line 172 |
-| Constant-time compare | Required | `memcmp::eq()` used at lines 121, 176 |
-
-**No discrepancies found.**
-
 ## 3. UDP Classification (QUIC-shaped)
 
 UDP datagrams are classified based on QUIC wire format detection. The classifier
@@ -208,7 +193,7 @@ Non-VPN UDP traffic (long headers and unknown short headers) is forwarded to ngi
 via a 4-tuple NAT mechanism:
 
 - **NAT Map**: `client_ip:client_port -> local_socket`
-- Each unique source address gets a dedicated local socket to `127.0.0.1:8443/udp`.
+- Each unique source address gets a dedicated local socket to `127.0.0.1:8080/udp`.
 - **Resource Limits**:
   - Bounded table size (configurable, typically 100-1000 entries).
   - LRU eviction when limit is reached.
@@ -216,21 +201,6 @@ via a 4-tuple NAT mechanism:
 
 This allows real QUIC connections to nginx to function normally while the VPN
 uses short-header packets with registered DCIDs.
-
-### 3.6 Verification Against Code
-
-The algorithm description above matches the implementation in `classify_quic_datagram()`:
-
-| Step | Spec | Code |
-|------|------|------|
-| Empty check | -> DROP | Line 43-44 |
-| Fixed bit check | (first & 0x40) | Line 49 |
-| Non-QUIC -> DROP | If !fixed_bit | Line 51-52 |
-| Long header -> PASS | If (first & 0x80) | Line 55-56 |
-| Short header DCID extraction | bytes [1..=20] | Line 59-64 |
-| Prefix length | 20 bytes | `QUIC_DCID_PREFIX_LEN` constant |
-
-**No discrepancies found.**
 
 ## 4. Security Requirements
 

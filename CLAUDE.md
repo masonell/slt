@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 
-SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on ports 80/443. It consists of 5 crates:
+SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on port 443 (TCP and UDP). Port 80 is owned by nginx (plain HTTP that redirects to HTTPS) and is not handled by SLT. It consists of 5 crates:
 
 - **slt-core**: Protocol definitions, crypto primitives, configuration types, packet parsing
 - **slt-server**: VPN server with TCP/UDP front doors, client authentication, session management, TUN integration

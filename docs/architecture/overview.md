@@ -2,7 +2,7 @@
 
 ## What is SLT?
 
-SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on the same public ports (80/TCP, 443/TCP, 443/UDP). This allows VPN traffic to coexist with normal HTTPS traffic, making it appear as regular web browsing to network observers.
+SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on port 443 (443/TCP, 443/UDP). Port 80 is owned by nginx, which serves plain HTTP and redirects to HTTPS. This allows VPN traffic to coexist with normal HTTPS traffic, making it appear as regular web browsing to network observers.
 
 ## Why This Approach?
 
@@ -10,7 +10,7 @@ The primary goal is to bypass firewalls and network restrictions that block non-
 
 - VPN traffic is indistinguishable from regular HTTPS traffic to passive observers
 - No special firewall rules or port forwarding is required
-- The service can run on standard web ports (80/443) that are rarely blocked
+- The service can run on standard web ports (443) that are rarely blocked
 - Non-VPN traffic is forwarded to nginx, allowing the server to host regular websites
 
 ## Network Topology
@@ -27,8 +27,8 @@ The primary goal is to bypass firewalls and network restrictions that block non-
 
 | Port | Protocol | Service | Purpose |
 |------|----------|---------|---------|
-| 127.0.0.1:8443/tcp | TCP | nginx | TLS + HTTP/1.1 and/or HTTP/2 |
-| 127.0.0.1:8443/udp | UDP | nginx | HTTP/3 / QUIC |
+| 127.0.0.1:8080/tcp | TCP | nginx | TLS + HTTP/1.1 and/or HTTP/2 |
+| 127.0.0.1:8080/udp | UDP | nginx | HTTP/3 / QUIC |
 
 Internal ports are firewall-blocked from the internet and only accessible to the wrapper process.
 
@@ -40,8 +40,8 @@ Internal ports are firewall-blocked from the internet and only accessible to the
                                  |
                     +------------+------------+
                     |      Public Ports       |
-                    |   :80/tcp   :443/tcp    |
-                    |        :443/udp         |
+                    |       :443/tcp          |
+                    |       :443/udp          |
                     +------------+------------+
                                  |
                                  v
@@ -211,7 +211,7 @@ Web Client                                    Server
    |                       long header (PASS)   |
    |                                            |
    |                    3. Forward via NAT      |
-   |                       to nginx :8443       |
+   |                       to nginx :8080       |
    |                                            |
    |  4. QUIC handshake                         |
    |<------------------------------------------>|
@@ -245,13 +245,14 @@ This design ensures:
 
 ## Crate Structure
 
-SLT is organized into four Rust crates:
+SLT is organized into five Rust crates:
 
 | Crate | Purpose |
 |-------|---------|
 | `slt-core` | Protocol definitions, crypto primitives, configuration types, packet parsing |
 | `slt-server` | VPN server with TCP/UDP front doors, client authentication, session management, TUN integration |
 | `slt-client` | VPN client with connection establishment, authentication, transport switching |
+| `slt-cli` | WireGuard-style management CLI (`slt` binary) for project init, key/cert generation, and client management |
 | `slt-tools` | CLI utilities for generating TLS/QUIC ClientHello packets |
 
 ## Key Protocol Concepts
