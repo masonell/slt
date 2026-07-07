@@ -93,7 +93,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                         );
                         return Ok(());
                     }
-                    self.note_activity();
                     if self.handle_tcp_read().await? == SessionControl::Close {
                         return Ok(());
                     }
@@ -184,7 +183,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         Instant::now() + min + jitter
     }
 
-    fn note_activity(&mut self) {
+    pub(super) fn note_activity(&mut self) {
         self.last_activity = Instant::now();
     }
 }

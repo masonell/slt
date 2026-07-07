@@ -53,6 +53,48 @@ async fn session_idle_timeout_sends_close() {
 }
 
 #[tokio::test]
+async fn partial_tcp_frame_does_not_reset_idle_timeout() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.idle_timeout = Duration::from_millis(300);
+    timeouts.ping_min = Duration::from_secs(5);
+    timeouts.ping_max = Duration::from_secs(5);
+
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+        spawn_session_with_timeouts(timeouts).await;
+
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    let mut payload = Vec::new();
+    PingPayload { nonce: 0xCAFE }.encode(&mut payload);
+    let mut frame = Vec::new();
+    encode_message(Message::Ping { payload: &payload }, &mut frame).unwrap();
+    client.write_all(&frame[..1]).await.unwrap();
+    client.flush().await.unwrap();
+
+    let buf = timeout(
+        Duration::from_millis(180),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .expect("partial frame bytes must not extend the original idle deadline")
+    .unwrap();
+    let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+    match message {
+        Message::Close { payload } => {
+            let close = ClosePayload::decode(payload).unwrap();
+            assert_eq!(close.code, CloseCode::IdleTimeout);
+        }
+        _ => panic!("expected close"),
+    }
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
 async fn session_sends_tcp_ping_on_schedule() {
     let mut timeouts = default_session_timeouts();
     timeouts.ping_min = Duration::from_millis(50);

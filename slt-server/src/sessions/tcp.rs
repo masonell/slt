@@ -29,6 +29,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 return Ok(SessionControl::Continue);
             };
 
+            self.note_activity();
             if self.handle_tcp_message(msg_buf.message()).await? == SessionControl::Close {
                 return Ok(SessionControl::Close);
             }
