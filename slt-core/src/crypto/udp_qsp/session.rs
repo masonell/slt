@@ -4,6 +4,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 
+use super::pn::packet_number_len;
 use super::{OpenedPacketRef, QspCryptoError, UdpQspKeys};
 use crate::types::Cid;
 
@@ -13,6 +14,18 @@ pub const PN_REPLAY_WINDOW: usize = 1024;
 pub const KEY_UPDATE_INTERVAL: u64 = 1 << 21;
 /// Late packet-number margin where receiver still accepts old keys.
 pub const KEY_UPDATE_LATE_MARGIN: u64 = (PN_REPLAY_WINDOW as u64) * 8;
+
+const MIN_KEY_UPDATE_DETECTION_PN: u64 = KEY_UPDATE_INTERVAL.saturating_sub(KEY_UPDATE_LATE_MARGIN);
+const MIN_KEY_UPDATE_DETECTION_PN_LEN: usize = packet_number_len(MIN_KEY_UPDATE_DETECTION_PN);
+const MIN_KEY_UPDATE_RECONSTRUCTION_HALF_WINDOW: u64 =
+    1u64 << (MIN_KEY_UPDATE_DETECTION_PN_LEN * 8 - 1);
+
+// The receiver starts trying candidate RX keys before the rekey threshold, and
+// the first new-phase packet may arrive after it. Keep the full detection span
+// inside packet-number reconstruction's half-window for the shortest PN length
+// used in that span.
+const _: () =
+    assert!(KEY_UPDATE_LATE_MARGIN.saturating_mul(2) < MIN_KEY_UPDATE_RECONSTRUCTION_HALF_WINDOW);
 
 const WINDOW_WORD_BITS: usize = 64;
 const WINDOW_WORDS: usize = PN_REPLAY_WINDOW / WINDOW_WORD_BITS;
