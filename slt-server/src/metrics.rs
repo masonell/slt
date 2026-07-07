@@ -17,6 +17,7 @@ pub struct Metrics {
     dropped: AtomicU64,
     upstream_send_failures: AtomicU64,
     tun_queue_overflow_drops: AtomicU64,
+    udp_claim_channel_full_drops: AtomicU64,
     auth_successes: AtomicU64,
     auth_failures: AtomicU64,
     auth_rejections: AtomicU64,
@@ -55,6 +56,8 @@ pub struct MetricsSnapshot {
     pub upstream_send_failures: u64,
     /// TUN packets dropped because session queue was full.
     pub tun_queue_overflow_drops: u64,
+    /// UDP-claim datagrams dropped because the session queue was full or closed.
+    pub udp_claim_channel_full_drops: u64,
     /// Authentication failures (all auth-phase failures: rejections + transport/decode).
     pub auth_failures: u64,
     /// Authentication rejections (genuine `AUTH_FAIL` sent — a subset of `auth_failures`).
@@ -150,6 +153,15 @@ impl Metrics {
         trace!(
             tun_queue_overflow_drops = count,
             "TUN packet dropped: session queue full"
+        );
+    }
+
+    /// Increment UDP-claim channel-full drop counter.
+    pub fn inc_udp_claim_channel_full_drops(&self) {
+        let count = inc(&self.udp_claim_channel_full_drops);
+        trace!(
+            udp_claim_channel_full_drops = count,
+            "UDP-claim datagram dropped: session queue full/closed"
         );
     }
 
@@ -310,6 +322,7 @@ impl Metrics {
             dropped: self.dropped.load(Ordering::Relaxed),
             upstream_send_failures: self.upstream_send_failures.load(Ordering::Relaxed),
             tun_queue_overflow_drops: self.tun_queue_overflow_drops.load(Ordering::Relaxed),
+            udp_claim_channel_full_drops: self.udp_claim_channel_full_drops.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
             auth_rejections: self.auth_rejections.load(Ordering::Relaxed),
             auth_limit_drops: self.auth_limit_drops.load(Ordering::Relaxed),

@@ -371,6 +371,7 @@ fn spawn_metrics_task(
                         dropped = snap.dropped,
                         upstream_send_failures = snap.upstream_send_failures,
                         tun_queue_overflow_drops = snap.tun_queue_overflow_drops,
+                        udp_claim_channel_full_drops = snap.udp_claim_channel_full_drops,
                         auth_successes = snap.auth_successes,
                         auth_failures = snap.auth_failures,
                         auth_rejections = snap.auth_rejections,

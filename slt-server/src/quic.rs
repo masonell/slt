@@ -369,17 +369,18 @@ impl QuicEndpoint {
                         "QUIC datagram claimed by session"
                     );
                     self.metrics.inc_claimed();
-                    match tx.try_send(SessionEvent::Udp(UdpClaim {
-                        peer,
-                        dcid_prefix,
-                        payload,
-                    })) {
-                        Ok(()) => {
-                            trace!(peer = %peer, dcid_prefix = ?dcid_prefix, "Sent claimed datagram to session");
-                        }
-                        Err(_) => {
-                            warn!(peer = %peer, dcid_prefix = ?dcid_prefix, "Failed to send claimed datagram to session (channel full/closed)");
-                        }
+                    if tx
+                        .try_send(SessionEvent::Udp(UdpClaim {
+                            peer,
+                            dcid_prefix,
+                            payload,
+                        }))
+                        .is_ok()
+                    {
+                        trace!(peer = %peer, dcid_prefix = ?dcid_prefix, "Sent claimed datagram to session");
+                    } else {
+                        self.metrics.inc_udp_claim_channel_full_drops();
+                        debug!(peer = %peer, dcid_prefix = ?dcid_prefix, "Claimed datagram dropped (session queue full/closed)");
                     }
                 } else {
                     debug!(
@@ -1164,6 +1165,65 @@ mod tests {
         // Metric should still be incremented (we tried to claim)
         let snapshot = endpoint.metrics.snapshot();
         assert!(snapshot.claimed > 0);
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_claim_channel_full_increments_drop_counter() {
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let downstream = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+        let endpoint = QuicEndpoint::from_socket_for_test(
+            downstream.clone(),
+            SocketAddr::from(([127, 0, 0, 1], 8080)),
+            NonZeroUsize::new(1024).unwrap(),
+            Duration::from_mins(1),
+            registry.clone(),
+            metrics.clone(),
+        )
+        .await;
+
+        // Register a CID prefix on a capacity-1 channel whose receiver is never
+        // drained, so the second claim overflows while the channel stays open.
+        let dcid_prefix = [0xDD; QUIC_DCID_PREFIX_LEN];
+        let (tx, rx) = mpsc::channel(1);
+        let _rx = rx;
+        registry
+            .insert_cid(1, slt_core::types::CidPrefix::from(dcid_prefix), tx)
+            .unwrap();
+
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+
+        let before = metrics.snapshot();
+
+        // First datagram fills the capacity-1 channel.
+        endpoint
+            .handle_datagram(
+                &mut state,
+                cancel.clone(),
+                peer,
+                make_quic_short_header(&dcid_prefix),
+            )
+            .await
+            .unwrap();
+        // Second datagram overflows while the channel is still open.
+        endpoint
+            .handle_datagram(
+                &mut state,
+                cancel,
+                peer,
+                make_quic_short_header(&dcid_prefix),
+            )
+            .await
+            .unwrap();
+
+        let after = metrics.snapshot();
+        assert_eq!(
+            after.udp_claim_channel_full_drops,
+            before.udp_claim_channel_full_drops + 1
+        );
     }
 
     #[tokio::test]
