@@ -159,14 +159,20 @@ impl NativeSession {
             // and its own callback `Arc` clones, so letting it finish
             // independently is safe: any stale post-stop callback is rejected by
             // handle in Kotlin, and the `Stop` command + cancel bound its life.
-            // If spawning the joiner fails the `JoinHandle` is dropped, which
-            // detaches the worker just the same.
-            thread::Builder::new()
+            // Spawning the joiner can only fail under thread/resource limits
+            // (e.g. `RLIMIT_NPROC`); the `JoinHandle` is then dropped, detaching
+            // the worker, and the failure is logged so the detach is not silent.
+            if let Err(err) = thread::Builder::new()
                 .name(format!("slt-android-stop-{}", self.handle))
                 .spawn(move || {
                     let _ = worker.join();
                 })
-                .ok();
+            {
+                error!(
+                    handle = self.handle,
+                    "failed to spawn stop-joiner thread: {err}"
+                );
+            }
         }
     }
 }
