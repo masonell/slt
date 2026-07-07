@@ -535,6 +535,12 @@ impl UdpQspKeys {
 
     /// Protect a UDP-QSP payload into a QUIC short-header packet.
     ///
+    /// `pn` becomes the AEAD nonce, so it must be unique for the lifetime of
+    /// the current TX key. Reusing a `(key, pn)` pair is catastrophic AEAD
+    /// nonce reuse: it leaks plaintext and enables forgery. Rotating the TX
+    /// key (`with_next_tx_keys`) starts a fresh key under which the
+    /// packet-number space resets.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
@@ -555,6 +561,9 @@ impl UdpQspKeys {
     /// Protect a UDP-QSP payload into the provided buffer.
     ///
     /// The output buffer is cleared and reused for the packet bytes.
+    ///
+    /// `pn` must be unique for the lifetime of the current TX key — see
+    /// [`protect`](Self::protect) for the nonce-reuse constraint.
     ///
     /// # Errors
     ///
@@ -607,6 +616,8 @@ impl UdpQspKeys {
     ///
     /// `expected_pn` should be the next packet number you expect to receive
     /// (typically `largest_pn + 1`) to allow packet number reconstruction.
+    /// The reconstructed packet number reproduces the sender's AEAD nonce;
+    /// uniqueness is the sender's obligation (see [`protect`](Self::protect)).
     ///
     /// # Errors
     ///
@@ -695,6 +706,10 @@ struct OpenedPacketMeta {
     key_phase: bool,
 }
 
+/// QUIC per-packet AEAD nonce (RFC 9001 §5.3): the IV with its low 8 bytes
+/// XOR'd against the big-endian packet number. AEAD security requires that
+/// `(key, counter)` never repeat for a given key — callers must pass a
+/// monotonically unique packet number.
 #[inline]
 fn make_nonce(iv: &[u8; AEAD_IV_LEN], counter: u64) -> [u8; AEAD_IV_LEN] {
     let mut nonce = *iv;
