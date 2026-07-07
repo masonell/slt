@@ -123,6 +123,15 @@ pub(super) enum UdpUpgradeState {
         probe_backoff: ReconnectBackoff,
     },
     /// Switch was acknowledged on TCP; wait for commit barrier pong.
+    ///
+    /// A lost barrier pong is not retransmitted. The carried `deadline` is the
+    /// attempt's single hard deadline (set in `start_udp_upgrade_attempt`),
+    /// kept armed by `timer_at`, so it fires `handle_udp_upgrade_tick` and
+    /// recovers via `TcpOnlyBlockedUdp` instead of stalling. That deadline is
+    /// shared with the probe phase, so the barrier-pong wait runs on the
+    /// residual `register_timeout`. The keepalive ping tick does not
+    /// participate: its pong nonce cannot match `barrier_nonce`, so only the
+    /// server's barrier pong commits.
     AwaitingSwitchCommit {
         /// Attempt identifier shared across probe/ack/ready/switch.
         upgrade_id: u64,

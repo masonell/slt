@@ -490,6 +490,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 Ok(SessionControl::Continue)
             }
             UdpUpgradeState::AwaitingSwitchCommit { deadline, .. } => {
+                // `timer_at` keeps this deadline armed, so a lost barrier pong
+                // recovers here as `switch_commit_timeout` instead of stalling.
                 if now >= *deadline {
                     return Ok(self.handle_udp_upgrade_timeout("switch_commit_timeout"));
                 }
@@ -554,6 +556,14 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         }
     }
 
+    /// Single recovery path for every upgrade deadline — a timed-out probe
+    /// phase, an unacked `switch_to_udp`, or a lost barrier pong
+    /// (`switch_commit_timeout`).
+    ///
+    /// Under `require_udp` a timeout is fatal (`UdpUpgradeRequired`); otherwise
+    /// the attempt backs off to `TcpOnlyBlockedUdp` so traffic keeps flowing on
+    /// TCP, and `timer_at` re-arms at `retry_at` to start a fresh attempt after
+    /// the cooldown.
     fn handle_udp_upgrade_timeout(&mut self, reason: &'static str) -> SessionControl {
         let upgrade_id = upgrade_id_from_active_upgrade_state(&self.udp_upgrade);
 
@@ -1083,6 +1093,128 @@ mod tests {
             let buf = [u8::from(RegisterFailCode::NotAuthenticated)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::NotAuthenticated);
+        }
+    }
+
+    /// Recovery from a lost commit-barrier pong.
+    ///
+    /// `AwaitingSwitchCommit` carries the attempt's hard `deadline`; the
+    /// keepalive ping tick does not retransmit the barrier ping and cannot
+    /// commit (its pong nonce never matches `barrier_nonce`). The deadline —
+    /// kept armed by `timer_at` — is the only recovery, firing
+    /// `switch_commit_timeout`.
+    mod awaiting_switch_commit_recovery {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        use slt_core::proto::OwnedMessageBuf;
+        use slt_core::transport::tcp::TcpChannel;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        use super::*;
+        use crate::metrics::Metrics;
+        use crate::runtime::services::DesktopServices;
+        use crate::test_support::{test_config, tls_tcp_stream_pair};
+        use crate::transport::tcp::{ClientKeyUpdater, TcpSession, TcpTransport};
+        use crate::tun::TunChannels;
+
+        /// A real `TcpStream`-backed TLS channel, so the session's `TcpTransport`
+        /// field is well-formed. Unused by the `AwaitingSwitchCommit` tick arm.
+        async fn loopback_tcp_transport() -> TcpTransport {
+            let metrics = Arc::new(Metrics::default());
+            let updater = ClientKeyUpdater::new(metrics);
+            let (client_stream, _server_stream) = tls_tcp_stream_pair().await;
+            TcpChannel::with_key_updater(client_stream, updater)
+        }
+
+        fn tun_channels() -> TunChannels {
+            let (_to_session_tx, to_session_rx) = mpsc::channel::<Vec<u8>>(8);
+            let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(8);
+            TunChannels {
+                to_session_rx,
+                to_tun_tx,
+            }
+        }
+
+        /// An `AwaitingSwitchCommit` whose hard deadline has already elapsed —
+        /// the residual `register_timeout` consumed by the probe phase, so the
+        /// barrier pong gets no window (the lost-pong worst case).
+        fn elapsed_barrier_commit() -> UdpUpgradeState {
+            UdpUpgradeState::AwaitingSwitchCommit {
+                upgrade_id: 0xAA,
+                barrier_nonce: 0xBB,
+                deadline: Instant::now() - Duration::from_secs(1),
+            }
+        }
+
+        #[tokio::test]
+        async fn lost_barrier_pong_recovers_via_deadline_when_udp_optional() {
+            let config = test_config();
+            let services = DesktopServices::new();
+            let mut tun = tun_channels();
+            let metrics = Arc::new(Metrics::default());
+            let tcp_session = TcpSession {
+                transport: loopback_tcp_transport().await,
+                peer: None,
+                sni: None,
+            };
+            let mut session = ClientSession::new(
+                &config,
+                tcp_session,
+                &mut tun,
+                CancellationToken::new(),
+                metrics,
+                &services,
+                None,
+            );
+            session.udp_upgrade = elapsed_barrier_commit();
+
+            let control = session.handle_udp_upgrade_tick().await.unwrap();
+            assert!(
+                matches!(control, SessionControl::Continue),
+                "expected backoff, got {control:?}",
+            );
+            assert!(
+                matches!(
+                    session.udp_upgrade,
+                    UdpUpgradeState::TcpOnlyBlockedUdp { .. }
+                ),
+                "lost barrier pong must recover via deadline backoff, not stall",
+            );
+        }
+
+        #[tokio::test]
+        async fn lost_barrier_pong_closes_when_require_udp() {
+            let mut config = test_config();
+            config.require_udp = true;
+            let services = DesktopServices::new();
+            let mut tun = tun_channels();
+            let metrics = Arc::new(Metrics::default());
+            let tcp_session = TcpSession {
+                transport: loopback_tcp_transport().await,
+                peer: None,
+                sni: None,
+            };
+            let mut session = ClientSession::new(
+                &config,
+                tcp_session,
+                &mut tun,
+                CancellationToken::new(),
+                metrics,
+                &services,
+                None,
+            );
+            session.udp_upgrade = elapsed_barrier_commit();
+
+            let control = session.handle_udp_upgrade_tick().await.unwrap();
+            assert!(
+                matches!(
+                    control,
+                    SessionControl::Close(SessionExit::UdpUpgradeRequired),
+                ),
+                "require_udp must make a lost barrier pong fatal; got {control:?}",
+            );
         }
     }
 }

@@ -18,5 +18,7 @@ pub use crypto::*;
 pub use protocol::*;
 // Re-export specific server items that are used by integration tests
 #[allow(unused_imports)]
-pub use server::{MockMessage, MockTlsServer, tls_client_channel_pair, tls_server_pair};
+pub use server::{
+    MockMessage, MockTlsServer, tls_client_channel_pair, tls_server_pair, tls_tcp_stream_pair,
+};
 pub use transport::*;

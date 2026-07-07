@@ -81,6 +81,37 @@ pub async fn tls_client_channel_pair() -> (
     (client_channel, server_stream)
 }
 
+/// Create a connected TLS pair over real loopback `TcpStream`s.
+///
+/// Returns `(connector_side, acceptor_side)`, both with the handshake complete.
+/// Unlike [`tls_server_pair`] (in-memory duplex streams), these wrap real
+/// `TcpStream`s, so the connector side satisfies
+/// `TcpTransport = TcpChannel<TcpStream, _>` for tests that build a
+/// `ClientSession` directly.
+pub async fn tls_tcp_stream_pair() -> (
+    SslStream<tokio::net::TcpStream>,
+    SslStream<tokio::net::TcpStream>,
+) {
+    use tokio::net::TcpListener;
+
+    let acceptor = tls_acceptor();
+    let connector = tls_connector();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio_boring::accept(&acceptor, stream).await.unwrap()
+    };
+    let client = async {
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tokio_boring::connect(connector.configure().unwrap(), "localhost", stream)
+            .await
+            .unwrap()
+    };
+    let (server_stream, client_stream) = tokio::join!(server, client);
+    (client_stream, server_stream)
+}
+
 /// Mock TLS server for integration tests.
 ///
 /// Wraps a server-side TLS stream and provides helpers for responding
