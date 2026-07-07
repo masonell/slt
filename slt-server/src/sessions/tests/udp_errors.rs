@@ -397,6 +397,20 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
     // CID should be removed and session should fall back to TCP
     assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 
+    // The fallback sends an immediate TCP ping so a peer still on UDP-QSP flips
+    // to TCP within ~RTT, rather than waiting for the next scheduled ping.
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::Ping { .. }
+    ));
+
     // Session should still accept TCP data
     let tcp_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 81), 8);
     let mut tcp_frame = Vec::new();
@@ -417,4 +431,72 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_closes_when_udp_dead_channel_and_tcp_already_closed() {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+
+    // Register and activate UDP-QSP.
+    let dcid = Cid::from([0xE1; MAX_DCID_LEN]);
+    let scid = Cid::from([0xE2; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut reg_buf = Vec::new();
+    register.encode(&mut reg_buf).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let peer = SocketAddr::from(([127, 0, 0, 1], 56790));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1602,
+    )
+    .await;
+
+    // Close the TCP connection (e.g. a middlebox reaped it after the upgrade).
+    // The server sets tcp_alive=false and continues on UDP-QSP alone.
+    drop(client);
+
+    // Let the server observe the TCP EOF before provoking the dead channel.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 64 undecryptable packets trigger a dead channel. With TCP already gone
+    // there is no fallback path, so the session tears itself down instead of
+    // switching onto a dead transport. The client cannot be notified over
+    // either dead path and recovers via its own idle timeout / reconnect.
+    for _ in 0..64 {
+        tx.send(SessionEvent::Udp(UdpClaim {
+            peer,
+            dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+            payload: vec![0xBB; 32],
+        }))
+        .await
+        .unwrap();
+    }
+
+    // The session terminates on its own (no Shutdown sent).
+    let result = timeout(Duration::from_secs(2), join).await;
+    assert!(
+        matches!(result, Ok(Ok(Ok(())))),
+        "expected clean session close after dead channel with tcp dead, got {result:?}"
+    );
 }
