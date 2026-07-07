@@ -102,10 +102,8 @@ pub fn add_client(
         })?;
     }
 
-    // Write the client config before mutating the server config so a failure leaves server state unchanged.
     let client_filename = format!("client-{client_id}.toml");
     let client_path = output_dir.join(&client_filename);
-    save_client_config(&client_path, &client_config)?;
 
     let server_client = ServerClient {
         client_id,
@@ -113,8 +111,31 @@ pub fn add_client(
         assigned_ipv4,
         enabled: true,
     };
+    let original_client_count = config.clients.len();
     config.clients.push(server_client);
+
+    // Write the server config before the client config so a client never holds
+    // credentials the server does not recognize. A server-only orphan — a client
+    // entry whose file was never written — is inert and removable, whereas a
+    // client-only orphan hands a user a key that auth rejects with no clue why.
     save_server_config(config_path, &config)?;
+
+    // Revert the server mutation if the client config cannot be persisted, so the
+    // two files never disagree. A failed restore leaves the inert server orphan
+    // above (the safe direction); the reported error then carries both failures.
+    if let Err(client_err) = save_client_config(&client_path, &client_config) {
+        config.clients.truncate(original_client_count);
+        if let Err(restore_err) = save_server_config(config_path, &config) {
+            bail!(
+                "failed to write client config to {}, and failed to roll back the server config: {restore_err}",
+                client_path.display()
+            );
+        }
+        return Err(client_err.context(format!(
+            "failed to write client config to {}",
+            client_path.display()
+        )));
+    }
 
     if !quiet {
         println!("Added client: {client_id}");
@@ -320,5 +341,28 @@ metrics_interval = "5m"
         let result = add_client(file.path(), output_dir.path(), None, "10.10.0.102", true);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("wildcard"));
+    }
+
+    #[test]
+    fn add_client_rolls_back_server_config_when_client_write_fails() {
+        let file = write_test_config();
+        // Use a regular file as the output dir: `exists()` is true so the
+        // create_dir_all step is skipped, but writing `client-<id>.toml` inside it
+        // fails (ENOTDIR), exercising the rollback path deterministically without
+        // depending on filesystem permissions.
+        let output_dir = NamedTempFile::new().unwrap();
+
+        let result = add_client(
+            file.path(),
+            output_dir.path(),
+            Some("vpn.example.com"),
+            "10.10.0.100",
+            true,
+        );
+        assert!(result.is_err());
+
+        // The server config must be unchanged: no orphaned client entry remains.
+        let config = load_server_config(file.path()).unwrap();
+        assert_eq!(config.clients.len(), 0);
     }
 }
