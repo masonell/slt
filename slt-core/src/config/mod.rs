@@ -34,7 +34,7 @@ pub const ETHERNET_IP_MTU: u16 = 1500;
 pub const MAX_TUN_MTU: u16 = 1406;
 
 /// Configuration validation error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigError {
     /// TUN MTU is zero or exceeds the supported maximum.
     #[error("invalid tun_mtu {tun_mtu}; expected 1..={max_tun_mtu}")]
