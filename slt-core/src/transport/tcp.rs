@@ -224,6 +224,11 @@ impl<S, K: KeyUpdater> TcpChannel<S, K> {
 impl<S: AsyncRead + AsyncWrite + Unpin, K: KeyUpdater> TcpChannel<S, K> {
     /// Read more plaintext bytes from TLS into the internal buffer.
     ///
+    /// `read_buf` has no cap here: an oversized frame header is rejected by
+    /// `decode_frame` on the next `try_pop_message`, before its payload can
+    /// accumulate. Callers pair each `read_more` with a draining
+    /// `try_pop_message` loop, so growth stays bounded by `max_frame_len`.
+    ///
     /// # Errors
     ///
     /// Returns an error if reading from the underlying TLS stream fails.
