@@ -20,6 +20,9 @@ The server configuration (`ServerConfig`) defines how the SLT VPN server operate
 ```toml
 # Server configuration (server.toml)
 server_secret = "..."  # 32-byte hex string
+udp_nat_max_entries = 1024
+session_queue_size = 256
+max_auth_inflight = 128
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -44,9 +47,6 @@ auth_timeout = "10s"
 idle_timeout = "5m"
 metrics_interval = "5m"
 
-udp_nat_max_entries = 1024
-session_queue_size = 256
-
 [[clients]]
 client_id = "..."
 pubkey_ed25519 = "..."
@@ -67,6 +67,7 @@ enabled = true
 | `timing` | [ServerTimingConfig](#timing-section) | No | Timing parameters with sensible defaults. |
 | `udp_nat_max_entries` | integer | No | Maximum UDP NAT peers for nginx forwarding. Default: `1024`. Must be > 0. |
 | `session_queue_size` | integer | No | Bounded queue size for per-session event channels. Default: `256`. Must be > 0. |
+| `max_auth_inflight` | integer | No | Maximum VPN-claimed TCP connections concurrently in TLS/AUTH. Default: `128`. Must be > 0. |
 | `clients` | array of [ServerClient](#clients-section) | Yes | List of authorized clients. |
 
 #### Network Section
@@ -120,6 +121,9 @@ Each entry in the `[[clients]]` array has the following fields:
 ```toml
 # Server configuration example
 server_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+udp_nat_max_entries = 1024
+session_queue_size = 256
+max_auth_inflight = 128
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -143,9 +147,6 @@ ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "5m"
 metrics_interval = "5m"
-
-udp_nat_max_entries = 1024
-session_queue_size = 256
 
 [[clients]]
 client_id = "0102030405060708090a0b0c0d0e0f10"
@@ -447,6 +448,7 @@ Route all traffic through the VPN:
 
 ```toml
 server_secret = "your-32-byte-secret-in-hex-here-0123456789abcdef"
+max_auth_inflight = 128
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -584,4 +586,5 @@ Both server and client configurations are validated when loaded. Common validati
 | `TimeoutTooLarge` | Any timeout > 1 hour | Use duration <= 1 hour |
 | `RequireUdpNeedsUpgrade` | `require_udp = true` but `enable_upgrade = false` | Set `enable_upgrade = true` |
 | `ZeroSessionQueueSize` | Server `session_queue_size` is 0 | Use positive integer |
+| `ZeroMaxAuthInflight` | Server `max_auth_inflight` is 0 | Use positive integer |
 | `ZeroUdpNatMaxEntries` | Server `udp_nat_max_entries` is 0 | Use positive integer |

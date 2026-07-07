@@ -43,8 +43,8 @@ terminating TLS for unknown traffic. The token is constructed as:
 ```
 session_id = part1 || part2
 
-part1 = HMAC-SHA256(random[0:16] || server_secret)[:16]
-part2 = HMAC-SHA256(key_share || server_secret)[:16]
+part1 = HMAC-SHA256(server_secret, random[0:16])[:16]
+part2 = HMAC-SHA256(server_secret, key_share)[:16]
 ```
 
 Where:
@@ -58,6 +58,9 @@ Where:
 
 **VPN connections**: The VPN handler terminates TLS and runs the VPN protocol
 over the decrypted stream. This is where authentication (AUTH/AUTH_OK) occurs.
+The server caps concurrent claimed connections in this TLS/AUTH phase with
+`max_auth_inflight`; established VPN sessions are not counted by this admission
+limit after authentication completes.
 
 **Unknown connections**: Connections that fail the classifier check are passed
 through to nginx without TLS termination. The wrapper pipes bytes

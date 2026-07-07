@@ -20,6 +20,11 @@ const fn default_session_queue_size() -> usize {
     256
 }
 
+/// Default concurrent TLS/AUTH handshakes for VPN-claimed TCP connections.
+const fn default_max_auth_inflight() -> usize {
+    128
+}
+
 /// Static server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -43,6 +48,9 @@ pub struct ServerConfig {
     /// Bounded queue size for per-session event channels.
     #[serde(default = "default_session_queue_size")]
     pub session_queue_size: usize,
+    /// Maximum number of VPN-claimed TCP connections concurrently in TLS/AUTH.
+    #[serde(default = "default_max_auth_inflight")]
+    pub max_auth_inflight: usize,
     /// Configured client entries.
     pub clients: Vec<ServerClient>,
 }
@@ -63,6 +71,7 @@ impl ServerConfig {
     /// - `InvalidPingInterval` if `ping_min` > `ping_max`
     /// - `EmptyUdpQspAllowedCiphers` if UDP-QSP has no allowed cipher suites
     /// - `ZeroSessionQueueSize` if `session_queue_size` is zero
+    /// - `ZeroMaxAuthInflight` if `max_auth_inflight` is zero
     /// - `ZeroUdpNatMaxEntries` if `udp_nat_max_entries` is zero
     /// - `ZeroTimeout` if any timeout is zero
     /// - `TimeoutTooLarge` if any timeout exceeds 1 hour
@@ -98,6 +107,9 @@ impl ServerConfig {
         self.transport.validate()?;
         if self.session_queue_size == 0 {
             return Err(ConfigError::ZeroSessionQueueSize);
+        }
+        if self.max_auth_inflight == 0 {
+            return Err(ConfigError::ZeroMaxAuthInflight);
         }
         if self.udp_nat_max_entries == 0 {
             return Err(ConfigError::ZeroUdpNatMaxEntries);
@@ -156,6 +168,7 @@ mod tests {
             transport: ServerTransportConfig::default(),
             udp_nat_max_entries: 1024,
             session_queue_size: 256,
+            max_auth_inflight: 128,
             clients: vec![ServerClient {
                 client_id: ClientId([0u8; 16]),
                 pubkey_ed25519: PubKeyEd25519([0u8; 32]),
@@ -230,6 +243,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_max_auth_inflight() {
+        let mut config = test_config();
+        config.max_auth_inflight = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::ZeroMaxAuthInflight));
+    }
+
+    #[test]
     fn validate_rejects_zero_udp_nat_max_entries() {
         let mut config = test_config();
         config.udp_nat_max_entries = 0;
@@ -274,6 +295,7 @@ mod tests {
         "#;
 
         let config = ServerConfig::from_toml_str(raw).unwrap();
+        assert_eq!(config.max_auth_inflight, 128);
         assert!(config.transport.udp_qsp.allows(CipherSuite::Aes128Gcm));
         assert!(
             config
@@ -318,6 +340,38 @@ mod tests {
             config.transport.udp_qsp.allowed_ciphers,
             vec![ServerUdpQspCipher::ChaCha20Poly1305]
         );
+    }
+
+    #[test]
+    fn serde_parses_max_auth_inflight() {
+        let raw = r#"
+            server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+            max_auth_inflight = 64
+
+            [network]
+            listen_tcp = "0.0.0.0:443"
+            listen_udp = "0.0.0.0:443"
+            nginx_tcp_upstream = "127.0.0.1:8080"
+            nginx_udp_upstream = "127.0.0.1:8080"
+
+            [tls]
+            tls_cert = ""
+            tls_key = ""
+
+            [tun]
+            tun_name = "tun0"
+            tun_mtu = 1280
+            tun_ipv4 = "10.10.0.1"
+            tun_prefix = 24
+
+            [[clients]]
+            client_id = "00000000000000000000000000000000"
+            pubkey_ed25519 = "0000000000000000000000000000000000000000000000000000000000000000"
+            assigned_ipv4 = "10.10.0.2"
+        "#;
+
+        let config = ServerConfig::from_toml_str(raw).unwrap();
+        assert_eq!(config.max_auth_inflight, 64);
     }
 
     #[test]

@@ -107,6 +107,9 @@ pub enum ConfigError {
     /// Session queue size is zero.
     #[error("session_queue_size must be greater than zero")]
     ZeroSessionQueueSize,
+    /// Concurrent TLS/AUTH admission limit is zero.
+    #[error("max_auth_inflight must be greater than zero")]
+    ZeroMaxAuthInflight,
     /// UDP NAT max entries is zero.
     #[error("udp_nat_max_entries must be greater than zero")]
     ZeroUdpNatMaxEntries,
@@ -246,6 +249,14 @@ mod tests {
         let err = ConfigError::ZeroSessionQueueSize;
         let msg = err.to_string();
         assert!(msg.contains("session_queue_size"));
+        assert!(msg.contains("greater than zero"));
+    }
+
+    #[test]
+    fn config_error_zero_max_auth_inflight_display() {
+        let err = ConfigError::ZeroMaxAuthInflight;
+        let msg = err.to_string();
+        assert!(msg.contains("max_auth_inflight"));
         assert!(msg.contains("greater than zero"));
     }
 

@@ -291,6 +291,7 @@ mod tests {
             transport: ServerTransportConfig::default(),
             udp_nat_max_entries: 1024,
             session_queue_size: 256,
+            max_auth_inflight: 128,
             clients: vec![ServerClient {
                 client_id: ClientId([0u8; 16]),
                 pubkey_ed25519: PubKeyEd25519([0u8; 32]),

@@ -154,6 +154,7 @@ The server configuration file contains:
 ```toml
 # Pre-shared secret for client classification
 server_secret = "hex-encoded-32-byte-secret"
+max_auth_inflight = 128
 
 [network]
 listen_tcp = "0.0.0.0:443"        # TCP listener address

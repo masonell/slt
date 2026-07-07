@@ -24,22 +24,26 @@ Client                                    Server
   |                                         |     - Verify part2 (key_share-based HMAC)
   |                                         |     - CLAIM or PASS decision
   |                                         |
-  |  4. TLS handshake completes             |
+  |                                         |  4. If CLAIM, acquire auth slot
+  |                                         |     - Bounded by max_auth_inflight
+  |                                         |     - Over-limit connections are closed
+  |                                         |
+  |  5. TLS handshake completes             |
   |<=======================================>|
   |                                         |
-  |  5. AUTH message                        |
+  |  6. AUTH message                        |
   |    - client_id (16 bytes)               |
   |    - assigned_ipv4 (4 bytes)            |
   |    - challenge (32 bytes, TLS exporter) |
   |    - signature (64 bytes, Ed25519)      |
   |---------------------------------------->|
-  |                                         |  6. Validate AUTH
+  |                                         |  7. Validate AUTH
   |                                         |     - client_id exists and enabled
   |                                         |     - IPv4 matches config
   |                                         |     - challenge matches exporter
   |                                         |     - signature verifies
   |                                         |
-  |  7. AUTH_OK or AUTH_FAIL                |
+  |  8. AUTH_OK or AUTH_FAIL                |
   |<----------------------------------------|
   |                                         |
   |  Session now AUTHENTICATED              |

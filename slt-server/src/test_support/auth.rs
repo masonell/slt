@@ -28,6 +28,7 @@ pub fn default_session_timeouts() -> SessionTimeouts {
 pub struct TestAuthHandlerBuilder {
     clients: Vec<ServerClient>,
     session_queue_size: usize,
+    max_auth_inflight: usize,
     auth_timeout: Duration,
     timeouts: SessionTimeouts,
 }
@@ -37,6 +38,7 @@ impl Default for TestAuthHandlerBuilder {
         Self {
             clients: Vec::new(),
             session_queue_size: 8,
+            max_auth_inflight: 128,
             auth_timeout: Duration::from_secs(30),
             timeouts: default_session_timeouts(),
         }
@@ -61,6 +63,13 @@ impl TestAuthHandlerBuilder {
     #[must_use]
     pub fn with_session_queue_size(mut self, size: usize) -> Self {
         self.session_queue_size = size;
+        self
+    }
+
+    /// Sets the concurrent TLS/AUTH admission limit.
+    #[must_use]
+    pub fn with_max_auth_inflight(mut self, size: usize) -> Self {
+        self.max_auth_inflight = size;
         self
     }
 
@@ -107,8 +116,13 @@ impl TestAuthHandlerBuilder {
             ServerUdpQspConfig::default(),
         );
 
-        let handler =
-            AuthHandlerBase::new(tls_acceptor(), authenticator, sessions, self.auth_timeout);
+        let handler = AuthHandlerBase::new(
+            tls_acceptor(),
+            authenticator,
+            sessions,
+            self.auth_timeout,
+            self.max_auth_inflight,
+        );
 
         (
             TestAuthHandler {
@@ -153,8 +167,13 @@ impl TestAuthHandlerBuilder {
             ServerUdpQspConfig::default(),
         );
 
-        let handler =
-            AuthHandlerBase::new(tls_acceptor(), authenticator, sessions, self.auth_timeout);
+        let handler = AuthHandlerBase::new(
+            tls_acceptor(),
+            authenticator,
+            sessions,
+            self.auth_timeout,
+            self.max_auth_inflight,
+        );
 
         (
             TestAuthHandler {

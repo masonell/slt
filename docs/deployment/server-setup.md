@@ -157,6 +157,7 @@ Create the server configuration at `/etc/slt/server.toml`:
 # /etc/slt/server.toml
 
 server_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+max_auth_inflight = 128
 
 [network]
 listen_tcp = "0.0.0.0:443"

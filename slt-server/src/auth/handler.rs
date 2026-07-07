@@ -1,5 +1,6 @@
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use boring::ssl::SslAcceptor;
@@ -10,6 +11,7 @@ use slt_core::proto::{
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::ClientId;
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time;
 use tokio_boring::accept as tls_accept;
 use tracing::{debug, info, trace, warn};
@@ -50,6 +52,7 @@ pub struct AuthHandlerBase<T: TunDeviceIo> {
     authenticator: Authenticator,
     sessions: SessionManager<T>,
     auth_timeout: std::time::Duration,
+    auth_inflight: Arc<Semaphore>,
 }
 
 /// Default auth handler using a real TUN device.
@@ -61,17 +64,19 @@ pub type AuthHandler = AuthHandlerBase<AsyncDevice>;
 impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// Build a new auth handler.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         acceptor: SslAcceptor,
         authenticator: Authenticator,
         sessions: SessionManager<T>,
         auth_timeout: std::time::Duration,
+        max_auth_inflight: usize,
     ) -> Self {
         Self {
             acceptor,
             authenticator,
             sessions,
             auth_timeout,
+            auth_inflight: Arc::new(Semaphore::new(max_auth_inflight)),
         }
     }
 
@@ -93,9 +98,27 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     /// connection I/O.
     pub async fn handle(&self, stream: TcpStream) -> io::Result<()> {
         let peer_addr = stream.peer_addr().ok();
+        let _permit = self.acquire_auth_permit(peer_addr.as_ref())?;
         let result = self.handle_stream(stream, peer_addr.as_ref()).await;
         self.record_result(&result);
         result.map(|_outcome| ()).map_err(AuthError::into)
+    }
+
+    fn acquire_auth_permit(
+        &self,
+        peer_addr: Option<&SocketAddr>,
+    ) -> io::Result<OwnedSemaphorePermit> {
+        self.auth_inflight.clone().try_acquire_owned().map_err(|_| {
+            self.sessions.metrics().inc_auth_limit_drops();
+            warn!(
+                peer_addr = ?peer_addr,
+                "auth admission limit reached, dropping claimed TCP connection"
+            );
+            io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "auth admission limit reached",
+            )
+        })
     }
 
     async fn handle_stream(
@@ -432,6 +455,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
+        let _permit = self.acquire_auth_permit(None)?;
         let mut tcp = Some(TcpChannel::with_key_updater(
             tls,
             SessionKeyUpdater::new(self.sessions.metrics().clone()),

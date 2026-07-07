@@ -85,7 +85,9 @@ The classifier processes the TLS record layer and handshake message step by step
 
 5. Compute expected_part1 = HMAC-SHA256(secret, random[0:16])[:16]
    - Compare with session_id[0:16] using constant-time comparison
-   - If mismatch -> PASS
+   - If mismatch -> PASS immediately; the classifier does not wait for the
+     full TLS record or `key_share` extension once this early check proves the
+     connection is not a VPN candidate
 
 6. Skip cipher_suites (variable length)
 7. Skip compression_methods (variable length)
@@ -107,9 +109,18 @@ The classifier processes the TLS record layer and handshake message step by step
 The implementation in `slt-core/src/classifier.rs` uses a streaming parser that:
 
 - Handles multiple TLS records (a ClientHello may span records).
+- Can inspect the `ClientHello` prefix before the full TLS record body has
+  arrived, allowing normal non-VPN TLS traffic to pass to nginx after the first
+  HMAC half fails.
 - Uses a fixed-size scratch buffer (256 bytes) for skipping data.
 - Performs constant-time HMAC comparisons using `boring::memcmp::eq`.
 - Returns early on any parse error with `PASS` verdict.
+
+After a TCP connection is classified as `CLAIM`, the server applies
+`max_auth_inflight` admission control before TLS termination and AUTH. This cap
+limits concurrent VPN-claimed connections in the TLS/AUTH phase. It does not
+limit nginx pass-through connections and does not count established VPN
+sessions after authentication completes.
 
 **Constants** (from `slt-core/src/crypto/client_hello.rs`):
 - `LEGACY_SESSION_ID_LEN = 32`

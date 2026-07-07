@@ -20,6 +20,7 @@ pub struct Metrics {
     auth_successes: AtomicU64,
     auth_failures: AtomicU64,
     auth_rejections: AtomicU64,
+    auth_limit_drops: AtomicU64,
     transport_tcp_to_udp: AtomicU64,
     transport_udp_to_tcp: AtomicU64,
     disconnect_idle_timeout: AtomicU64,
@@ -58,6 +59,8 @@ pub struct MetricsSnapshot {
     pub auth_failures: u64,
     /// Authentication rejections (genuine `AUTH_FAIL` sent — a subset of `auth_failures`).
     pub auth_rejections: u64,
+    /// VPN-claimed TCP connections dropped because auth admission was full.
+    pub auth_limit_drops: u64,
     /// Authentication successes.
     pub auth_successes: u64,
     /// TCP -> UDP transport switches.
@@ -162,6 +165,15 @@ impl Metrics {
     pub fn inc_auth_rejections(&self) {
         let count = inc(&self.auth_rejections);
         trace!(auth_rejections = count, "Authentication rejected");
+    }
+
+    /// Increment auth admission-limit drop counter.
+    pub fn inc_auth_limit_drops(&self) {
+        let count = inc(&self.auth_limit_drops);
+        trace!(
+            auth_limit_drops = count,
+            "Authentication admission limit dropped connection"
+        );
     }
 
     /// Increment auth success counter.
@@ -300,6 +312,7 @@ impl Metrics {
             tun_queue_overflow_drops: self.tun_queue_overflow_drops.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
             auth_rejections: self.auth_rejections.load(Ordering::Relaxed),
+            auth_limit_drops: self.auth_limit_drops.load(Ordering::Relaxed),
             auth_successes: self.auth_successes.load(Ordering::Relaxed),
             transport_tcp_to_udp: self.transport_tcp_to_udp.load(Ordering::Relaxed),
             transport_udp_to_tcp: self.transport_udp_to_tcp.load(Ordering::Relaxed),

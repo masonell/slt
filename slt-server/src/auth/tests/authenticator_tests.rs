@@ -49,6 +49,7 @@ fn authenticator_from_config_tracks_enabled_clients() {
         transport: ServerTransportConfig::default(),
         udp_nat_max_entries: 32,
         session_queue_size: 8,
+        max_auth_inflight: 128,
         clients: vec![client_enabled, client_disabled],
     };
 

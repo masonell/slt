@@ -16,6 +16,7 @@ Quick reference for SLT configuration fields. For detailed explanations, see [Us
 | `transport` | table | No | defaults apply | See below |
 | `udp_nat_max_entries` | integer | No | `1024` | > 0 |
 | `session_queue_size` | integer | No | `256` | > 0 |
+| `max_auth_inflight` | integer | No | `128` | > 0 |
 | `clients` | array of tables | Yes | - | At least one entry |
 
 ### `[network]`
@@ -81,6 +82,9 @@ The list must not be empty.
 
 ```toml
 server_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+udp_nat_max_entries = 1024
+session_queue_size = 256
+max_auth_inflight = 128
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -107,9 +111,6 @@ metrics_interval = "5m"
 
 [transport.udp_qsp]
 allowed_ciphers = ["aes-128-gcm", "chacha20-poly1305"]
-
-udp_nat_max_entries = 1024
-session_queue_size = 256
 
 [[clients]]
 client_id = "0102030405060708090a0b0c0d0e0f10"
@@ -330,5 +331,6 @@ nginx_tcp_upstream = "127.0.0.1:8080"
 | `TimeoutTooLarge` | Any timeout > 1 hour |
 | `RequireUdpNeedsUpgrade` | `require_udp = true` without `enable_upgrade = true` |
 | `ZeroSessionQueueSize` | Server `session_queue_size` is 0 |
+| `ZeroMaxAuthInflight` | Server `max_auth_inflight` is 0 |
 | `ZeroUdpNatMaxEntries` | Server `udp_nat_max_entries` is 0 |
 | `EmptyUdpQspAllowedCiphers` | Server `transport.udp_qsp.allowed_ciphers` is empty |

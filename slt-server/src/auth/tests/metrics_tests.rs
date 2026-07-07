@@ -87,3 +87,44 @@ async fn tls_handshake_error_increments_failure_metrics() {
     assert_eq!(err.kind(), io::ErrorKind::Other);
     assert_eq!(metrics.snapshot().auth_failures, 1);
 }
+
+#[tokio::test]
+async fn auth_admission_limit_drops_without_auth_failure_metric() {
+    let (handler, _registry, metrics) = TestAuthHandler::builder()
+        .with_auth_timeout(Duration::from_secs(5))
+        .with_max_auth_inflight(1)
+        .build_async()
+        .await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let first_client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (first_server, _) = listener.accept().await.unwrap();
+    let first_handler = handler.inner.clone();
+    let first = tokio::spawn(async move { first_handler.handle(first_server).await });
+
+    tokio::task::yield_now().await;
+
+    let _second_client = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (second_server, _) = listener.accept().await.unwrap();
+    let err = handler
+        .inner
+        .handle(second_server)
+        .await
+        .expect_err("second auth connection should exceed admission limit");
+
+    assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+    assert_eq!(metrics.snapshot().auth_limit_drops, 1);
+    assert_eq!(
+        metrics.snapshot().auth_failures,
+        0,
+        "admission drops are not auth attempts"
+    );
+
+    drop(first_client);
+    let _ = timeout(Duration::from_secs(2), first)
+        .await
+        .unwrap()
+        .unwrap();
+}

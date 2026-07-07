@@ -293,7 +293,15 @@ impl<'a> RecordReader<'a> {
                 self.next_record()?;
             }
 
-            let take = core::cmp::min(self.record_remaining, out.len() - filled);
+            let available = self.buf.len().saturating_sub(self.pos);
+            if available == 0 {
+                return Err(Verdict::Incomplete);
+            }
+
+            let take = core::cmp::min(
+                core::cmp::min(self.record_remaining, out.len() - filled),
+                available,
+            );
             let end = self.pos + take;
 
             out[filled..filled + take].copy_from_slice(&self.buf[self.pos..end]);
@@ -328,11 +336,6 @@ impl<'a> RecordReader<'a> {
         let len = u16::from_be_bytes([self.buf[self.pos + 3], self.buf[self.pos + 4]]) as usize;
 
         self.pos += 5;
-
-        if self.pos + len > self.buf.len() {
-            return Err(Verdict::Incomplete);
-        }
-
         self.record_remaining = len;
         Ok(())
     }
@@ -406,6 +409,30 @@ mod tests {
         assert_eq!(
             classify_tcp_client_hello(&client_hello, &wrong_secret),
             Verdict::Pass
+        );
+    }
+
+    #[test]
+    fn classifier_passes_early_when_session_id_hmac_mismatches() {
+        let secret = SharedSecret([0x11u8; 32]);
+        let client_hello = generate_client_hello_tls_record(SharedSecret([0x22u8; 32]));
+        let through_session_id = 5 + 4 + 2 + 32 + 1 + LEGACY_SESSION_ID_LEN;
+
+        assert_eq!(
+            classify_tcp_client_hello(&client_hello[..through_session_id], &secret),
+            Verdict::Pass
+        );
+    }
+
+    #[test]
+    fn classifier_waits_for_key_share_when_session_id_hmac_matches() {
+        let secret = SharedSecret([0x11u8; 32]);
+        let client_hello = generate_client_hello_tls_record(secret);
+        let through_session_id = 5 + 4 + 2 + 32 + 1 + LEGACY_SESSION_ID_LEN;
+
+        assert_eq!(
+            classify_tcp_client_hello(&client_hello[..through_session_id], &secret),
+            Verdict::Incomplete
         );
     }
 

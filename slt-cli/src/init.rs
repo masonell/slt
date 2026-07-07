@@ -36,6 +36,7 @@ const DEFAULT_TUN_PREFIX: u8 = 24;
 
 /// Default session queue size.
 const DEFAULT_SESSION_QUEUE_SIZE: usize = 1024;
+const DEFAULT_MAX_AUTH_INFLIGHT: usize = 128;
 
 /// Initialize server configuration.
 ///
@@ -124,6 +125,7 @@ pub fn init(
         transport: ServerTransportConfig::default(),
         udp_nat_max_entries: 1024,
         session_queue_size: DEFAULT_SESSION_QUEUE_SIZE,
+        max_auth_inflight: DEFAULT_MAX_AUTH_INFLIGHT,
         clients: Vec::new(),
     };
 
