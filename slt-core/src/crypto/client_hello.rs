@@ -51,6 +51,11 @@ impl From<ClientHelloError> for ErrorStack {
 ///
 /// Returns `None` if the buffer is malformed or does not contain an `X25519`
 /// `key_share`.
+///
+/// Selection contract: selects the first `key_share` entry whose group is
+/// `X25519` with a 32-byte key. The server-side streaming classifier
+/// ([`crate::classifier::classify_tcp_client_hello`]) applies the same rule so
+/// the HMAC-derived session id round-trips across the wire.
 #[must_use]
 pub fn parse_client_hello(client_hello: &[u8]) -> Option<([u8; 32], [u8; 32])> {
     if client_hello.len() < 4 {

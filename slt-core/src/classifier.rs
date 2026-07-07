@@ -71,6 +71,10 @@ pub fn classify_quic_datagram(input: &[u8]) -> QuicVerdict {
 ///
 /// The classifier reads the first `ClientHello` from the stream and validates
 /// the `legacy_session_id` using `shared_secret`.
+///
+/// Selection contract: applies the same `X25519` `key_share` selection rule as
+/// the client-side [`crate::crypto::client_hello::parse_client_hello`], so the
+/// session id it validates matches the one the client derived.
 #[must_use]
 pub fn classify_tcp_client_hello(input: &[u8], shared_secret: &SharedSecret) -> Verdict {
     let mut record = RecordReader::new(input);
@@ -387,6 +391,7 @@ mod tests {
     use quiche::Header;
 
     use super::*;
+    use crate::crypto::client_hello::{fill_legacy_session_id, parse_client_hello};
     use crate::test_support::generate_client_hello_tls_record;
 
     #[test]
@@ -486,5 +491,106 @@ mod tests {
         buf.extend_from_slice(&[0xAB; QUIC_DCID_PREFIX_LEN - 1]);
 
         assert_eq!(classify_quic_datagram(&buf), QuicVerdict::Drop);
+    }
+
+    /// Build a `ClientHello` handshake message (4-byte handshake header included).
+    fn build_client_hello_handshake(
+        random: &[u8; 32],
+        session_id: &[u8],
+        extensions: &[u8],
+    ) -> Vec<u8> {
+        let cipher_suites: &[u8] = &[0x00, 0x02, 0x13, 0x01]; // len=2 + TLS_AES_128_GCM_SHA256
+        let compression: &[u8] = &[0x01, 0x00]; // len=1 + null
+
+        let body_len = 2 // legacy_version
+            + 32 // random
+            + 1 + session_id.len()
+            + cipher_suites.len()
+            + compression.len()
+            + 2 + extensions.len();
+
+        let mut buf = Vec::with_capacity(4 + body_len);
+        buf.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        buf.extend_from_slice(&(body_len as u32).to_be_bytes()[1..]); // u24 length
+        buf.extend_from_slice(&[0x03, 0x03]); // legacy_version
+        buf.extend_from_slice(random);
+        buf.push(session_id.len() as u8);
+        buf.extend_from_slice(session_id);
+        buf.extend_from_slice(cipher_suites);
+        buf.extend_from_slice(compression);
+        buf.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        buf.extend_from_slice(extensions);
+        buf
+    }
+
+    /// Build a `key_share` extension (type + length + list) from ordered entries.
+    fn build_key_share_extension(entries: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut list = Vec::new();
+        for (group, key) in entries {
+            list.extend_from_slice(&group.to_be_bytes());
+            list.extend_from_slice(&(key.len() as u16).to_be_bytes());
+            list.extend_from_slice(key);
+        }
+
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&EXT_KEY_SHARE.to_be_bytes());
+        ext.extend_from_slice(&((2 + list.len()) as u16).to_be_bytes()); // ext_len = list_len field + list
+        ext.extend_from_slice(&(list.len() as u16).to_be_bytes()); // list_len
+        ext.extend_from_slice(&list);
+        ext
+    }
+
+    /// Wrap a handshake message in a single TLS handshake record.
+    fn wrap_in_tls_record(handshake: &[u8]) -> Vec<u8> {
+        let mut record = Vec::with_capacity(5 + handshake.len());
+        record.push(0x16); // content_type = handshake
+        record.extend_from_slice(&[0x03, 0x03]); // legacy_record_version
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(handshake);
+        record
+    }
+
+    #[test]
+    fn both_parsers_select_x25519_among_multiple_key_share_entries() {
+        // The key_share extension lists a non-X25519 group both before and after
+        // the X25519 entry, exercising the selection rule (first X25519 with a
+        // 32-byte key) that the client-side extractor and the streaming
+        // classifier must apply identically for the session id to round-trip.
+        const SECP256R1: u16 = 0x0017;
+
+        let secret = SharedSecret([0x42u8; 32]);
+        let random = [0xABu8; 32];
+        let x25519_key = [0x55u8; 32];
+        let leading_key = [0x11u8; 65]; // secp256r1 point length; must be ignored
+        let trailing_key = [0x77u8; 65];
+
+        let entries: &[(u16, &[u8])] = &[
+            (SECP256R1, &leading_key),
+            (GROUP_X25519, &x25519_key),
+            (SECP256R1, &trailing_key),
+        ];
+        let extensions = build_key_share_extension(entries);
+
+        // Derive the authoritative session id via the client-side path
+        // (parse_client_hello + fill_legacy_session_id), then bake it in.
+        let placeholder = build_client_hello_handshake(&random, &[0u8; 32], &extensions);
+        let mut session_id = [0u8; 32];
+        fill_legacy_session_id(&placeholder, &mut session_id, &secret).unwrap();
+        let handshake = build_client_hello_handshake(&random, &session_id, &extensions);
+
+        // Parser 1 (random access, client side) selects the X25519 entry.
+        assert_eq!(
+            parse_client_hello(&handshake),
+            Some((random, x25519_key)),
+            "parse_client_hello must select the X25519 entry, not a neighboring group"
+        );
+
+        // Parser 2 (streaming, server side) derives the same inputs and accepts.
+        let record = wrap_in_tls_record(&handshake);
+        assert_eq!(
+            classify_tcp_client_hello(&record, &secret),
+            Verdict::Claim,
+            "classifier must agree with parse_client_hello on the selected key share"
+        );
     }
 }
