@@ -200,6 +200,16 @@ impl RekeyPolicy {
     }
 }
 
+/// Prior receive key phase, retained so reordered old-phase packets still
+/// decrypt after the receiver promotes the next key phase.
+///
+/// `valid_until_pn` tracks `PN_REPLAY_WINDOW`, not `KEY_UPDATE_LATE_MARGIN`:
+/// the replay window is shared across both key phases and rejects any packet
+/// more than one window below the largest seen as `TooOld`, so old-phase
+/// packets (sent before the threshold) are unreachable past
+/// `threshold + PN_REPLAY_WINDOW` regardless of key availability.
+/// `KEY_UPDATE_LATE_MARGIN` bounds rotation detection
+/// (`should_try_candidate`), a separate concern.
 #[derive(Debug)]
 struct PreviousRxKeys {
     keys: UdpQspKeys,
@@ -498,6 +508,8 @@ impl<I: SessionIo> QuicQspSession<I> {
         let threshold = self
             .rx_next_rekey_pn
             .unwrap_or_else(|| self.replay_window.expected_pn());
+        // One replay window: by then old-phase packets are `TooOld` in the shared
+        // replay window regardless of key availability (see `PreviousRxKeys`).
         let valid_until = threshold.saturating_add(PN_REPLAY_WINDOW as u64);
         self.previous_rx = Some(PreviousRxKeys {
             keys: self.keys.try_clone()?,

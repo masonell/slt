@@ -406,8 +406,14 @@ Previous keys remain valid for one replay window after the rekey threshold:
 let valid_until = threshold.saturating_add(PN_REPLAY_WINDOW as u64);
 ```
 
-This handles reordering where packets from the old key phase arrive after
-the transition.
+The grace window tracks `PN_REPLAY_WINDOW`, not `KEY_UPDATE_LATE_MARGIN`. The
+replay window is shared across both key phases, so any old-phase packet whose
+number is more than one window below the largest seen is rejected as `TooOld`
+regardless of key availability — old-phase packets (sent before the threshold)
+become unreachable once the largest accepted number passes
+`threshold + PN_REPLAY_WINDOW`. Retaining the keys beyond that point would hold
+dead keys with no effect. `KEY_UPDATE_LATE_MARGIN` bounds rotation *detection*
+(`should_try_candidate`), a separate concern.
 
 ### Dead Channel Detection
 
