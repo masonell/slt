@@ -180,10 +180,14 @@ async fn run_tun_writer(
 
         let written = tun.send(packet).await?;
         if written != packet.len() {
+            // Android/Linux TUN writes are packet-oriented: a successful write
+            // accepts exactly one whole packet. A short positive write would
+            // mean the fd/backend violated that contract; retrying the tail
+            // would inject it as a malformed second packet.
             return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
+                io::ErrorKind::InvalidData,
                 format!(
-                    "partial Android TUN write: wrote {written} of {} bytes",
+                    "short Android TUN packet write: wrote {written} of {} bytes",
                     packet.len()
                 ),
             ));
