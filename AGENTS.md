@@ -1,5 +1,17 @@
 # Repository Guidelines
 
+## Architecture & Protocol Overview
+- SLT is a VPN implementation that multiplexes VPN traffic with standard web traffic on port 443 over TCP and UDP.
+- Port 80 is owned by nginx for plain HTTP redirects to HTTPS; SLT does not handle port 80 traffic.
+- Server traffic classification inspects the TLS ClientHello `legacy_session_id` for a 32-byte HMAC token that identifies VPN clients; unknown traffic is forwarded to nginx.
+- UDP-QSP is QUIC-shaped packet protection for VPN data. It uses QUIC short headers with AES-128-GCM AEAD, but there is no QUIC handshake.
+- VPN messages use `TYPE(1) + LEN(4) + PAYLOAD` framing. See `docs/protocol/wire-format.md` for message types and `docs/protocol/messages.md` for payload schemas.
+- Connection flow:
+
+```text
+TCP connect -> TLS handshake -> AUTH/AUTH_OK -> optional QUIC discovery -> REGISTER_CID/REGISTER_OK -> UDP-QSP active
+```
+
 ## Project Structure & Module Organization
 - Workspace root (`Cargo.toml`) defines five crates: `slt-core`, `slt-client`, `slt-server`, `slt-cli`, and `slt-tools`.
 - `slt-core/src/` contains shared protocol and crypto primitives.
@@ -21,23 +33,29 @@
   - `android/app/src/main/AndroidManifest.xml` declares VPN and foreground-service integration.
   - `android/app/src/main/res/` contains the adaptive launcher icon (elephant foreground + monochrome), the VPN notification icon, DayNight themes, and the splash screen.
   - `android/*.gradle.kts` and `android/gradle.properties` configure the standalone Android Gradle build.
+  - The UI uses a custom green-accented dark-first Material 3 theme; keep new UI consistent with those tokens.
 - `vendor/` includes patched dependencies (`boring`, `boring-sys`, `quiche`).
 - `scripts/` holds local capture helpers (e.g., `scripts/chrome-*.sh`).
 - `local/` is an ignored scratch directory for temporary files and temporary docs.
 - Protocol/design references are in `docs/`:
-  - `docs/protocol/` for wire format, messages, UDP-QSP, connection flow
+  - `docs/README.md` for the documentation index
+  - `docs/user-guide/` for installation, quick-start, and configuration
+  - `docs/protocol/` for wire format, messages, UDP-QSP, connection flow, and key update
   - `docs/architecture/` for system design, traffic classification, transport security
+  - `docs/deployment/` for server/client setup and nginx integration
   - `docs/reference/` for quick reference sheets (config schema, message types)
 - Project status: early-stage development. Prefer clear, correct changes over compatibility preservation; breaking changes are acceptable unless a task explicitly requires compatibility.
 
 ## Coding Style & Naming Conventions
 - Rust 2024 workspace; format with `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate`.
 - Android code is Kotlin + Jetpack Compose; keep Kotlin/XML formatted with Android Studio defaults until a checked-in formatter is added.
-- Workspace lints are strict: rustc warnings are denied, clippy `all` is denied, and `pedantic`/`nursery` run at warn level.
+- Workspace lints are strict: rustc warnings are denied, clippy `all` is denied, and `pedantic`/`nursery`/`cargo` run at warn level.
 - Test code (`#[cfg(test)]`) is exempt from clippy's code-quality groups (`style`/`complexity`/`perf`/`pedantic`/`nursery`) via a per-crate `#![cfg_attr(test, allow(...))]` at each crate root; the bug-catching `correctness`/`suspicious` groups still apply to tests. `slt-core`'s `test_support` module (gated `cfg(any(test, feature = "testing"))`) carries a matching module-level `#[allow]`. Extend the crate-level allow rather than adding per-function `#[allow]` in tests.
 - Keep shared protocol/config/crypto logic in `slt-core`; keep runtime/orchestration logic in `slt-client` and `slt-server`.
 - Prefer small, focused modules and descriptive names (`configure_client_chrome_ssl`, `message_limits_from_mtu`).
 - Public library APIs (`pub`) should include doc comments and clear error behavior.
+- Comments and docs describe current behavior only. Avoid historical narration such as "previously", "used to", "now uses" as a then-vs-now contrast, "older versions", "replaced", and changelog-style asides.
+- Every comment should add non-obvious context: the why, a protocol/spec invariant, or a hidden gotcha. Delete comments that only paraphrase nearby code.
 - **anyhow usage** (for application code like `slt-cli`):
   - Use `.context()` and `.with_context()` to add error context, not `map_err(|e| anyhow!(...))`.
   - Use `bail!` macro for early error returns, not `return Err(anyhow!(...))`.
@@ -58,6 +76,11 @@
 
 ## Commit & Pull Request Guidelines
 - Use Conventional Commit messages: `<type>(<scope>): <subject>` (e.g., `feat(slt-core): add udp-qsp key phase tracking`).
+- Use a commit body only when it adds useful context.
+- Separate the commit subject and body with a blank line.
+- Keep the commit subject concise, usually under 72 characters.
+- Commit subject and body describe the final state, not the journey. Avoid "was X, now Y", "previously", "replaces", or "this changes A to B".
+- Use the commit body to explain why; the diff shows what changed.
 - Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
 - Always run `cargo fmt --all -- --config imports_granularity=Module,group_imports=StdExternalCrate` before committing (pre-commit hook also runs fmt --check/clippy --all-targets/test).
 - Commit hooks run tests and may need capabilities unavailable in the sandbox (for example local socket binds). Agents should perform `git commit` outside the sandbox so hooks can run successfully.
