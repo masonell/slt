@@ -682,6 +682,14 @@ impl UdpQspKeys {
         let mask = rx.hp.mask(&packet[sample])?;
         let parsed = parse_header(dcid_len, packet, mask)?;
 
+        // parse_header guarantees packet.len() >= parsed.header.len() + AEAD_TAG_LEN,
+        // so this guard is never expected to fire; it restates the bound locally so
+        // the subtraction and slice below are safe by inspection instead of relying
+        // on that cross-function invariant on the untrusted UDP receive path.
+        if packet.len() < parsed.header.len() + AEAD_TAG_LEN {
+            return Err(QspCryptoError::PacketTooShort);
+        }
+
         let pn = reconstruct_packet_number(parsed.pn, expected_pn, parsed.pn_len);
         let plaintext_len = packet.len() - parsed.header.len() - AEAD_TAG_LEN;
         let needed_capacity = plaintext_len;
