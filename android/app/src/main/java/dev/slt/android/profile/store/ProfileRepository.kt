@@ -34,6 +34,11 @@ class ProfileRepository(context: Context) {
             )
         }
 
+    suspend fun loadActiveProfile(): SltProfile? =
+        withContext(Dispatchers.IO) {
+            activeProfileId()?.let { loadProfileInternal(it) }
+        }
+
     suspend fun loadProfile(id: String): SltProfile? =
         withContext(Dispatchers.IO) {
             loadProfileInternal(id)

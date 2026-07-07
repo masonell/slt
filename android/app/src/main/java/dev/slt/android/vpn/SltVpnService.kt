@@ -14,7 +14,13 @@ import dev.slt.android.SltNative
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.uniffi.ClientConfigSummary
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class SltVpnService : VpnService() {
     @Volatile private var activeTunnel: ActiveTunnel? = null
@@ -22,6 +28,8 @@ class SltVpnService : VpnService() {
     private var terminalStatusReported = false
 
     private val stateLock = Any()
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var startJob: Job? = null
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val profileApplier by lazy { VpnProfileApplier(this, TAG) }
     private val notificationFactory by lazy { VpnNotificationFactory(this) }
@@ -107,6 +115,7 @@ class SltVpnService : VpnService() {
         } else {
             stopVpn("Service destroyed")
         }
+        serviceScope.cancel()
         super.onDestroy()
     }
 
@@ -114,7 +123,7 @@ class SltVpnService : VpnService() {
         terminalStatusReported = false
         notificationFactory.ensureChannel()
 
-        if (activeTunnel != null) {
+        if (activeTunnel != null || startJob?.isActive == true) {
             // Tunnel is already established; refresh the foreground notification
             // and stay in the current (possibly Reconnecting/Starting/Handoff) status.
             val status = SltVpnStatusBus.state.value.status
@@ -136,68 +145,86 @@ class SltVpnService : VpnService() {
                 VpnNotificationFactory.NOTIFICATION_ID,
                 notificationFactory.build(notificationText(VpnStatus.Starting)),
             )
-            SltNative.load()
-            val profile = loadActiveProfile()
-            val summary = validateProfile(profile)
-            dnsResolver.warmAsync(summary.serverHost)
-            val connectivityManager = getSystemService(ConnectivityManager::class.java)
-            val preEstablishUnderlyingNetwork =
-                connectivityManager.findInitialUnderlyingNetwork(TAG)
 
-            val builder = Builder()
-                .setSession(profile.metadata.name)
-                .setMtu(summary.tunMtu)
-                .addAddress(summary.assignedIpv4, CLIENT_ADDRESS_PREFIX)
-            profileApplier.apply(builder, profile)
-
-            val fd = builder.establish()
-
-            if (fd == null) {
-                failVpn("Android did not return a TUN fd")
-                return
-            }
-
-            val initialUnderlyingNetwork =
-                connectivityManager.findInitialUnderlyingNetwork(TAG)
-                    ?: preEstablishUnderlyingNetwork
-            if (initialUnderlyingNetwork == null) {
+            val job = serviceScope.launch {
                 try {
-                    fd.close()
-                } catch (error: RuntimeException) {
-                    Log.w(TAG, "Failed to close unused VPN fd after startup network failure", error)
+                    startVpnAsync()
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (error: Exception) {
+                    failVpn(error.message ?: error::class.java.simpleName)
+                } finally {
+                    if (startJob === coroutineContext[Job]) {
+                        startJob = null
+                    }
                 }
-                failVpn("No non-VPN network available; stop the other VPN and try again")
-                return
             }
-
-            synchronized(stateLock) {
-                activeTunnel = ActiveTunnel(
-                    fd = fd,
-                    clientToml = profile.clientToml,
-                    tunMtu = summary.tunMtu,
-                    underlyingNetwork = initialUnderlyingNetwork,
-                )
-            }
-            val session = nativeController.start(
-                NativeSessionConfig(
-                    clientToml = profile.clientToml,
-                    tunFd = fd.fd,
-                    tunMtu = summary.tunMtu,
-                ),
-            )
-            Log.i(
-                TAG,
-                "SLT VPN tunnel established; awaiting native auth: " +
-                    "profile=${profile.metadata.name} fd=${fd.fd} " +
-                    "${summary.assignedIpv4}/$CLIENT_ADDRESS_PREFIX native=${session.handle()}",
-            )
-            // Stay Starting until the runtime emits Authenticated (-> Running).
-            updateNotification()
-
-            startNetworkWatcher(initialUnderlyingNetwork)
+            startJob = job
         } catch (error: Exception) {
             failVpn(error.message ?: error::class.java.simpleName)
         }
+    }
+
+    private suspend fun startVpnAsync() {
+        SltNative.load()
+        val profile = loadActiveProfile()
+        val summary = validateProfile(profile)
+        dnsResolver.warmAsync(summary.serverHost)
+        val connectivityManager = getSystemService(ConnectivityManager::class.java)
+        val preEstablishUnderlyingNetwork =
+            connectivityManager.findInitialUnderlyingNetwork(TAG)
+
+        val builder = Builder()
+            .setSession(profile.metadata.name)
+            .setMtu(summary.tunMtu)
+            .addAddress(summary.assignedIpv4, CLIENT_ADDRESS_PREFIX)
+        profileApplier.apply(builder, profile)
+
+        val fd = builder.establish()
+
+        if (fd == null) {
+            failVpn("Android did not return a TUN fd")
+            return
+        }
+
+        val initialUnderlyingNetwork =
+            connectivityManager.findInitialUnderlyingNetwork(TAG)
+                ?: preEstablishUnderlyingNetwork
+        if (initialUnderlyingNetwork == null) {
+            try {
+                fd.close()
+            } catch (error: RuntimeException) {
+                Log.w(TAG, "Failed to close unused VPN fd after startup network failure", error)
+            }
+            failVpn("No non-VPN network available; stop the other VPN and try again")
+            return
+        }
+
+        synchronized(stateLock) {
+            activeTunnel = ActiveTunnel(
+                fd = fd,
+                clientToml = profile.clientToml,
+                tunMtu = summary.tunMtu,
+                underlyingNetwork = initialUnderlyingNetwork,
+            )
+        }
+        val session = nativeController.start(
+            NativeSessionConfig(
+                clientToml = profile.clientToml,
+                tunFd = fd.fd,
+                tunMtu = summary.tunMtu,
+            ),
+        )
+        Log.i(
+            TAG,
+            "SLT VPN tunnel established; awaiting native auth: " +
+                "profile=${profile.metadata.name} fd=${fd.fd} " +
+                "${summary.assignedIpv4}/$CLIENT_ADDRESS_PREFIX native=${session.handle()}",
+        )
+        // Stay Starting until the runtime emits Authenticated (-> Running).
+        updateNotification()
+
+        startNetworkWatcher(initialUnderlyingNetwork)
     }
 
     private fun startNetworkWatcher(initialNetwork: Network?) {
@@ -219,10 +246,8 @@ class SltVpnService : VpnService() {
         }
     }
 
-    private fun loadActiveProfile(): SltProfile =
-        runBlocking {
-            ProfileRepository(applicationContext).loadState().activeProfile
-        } ?: error("No active profile")
+    private suspend fun loadActiveProfile(): SltProfile =
+        ProfileRepository(applicationContext).loadActiveProfile() ?: error("No active profile")
 
     private fun validateProfile(profile: SltProfile): ClientConfigSummary {
         return when (val result = SltNative.validateClientConfig(profile.clientToml)) {
@@ -232,6 +257,8 @@ class SltVpnService : VpnService() {
     }
 
     private fun stopVpn(detail: String) {
+        startJob?.cancel()
+        startJob = null
         SltVpnStatusBus.markStopped(detail)
         teardown()
         terminalStatusReported = true
