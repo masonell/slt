@@ -1,5 +1,7 @@
 //! Server configuration.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::{ConfigError, ConfigLoadError};
@@ -56,6 +58,8 @@ impl ServerConfig {
     /// - `InvalidTunPrefix` if `tun_prefix` is out of range
     /// - `ClientOutsideTunSubnet` if a configured client IP is outside the TUN subnet
     /// - `ClientUsesTunAddress` if a configured client IP equals `tun_ipv4`
+    /// - `DuplicateClientId` if two clients share a `client_id`
+    /// - `DuplicateAssignedIpv4` if two clients share an `assigned_ipv4`
     /// - `InvalidPingInterval` if `ping_min` > `ping_max`
     /// - `EmptyUdpQspAllowedCiphers` if UDP-QSP has no allowed cipher suites
     /// - `ZeroSessionQueueSize` if `session_queue_size` is zero
@@ -64,6 +68,8 @@ impl ServerConfig {
     /// - `TimeoutTooLarge` if any timeout exceeds 1 hour
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.tun.validate()?;
+        let mut seen_client_ids = HashSet::new();
+        let mut seen_assigned_ipv4 = HashSet::new();
         for client in &self.clients {
             if client.assigned_ipv4 == self.tun.tun_ipv4 {
                 return Err(ConfigError::ClientUsesTunAddress {
@@ -75,6 +81,16 @@ impl ServerConfig {
                     assigned_ipv4: client.assigned_ipv4,
                     tun_ipv4: self.tun.tun_ipv4,
                     tun_prefix: self.tun.tun_prefix,
+                });
+            }
+            if !seen_client_ids.insert(client.client_id) {
+                return Err(ConfigError::DuplicateClientId {
+                    client_id: client.client_id,
+                });
+            }
+            if !seen_assigned_ipv4.insert(client.assigned_ipv4) {
+                return Err(ConfigError::DuplicateAssignedIpv4 {
+                    assigned_ipv4: client.assigned_ipv4,
                 });
             }
         }
@@ -177,6 +193,32 @@ mod tests {
         config.clients[0].assigned_ipv4 = config.tun.tun_ipv4;
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::ClientUsesTunAddress { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_client_id() {
+        let mut config = test_config();
+        config.clients.push(ServerClient {
+            client_id: ClientId([0u8; 16]),
+            pubkey_ed25519: PubKeyEd25519([1u8; 32]),
+            assigned_ipv4: Ipv4Addr::new(10, 10, 0, 3),
+            enabled: true,
+        });
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::DuplicateClientId { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_assigned_ipv4() {
+        let mut config = test_config();
+        config.clients.push(ServerClient {
+            client_id: ClientId([1u8; 16]),
+            pubkey_ed25519: PubKeyEd25519([1u8; 32]),
+            assigned_ipv4: Ipv4Addr::new(10, 10, 0, 2),
+            enabled: true,
+        });
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::DuplicateAssignedIpv4 { .. }));
     }
 
     #[test]

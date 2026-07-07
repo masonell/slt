@@ -19,6 +19,8 @@ pub use server::ServerConfig;
 use thiserror::Error;
 pub use validate::{validate_ping_interval, validate_timeout};
 
+use crate::types::ClientId;
+
 /// Maximum allowed timeout duration (1 hour).
 pub const MAX_TIMEOUT: Duration = Duration::from_hours(1);
 
@@ -90,6 +92,18 @@ pub enum ConfigError {
         /// Client address.
         assigned_ipv4: std::net::Ipv4Addr,
     },
+    /// Two configured clients share the same `client_id`.
+    #[error("duplicate client_id {client_id}")]
+    DuplicateClientId {
+        /// Identifier claimed by more than one client.
+        client_id: ClientId,
+    },
+    /// Two configured clients share the same `assigned_ipv4`.
+    #[error("duplicate assigned_ipv4 {assigned_ipv4}")]
+    DuplicateAssignedIpv4 {
+        /// Address claimed by more than one client.
+        assigned_ipv4: std::net::Ipv4Addr,
+    },
     /// Session queue size is zero.
     #[error("session_queue_size must be greater than zero")]
     ZeroSessionQueueSize,
@@ -138,7 +152,7 @@ mod tests {
     use super::{ConfigError, ConfigLoadError, ETHERNET_IP_MTU, MAX_TUN_MTU};
     use crate::crypto::udp_qsp::AEAD_TAG_LEN;
     use crate::proto::HEADER_LEN;
-    use crate::types::MAX_DCID_LEN;
+    use crate::types::{ClientId, MAX_DCID_LEN};
 
     #[test]
     fn max_tun_mtu_budget_is_stable() {
@@ -207,6 +221,24 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("tun_name"));
         assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn config_error_duplicate_client_id_display() {
+        let err = ConfigError::DuplicateClientId {
+            client_id: ClientId([0u8; 16]),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate client_id"));
+    }
+
+    #[test]
+    fn config_error_duplicate_assigned_ipv4_display() {
+        let err = ConfigError::DuplicateAssignedIpv4 {
+            assigned_ipv4: std::net::Ipv4Addr::new(10, 10, 0, 2),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate assigned_ipv4"));
     }
 
     #[test]
