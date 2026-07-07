@@ -8,7 +8,7 @@ use slt_core::types::{Cid, CidPrefix};
 use tracing::{debug, error, trace, warn};
 
 /// CID map entry for a single UDP-QSP session.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CidEntry {
     /// Opaque handle linking this CID to a connection/session.
     pub conn_handle: u64,
@@ -249,7 +249,7 @@ impl CidMap {
 
 #[cfg(test)]
 mod tests {
-    use slt_core::proto::{AEAD_IV_LEN, CipherSuite, RegisterCidPayload};
+    use slt_core::proto::{CipherSuite, RegisterCidPayload, UDP_QSP_TRAFFIC_SECRET_LEN};
     use slt_core::types::{Cid, MAX_DCID_LEN};
 
     use super::*;
@@ -261,12 +261,8 @@ mod tests {
             client_to_server_cid: c2s_cid,
             server_to_client_cid: s2c_cid,
             cipher: CipherSuite::Aes128Gcm,
-            hp_tx: vec![0x01; CipherSuite::Aes128Gcm.hp_key_len()],
-            hp_rx: vec![0x02; CipherSuite::Aes128Gcm.hp_key_len()],
-            aead_tx: vec![0x03; CipherSuite::Aes128Gcm.aead_key_len()],
-            aead_rx: vec![0x04; CipherSuite::Aes128Gcm.aead_key_len()],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
+            secret_tx: [0x01; UDP_QSP_TRAFFIC_SECRET_LEN],
+            secret_rx: [0x02; UDP_QSP_TRAFFIC_SECRET_LEN],
             pn_start: 0,
             pn_start_rx: 0,
             key_phase: false,
@@ -318,7 +314,7 @@ mod tests {
         let payload = make_test_payload();
 
         let entry = CidEntry::from_register(7, &payload, 0, false).unwrap();
-        let entry_dup = entry.clone();
+        let entry_dup = CidEntry::from_register(7, &payload, 0, false).unwrap();
 
         let mut map = CidMap::new();
         map.insert(entry).unwrap();

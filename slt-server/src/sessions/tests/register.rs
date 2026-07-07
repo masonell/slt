@@ -92,7 +92,7 @@ async fn session_registers_udp_and_forwards_data() {
         "unexpected udp datagram before first udp claim"
     );
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 55555));
 
     let server_expected_pn = complete_udp_upgrade_handshake(

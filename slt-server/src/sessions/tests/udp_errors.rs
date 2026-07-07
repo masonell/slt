@@ -40,7 +40,7 @@ async fn session_ignores_trailing_data_after_udp_message() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 44444));
     let _ = complete_udp_upgrade_handshake(
         &mut client,
@@ -123,7 +123,7 @@ async fn session_drops_udp_replay_packet() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
     let _ = complete_udp_upgrade_handshake(
         &mut client,
@@ -213,7 +213,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 12346));
     let _ = complete_udp_upgrade_handshake(
         &mut client,
@@ -335,7 +335,7 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
     ));
     assert!(registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 56789));
     let _ = complete_udp_upgrade_handshake(
         &mut client,

@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_roundtrip() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_roundtrip_into() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_accepts_large_packet_number() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_rejects_short_packet() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_rejects_invalid_fixed_bit() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_rejects_long_header_bit() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_rejects_reserved_bits() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_rejects_tampered_payload() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn udp_qsp_roundtrip_small_payload_has_zero_padding() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],

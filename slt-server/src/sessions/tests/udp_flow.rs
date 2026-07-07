@@ -40,7 +40,7 @@ async fn session_switches_to_udp_after_switch_ack() {
     let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
     assert!(matches!(message, Message::RegisterOk { .. }));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 44444));
 
     let server_expected_pn = complete_udp_upgrade_handshake(
@@ -137,7 +137,7 @@ async fn session_switches_to_udp_with_chacha20_poly1305() {
     let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
     assert!(matches!(message, Message::RegisterOk { .. }));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 44445));
 
     let server_expected_pn = complete_udp_upgrade_handshake(
@@ -238,7 +238,7 @@ async fn session_handles_udp_pong() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 23456));
 
     let _ = complete_udp_upgrade_handshake(
@@ -344,7 +344,7 @@ async fn valid_udp_packet_from_new_peer_updates_reply_peer() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let old_peer = SocketAddr::from(([127, 0, 0, 1], 45678));
     let new_peer = SocketAddr::from(([127, 0, 0, 1], 45679));
 
@@ -451,7 +451,7 @@ async fn session_ignores_udp_control_messages() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 34567));
 
     let _ = complete_udp_upgrade_handshake(

@@ -15,7 +15,7 @@ use super::pn::{packet_number_len, reconstruct_packet_number};
 use super::{AEAD_TAG_LEN, HP_MASK_LEN, HP_SAMPLE_LEN, QspCryptoError};
 use crate::proto::{
     AEAD_IV_LEN, AEAD_KEY_LEN, CHACHA20_POLY1305_KEY_LEN, CipherSuite, HP_KEY_LEN,
-    RegisterCidPayload,
+    RegisterCidPayload, UDP_QSP_TRAFFIC_SECRET_LEN,
 };
 
 #[derive(Clone, Copy)]
@@ -181,20 +181,11 @@ impl HeaderProtectionKey {
         }
     }
 
-    fn key_material(&self) -> &[u8] {
-        match self {
-            Self::Aes128 { key, .. } | Self::ChaCha20 { key } => key,
-        }
-    }
-}
-
-impl Clone for HeaderProtectionKey {
-    fn clone(&self) -> Self {
+    fn try_clone(&self) -> Result<Self, QspCryptoError> {
         match self {
             Self::Aes128 { key, .. } => Self::new(HeaderProtectionKind::Aes128, key),
             Self::ChaCha20 { key } => Self::new(HeaderProtectionKind::ChaCha20, key),
         }
-        .expect("HP key material must remain valid")
     }
 }
 
@@ -264,17 +255,62 @@ impl PacketKey {
     }
 }
 
-impl Clone for PacketKey {
-    fn clone(&self) -> Self {
+impl PacketKey {
+    fn try_clone(&self) -> Result<Self, QspCryptoError> {
         Self::new(&self.key, &self.iv, self.aead)
-            .expect("AEAD key material must remain valid for cloned PacketKey")
     }
 }
 
-#[derive(Clone)]
 struct DirectionKeys {
+    secret: [u8; UDP_QSP_TRAFFIC_SECRET_LEN],
     hp: HeaderProtectionKey,
     aead: PacketKey,
+}
+
+impl DirectionKeys {
+    fn from_secret(
+        secret: &[u8],
+        config: CipherConfig,
+        derive_hp: bool,
+        previous_hp: Option<&HeaderProtectionKey>,
+    ) -> Result<Self, QspCryptoError> {
+        if secret.len() != UDP_QSP_TRAFFIC_SECRET_LEN {
+            return Err(QspCryptoError::CryptoFail);
+        }
+        let secret: [u8; UDP_QSP_TRAFFIC_SECRET_LEN] =
+            secret.try_into().map_err(|_| QspCryptoError::CryptoFail)?;
+        let hp = if derive_hp {
+            HeaderProtectionKey::new(
+                config.hp,
+                &hkdf_expand_label_sha256(&secret, QUIC_HP_LABEL, b"", config.hp_key_len())?,
+            )?
+        } else {
+            previous_hp.ok_or(QspCryptoError::CryptoFail)?.try_clone()?
+        };
+        let aead_key =
+            hkdf_expand_label_sha256(&secret, QUIC_KEY_LABEL, b"", config.aead_key_len())?;
+        let iv = hkdf_expand_label_sha256(&secret, QUIC_IV_LABEL, b"", config.iv_len())?;
+
+        Ok(Self {
+            secret,
+            hp,
+            aead: PacketKey::new(&aead_key, &iv, config.aead)?,
+        })
+    }
+
+    fn next_generation(&self, config: CipherConfig) -> Result<Self, QspCryptoError> {
+        let next_secret =
+            hkdf_expand_label_sha256(&self.secret, QUIC_KU_LABEL, b"", UDP_QSP_TRAFFIC_SECRET_LEN)?;
+        Self::from_secret(&next_secret, config, false, Some(&self.hp))
+    }
+
+    fn try_clone(&self) -> Result<Self, QspCryptoError> {
+        Ok(Self {
+            secret: self.secret,
+            hp: self.hp.try_clone()?,
+            aead: self.aead.try_clone()?,
+        })
+    }
 }
 
 struct AeadContext {
@@ -379,13 +415,13 @@ impl Drop for AeadContext {
     }
 }
 
-const KEY_UPDATE_CONTEXT: &[u8] = b"slt-udp-qsp/key-update-v1";
-const KEY_UPDATE_HP_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/hp";
-const KEY_UPDATE_AEAD_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/aead";
-const KEY_UPDATE_IV_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/iv";
+const TLS13_LABEL_PREFIX: &[u8] = b"tls13 ";
+const QUIC_KEY_LABEL: &[u8] = b"quic key";
+const QUIC_IV_LABEL: &[u8] = b"quic iv";
+const QUIC_HP_LABEL: &[u8] = b"quic hp";
+const QUIC_KU_LABEL: &[u8] = b"quic ku";
 
 /// UDP-QSP key material for header and payload protection.
-#[derive(Clone)]
 pub struct UdpQspKeys {
     cipher: CipherSuite,
     tx: DirectionKeys,
@@ -403,15 +439,40 @@ impl fmt::Debug for UdpQspKeys {
 }
 
 impl UdpQspKeys {
-    /// Build UDP-QSP keys from raw key material slices.
+    /// Build UDP-QSP keys from directional traffic secrets.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The cipher suite is unsupported
-    /// - Key or IV material lengths do not match the cipher suite
+    /// - Secret material lengths do not match `UDP_QSP_TRAFFIC_SECRET_LEN`
     /// - Crypto key initialization fails
     pub fn new(
+        cipher: CipherSuite,
+        secret_tx: impl AsRef<[u8]>,
+        secret_rx: impl AsRef<[u8]>,
+    ) -> Result<Self, QspCryptoError> {
+        let config = CipherConfig::for_suite(cipher);
+
+        Ok(Self {
+            cipher,
+            tx: DirectionKeys::from_secret(secret_tx.as_ref(), config, true, None)?,
+            rx: DirectionKeys::from_secret(secret_rx.as_ref(), config, true, None)?,
+        })
+    }
+
+    /// Build UDP-QSP keys from raw packet material.
+    ///
+    /// This is retained for tests that need exact packet keys. Rekeying from
+    /// this state uses an all-zero synthetic traffic secret, so production
+    /// registration should use [`Self::new`] or [`Self::from_register`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key or IV material lengths do not match the cipher
+    /// suite, or crypto key initialization fails.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn from_packet_material(
         cipher: CipherSuite,
         hp_tx: impl AsRef<[u8]>,
         hp_rx: impl AsRef<[u8]>,
@@ -421,22 +482,17 @@ impl UdpQspKeys {
         iv_rx: impl AsRef<[u8]>,
     ) -> Result<Self, QspCryptoError> {
         let config = CipherConfig::for_suite(cipher);
-        let hp_tx = hp_tx.as_ref();
-        let hp_rx = hp_rx.as_ref();
-        let aead_tx = aead_tx.as_ref();
-        let aead_rx = aead_rx.as_ref();
-        let iv_tx = iv_tx.as_ref();
-        let iv_rx = iv_rx.as_ref();
-
         Ok(Self {
             cipher,
             tx: DirectionKeys {
-                hp: HeaderProtectionKey::new(config.hp, hp_tx)?,
-                aead: PacketKey::new(aead_tx, iv_tx, config.aead)?,
+                secret: [0u8; UDP_QSP_TRAFFIC_SECRET_LEN],
+                hp: HeaderProtectionKey::new(config.hp, hp_tx.as_ref())?,
+                aead: PacketKey::new(aead_tx.as_ref(), iv_tx.as_ref(), config.aead)?,
             },
             rx: DirectionKeys {
-                hp: HeaderProtectionKey::new(config.hp, hp_rx)?,
-                aead: PacketKey::new(aead_rx, iv_rx, config.aead)?,
+                secret: [0u8; UDP_QSP_TRAFFIC_SECRET_LEN],
+                hp: HeaderProtectionKey::new(config.hp, hp_rx.as_ref())?,
+                aead: PacketKey::new(aead_rx.as_ref(), iv_rx.as_ref(), config.aead)?,
             },
         })
     }
@@ -448,23 +504,23 @@ impl UdpQspKeys {
     /// Returns an error if the cipher suite is unsupported or crypto key
     /// initialization fails.
     pub fn from_register(payload: &RegisterCidPayload) -> Result<Self, QspCryptoError> {
-        Self::new(
-            payload.cipher,
-            &payload.hp_tx,
-            &payload.hp_rx,
-            &payload.aead_tx,
-            &payload.aead_rx,
-            payload.iv_tx,
-            payload.iv_rx,
-        )
+        Self::new(payload.cipher, payload.secret_tx, payload.secret_rx)
+    }
+
+    pub(crate) fn try_clone(&self) -> Result<Self, QspCryptoError> {
+        Ok(Self {
+            cipher: self.cipher,
+            tx: self.tx.try_clone()?,
+            rx: self.rx.try_clone()?,
+        })
     }
 
     pub(crate) fn with_next_tx_keys(&self) -> Result<Self, QspCryptoError> {
         let config = CipherConfig::for_suite(self.cipher);
         Ok(Self {
             cipher: self.cipher,
-            tx: derive_direction_keys(&self.tx, config)?,
-            rx: self.rx.clone(),
+            tx: self.tx.next_generation(config)?,
+            rx: self.rx.try_clone()?,
         })
     }
 
@@ -472,8 +528,8 @@ impl UdpQspKeys {
         let config = CipherConfig::for_suite(self.cipher);
         Ok(Self {
             cipher: self.cipher,
-            tx: self.tx.clone(),
-            rx: derive_direction_keys(&self.rx, config)?,
+            tx: self.tx.try_clone()?,
+            rx: self.rx.next_generation(config)?,
         })
     }
 
@@ -648,36 +704,31 @@ fn make_nonce(iv: &[u8; AEAD_IV_LEN], counter: u64) -> [u8; AEAD_IV_LEN] {
     nonce
 }
 
-fn derive_direction_keys(
-    current: &DirectionKeys,
-    config: CipherConfig,
-) -> Result<DirectionKeys, QspCryptoError> {
-    let mut ikm = Vec::with_capacity(config.hp_key_len() + config.aead_key_len() + config.iv_len());
-    ikm.extend_from_slice(current.hp.key_material());
-    ikm.extend_from_slice(&current.aead.key);
-    ikm.extend_from_slice(&current.aead.iv);
-
-    let mut extract_input = Vec::with_capacity(KEY_UPDATE_CONTEXT.len() + ikm.len());
-    extract_input.extend_from_slice(KEY_UPDATE_CONTEXT);
-    extract_input.extend_from_slice(&ikm);
-    let prk = hkdf_extract_sha256(&current.aead.iv, &extract_input)?;
-
-    let next_iv = hkdf_expand_sha256_vec(&prk, KEY_UPDATE_IV_INFO, config.iv_len())?;
-    Ok(DirectionKeys {
-        hp: HeaderProtectionKey::new(
-            config.hp,
-            &hkdf_expand_sha256_vec(&prk, KEY_UPDATE_HP_INFO, config.hp_key_len())?,
-        )?,
-        aead: PacketKey::new(
-            &hkdf_expand_sha256_vec(&prk, KEY_UPDATE_AEAD_INFO, config.aead_key_len())?,
-            &next_iv,
-            config.aead,
-        )?,
-    })
-}
-
+#[cfg(test)]
 fn hkdf_extract_sha256(salt: &[u8], ikm: &[u8]) -> Result<[u8; 32], QspCryptoError> {
     hmac_sha256(salt, ikm).map_err(|_| QspCryptoError::CryptoFail)
+}
+
+fn hkdf_expand_label_sha256(
+    secret: &[u8; UDP_QSP_TRAFFIC_SECRET_LEN],
+    label: &[u8],
+    context: &[u8],
+    len: usize,
+) -> Result<Vec<u8>, QspCryptoError> {
+    let output_len = u16::try_from(len).map_err(|_| QspCryptoError::CryptoFail)?;
+    let full_label_len = TLS13_LABEL_PREFIX.len() + label.len();
+    let full_label_len = u8::try_from(full_label_len).map_err(|_| QspCryptoError::CryptoFail)?;
+    let context_len = u8::try_from(context.len()).map_err(|_| QspCryptoError::CryptoFail)?;
+
+    let mut info = Vec::with_capacity(2 + 1 + usize::from(full_label_len) + 1 + context.len());
+    info.extend_from_slice(&output_len.to_be_bytes());
+    info.push(full_label_len);
+    info.extend_from_slice(TLS13_LABEL_PREFIX);
+    info.extend_from_slice(label);
+    info.push(context_len);
+    info.extend_from_slice(context);
+
+    hkdf_expand_sha256_vec(secret, &info, len)
 }
 
 fn hkdf_expand_sha256_vec(
@@ -720,18 +771,15 @@ mod tests {
     use super::*;
     use crate::proto::{
         AEAD_IV_LEN, AEAD_KEY_LEN, CHACHA20_POLY1305_KEY_LEN, CipherSuite, HP_KEY_LEN,
+        UDP_QSP_TRAFFIC_SECRET_LEN,
     };
 
     /// Create keys where TX == RX for self-contained roundtrip tests.
     fn make_symmetric_keys() -> UdpQspKeys {
         UdpQspKeys::new(
             CipherSuite::Aes128Gcm,
-            [0xAA; HP_KEY_LEN], // hp_tx == hp_rx
-            [0xAA; HP_KEY_LEN],
-            [0xBB; AEAD_KEY_LEN], // aead_tx == aead_rx
-            [0xBB; AEAD_KEY_LEN],
-            [0xCC; AEAD_IV_LEN], // iv_tx == iv_rx
-            [0xCC; AEAD_IV_LEN],
+            [0xAA; UDP_QSP_TRAFFIC_SECRET_LEN],
+            [0xAA; UDP_QSP_TRAFFIC_SECRET_LEN],
         )
         .unwrap()
     }
@@ -740,12 +788,8 @@ mod tests {
     fn make_directional_keys() -> UdpQspKeys {
         UdpQspKeys::new(
             CipherSuite::Aes128Gcm,
-            [0x11; HP_KEY_LEN],   // hp_tx
-            [0x22; HP_KEY_LEN],   // hp_rx
-            [0x33; AEAD_KEY_LEN], // aead_tx
-            [0x44; AEAD_KEY_LEN], // aead_rx
-            [0x55; AEAD_IV_LEN],  // iv_tx
-            [0x66; AEAD_IV_LEN],  // iv_rx
+            [0x11; UDP_QSP_TRAFFIC_SECRET_LEN],
+            [0x22; UDP_QSP_TRAFFIC_SECRET_LEN],
         )
         .unwrap()
     }
@@ -754,12 +798,8 @@ mod tests {
     fn make_symmetric_chacha_keys() -> UdpQspKeys {
         UdpQspKeys::new(
             CipherSuite::ChaCha20Poly1305,
-            &[0xAA; CHACHA20_POLY1305_KEY_LEN],
-            &[0xAA; CHACHA20_POLY1305_KEY_LEN],
-            &[0xBB; CHACHA20_POLY1305_KEY_LEN],
-            &[0xBB; CHACHA20_POLY1305_KEY_LEN],
-            &[0xCC; AEAD_IV_LEN],
-            &[0xCC; AEAD_IV_LEN],
+            [0xAA; UDP_QSP_TRAFFIC_SECRET_LEN],
+            [0xAA; UDP_QSP_TRAFFIC_SECRET_LEN],
         )
         .unwrap()
     }
@@ -768,26 +808,24 @@ mod tests {
     fn make_directional_chacha_keys() -> UdpQspKeys {
         UdpQspKeys::new(
             CipherSuite::ChaCha20Poly1305,
-            &[0x11; CHACHA20_POLY1305_KEY_LEN],
-            &[0x22; CHACHA20_POLY1305_KEY_LEN],
-            &[0x33; CHACHA20_POLY1305_KEY_LEN],
-            &[0x44; CHACHA20_POLY1305_KEY_LEN],
-            &[0x55; AEAD_IV_LEN],
-            &[0x66; AEAD_IV_LEN],
+            [0x11; UDP_QSP_TRAFFIC_SECRET_LEN],
+            [0x22; UDP_QSP_TRAFFIC_SECRET_LEN],
         )
         .unwrap()
+    }
+
+    fn hp_bytes(key: &HeaderProtectionKey) -> &[u8] {
+        match key {
+            HeaderProtectionKey::Aes128 { key, .. } | HeaderProtectionKey::ChaCha20 { key } => key,
+        }
     }
 
     #[test]
     fn new_keys_with_aes128gcm_succeeds() {
         let keys = UdpQspKeys::new(
             CipherSuite::Aes128Gcm,
-            [0u8; HP_KEY_LEN],
-            [0u8; HP_KEY_LEN],
-            [0u8; AEAD_KEY_LEN],
-            [0u8; AEAD_KEY_LEN],
-            [0u8; AEAD_IV_LEN],
-            [0u8; AEAD_IV_LEN],
+            [0u8; UDP_QSP_TRAFFIC_SECRET_LEN],
+            [0u8; UDP_QSP_TRAFFIC_SECRET_LEN],
         );
         assert!(keys.is_ok());
     }
@@ -796,12 +834,8 @@ mod tests {
     fn new_keys_with_chacha20_poly1305_succeeds() {
         let keys = UdpQspKeys::new(
             CipherSuite::ChaCha20Poly1305,
-            &[0u8; CHACHA20_POLY1305_KEY_LEN],
-            &[0u8; CHACHA20_POLY1305_KEY_LEN],
-            &[0u8; CHACHA20_POLY1305_KEY_LEN],
-            &[0u8; CHACHA20_POLY1305_KEY_LEN],
-            &[0u8; AEAD_IV_LEN],
-            &[0u8; AEAD_IV_LEN],
+            [0u8; UDP_QSP_TRAFFIC_SECRET_LEN],
+            [0u8; UDP_QSP_TRAFFIC_SECRET_LEN],
         );
         assert!(keys.is_ok());
     }
@@ -823,7 +857,7 @@ mod tests {
 
     #[test]
     fn chacha20_poly1305_rejects_wrong_key_lengths() {
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::ChaCha20Poly1305,
             &[0u8; HP_KEY_LEN],
             &[0u8; CHACHA20_POLY1305_KEY_LEN],
@@ -872,6 +906,16 @@ mod tests {
     }
 
     #[test]
+    fn key_update_preserves_hp_key_and_changes_aead_key_and_iv() {
+        let keys = make_directional_keys();
+        let next = keys.with_next_tx_keys().unwrap();
+
+        assert_eq!(hp_bytes(&keys.tx.hp), hp_bytes(&next.tx.hp));
+        assert_ne!(keys.tx.aead.key, next.tx.aead.key);
+        assert_ne!(keys.tx.aead.iv, next.tx.aead.iv);
+    }
+
+    #[test]
     fn rx_key_rotation_changes_decrypt_keys() {
         let dcid = [0xAB; 8];
         let plaintext = b"test payload";
@@ -905,40 +949,18 @@ mod tests {
         let pn = 42;
 
         // Create "server" keys where TX and RX are distinct
-        let server_tx = [0x33; AEAD_KEY_LEN];
-        let server_rx = [0x44; AEAD_KEY_LEN];
-        let server_iv_tx = [0x55; AEAD_IV_LEN];
-        let server_iv_rx = [0x66; AEAD_IV_LEN];
-        let server_hp_tx = [0x11; HP_KEY_LEN];
-        let server_hp_rx = [0x22; HP_KEY_LEN];
+        let server_tx = [0x33; UDP_QSP_TRAFFIC_SECRET_LEN];
+        let server_rx = [0x44; UDP_QSP_TRAFFIC_SECRET_LEN];
 
         // Server keys
-        let server_keys = UdpQspKeys::new(
-            CipherSuite::Aes128Gcm,
-            server_hp_tx,
-            server_hp_rx,
-            server_tx,
-            server_rx,
-            server_iv_tx,
-            server_iv_rx,
-        )
-        .unwrap();
+        let server_keys = UdpQspKeys::new(CipherSuite::Aes128Gcm, server_tx, server_rx).unwrap();
 
         // Rotate server's TX keys - RX should stay the same
         let server_next = server_keys.with_next_tx_keys().unwrap();
 
         // Create a "peer" that has TX=server's RX and RX=server's original TX
         // This simulates the other party in the communication
-        let peer_keys = UdpQspKeys::new(
-            CipherSuite::Aes128Gcm,
-            server_hp_rx, // peer's hp_tx = server's hp_rx
-            server_hp_tx, // peer's hp_rx = server's hp_tx
-            server_rx,    // peer's aead_tx = server's aead_rx
-            server_tx,    // peer's aead_rx = server's aead_tx
-            server_iv_rx, // peer's iv_tx = server's iv_rx
-            server_iv_tx, // peer's iv_rx = server's iv_tx
-        )
-        .unwrap();
+        let peer_keys = UdpQspKeys::new(CipherSuite::Aes128Gcm, server_rx, server_tx).unwrap();
 
         // Peer encrypts with its TX (which is server's original RX)
         let packet = peer_keys.protect(&dcid, pn, false, plaintext).unwrap();
@@ -1033,6 +1055,27 @@ mod tests {
 
         assert!(keys.open(dcid.len(), &new_phase, pn).is_err());
         assert!(rx_next.open(dcid.len(), &old_phase, pn).is_err());
+    }
+
+    #[test]
+    fn opposite_directional_secrets_rekey_and_roundtrip() {
+        let dcid = [0xAB; 8];
+        let plaintext = b"server to client after rekey";
+        let server_to_client = [0xA5; UDP_QSP_TRAFFIC_SECRET_LEN];
+        let client_to_server = [0x5A; UDP_QSP_TRAFFIC_SECRET_LEN];
+
+        let server =
+            UdpQspKeys::new(CipherSuite::Aes128Gcm, server_to_client, client_to_server).unwrap();
+        let client =
+            UdpQspKeys::new(CipherSuite::Aes128Gcm, client_to_server, server_to_client).unwrap();
+
+        let server_next = server.with_next_tx_keys().unwrap();
+        let client_next = client.with_next_rx_keys().unwrap();
+        let packet = server_next.protect(&dcid, 42, true, plaintext).unwrap();
+        let opened = client_next.open(dcid.len(), &packet, 42).unwrap();
+
+        assert_eq!(opened.payload, plaintext);
+        assert!(opened.key_phase);
     }
 
     #[test]
@@ -1154,6 +1197,36 @@ mod tests {
     }
 
     #[test]
+    fn hkdf_expand_label_matches_rfc9001_client_initial_vectors() {
+        let secret: [u8; UDP_QSP_TRAFFIC_SECRET_LEN] =
+            hex::decode("c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea")
+                .unwrap()
+                .try_into()
+                .unwrap();
+
+        let key = hkdf_expand_label_sha256(&secret, QUIC_KEY_LABEL, b"", AEAD_KEY_LEN).unwrap();
+        let iv = hkdf_expand_label_sha256(&secret, QUIC_IV_LABEL, b"", AEAD_IV_LEN).unwrap();
+        let hp = hkdf_expand_label_sha256(&secret, QUIC_HP_LABEL, b"", HP_KEY_LEN).unwrap();
+
+        assert_eq!(hex::encode(key), "1f369613dd76d5467730efcbe3b1a22d");
+        assert_eq!(hex::encode(iv), "fa044b2f42a3fd3b46fb255c");
+        assert_eq!(hex::encode(hp), "9f50449e04a0e810283a1e9933adedd2");
+    }
+
+    #[test]
+    fn hkdf_expand_label_quic_ku_vector_is_stable() {
+        let secret = [0x42; UDP_QSP_TRAFFIC_SECRET_LEN];
+        let next =
+            hkdf_expand_label_sha256(&secret, QUIC_KU_LABEL, b"", UDP_QSP_TRAFFIC_SECRET_LEN)
+                .unwrap();
+
+        assert_eq!(
+            hex::encode(next),
+            "f8f868f38fc89d88af15ab693b940f391dee2dee6ec57aa4321581de7a45960d"
+        );
+    }
+
+    #[test]
     fn hkdf_extract_produces_32_bytes() {
         let salt = [0x01u8; 12];
         let ikm = b"input key material";
@@ -1199,6 +1272,36 @@ mod tests {
         assert_eq!(opened.pn, pn);
         assert!(!opened.key_phase);
         assert_eq!(opened.payload, plaintext);
+    }
+
+    #[test]
+    fn protect_and_open_empty_payload_returns_padding_only() {
+        let dcid = [0xAB; 8];
+        let pn = 1;
+        let keys = make_symmetric_keys();
+        let protected = keys.protect(&dcid, pn, false, b"").unwrap();
+        let opened = keys.open(dcid.len(), &protected, pn).unwrap();
+
+        assert!(opened.payload.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn packet_key_open_accepts_tag_only_ciphertext() {
+        let key = PacketKey::new(
+            &[0xBB; AEAD_KEY_LEN],
+            &[0xCC; AEAD_IV_LEN],
+            AeadKind::Aes128Gcm,
+        )
+        .unwrap();
+        let ad = b"associated data";
+        let mut sealed = ad.to_vec();
+        key.seal_into(7, ad.len(), b"", &mut sealed).unwrap();
+        let tag_only = &sealed[ad.len()..];
+        assert_eq!(tag_only.len(), AEAD_TAG_LEN);
+
+        let mut opened = Vec::new();
+        key.open_into(7, ad, tag_only, &mut opened).unwrap();
+        assert!(opened.is_empty());
     }
 
     #[test]

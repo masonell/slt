@@ -163,7 +163,7 @@ async fn session_drops_udp_data_before_switch_commit() {
     ));
 
     // UDP data before switch commit must not be treated as active transport.
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 56321));
     let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 250), 12);
     send_udp_message(
@@ -237,7 +237,7 @@ async fn session_handles_udp_probe_reordering_before_ready() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 54321));
     let upgrade_id = 0xD00D;
 
@@ -379,7 +379,7 @@ async fn session_is_idempotent_for_duplicate_upgrade_controls() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 55321));
     let upgrade_id = 0xD00E;
 
@@ -577,7 +577,7 @@ async fn session_allows_new_upgrade_id_after_uncommitted_switch() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 57321));
 
     let first_upgrade_id = 0xD00F;
@@ -780,7 +780,7 @@ async fn session_ignores_delayed_probe_for_superseded_upgrade_id() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 58321));
 
     let first_upgrade_id = 0xD100;

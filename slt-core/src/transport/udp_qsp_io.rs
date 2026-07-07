@@ -386,7 +386,7 @@ mod tests {
     }
 
     fn client_keys() -> UdpQspKeys {
-        UdpQspKeys::new(
+        UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x22; HP_KEY_LEN],
@@ -399,7 +399,7 @@ mod tests {
     }
 
     fn server_keys() -> UdpQspKeys {
-        UdpQspKeys::new(
+        UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x22; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],

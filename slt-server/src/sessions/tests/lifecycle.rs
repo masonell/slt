@@ -149,7 +149,7 @@ async fn session_sends_udp_ping_on_schedule() {
     let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
     assert!(matches!(message, Message::RegisterOk { .. }));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 33333));
     let mut server_expected_pn = complete_udp_upgrade_handshake(
         &mut client,
@@ -291,7 +291,7 @@ async fn session_continues_on_udp_after_tcp_close() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 22222));
     let _ = complete_udp_upgrade_handshake(
         &mut client,
@@ -403,7 +403,7 @@ async fn session_closes_via_udp_when_tcp_dead() {
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 45678));
     let server_expected_pn = complete_udp_upgrade_handshake(
         &mut client,

@@ -200,7 +200,7 @@ impl RekeyPolicy {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PreviousRxKeys {
     keys: UdpQspKeys,
     valid_until_pn: u64,
@@ -425,7 +425,7 @@ impl<I: SessionIo> QuicQspSession<I> {
                 .map(|opened| (opened.pn, opened.pn_len, opened.key_phase))
             && key_phase != self.rx_key_phase
         {
-            self.promote_candidate_rx_keys(candidate_keys);
+            self.promote_candidate_rx_keys(candidate_keys)?;
             return self.accept_opened(pn, pn_len, key_phase);
         }
 
@@ -494,18 +494,19 @@ impl<I: SessionIo> QuicQspSession<I> {
         Ok(Some(self.keys.with_next_rx_keys()?))
     }
 
-    fn promote_candidate_rx_keys(&mut self, candidate: UdpQspKeys) {
+    fn promote_candidate_rx_keys(&mut self, candidate: UdpQspKeys) -> Result<(), QspSessionError> {
         let threshold = self
             .rx_next_rekey_pn
             .unwrap_or_else(|| self.replay_window.expected_pn());
         let valid_until = threshold.saturating_add(PN_REPLAY_WINDOW as u64);
         self.previous_rx = Some(PreviousRxKeys {
-            keys: self.keys.clone(),
+            keys: self.keys.try_clone()?,
             valid_until_pn: valid_until,
         });
         self.keys = candidate;
         self.rx_key_phase = !self.rx_key_phase;
         self.rx_next_rekey_pn = next_rekey_after(threshold, self.rekey_policy.interval);
+        Ok(())
     }
 
     fn maybe_confirm_previous_rx_keys(&mut self, expected_pn: u64) {
@@ -543,7 +544,7 @@ mod tests {
     use super::*;
     use crate::proto::{
         AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN, Message, MessageLimits, PingPayload,
-        PongPayload, decode_message, encode_message,
+        PongPayload, UDP_QSP_TRAFFIC_SECRET_LEN, decode_message, encode_message,
     };
 
     struct ChanIo {
@@ -738,12 +739,8 @@ mod tests {
     fn symmetric_keys() -> UdpQspKeys {
         UdpQspKeys::new(
             CipherSuite::Aes128Gcm,
-            [0x11; HP_KEY_LEN],
-            [0x11; HP_KEY_LEN],
-            [0x33; AEAD_KEY_LEN],
-            [0x33; AEAD_KEY_LEN],
-            [0x55; AEAD_IV_LEN],
-            [0x55; AEAD_IV_LEN],
+            [0x11; UDP_QSP_TRAFFIC_SECRET_LEN],
+            [0x11; UDP_QSP_TRAFFIC_SECRET_LEN],
         )
         .unwrap()
     }
@@ -756,7 +753,8 @@ mod tests {
         let scid_len = scid.len();
         let replayed_packet = keys.protect(dcid.as_slice(), 0, false, b"inbound").unwrap();
         let (io, _old_sent) = QueueIo::new(vec![replayed_packet.clone()]);
-        let mut session = QuicQspSession::new(io, scid, dcid, keys.clone(), 1, 0, false);
+        let mut session =
+            QuicQspSession::new(io, scid, dcid, keys.try_clone().unwrap(), 1, 0, false);
         set_rekey_policy(
             &mut session,
             2,
@@ -858,7 +856,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -902,7 +900,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -947,7 +945,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -983,7 +981,7 @@ mod tests {
         let iv_c2s = [0x55; AEAD_IV_LEN];
         let iv_s2c = [0x66; AEAD_IV_LEN];
 
-        let keys_client = UdpQspKeys::new(
+        let keys_client = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             hp_c2s,
             hp_s2c,
@@ -993,7 +991,7 @@ mod tests {
             iv_s2c,
         )
         .unwrap();
-        let keys_server = UdpQspKeys::new(
+        let keys_server = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             hp_s2c,
             hp_c2s,
@@ -1068,7 +1066,7 @@ mod tests {
         let iv_c2s = [0x55; AEAD_IV_LEN];
         let iv_s2c = [0x66; AEAD_IV_LEN];
 
-        let keys_client = UdpQspKeys::new(
+        let keys_client = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             hp_c2s,
             hp_s2c,
@@ -1078,7 +1076,7 @@ mod tests {
             iv_s2c,
         )
         .unwrap();
-        let keys_server = UdpQspKeys::new(
+        let keys_server = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             hp_s2c,
             hp_c2s,
@@ -1157,7 +1155,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1175,7 +1173,7 @@ mod tests {
             CaptureIo { sent: Vec::new() },
             scid,
             dcid,
-            keys.clone(),
+            keys.try_clone().unwrap(),
             0,
             0,
             false,
@@ -1231,7 +1229,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1249,7 +1247,7 @@ mod tests {
             CaptureIo { sent: Vec::new() },
             scid,
             dcid,
-            keys.clone(),
+            keys.try_clone().unwrap(),
             0,
             0,
             false,
@@ -1305,7 +1303,7 @@ mod tests {
             }
         }
 
-        let keys_a = UdpQspKeys::new(
+        let keys_a = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1315,7 +1313,7 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let keys_b = UdpQspKeys::new(
+        let keys_b = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x21; HP_KEY_LEN],
             [0x21; HP_KEY_LEN],
@@ -1492,7 +1490,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1509,7 +1507,7 @@ mod tests {
             CaptureIo { sent: Vec::new() },
             scid,
             dcid,
-            keys.clone(),
+            keys.try_clone().unwrap(),
             0,
             0,
             false,
@@ -1563,7 +1561,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1580,7 +1578,7 @@ mod tests {
             CaptureIo { sent: Vec::new() },
             scid,
             dcid,
-            keys.clone(),
+            keys.try_clone().unwrap(),
             0,
             0,
             false,
@@ -1650,7 +1648,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1667,7 +1665,7 @@ mod tests {
             CaptureIo { sent: Vec::new() },
             scid,
             dcid,
-            keys.clone(),
+            keys.try_clone().unwrap(),
             0,
             0,
             false,
@@ -1722,7 +1720,7 @@ mod tests {
             }
         }
 
-        let keys_a = UdpQspKeys::new(
+        let keys_a = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1732,7 +1730,7 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let keys_b = UdpQspKeys::new(
+        let keys_b = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x21; HP_KEY_LEN],
             [0x21; HP_KEY_LEN],
@@ -1782,7 +1780,7 @@ mod tests {
             }
         }
 
-        let keys = UdpQspKeys::new(
+        let keys = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1792,7 +1790,7 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let keys_bad = UdpQspKeys::new(
+        let keys_bad = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x21; HP_KEY_LEN],
             [0x21; HP_KEY_LEN],
@@ -1807,7 +1805,7 @@ mod tests {
             TestIo,
             Cid::from([0xCD; 20]),
             Cid::from([0xAB; 20]),
-            keys.clone(),
+            keys.try_clone().unwrap(),
             0,
             100,
             false,
@@ -1851,7 +1849,7 @@ mod tests {
             }
         }
 
-        let keys_a = UdpQspKeys::new(
+        let keys_a = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x11; HP_KEY_LEN],
             [0x11; HP_KEY_LEN],
@@ -1861,7 +1859,7 @@ mod tests {
             [0x55; AEAD_IV_LEN],
         )
         .unwrap();
-        let keys_b = UdpQspKeys::new(
+        let keys_b = UdpQspKeys::from_packet_material(
             CipherSuite::Aes128Gcm,
             [0x21; HP_KEY_LEN],
             [0x21; HP_KEY_LEN],
@@ -1910,12 +1908,8 @@ mod tests {
     fn buffering_keys() -> UdpQspKeys {
         UdpQspKeys::new(
             CipherSuite::Aes128Gcm,
-            [0x11; HP_KEY_LEN],
-            [0x11; HP_KEY_LEN],
-            [0x33; AEAD_KEY_LEN],
-            [0x33; AEAD_KEY_LEN],
-            [0x55; AEAD_IV_LEN],
-            [0x55; AEAD_IV_LEN],
+            [0x11; UDP_QSP_TRAFFIC_SECRET_LEN],
+            [0x11; UDP_QSP_TRAFFIC_SECRET_LEN],
         )
         .unwrap()
     }

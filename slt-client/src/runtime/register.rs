@@ -1,6 +1,6 @@
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
-use slt_core::proto::{AEAD_IV_LEN, CipherSuite, Message, RegisterCidPayload};
+use slt_core::proto::{CipherSuite, Message, RegisterCidPayload, UDP_QSP_TRAFFIC_SECRET_LEN};
 use slt_core::types::ClientUdpQspCipher;
 
 use crate::runtime::session::SessionError;
@@ -41,12 +41,8 @@ pub(super) fn prepare_udp_qsp_registration(
     ids: &quic::QuicIds,
     cipher: CipherSuite,
 ) -> Result<PreparedUdpQspRegistration, SessionError> {
-    let hp_c2s = random_bytes(cipher.hp_key_len())?;
-    let hp_s2c = random_bytes(cipher.hp_key_len())?;
-    let aead_c2s = random_bytes(cipher.aead_key_len())?;
-    let aead_s2c = random_bytes(cipher.aead_key_len())?;
-    let iv_c2s = random_array::<AEAD_IV_LEN>()?;
-    let iv_s2c = random_array::<AEAD_IV_LEN>()?;
+    let secret_c2s = random_array::<UDP_QSP_TRAFFIC_SECRET_LEN>()?;
+    let secret_s2c = random_array::<UDP_QSP_TRAFFIC_SECRET_LEN>()?;
     let pn_start_s2c = u64::from(fastrand::u32(..));
     let pn_start_c2s = u64::from(fastrand::u32(..));
     let key_phase = false;
@@ -55,12 +51,8 @@ pub(super) fn prepare_udp_qsp_registration(
         client_to_server_cid: ids.dcid,
         server_to_client_cid: ids.scid,
         cipher,
-        hp_tx: hp_s2c,
-        hp_rx: hp_c2s,
-        aead_tx: aead_s2c,
-        aead_rx: aead_c2s,
-        iv_tx: iv_s2c,
-        iv_rx: iv_c2s,
+        secret_tx: secret_s2c,
+        secret_rx: secret_c2s,
         pn_start: pn_start_s2c,
         pn_start_rx: pn_start_c2s,
         key_phase,
@@ -70,15 +62,7 @@ pub(super) fn prepare_udp_qsp_registration(
     payload.encode(&mut payload_buf)?;
 
     // Reverse key directions: the payload is expressed in the server's (tx/rx) terms.
-    let keys = UdpQspKeys::new(
-        cipher,
-        &payload.hp_rx,
-        &payload.hp_tx,
-        &payload.aead_rx,
-        &payload.aead_tx,
-        payload.iv_rx,
-        payload.iv_tx,
-    )?;
+    let keys = UdpQspKeys::new(cipher, payload.secret_rx, payload.secret_tx)?;
 
     let io = client_udp_qsp_io(&ids.socket, ids.peer)?;
     let session = QuicQspSession::new(
@@ -130,12 +114,6 @@ pub(super) async fn start_udp_qsp_registration(
 /// report.
 fn random_array<const N: usize>() -> Result<[u8; N], SessionError> {
     let mut bytes = [0u8; N];
-    rand_bytes(&mut bytes)?;
-    Ok(bytes)
-}
-
-fn random_bytes(len: usize) -> Result<Vec<u8>, SessionError> {
-    let mut bytes = vec![0u8; len];
     rand_bytes(&mut bytes)?;
     Ok(bytes)
 }
@@ -196,10 +174,7 @@ const fn aes_gcm_acceleration_available_for_target() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use slt_core::proto::{
-        AEAD_IV_LEN, AEAD_KEY_LEN, CHACHA20_POLY1305_KEY_LEN, CipherSuite, HP_KEY_LEN,
-        RegisterCidPayload,
-    };
+    use slt_core::proto::{CipherSuite, RegisterCidPayload, UDP_QSP_TRAFFIC_SECRET_LEN};
     use slt_core::types::{ClientUdpQspCipher, MAX_DCID_LEN};
 
     use super::*;
@@ -242,10 +217,8 @@ mod tests {
         let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
 
         assert_eq!(decoded.cipher, CipherSuite::ChaCha20Poly1305);
-        assert_eq!(decoded.hp_tx.len(), CHACHA20_POLY1305_KEY_LEN);
-        assert_eq!(decoded.hp_rx.len(), CHACHA20_POLY1305_KEY_LEN);
-        assert_eq!(decoded.aead_tx.len(), CHACHA20_POLY1305_KEY_LEN);
-        assert_eq!(decoded.aead_rx.len(), CHACHA20_POLY1305_KEY_LEN);
+        assert_eq!(decoded.secret_tx.len(), UDP_QSP_TRAFFIC_SECRET_LEN);
+        assert_eq!(decoded.secret_rx.len(), UDP_QSP_TRAFFIC_SECRET_LEN);
         assert!(prepared.session.is_some());
     }
 
@@ -257,15 +230,12 @@ mod tests {
 
         // Verify minimum payload length
         // Structure: c2s_cid_len(1) + c2s_cid(20) + s2c_cid_len(1) + s2c_cid(var) + cipher(1) +
-        //            hp_tx(16) + hp_rx(16) + aead_tx(16) + aead_rx(16) +
-        //            iv_tx(12) + iv_rx(12) + pn_start(8) + pn_start_rx(8) + key_phase(1)
+        //            secret_tx(32) + secret_rx(32) + pn_start(8) + pn_start_rx(8) + key_phase(1)
         let expected_min_len = (1
             + MAX_DCID_LEN
             + 1) // s2c can be empty
             + 1
-            + HP_KEY_LEN * 2
-            + AEAD_KEY_LEN * 2
-            + AEAD_IV_LEN * 2
+            + UDP_QSP_TRAFFIC_SECRET_LEN * 2
             + 8
             + 8
             + 1;
@@ -299,23 +269,21 @@ mod tests {
         let ids = mock_quic_ids().await;
         let prepared = prepare_udp_qsp_registration(&ids, CipherSuite::Aes128Gcm).unwrap();
 
-        // Decode the payload to examine the keys
+        // Decode the payload to examine the secrets
         let decoded = RegisterCidPayload::decode(&prepared.payload_buf).unwrap();
 
         // The prepare_udp_qsp_registration function constructs the payload with:
-        // - hp_tx = hp_s2c (server's tx = client's rx direction)
-        // - hp_rx = hp_c2s (server's rx = client's tx direction)
-        // This means the payload expresses keys in server's (tx, rx) terms.
+        // - secret_tx = secret_s2c (server's tx = client's rx direction)
+        // - secret_rx = secret_c2s (server's rx = client's tx direction)
+        // This means the payload expresses secrets in server's (tx, rx) terms.
 
-        // Verify the keys are non-zero (random generation worked)
-        assert!(decoded.hp_tx.iter().any(|&b| b != 0));
-        assert!(decoded.hp_rx.iter().any(|&b| b != 0));
-        assert!(decoded.aead_tx.iter().any(|&b| b != 0));
-        assert!(decoded.aead_rx.iter().any(|&b| b != 0));
+        // Verify the secrets are non-zero (random generation worked)
+        assert!(decoded.secret_tx.iter().any(|&b| b != 0));
+        assert!(decoded.secret_rx.iter().any(|&b| b != 0));
 
         // The session stored in prepared should have reversed directions:
-        // - Client uses hp_rx (from payload) for its tx direction
-        // - Client uses hp_tx (from payload) for its rx direction
+        // - Client uses secret_rx (from payload) for its tx direction
+        // - Client uses secret_tx (from payload) for its rx direction
 
         // Verify that a session was created (keys were valid)
         assert!(prepared.session.is_some());
@@ -395,13 +363,6 @@ mod tests {
 
         // Probability of all zeros is astronomically low
         assert!(arr.iter().any(|&b| b != 0));
-    }
-
-    #[test]
-    fn random_bytes_produces_requested_length() {
-        let bytes = random_bytes(32).unwrap();
-        assert_eq!(bytes.len(), 32);
-        assert!(bytes.iter().any(|&b| b != 0));
     }
 
     #[test]

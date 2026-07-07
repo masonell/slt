@@ -44,7 +44,7 @@ Maximum `tun_mtu` of 1406 is derived from:
 | AUTH             | 0x01  | Client -> Server  | Client authentication request                  |
 | AUTH_OK          | 0x02  | Server -> Client  | Authentication accepted                        |
 | AUTH_FAIL        | 0x03  | Server -> Client  | Authentication rejected                        |
-| REGISTER_CID     | 0x04  | Client -> Server  | Register UDP-QSP connection ID and keys        |
+| REGISTER_CID     | 0x04  | Client -> Server  | Register UDP-QSP connection ID and traffic secrets |
 | REGISTER_OK      | 0x05  | Server -> Client  | CID registration accepted                      |
 | REGISTER_FAIL    | 0x06  | Server -> Client  | CID registration rejected                      |
 | PING             | 0x07  | Both              | Keepalive ping                                 |
@@ -98,7 +98,7 @@ These messages are only sent on the TCP control channel:
 | AUTH             | Authentication requires TLS channel binding     |
 | AUTH_OK          | Authentication response                         |
 | AUTH_FAIL        | Authentication response                         |
-| REGISTER_CID     | Registers UDP keys securely over TCP            |
+| REGISTER_CID     | Registers UDP traffic secrets over TCP          |
 | REGISTER_OK      | Registration response                           |
 | REGISTER_FAIL    | Registration response                           |
 | UDP_READY        | UDP upgrade commit (control plane)              |

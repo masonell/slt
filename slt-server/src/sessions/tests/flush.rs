@@ -179,7 +179,7 @@ async fn register_and_upgrade(
         Message::RegisterOk { .. }
     ));
 
-    let keys = UdpQspKeys::from_register(&register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let _next_server_pn =
         complete_udp_upgrade_handshake(client, tx, udp_rx, limits, &register, peer, upgrade_id)
             .await;

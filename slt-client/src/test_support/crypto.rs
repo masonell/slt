@@ -14,7 +14,7 @@ use slt_core::proto::{AEAD_IV_LEN, AEAD_KEY_LEN, CipherSuite, HP_KEY_LEN};
 /// - IV RX: `[0x66; 12]`
 #[must_use]
 pub fn make_test_keys() -> UdpQspKeys {
-    UdpQspKeys::new(
+    UdpQspKeys::from_packet_material(
         CipherSuite::Aes128Gcm,
         [0x11; HP_KEY_LEN],
         [0x22; HP_KEY_LEN],
@@ -33,7 +33,7 @@ pub fn make_test_keys() -> UdpQspKeys {
 #[must_use]
 pub fn make_server_keys() -> UdpQspKeys {
     // Swapped directions relative to client keys
-    UdpQspKeys::new(
+    UdpQspKeys::from_packet_material(
         CipherSuite::Aes128Gcm,
         [0x22; HP_KEY_LEN],
         [0x11; HP_KEY_LEN],

@@ -473,7 +473,7 @@ mod tests {
                 let dcid = Cid::from([0xAA; MAX_DCID_LEN]);
                 let scid = Cid::from([0xBB; MAX_DCID_LEN]);
 
-                let keys = UdpQspKeys::new(
+                let keys = UdpQspKeys::from_packet_material(
                     CipherSuite::Aes128Gcm,
                     [0u8; 16],
                     [0u8; 16],
@@ -593,7 +593,7 @@ mod tests {
                 let dcid = Cid::from([0xAA; MAX_DCID_LEN]);
                 let scid = Cid::from([0xBB; MAX_DCID_LEN]);
 
-                let keys = UdpQspKeys::new(
+                let keys = UdpQspKeys::from_packet_material(
                     CipherSuite::Aes128Gcm,
                     [0u8; 16],
                     [0u8; 16],

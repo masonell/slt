@@ -103,7 +103,7 @@ Keys are **not** derived from a QUIC handshake. Instead:
 1. Client establishes a real QUIC connection to nginx (for wire-shape cover)
 2. Client sends `REGISTER_CID` over the **TCP control channel** with:
    - DCID to use for UDP-QSP
-   - UDP-QSP keys (HP + AEAD, both directions)
+   - UDP-QSP traffic secrets for both directions
    - Initial packet numbers and key phase
 3. Server validates, stores keys in `cid_map`, replies `REGISTER_OK`
 4. Client may now send UDP-QSP packets with that DCID
@@ -150,19 +150,17 @@ ciphertext || tag = AES-128-GCM-Seal(key, nonce, ad, plaintext)
 
 ### 3.5 Key Directionality
 
-UDP-QSP uses separate keys for each direction:
+UDP-QSP uses separate traffic secrets for each direction. Packet-protection
+keys are derived from those secrets.
 
-| Key | Client Uses For | Server Uses For |
-|-----|-----------------|-----------------|
-| `hp_tx` | Sending packets | Sending packets |
-| `hp_rx` | Receiving packets | Receiving packets |
-| `aead_tx` | Encrypting outbound | Encrypting outbound |
-| `aead_rx` | Decrypting inbound | Decrypting inbound |
-| `iv_tx` | Outbound nonces | Outbound nonces |
-| `iv_rx` | Inbound nonces | Inbound nonces |
+| Secret | Client Uses For | Server Uses For |
+|--------|-----------------|-----------------|
+| `secret_tx` | Receiving packets | Sending packets |
+| `secret_rx` | Sending packets | Receiving packets |
 
-In `REGISTER_CID`, the client sends keys from its perspective. The server
-uses `*_tx` to send to the client and `*_rx` to open packets from the client.
+In `REGISTER_CID`, fields are expressed from the server's perspective. The
+server uses `secret_tx` for server->client packets and `secret_rx` for
+client->server packets. The client uses the opposite directions locally.
 
 ## 4. Key Management
 
@@ -177,12 +175,8 @@ offset size field
 1+N    1    server_to_client_cid_len (0-20)
 2+N    M    server_to_client_cid
 ...    1    cipher (0x01 = AES-128-GCM)
-...    16   hp_tx
-...    16   hp_rx
-...    16   aead_tx
-...    16   aead_rx
-...    12   iv_tx
-...    12   iv_rx
+...    32   secret_tx
+...    32   secret_rx
 ...    8    pn_start (server->client initial PN)
 ...    8    pn_start_rx (expected from client)
 ...    1    key_phase (0 or 1)
@@ -216,18 +210,23 @@ by default), the channel is considered dead and the session reconnects.
 
 ### 4.3 HKDF Key Derivation
 
-Next-generation keys are derived using HKDF-SHA256:
+Packet keys are derived from directional 32-byte traffic secrets using
+TLS 1.3 `HKDF-Expand-Label` labels from RFC 9001:
 
 ```
-ikm = hp_key || aead_key || iv
+hp_key   = HKDF-Expand-Label(secret, "quic hp",  "", hp_len)
+aead_key = HKDF-Expand-Label(secret, "quic key", "", aead_len)
+iv       = HKDF-Expand-Label(secret, "quic iv",  "", 12)
 
-extract_input = "slt-udp-qsp/key-update-v1" || ikm
-prk = HKDF-Extract(iv, extract_input)
+next_secret = HKDF-Expand-Label(secret, "quic ku", "", 32)
 
-next_hp = HKDF-Expand(prk, "slt-udp-qsp/key-update-v1/hp", 16)
-next_aead = HKDF-Expand(prk, "slt-udp-qsp/key-update-v1/aead", 16)
-next_iv = HKDF-Expand(prk, "slt-udp-qsp/key-update-v1/iv", 12)
+next_aead_key = HKDF-Expand-Label(next_secret, "quic key", "", aead_len)
+next_iv       = HKDF-Expand-Label(next_secret, "quic iv",  "", 12)
 ```
+
+Header-protection keys are derived from the initial traffic secret and remain
+stable across key updates. AEAD keys and IVs are re-derived from each updated
+traffic secret.
 
 ## 5. Security Properties
 
@@ -255,9 +254,8 @@ next_iv = HKDF-Expand(prk, "slt-udp-qsp/key-update-v1/iv", 12)
   3. Decrypt captured VPN traffic if they also captured the REGISTER_CID
      message
 
-  However, forward secrecy **is** maintained for key phase updates: an
-  attacker who compromises current keys cannot decrypt past traffic from
-  earlier key phases.
+  Key phase updates limit packet-key lifetime, but they do not add
+  post-compromise forward secrecy without a fresh secret exchange.
 
 - **QUIC interoperability**: UDP-QSP uses QUIC wire format but is not
   compatible with standard QUIC stacks. It cannot be used with generic

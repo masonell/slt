@@ -7,7 +7,7 @@
 | `0x01`  | AUTH            | C->S      | 116 bytes    | Client authentication request            |
 | `0x02`  | AUTH_OK         | S->C      | 0 bytes      | Authentication accepted                  |
 | `0x03`  | AUTH_FAIL       | S->C      | 1 byte       | Authentication rejected                  |
-| `0x04`  | REGISTER_CID    | C->S      | 128-148 bytes (AES) / 192-212 bytes (ChaCha) | Register UDP-QSP CID and keys        |
+| `0x04`  | REGISTER_CID    | C->S      | 104-124 bytes | Register UDP-QSP CID and traffic secrets |
 | `0x05`  | REGISTER_OK     | S->C      | 21 bytes     | CID registration accepted                |
 | `0x06`  | REGISTER_FAIL   | S->C      | 1 byte       | CID registration rejected                |
 | `0x07`  | PING            | Both      | 8 bytes      | Keepalive ping                           |

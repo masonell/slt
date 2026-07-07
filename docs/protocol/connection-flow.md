@@ -90,7 +90,7 @@ This is an optional but recommended optimization.
 Before UDP upgrade can begin:
 1. TCP session must be `AUTHENTICATED`
 2. Client must discover a QUIC DCID by establishing a real QUIC connection to nginx
-3. Client generates UDP-QSP keys and packet number state
+3. Client generates UDP-QSP traffic secrets and packet number state
 
 ### 2.2 Upgrade Sequence
 
@@ -103,10 +103,8 @@ Client                                    Server
   |  1. REGISTER_CID over TCP               |
   |    - client_to_server_cid (20 bytes)    |
   |    - server_to_client_cid (0-20 bytes)  |
-  |    - cipher (AES-128-GCM)               |
-  |    - hp_tx, hp_rx (header protection)   |
-  |    - aead_tx, aead_rx (payload keys)    |
-  |    - iv_tx, iv_rx (nonce bases)         |
+  |    - cipher                             |
+  |    - secret_tx, secret_rx               |
   |    - pn_start, pn_start_rx              |
   |    - key_phase (0 or 1)                 |
   |---------------------------------------->|

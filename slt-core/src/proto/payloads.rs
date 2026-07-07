@@ -19,6 +19,8 @@ pub const MAX_HP_KEY_LEN: usize = CHACHA20_POLY1305_KEY_LEN;
 pub const MAX_AEAD_KEY_LEN: usize = CHACHA20_POLY1305_KEY_LEN;
 /// Length of the AEAD IV in bytes.
 pub const AEAD_IV_LEN: usize = 12;
+/// Length of a UDP-QSP directional traffic secret in bytes.
+pub const UDP_QSP_TRAFFIC_SECRET_LEN: usize = 32;
 /// Length of the AUTH payload in bytes.
 pub const AUTH_PAYLOAD_LEN: usize = 16 + 4 + AUTH_CHALLENGE_LEN + AUTH_SIGNATURE_LEN;
 /// Length of the PING/PONG payload in bytes.
@@ -35,17 +37,8 @@ pub const CLOSE_PAYLOAD_LEN: usize = 1;
 /// Currently bounded by `REGISTER_CID`. When adding new message types or
 /// changing payload layouts, verify this value still exceeds all control
 /// payloads. See `protocol.md` for wire format specification.
-pub const MAX_CONTROL_FRAME_LEN: usize = 1
-    + MAX_DCID_LEN
-    + 1
-    + MAX_DCID_LEN
-    + 1
-    + (MAX_HP_KEY_LEN * 2)
-    + (MAX_AEAD_KEY_LEN * 2)
-    + (AEAD_IV_LEN * 2)
-    + 8
-    + 8
-    + 1;
+pub const MAX_CONTROL_FRAME_LEN: usize =
+    1 + MAX_DCID_LEN + 1 + MAX_DCID_LEN + 1 + (UDP_QSP_TRAFFIC_SECRET_LEN * 2) + 8 + 8 + 1;
 
 /// Cipher identifiers for UDP-QSP payload protection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
@@ -251,7 +244,7 @@ impl AuthFailPayload {
 }
 
 /// `REGISTER_CID` payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RegisterCidPayload {
     /// CID for client->server packets (must be exactly `MAX_DCID_LEN` bytes).
     pub client_to_server_cid: Cid,
@@ -259,18 +252,10 @@ pub struct RegisterCidPayload {
     pub server_to_client_cid: Cid,
     /// Cipher suite for packet protection.
     pub cipher: CipherSuite,
-    /// Header protection key (tx).
-    pub hp_tx: Vec<u8>,
-    /// Header protection key (rx).
-    pub hp_rx: Vec<u8>,
-    /// AEAD key (tx).
-    pub aead_tx: Vec<u8>,
-    /// AEAD key (rx).
-    pub aead_rx: Vec<u8>,
-    /// AEAD IV (tx).
-    pub iv_tx: [u8; AEAD_IV_LEN],
-    /// AEAD IV (rx).
-    pub iv_rx: [u8; AEAD_IV_LEN],
+    /// Traffic secret for packets sent by the server.
+    pub secret_tx: [u8; UDP_QSP_TRAFFIC_SECRET_LEN],
+    /// Traffic secret for packets received by the server.
+    pub secret_rx: [u8; UDP_QSP_TRAFFIC_SECRET_LEN],
     /// Initial packet number for the server->client direction.
     pub pn_start: u64,
     /// Initial packet number expected from the client.
@@ -280,22 +265,18 @@ pub struct RegisterCidPayload {
 }
 
 impl RegisterCidPayload {
-    const fn encoded_len_for(c2s_cid_len: usize, s2c_cid_len: usize, cipher: CipherSuite) -> usize {
-        1 + c2s_cid_len
-            + 1
-            + s2c_cid_len
-            + 1
-            + (cipher.hp_key_len() * 2)
-            + (cipher.aead_key_len() * 2)
-            + (cipher.iv_len() * 2)
-            + 8
-            + 8
-            + 1
+    const fn encoded_len_for(
+        c2s_cid_len: usize,
+        s2c_cid_len: usize,
+        _cipher: CipherSuite,
+    ) -> usize {
+        1 + c2s_cid_len + 1 + s2c_cid_len + 1 + (UDP_QSP_TRAFFIC_SECRET_LEN * 2) + 8 + 8 + 1
     }
 
-    fn read_vec(payload: &[u8], offset: &mut usize, len: usize) -> Vec<u8> {
-        let out = payload[*offset..*offset + len].to_vec();
-        *offset += len;
+    fn read_secret(payload: &[u8], offset: &mut usize) -> [u8; UDP_QSP_TRAFFIC_SECRET_LEN] {
+        let mut out = [0u8; UDP_QSP_TRAFFIC_SECRET_LEN];
+        out.copy_from_slice(&payload[*offset..*offset + UDP_QSP_TRAFFIC_SECRET_LEN]);
+        *offset += UDP_QSP_TRAFFIC_SECRET_LEN;
         out
     }
 
@@ -372,19 +353,9 @@ impl RegisterCidPayload {
         let server_to_client_cid = Cid::try_from(&payload[offset..offset + s2c_cid_len])
             .map_err(|_| PayloadError::InvalidServerToClientCidLen(s2c_cid_len))?;
         offset += s2c_cid_len;
-        let cipher = CipherSuite::try_from(payload[offset])
-            .map_err(|_| PayloadError::InvalidCipher(payload[offset]))?;
         offset += 1;
-        let hp_tx = Self::read_vec(payload, &mut offset, cipher.hp_key_len());
-        let hp_rx = Self::read_vec(payload, &mut offset, cipher.hp_key_len());
-        let aead_tx = Self::read_vec(payload, &mut offset, cipher.aead_key_len());
-        let aead_rx = Self::read_vec(payload, &mut offset, cipher.aead_key_len());
-        let mut iv_tx = [0u8; AEAD_IV_LEN];
-        iv_tx.copy_from_slice(&payload[offset..offset + cipher.iv_len()]);
-        offset += cipher.iv_len();
-        let mut iv_rx = [0u8; AEAD_IV_LEN];
-        iv_rx.copy_from_slice(&payload[offset..offset + cipher.iv_len()]);
-        offset += cipher.iv_len();
+        let secret_tx = Self::read_secret(payload, &mut offset);
+        let secret_rx = Self::read_secret(payload, &mut offset);
         let pn_start = Self::read_u64(payload, &mut offset, expected_len)?;
         let pn_start_rx = Self::read_u64(payload, &mut offset, expected_len)?;
         let key_phase = match payload[offset] {
@@ -397,12 +368,8 @@ impl RegisterCidPayload {
             client_to_server_cid,
             server_to_client_cid,
             cipher,
-            hp_tx,
-            hp_rx,
-            aead_tx,
-            aead_rx,
-            iv_tx,
-            iv_rx,
+            secret_tx,
+            secret_rx,
             pn_start,
             pn_start_rx,
             key_phase,
@@ -421,7 +388,6 @@ impl RegisterCidPayload {
                 self.client_to_server_cid.len(),
             ));
         }
-        self.validate_key_lengths()?;
         let expected_len = self.encoded_len();
         out.reserve(expected_len);
         #[allow(clippy::cast_possible_truncation)]
@@ -433,12 +399,8 @@ impl RegisterCidPayload {
         out.push(s2c_len);
         out.extend_from_slice(self.server_to_client_cid.as_slice());
         out.push(u8::from(self.cipher));
-        out.extend_from_slice(&self.hp_tx);
-        out.extend_from_slice(&self.hp_rx);
-        out.extend_from_slice(&self.aead_tx);
-        out.extend_from_slice(&self.aead_rx);
-        out.extend_from_slice(&self.iv_tx);
-        out.extend_from_slice(&self.iv_rx);
+        out.extend_from_slice(&self.secret_tx);
+        out.extend_from_slice(&self.secret_rx);
         out.extend_from_slice(&self.pn_start.to_be_bytes());
         out.extend_from_slice(&self.pn_start_rx.to_be_bytes());
         out.push(u8::from(self.key_phase));
@@ -453,21 +415,6 @@ impl RegisterCidPayload {
             self.server_to_client_cid.len(),
             self.cipher,
         )
-    }
-
-    fn validate_key_lengths(&self) -> Result<(), PayloadError> {
-        Self::validate_key_len(self.hp_tx.len(), self.cipher.hp_key_len())?;
-        Self::validate_key_len(self.hp_rx.len(), self.cipher.hp_key_len())?;
-        Self::validate_key_len(self.aead_tx.len(), self.cipher.aead_key_len())?;
-        Self::validate_key_len(self.aead_rx.len(), self.cipher.aead_key_len())
-    }
-
-    const fn validate_key_len(actual: usize, expected: usize) -> Result<(), PayloadError> {
-        if actual == expected {
-            Ok(())
-        } else {
-            Err(PayloadError::LengthMismatch { expected, actual })
-        }
     }
 }
 
@@ -941,6 +888,24 @@ pub enum PayloadError {
 mod tests {
     use super::*;
 
+    fn assert_register_payload_eq(actual: &RegisterCidPayload, expected: &RegisterCidPayload) {
+        assert_eq!(actual.client_to_server_cid, expected.client_to_server_cid);
+        assert_eq!(actual.server_to_client_cid, expected.server_to_client_cid);
+        assert_eq!(actual.cipher, expected.cipher);
+        assert_eq!(actual.secret_tx, expected.secret_tx);
+        assert_eq!(actual.secret_rx, expected.secret_rx);
+        assert_eq!(actual.pn_start, expected.pn_start);
+        assert_eq!(actual.pn_start_rx, expected.pn_start_rx);
+        assert_eq!(actual.key_phase, expected.key_phase);
+    }
+
+    fn assert_register_decode_err(payload: &[u8], expected: PayloadError) {
+        match RegisterCidPayload::decode(payload) {
+            Ok(_) => panic!("REGISTER_CID decode unexpectedly succeeded"),
+            Err(actual) => assert_eq!(actual, expected),
+        }
+    }
+
     #[test]
     fn auth_payload_roundtrip() {
         let payload = AuthPayload {
@@ -976,12 +941,8 @@ mod tests {
             client_to_server_cid: c2s_cid,
             server_to_client_cid: s2c_cid,
             cipher: CipherSuite::Aes128Gcm,
-            hp_tx: vec![0x01; HP_KEY_LEN],
-            hp_rx: vec![0x02; HP_KEY_LEN],
-            aead_tx: vec![0x03; AEAD_KEY_LEN],
-            aead_rx: vec![0x04; AEAD_KEY_LEN],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
+            secret_tx: [0x01; UDP_QSP_TRAFFIC_SECRET_LEN],
+            secret_rx: [0x02; UDP_QSP_TRAFFIC_SECRET_LEN],
             pn_start: 42,
             pn_start_rx: 9001,
             key_phase: true,
@@ -993,12 +954,8 @@ mod tests {
         assert_eq!(decoded.client_to_server_cid, payload.client_to_server_cid);
         assert_eq!(decoded.server_to_client_cid, payload.server_to_client_cid);
         assert_eq!(decoded.cipher, payload.cipher);
-        assert_eq!(decoded.hp_tx, payload.hp_tx);
-        assert_eq!(decoded.hp_rx, payload.hp_rx);
-        assert_eq!(decoded.aead_tx, payload.aead_tx);
-        assert_eq!(decoded.aead_rx, payload.aead_rx);
-        assert_eq!(decoded.iv_tx, payload.iv_tx);
-        assert_eq!(decoded.iv_rx, payload.iv_rx);
+        assert_eq!(decoded.secret_tx, payload.secret_tx);
+        assert_eq!(decoded.secret_rx, payload.secret_rx);
         assert_eq!(decoded.pn_start, payload.pn_start);
         assert_eq!(decoded.pn_start_rx, payload.pn_start_rx);
         assert_eq!(decoded.key_phase, payload.key_phase);
@@ -1012,12 +969,8 @@ mod tests {
             client_to_server_cid: c2s_cid,
             server_to_client_cid: s2c_cid,
             cipher: CipherSuite::Aes128Gcm,
-            hp_tx: vec![0x01; HP_KEY_LEN],
-            hp_rx: vec![0x02; HP_KEY_LEN],
-            aead_tx: vec![0x03; AEAD_KEY_LEN],
-            aead_rx: vec![0x04; AEAD_KEY_LEN],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
+            secret_tx: [0x01; UDP_QSP_TRAFFIC_SECRET_LEN],
+            secret_rx: [0x02; UDP_QSP_TRAFFIC_SECRET_LEN],
             pn_start: 42,
             pn_start_rx: 9001,
             key_phase: false,
@@ -1039,12 +992,8 @@ mod tests {
             client_to_server_cid: c2s_cid,
             server_to_client_cid: s2c_cid,
             cipher: CipherSuite::Aes128Gcm,
-            hp_tx: vec![0x01; HP_KEY_LEN],
-            hp_rx: vec![0x02; HP_KEY_LEN],
-            aead_tx: vec![0x03; AEAD_KEY_LEN],
-            aead_rx: vec![0x04; AEAD_KEY_LEN],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
+            secret_tx: [0x01; UDP_QSP_TRAFFIC_SECRET_LEN],
+            secret_rx: [0x02; UDP_QSP_TRAFFIC_SECRET_LEN],
             pn_start: 42,
             pn_start_rx: 9001,
             key_phase: true,
@@ -1055,9 +1004,7 @@ mod tests {
             + 1
             + payload.server_to_client_cid.len()
             + 1
-            + (payload.cipher.hp_key_len() * 2)
-            + (payload.cipher.aead_key_len() * 2)
-            + (AEAD_IV_LEN * 2)
+            + (UDP_QSP_TRAFFIC_SECRET_LEN * 2)
             + 8
             + 8
             + 1;
@@ -1067,23 +1014,19 @@ mod tests {
         assert_eq!(buf.len(), expected_len);
 
         let decoded = RegisterCidPayload::decode(&buf).unwrap();
-        assert_eq!(decoded, payload);
+        assert_register_payload_eq(&decoded, &payload);
     }
 
     #[test]
-    fn register_cid_roundtrip_chacha_sized_keys() {
+    fn register_cid_roundtrip_chacha_uses_fixed_size_secrets() {
         let c2s_cid = Cid::new(&[0x55u8; MAX_DCID_LEN]).unwrap();
         let s2c_cid = Cid::new(&[0x44u8; MAX_DCID_LEN]).unwrap();
         let payload = RegisterCidPayload {
             client_to_server_cid: c2s_cid,
             server_to_client_cid: s2c_cid,
             cipher: CipherSuite::ChaCha20Poly1305,
-            hp_tx: vec![0x01; CipherSuite::ChaCha20Poly1305.hp_key_len()],
-            hp_rx: vec![0x02; CipherSuite::ChaCha20Poly1305.hp_key_len()],
-            aead_tx: vec![0x03; CipherSuite::ChaCha20Poly1305.aead_key_len()],
-            aead_rx: vec![0x04; CipherSuite::ChaCha20Poly1305.aead_key_len()],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
+            secret_tx: [0x01; UDP_QSP_TRAFFIC_SECRET_LEN],
+            secret_rx: [0x02; UDP_QSP_TRAFFIC_SECRET_LEN],
             pn_start: 42,
             pn_start_rx: 9001,
             key_phase: true,
@@ -1094,38 +1037,11 @@ mod tests {
         assert_eq!(buf.len(), payload.encoded_len());
 
         let decoded = RegisterCidPayload::decode(&buf).unwrap();
-        assert_eq!(decoded, payload);
+        assert_register_payload_eq(&decoded, &payload);
     }
 
     #[test]
-    fn register_cid_encode_rejects_wrong_key_length_for_cipher() {
-        let payload = RegisterCidPayload {
-            client_to_server_cid: Cid::new(&[0x55u8; MAX_DCID_LEN]).unwrap(),
-            server_to_client_cid: Cid::new(&[0x44u8; MAX_DCID_LEN]).unwrap(),
-            cipher: CipherSuite::ChaCha20Poly1305,
-            hp_tx: vec![0x01; HP_KEY_LEN],
-            hp_rx: vec![0x02; CipherSuite::ChaCha20Poly1305.hp_key_len()],
-            aead_tx: vec![0x03; CipherSuite::ChaCha20Poly1305.aead_key_len()],
-            aead_rx: vec![0x04; CipherSuite::ChaCha20Poly1305.aead_key_len()],
-            iv_tx: [0x05; AEAD_IV_LEN],
-            iv_rx: [0x06; AEAD_IV_LEN],
-            pn_start: 42,
-            pn_start_rx: 9001,
-            key_phase: true,
-        };
-
-        let mut buf = Vec::new();
-        assert_eq!(
-            payload.encode(&mut buf),
-            Err(PayloadError::LengthMismatch {
-                expected: CipherSuite::ChaCha20Poly1305.hp_key_len(),
-                actual: HP_KEY_LEN,
-            })
-        );
-    }
-
-    #[test]
-    fn register_cid_decode_rejects_chacha_payload_with_aes_key_lengths() {
+    fn register_cid_decode_rejects_short_secret_payload() {
         let c2s_cid = Cid::from([0x55u8; MAX_DCID_LEN]);
         let s2c_cid = Cid::from([0x44u8; MAX_DCID_LEN]);
 
@@ -1135,23 +1051,21 @@ mod tests {
         buf.push(s2c_cid.len() as u8);
         buf.extend_from_slice(s2c_cid.as_slice());
         buf.push(CipherSuite::ChaCha20Poly1305 as u8);
-        buf.extend_from_slice(&[0x01; HP_KEY_LEN * 2]);
-        buf.extend_from_slice(&[0x02; AEAD_KEY_LEN * 2]);
-        buf.extend_from_slice(&[0x03; AEAD_IV_LEN * 2]);
+        buf.extend_from_slice(&[0x01; (UDP_QSP_TRAFFIC_SECRET_LEN * 2) - 1]);
         buf.extend_from_slice(&0u64.to_be_bytes());
         buf.extend_from_slice(&0u64.to_be_bytes());
         buf.push(0);
 
-        assert_eq!(
-            RegisterCidPayload::decode(&buf),
-            Err(PayloadError::LengthMismatch {
+        assert_register_decode_err(
+            &buf,
+            PayloadError::LengthMismatch {
                 expected: RegisterCidPayload::encoded_len_for(
                     c2s_cid.len(),
                     s2c_cid.len(),
                     CipherSuite::ChaCha20Poly1305,
                 ),
                 actual: buf.len(),
-            })
+            },
         );
     }
 
@@ -1477,9 +1391,9 @@ mod tests {
         let mut buf = vec![(MAX_DCID_LEN - 1) as u8]; // c2s_cid_len = 19
         buf.extend_from_slice(&[0u8; MAX_DCID_LEN - 1]);
 
-        assert_eq!(
-            RegisterCidPayload::decode(&buf),
-            Err(PayloadError::InvalidClientToServerCidLen(MAX_DCID_LEN - 1))
+        assert_register_decode_err(
+            &buf,
+            PayloadError::InvalidClientToServerCidLen(MAX_DCID_LEN - 1),
         );
     }
 
@@ -1491,9 +1405,9 @@ mod tests {
         buf.extend_from_slice(c2s_cid.as_slice());
         buf.push((MAX_DCID_LEN + 1) as u8); // s2c_cid_len = 21 (too long)
 
-        assert_eq!(
-            RegisterCidPayload::decode(&buf),
-            Err(PayloadError::InvalidServerToClientCidLen(MAX_DCID_LEN + 1))
+        assert_register_decode_err(
+            &buf,
+            PayloadError::InvalidServerToClientCidLen(MAX_DCID_LEN + 1),
         );
     }
 
@@ -1563,17 +1477,12 @@ mod tests {
         buf.push(s2c_cid.len() as u8);
         buf.extend_from_slice(s2c_cid.as_slice());
         buf.push(0xFF); // invalid cipher
-        buf.extend_from_slice(&[0x01; HP_KEY_LEN * 2]);
-        buf.extend_from_slice(&[0x02; AEAD_KEY_LEN * 2]);
-        buf.extend_from_slice(&[0x03; AEAD_IV_LEN * 2]);
+        buf.extend_from_slice(&[0x01; UDP_QSP_TRAFFIC_SECRET_LEN * 2]);
         buf.extend_from_slice(&0u64.to_be_bytes()); // pn_start
         buf.extend_from_slice(&0u64.to_be_bytes()); // pn_start_rx
         buf.push(0); // key_phase
 
-        assert_eq!(
-            RegisterCidPayload::decode(&buf),
-            Err(PayloadError::InvalidCipher(0xFF))
-        );
+        assert_register_decode_err(&buf, PayloadError::InvalidCipher(0xFF));
     }
 
     #[test]
@@ -1587,16 +1496,11 @@ mod tests {
         buf.push(s2c_cid.len() as u8);
         buf.extend_from_slice(s2c_cid.as_slice());
         buf.push(CipherSuite::Aes128Gcm as u8);
-        buf.extend_from_slice(&[0x01; HP_KEY_LEN * 2]);
-        buf.extend_from_slice(&[0x02; AEAD_KEY_LEN * 2]);
-        buf.extend_from_slice(&[0x03; AEAD_IV_LEN * 2]);
+        buf.extend_from_slice(&[0x01; UDP_QSP_TRAFFIC_SECRET_LEN * 2]);
         buf.extend_from_slice(&0u64.to_be_bytes()); // pn_start
         buf.extend_from_slice(&0u64.to_be_bytes()); // pn_start_rx
         buf.push(0xFF); // invalid key phase
 
-        assert_eq!(
-            RegisterCidPayload::decode(&buf),
-            Err(PayloadError::InvalidKeyPhase(0xFF))
-        );
+        assert_register_decode_err(&buf, PayloadError::InvalidKeyPhase(0xFF));
     }
 }

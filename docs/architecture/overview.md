@@ -164,7 +164,7 @@ VPN Client                                    Server
    |  6. DATA (IP packets) over TCP             |
    |<------------------------------------------>|
    |                                            |
-   |  7. REGISTER_CID (DCID, UDP-QSP keys)      |
+   |  7. REGISTER_CID (DCID, traffic secrets)   |
    |------------------------------------------->|
    |                                            |
    |  8. REGISTER_OK                            |

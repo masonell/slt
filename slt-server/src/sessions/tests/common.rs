@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    AEAD_IV_LEN, CipherSuite, Message, MessageLimits, PingPayload, PongPayload, RegisterCidPayload,
-    SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
-    UpgradeProbePayload, decode_message, encode_message,
+    CipherSuite, Message, MessageLimits, PingPayload, PongPayload, RegisterCidPayload,
+    SwitchAckPayload, SwitchToUdpPayload, UDP_QSP_TRAFFIC_SECRET_LEN, UdpReadyPayload,
+    UpgradeProbeAckPayload, UpgradeProbePayload, decode_message, encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{Cid, ServerUdpQspConfig};
@@ -190,12 +190,8 @@ pub(super) fn make_register_payload(
         client_to_server_cid,
         server_to_client_cid,
         cipher,
-        hp_tx: vec![0x11; cipher.hp_key_len()],
-        hp_rx: vec![0x11; cipher.hp_key_len()],
-        aead_tx: vec![0x22; cipher.aead_key_len()],
-        aead_rx: vec![0x22; cipher.aead_key_len()],
-        iv_tx: [0x33; AEAD_IV_LEN],
-        iv_rx: [0x33; AEAD_IV_LEN],
+        secret_tx: [0x11; UDP_QSP_TRAFFIC_SECRET_LEN],
+        secret_rx: [0x22; UDP_QSP_TRAFFIC_SECRET_LEN],
         pn_start: 0,
         pn_start_rx: 0,
         key_phase: false,
@@ -211,7 +207,7 @@ pub(super) async fn complete_udp_upgrade_handshake(
     peer: SocketAddr,
     upgrade_id: u64,
 ) -> u64 {
-    let keys = UdpQspKeys::from_register(register).unwrap();
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let probe_nonce = 0xDEAD_BEEF_CAFE_1234;
     let probe = UpgradeProbePayload {
         upgrade_id,

@@ -9,14 +9,14 @@ bit in the QUIC short header and both endpoints derive new keys locally using HK
 Key updates serve several purposes:
 
 - Limit the amount of data encrypted under any single key (cryptographic hygiene)
-- Provide forward secrecy within a session
+- Limit exposure from long-lived packet keys
 - Maintain traffic flow without control-plane intervention
 
 Key characteristics:
 
 - **In-band signaling**: No explicit rekey messages; the key phase bit signals transitions
 - **Unidirectional independence**: TX and RX directions rekey independently
-- **Local derivation**: Both endpoints derive new keys from current keys using HKDF
+- **Local derivation**: Both endpoints derive new keys from current traffic secrets using HKDF
 - **No REGISTER_CID retransmit**: Periodic rekeying does not involve the control plane
 
 ## 2. Key Phase Bit
@@ -95,69 +95,59 @@ This large margin ensures:
 
 ## 4. HKDF Key Derivation
 
-New keys are derived from current keys using HKDF-SHA256. The derivation is deterministic,
-so both endpoints compute identical next-generation keys. Output lengths follow the active
-cipher suite: AES-128-GCM derives 16-byte HP and AEAD keys, ChaCha20-Poly1305 derives
-32-byte HP and AEAD keys; both derive a 12-byte IV.
+UDP-QSP stores a 32-byte traffic secret per direction. Initial packet material is
+derived from the directional secret. Key updates replace the traffic secret using
+the RFC 9001/TLS 1.3 `"quic ku"` label, then re-derive AEAD packet material.
+Header-protection keys remain stable across key updates, matching RFC 9001.
 
 ### Per-Suite Sizes
 
-| Suite | HP key | AEAD key | IV | IKM (`hp || aead || iv`) |
-|-------|-------:|---------:|---:|-------------------------:|
-| AES-128-GCM        | 16 | 16 | 12 | 44 bytes |
-| ChaCha20-Poly1305  | 32 | 32 | 12 | 76 bytes |
+| Suite | Traffic secret | HP key | AEAD key | IV |
+|-------|---------------:|-------:|---------:|---:|
+| AES-128-GCM        | 32 | 16 | 16 | 12 |
+| ChaCha20-Poly1305  | 32 | 32 | 32 | 12 |
 
 ### Context Strings and Labels
 
 From `slt-core/src/crypto/udp_qsp/keys.rs`:
 
 ```rust
-const KEY_UPDATE_CONTEXT: &[u8] = b"slt-udp-qsp/key-update-v1";
-const KEY_UPDATE_HP_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/hp";
-const KEY_UPDATE_AEAD_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/aead";
-const KEY_UPDATE_IV_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/iv";
+const QUIC_KEY_LABEL: &[u8] = b"quic key";
+const QUIC_IV_LABEL: &[u8] = b"quic iv";
+const QUIC_HP_LABEL: &[u8] = b"quic hp";
+const QUIC_KU_LABEL: &[u8] = b"quic ku";
 ```
 
 ### Derivation Process
 
-**Step 1: Assemble input key material (IKM)**
-
-Concatenate current directional keys:
+**Step 1: Derive initial packet material**
 
 ```rust
-ikm = hp_key || aead_key || iv
-// Length: hp_len + aead_len + 12
-//   AES-128-GCM:       16 + 16 + 12 = 44 bytes
-//   ChaCha20-Poly1305: 32 + 32 + 12 = 76 bytes
+hp_key   = HKDF-Expand-Label(secret, "quic hp",  "", hp_len)
+aead_key = HKDF-Expand-Label(secret, "quic key", "", aead_len)
+iv       = HKDF-Expand-Label(secret, "quic iv",  "", 12)
 ```
 
-**Step 2: HKDF-Extract**
+**Step 2: Update the traffic secret**
 
 ```rust
-extract_input = KEY_UPDATE_CONTEXT || ikm
-prk = HMAC-SHA256(current_iv, extract_input)
+next_secret = HKDF-Expand-Label(secret, "quic ku", "", 32)
 ```
 
-The current IV is used as the salt. The output PRK is 32 bytes.
-
-**Step 3: HKDF-Expand**
-
-Derive each new key component with its specific info label, expanding to the active
-suite's lengths:
+**Step 3: Re-derive AEAD packet material**
 
 ```rust
-new_hp_key   = HKDF-Expand-SHA256(prk, KEY_UPDATE_HP_INFO,   hp_len)   // 16 or 32
-new_aead_key = HKDF-Expand-SHA256(prk, KEY_UPDATE_AEAD_INFO, aead_len) // 16 or 32
-new_iv       = HKDF-Expand-SHA256(prk, KEY_UPDATE_IV_INFO,   12)
+new_aead_key = HKDF-Expand-Label(next_secret, "quic key", "", aead_len)
+new_iv       = HKDF-Expand-Label(next_secret, "quic iv",  "", 12)
 ```
 
 ### What Gets Rotated
 
-Each directional rekey rotates all three key components:
+Each directional rekey rotates the traffic secret, AEAD key, and IV:
 
 | Component | AES-128-GCM | ChaCha20-Poly1305 | Purpose |
 |-----------|------------:|------------------:|---------|
-| HP key | 16 bytes | 32 bytes | Header protection (AES-128-ECB / ChaCha20) |
+| HP key | 16 bytes | 32 bytes | Header protection; stable across key updates |
 | AEAD key | 16 bytes | 32 bytes | Payload encryption (AES-128-GCM / ChaCha20-Poly1305) |
 | IV | 12 bytes | 12 bytes | Nonce construction |
 
@@ -166,38 +156,10 @@ remain unchanged, and vice versa.
 
 ### Implementation
 
-From `derive_direction_keys` in `keys.rs`:
-
 ```rust
-fn derive_direction_keys(
-    current: &DirectionKeys,
-    config: CipherConfig,
-) -> Result<DirectionKeys, QspCryptoError> {
-    // Assemble IKM with suite-specific lengths
-    let mut ikm = Vec::with_capacity(config.hp_key_len() + config.aead_key_len() + config.iv_len());
-    ikm.extend_from_slice(current.hp.key_material());
-    ikm.extend_from_slice(&current.aead.key);
-    ikm.extend_from_slice(&current.aead.iv);
-
-    // Extract
-    let mut extract_input = Vec::with_capacity(KEY_UPDATE_CONTEXT.len() + ikm.len());
-    extract_input.extend_from_slice(KEY_UPDATE_CONTEXT);
-    extract_input.extend_from_slice(&ikm);
-    let prk = hkdf_extract_sha256(&current.aead.iv, &extract_input)?;
-
-    // Expand to suite-specific lengths
-    let next_iv = hkdf_expand_sha256_vec(&prk, KEY_UPDATE_IV_INFO, config.iv_len())?;
-    Ok(DirectionKeys {
-        hp: HeaderProtectionKey::new(
-            config.hp,
-            &hkdf_expand_sha256_vec(&prk, KEY_UPDATE_HP_INFO, config.hp_key_len())?,
-        )?,
-        aead: PacketKey::new(
-            &hkdf_expand_sha256_vec(&prk, KEY_UPDATE_AEAD_INFO, config.aead_key_len())?,
-            &next_iv,
-            config.aead,
-        )?,
-    })
+fn next_generation(&self, config: CipherConfig) -> Result<Self, QspCryptoError> {
+    let next_secret = hkdf_expand_label_sha256(&self.secret, b"quic ku", b"", 32)?;
+    DirectionKeys::from_secret(&next_secret, config, false, Some(&self.hp))
 }
 ```
 

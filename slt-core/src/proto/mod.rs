@@ -24,8 +24,8 @@ pub use payloads::{
     CLOSE_PAYLOAD_LEN, CipherSuite, CloseCode, ClosePayload, HP_KEY_LEN, MAX_AEAD_KEY_LEN,
     MAX_CONTROL_FRAME_LEN, MAX_HP_KEY_LEN, PING_PAYLOAD_LEN, PayloadError, PingPayload,
     PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload,
-    SwitchAckPayload, SwitchToUdpPayload, UPGRADE_ID_PAYLOAD_LEN, UPGRADE_PROBE_PAYLOAD_LEN,
-    UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
+    SwitchAckPayload, SwitchToUdpPayload, UDP_QSP_TRAFFIC_SECRET_LEN, UPGRADE_ID_PAYLOAD_LEN,
+    UPGRADE_PROBE_PAYLOAD_LEN, UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
 };
 /// Message type identifiers.
 pub use types::MessageType;

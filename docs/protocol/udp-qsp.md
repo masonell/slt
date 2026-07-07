@@ -324,7 +324,7 @@ re-transmitting `REGISTER_CID`.
 ### Sender Behavior
 
 1. When `next_pn` crosses a multiple of `KEY_UPDATE_INTERVAL`:
-   - Derive new TX keys via HKDF from current keys
+   - Derive new TX keys via HKDF from the current traffic secret
    - Flip `tx_key_phase`
    - Continue sending with new keys
 
@@ -344,26 +344,20 @@ On packet receipt:
 
 ### Key Derivation
 
-New keys are derived using HKDF-SHA256 with suite-specific output lengths:
+Initial packet material is derived from the directional traffic secrets carried
+in `REGISTER_CID`. Key updates use the RFC 9001/TLS 1.3 label schedule:
 
 ```rust
-// Context for key derivation
-const KEY_UPDATE_CONTEXT: &[u8] = b"slt-udp-qsp/key-update-v1";
-const KEY_UPDATE_HP_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/hp";
-const KEY_UPDATE_AEAD_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/aead";
-const KEY_UPDATE_IV_INFO: &[u8] = b"slt-udp-qsp/key-update-v1/iv";
+hp_key   = HKDF-Expand-Label(secret, "quic hp",  "", hp_len)
+aead_key = HKDF-Expand-Label(secret, "quic key", "", aead_len)
+iv       = HKDF-Expand-Label(secret, "quic iv",  "", 12)
 
-// Extract: PRK = HMAC-SHA256(iv, context || ikm)
-// where ikm = hp_key || aead_key || iv (lengths follow the active suite)
-
-// Expand: output = HKDF-Expand-SHA256(PRK, info)
-new_hp_key   = HKDF-Expand(PRK, KEY_UPDATE_HP_INFO,   hp_len)   // 16 (AES) or 32 (ChaCha)
-new_aead_key = HKDF-Expand(PRK, KEY_UPDATE_AEAD_INFO, aead_len) // 16 (AES) or 32 (ChaCha)
-new_iv       = HKDF-Expand(PRK, KEY_UPDATE_IV_INFO,   12)
+next_secret = HKDF-Expand-Label(secret, "quic ku", "", 32)
 ```
 
-See [key-update.md](key-update.md) for the full derivation, including per-suite IKM
-and output lengths.
+Header-protection keys are derived from the initial directional secret and remain
+stable across key updates. AEAD keys and IVs are re-derived from each updated
+traffic secret. See [key-update.md](key-update.md) for the full derivation.
 
 ## 9. UDP-QSP Payload Format
 

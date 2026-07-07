@@ -25,7 +25,7 @@ All VPN messages are framed as:
 | AUTH              | 0x01  | Client -> Server| 116 bytes    | Client authentication request         |
 | AUTH_OK           | 0x02  | Server -> Client| 0 bytes      | Authentication accepted               |
 | AUTH_FAIL         | 0x03  | Server -> Client| 1 byte       | Authentication rejected               |
-| REGISTER_CID      | 0x04  | Client -> Server| Variable     | Register UDP-QSP CID and keys         |
+| REGISTER_CID      | 0x04  | Client -> Server| Variable     | Register UDP-QSP CID and traffic secrets |
 | REGISTER_OK       | 0x05  | Server -> Client| 21 bytes     | CID registration accepted             |
 | REGISTER_FAIL     | 0x06  | Server -> Client| 1 byte       | CID registration rejected             |
 | PING              | 0x07  | Bidirectional   | 8 bytes      | Keepalive ping                        |
@@ -126,24 +126,22 @@ Indicates authentication failure.
 ### REGISTER_CID (0x04)
 
 **Direction:** Client -> Server
-**Payload Size:** Variable; key-material lengths depend on `cipher` (see below)
+**Payload Size:** Variable; traffic secrets are fixed at 32 bytes each
 
-Registers a UDP-QSP connection ID and associated cryptographic keys for the session.
+Registers a UDP-QSP connection ID and associated directional traffic secrets for the session.
 
-`cipher` appears before the key material, so the receiver reads it first and uses
-it to determine the lengths of the HP, AEAD, and IV fields that follow.
+Packet-protection keys are derived locally from the traffic secrets using the
+RFC 9001/TLS 1.3 labels described in [key-update.md](key-update.md).
 
 #### Per-Cipher Key Sizes
 
 Key-material field widths are fixed per cipher and defined by the cipher, not by
 configuration:
 
-| Suite | `cipher` | HP key | AEAD key | IV | Tag |
-|-------|----------|-------:|---------:|---:|----:|
-| AES-128-GCM        | 0x01 | 16 | 16 | 12 | 16 |
-| ChaCha20-Poly1305  | 0x02 | 32 | 32 | 12 | 16 |
-
-Below, `HP = AEAD = 16` for AES-128-GCM and `HP = AEAD = 32` for ChaCha20-Poly1305.
+| Suite | `cipher` | Traffic secret | Derived HP key | Derived AEAD key | Derived IV | Tag |
+|-------|----------|---------------:|---------------:|-----------------:|-----------:|----:|
+| AES-128-GCM        | 0x01 | 32 | 16 | 16 | 12 | 16 |
+| ChaCha20-Poly1305  | 0x02 | 32 | 32 | 32 | 12 | 16 |
 
 #### Binary Layout
 
@@ -154,32 +152,24 @@ Below, `HP = AEAD = 16` for AES-128-GCM and `HP = AEAD = 32` for ChaCha20-Poly13
 | 1+N            | 1                 | server_to_client_cid_len| Length of server->client CID (0-20)   |
 | 2+N            | M                 | server_to_client_cid    | CID for server->client packets        |
 | 2+N+M          | 1                 | cipher                  | Cipher suite identifier               |
-| 3+N+M          | HP                | hp_tx                   | Header protection key (TX)            |
-| 3+N+M+HP        | HP                | hp_rx                   | Header protection key (RX)            |
-| 3+N+M+2*HP      | AEAD              | aead_tx                 | AEAD encryption key (TX)              |
-| 3+N+M+2*HP+AEAD | AEAD              | aead_rx                 | AEAD decryption key (RX)              |
-| 3+N+M+2*(HP+AEAD)         | 12       | iv_tx        | AEAD IV (TX)                          |
-| 3+N+M+2*(HP+AEAD)+12      | 12       | iv_rx        | AEAD IV (RX)                          |
-| 3+N+M+2*(HP+AEAD)+24      | 8        | pn_start     | Initial packet number (TX, server->client) |
-| 3+N+M+2*(HP+AEAD)+32      | 8        | pn_start_rx  | Initial packet number (RX, client->server) |
-| 3+N+M+2*(HP+AEAD)+40      | 1        | key_phase    | Initial key phase (0 or 1)            |
+| 3+N+M          | 32                | secret_tx               | Traffic secret for server->client packets |
+| 35+N+M         | 32                | secret_rx               | Traffic secret for client->server packets |
+| 67+N+M         | 8                 | pn_start                | Initial packet number (TX, server->client) |
+| 75+N+M         | 8                 | pn_start_rx             | Initial packet number (RX, client->server) |
+| 83+N+M         | 1                 | key_phase               | Initial key phase (0 or 1)            |
 
 Where:
 - N = client_to_server_cid_len (must be 20)
 - M = server_to_client_cid_len (0 to 20)
 
-Total length: `44 + 2*HP + 2*AEAD + N + M` bytes
-- AES-128-GCM: `108 + N + M` bytes (128-148 with N=20)
-- ChaCha20-Poly1305: `172 + N + M` bytes (192-212 with N=20)
+Total length: `84 + N + M` bytes (104-124 bytes with N=20).
 
 #### Field Descriptions
 
 - **client_to_server_cid** (N bytes): Destination CID for packets from client to server. Must be exactly 20 bytes.
 - **server_to_client_cid** (M bytes): Destination CID for packets from server to client. May be 0-20 bytes (Chrome uses 0).
 - **cipher** (1 byte): Cipher suite for packet protection.
-- **hp_tx/hp_rx** (HP bytes each): Header protection keys. AES-128-ECB keys for AES-128-GCM; ChaCha20 keys for ChaCha20-Poly1305.
-- **aead_tx/aead_rx** (AEAD bytes each): AEAD keys for payload protection (AES-128-GCM or ChaCha20-Poly1305).
-- **iv_tx/iv_rx** (12 bytes each): AEAD initialization vectors.
+- **secret_tx/secret_rx** (32 bytes each): Directional traffic secrets. The server uses `secret_tx` for server->client packets and `secret_rx` for client->server packets. The client uses the opposite directions.
 - **pn_start** (8 bytes): Initial packet number for server->client traffic.
 - **pn_start_rx** (8 bytes): Initial packet number expected from client->server traffic.
 - **key_phase** (1 byte): Initial key phase (0 = phase 0, 1 = phase 1).
@@ -187,8 +177,8 @@ Total length: `44 + 2*HP + 2*AEAD + N + M` bytes
 #### Key Direction Semantics
 
 From the server's perspective:
-- `*_tx` keys are used by the server to **send** packets to the client
-- `*_rx` keys are used by the server to **receive** (decrypt) packets from the client
+- `secret_tx` is used by the server to **send** packets to the client
+- `secret_rx` is used by the server to **receive** packets from the client
 
 The client uses the opposite directions.
 
@@ -208,14 +198,14 @@ accepts the suite if it is both supported and permitted by the server's
 1. `client_to_server_cid_len` MUST be exactly 20 bytes
 2. `server_to_client_cid_len` MUST be 0-20 bytes
 3. `cipher` MUST be a supported suite (0x01 or 0x02) and permitted by server policy
-4. The HP/AEAD/IV field lengths MUST match the sizes required by `cipher`, and the
-   overall payload length MUST match the expected total
+4. `secret_tx` and `secret_rx` MUST each be exactly 32 bytes, and the overall
+   payload length MUST match the expected total
 5. `key_phase` MUST be 0 or 1
 6. The 20-byte prefix of `client_to_server_cid` MUST NOT conflict with any other active connection
 
 A `cipher` value that is supported but disallowed by policy is rejected as
-`InvalidCipher`; key material whose lengths do not match `cipher` (or a payload
-that does not fit the expected layout) is rejected as `InvalidKeys`.
+`InvalidCipher`; payloads that do not fit the expected layout are rejected as
+`InvalidKeys`.
 
 ---
 
