@@ -146,6 +146,8 @@ impl HeaderProtectionKey {
 
         match self {
             Self::Aes128 { encrypt_key, .. } => {
+                // RFC 9001 Section 5.4.3: the mask is the first 5 bytes of a
+                // single-block AES-ECB encryption of the sample.
                 let mut out = [0u8; HP_SAMPLE_LEN];
                 unsafe {
                     // SAFETY: input and output are each 16-byte blocks and key schedule is initialized.
@@ -157,6 +159,10 @@ impl HeaderProtectionKey {
                 Ok(mask)
             }
             Self::ChaCha20 { key } => {
+                // RFC 9001 Section 5.4.4: the mask is ChaCha20 encryption of 5
+                // zero bytes under the header-protection key, with sample[0..4]
+                // as the little-endian block counter and sample[4..16] as the
+                // 12-byte nonce.
                 let counter = u32::from_le_bytes(
                     sample[..4]
                         .try_into()
@@ -165,8 +171,8 @@ impl HeaderProtectionKey {
                 let plaintext = [0u8; HP_MASK_LEN];
                 let mut mask = [0u8; HP_MASK_LEN];
                 unsafe {
-                    // SAFETY: output/input are valid for 5 bytes, key is 32 bytes, and nonce is the
-                    // remaining 12 bytes of the 16-byte HP sample.
+                    // SAFETY: output/input buffers are valid for 5 bytes, key is 32
+                    // bytes, and the nonce slice is valid for 12 bytes.
                     ffi::CRYPTO_chacha_20(
                         mask.as_mut_ptr(),
                         plaintext.as_ptr(),
@@ -714,7 +720,7 @@ struct OpenedPacketMeta {
     key_phase: bool,
 }
 
-/// QUIC per-packet AEAD nonce (RFC 9001 §5.3): the IV with its low 8 bytes
+/// QUIC per-packet AEAD nonce (RFC 9001 Section 5.3): the IV with its low 8 bytes
 /// XOR'd against the big-endian packet number. AEAD security requires that
 /// `(key, counter)` never repeat for a given key — callers must pass a
 /// monotonically unique packet number.
