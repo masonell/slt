@@ -12,8 +12,6 @@ use crate::cert::extract_domain_from_cert;
 use crate::client_id::parse_client_id;
 use crate::config_io::{load_server_config, read_cert_content};
 
-const DEFAULT_CLIENT_PORT: u16 = 443;
-
 #[derive(Serialize)]
 struct RecoverableClientConfig {
     network: RecoverableClientNetwork,
@@ -95,7 +93,7 @@ fn recoverable_client_config_output(
     let recoverable = RecoverableClientConfig {
         network: RecoverableClientNetwork {
             hostname: domain,
-            port: DEFAULT_CLIENT_PORT,
+            port: config.network.listen_tcp.port(),
         },
         tls: RecoverableClientTls {
             tls_ca: TlsMaterial::Pem(cert_pem),
@@ -133,15 +131,15 @@ mod tests {
 
     use super::*;
 
-    fn write_test_config_with_cert(cert_pem: &str) -> NamedTempFile {
+    fn write_test_config_with_cert_and_port(cert_pem: &str, port: u16) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         let config = format!(
             r#"
 server_secret = {{ hex = "0000000000000000000000000000000000000000000000000000000000000002" }}
 
 [network]
-listen_tcp = "0.0.0.0:443"
-listen_udp = "0.0.0.0:443"
+listen_tcp = "0.0.0.0:{port}"
+listen_udp = "0.0.0.0:{port}"
 nginx_tcp_upstream = "127.0.0.1:8080"
 nginx_udp_upstream = "127.0.0.1:8080"
 
@@ -173,6 +171,10 @@ enabled = true
         );
         file.write_all(config.as_bytes()).unwrap();
         file
+    }
+
+    fn write_test_config_with_cert(cert_pem: &str) -> NamedTempFile {
+        write_test_config_with_cert_and_port(cert_pem, 443)
     }
 
     fn write_test_config() -> NamedTempFile {
@@ -227,6 +229,22 @@ enabled = true
 
         let err = slt_core::config::ClientConfig::from_toml_str(&output).unwrap_err();
         assert!(err.to_string().contains("privkey_ed25519"));
+    }
+
+    #[test]
+    fn show_client_config_uses_server_listen_port() {
+        let file = write_test_config_with_cert_and_port(
+            "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA test\n-----END CERTIFICATE-----",
+            8443,
+        );
+        let output = recoverable_client_config_output(
+            file.path(),
+            "0102030405060708090a0b0c0d0e0f10",
+            Some("vpn.example.com"),
+        )
+        .unwrap();
+
+        assert!(output.contains("port = 8443"));
     }
 
     #[test]

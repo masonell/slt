@@ -8,9 +8,6 @@ use slt_core::types::{
     SharedSecret, TlsMaterial, TunConfig,
 };
 
-/// Default client port.
-const DEFAULT_PORT: u16 = 443;
-
 /// Build a complete client configuration.
 ///
 /// Creates a `ClientConfig` with the given parameters. The server certificate
@@ -22,7 +19,7 @@ const DEFAULT_PORT: u16 = 443;
 /// * `client_id` - 16-byte client identifier
 /// * `privkey` - Client's Ed25519 private key
 /// * `assigned_ipv4` - IP address assigned to the client's TUN interface
-/// * `domain` - Server domain name
+/// * `network` - Server endpoint clients should dial
 /// * `tls_server_cert_pem` - PEM-encoded server certificate (embedded for pinning)
 /// * `tun_config` - TUN configuration from server
 pub fn build_client_config(
@@ -30,16 +27,12 @@ pub fn build_client_config(
     client_id: slt_core::types::ClientId,
     privkey: PrivKeyEd25519,
     assigned_ipv4: Ipv4Addr,
-    domain: &str,
+    network: ClientNetworkConfig,
     tls_server_cert_pem: &str,
     tun_config: &TunConfig,
 ) -> ClientConfig {
     ClientConfig {
-        network: ClientNetworkConfig {
-            hostname: domain.to_string(),
-            port: DEFAULT_PORT,
-            ip: None,
-        },
+        network,
         tls: ClientTlsConfig {
             tls_ca: TlsMaterial::Pem(tls_server_cert_pem.to_string()),
             quic_ca: None,
@@ -74,7 +67,11 @@ mod tests {
             slt_core::types::ClientId([2u8; 16]),
             PrivKeyEd25519([3u8; 32]),
             "10.10.0.2".parse().unwrap(),
-            "vpn.example.com",
+            ClientNetworkConfig {
+                hostname: "vpn.example.com".to_string(),
+                port: 8443,
+                ip: None,
+            },
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
             &TunConfig {
                 tun_name: "tun0".to_string(),
@@ -85,7 +82,7 @@ mod tests {
         );
 
         assert_eq!(config.network.hostname, "vpn.example.com");
-        assert_eq!(config.network.port, 443);
+        assert_eq!(config.network.port, 8443);
         assert_eq!(config.identity.assigned_ipv4.to_string(), "10.10.0.2");
         assert_eq!(config.tun.tun_name, "tun0");
         assert_eq!(config.tun.tun_ipv4.to_string(), "10.10.0.2");

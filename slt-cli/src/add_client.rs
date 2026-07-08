@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::SigningKey;
-use slt_core::types::{ClientId, PrivKeyEd25519, PubKeyEd25519, ServerClient};
+use slt_core::types::{ClientId, ClientNetworkConfig, PrivKeyEd25519, PubKeyEd25519, ServerClient};
 
 use crate::cert::extract_domain_from_cert;
 use crate::client_config::build_client_config;
@@ -91,7 +91,11 @@ pub fn add_client(
         client_id,
         privkey,
         assigned_ipv4,
-        &domain,
+        ClientNetworkConfig {
+            hostname: domain,
+            port: config.network.listen_tcp.port(),
+            ip: None,
+        },
         &cert_pem,
         &config.tun,
     );
@@ -160,7 +164,7 @@ mod tests {
 
     use super::*;
 
-    fn write_test_config_with_cert(cert_pem: &str) -> NamedTempFile {
+    fn write_test_config_with_cert_and_port(cert_pem: &str, port: u16) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         let config = format!(
             r#"
@@ -168,8 +172,8 @@ server_secret = {{ hex = "000000000000000000000000000000000000000000000000000000
 clients = []
 
 [network]
-listen_tcp = "0.0.0.0:443"
-listen_udp = "0.0.0.0:443"
+listen_tcp = "0.0.0.0:{port}"
+listen_udp = "0.0.0.0:{port}"
 nginx_tcp_upstream = "127.0.0.1:8080"
 nginx_udp_upstream = "127.0.0.1:8080"
 
@@ -195,6 +199,10 @@ metrics_interval = "5m"
         );
         file.write_all(config.as_bytes()).unwrap();
         file
+    }
+
+    fn write_test_config_with_cert(cert_pem: &str) -> NamedTempFile {
+        write_test_config_with_cert_and_port(cert_pem, 443)
     }
 
     fn write_test_config() -> NamedTempFile {
@@ -249,6 +257,34 @@ metrics_interval = "5m"
         let client_config = ClientConfig::from_toml_str(&client_toml).unwrap();
         assert_eq!(client_config.tun.tun_ipv4, Ipv4Addr::new(10, 10, 0, 100));
         assert_eq!(client_config.tun.tun_prefix, 24);
+    }
+
+    #[test]
+    fn add_client_uses_server_listen_port() {
+        let file = write_test_config_with_cert_and_port(
+            "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA test\n-----END CERTIFICATE-----",
+            8443,
+        );
+        let output_dir = TempDir::new().unwrap();
+
+        let result = add_client(
+            file.path(),
+            output_dir.path(),
+            Some("vpn.example.com"),
+            "10.10.0.100",
+            true,
+        );
+        assert!(result.is_ok());
+
+        let client_path = fs::read_dir(output_dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let client_toml = fs::read_to_string(client_path).unwrap();
+        let client_config = ClientConfig::from_toml_str(&client_toml).unwrap();
+        assert_eq!(client_config.network.port, 8443);
     }
 
     #[test]
