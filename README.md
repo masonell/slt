@@ -32,7 +32,7 @@ See [System Design](docs/architecture/overview.md) and the [Protocol Reference](
 | `slt-server` | VPN server: TCP/UDP front doors, auth, sessions, TUN integration |
 | `slt-client` | VPN client: connection establishment, transport switching, TUN I/O |
 | `slt-cli` | The `slt` management CLI: init, keys/certs, client management, validation, `net` setup |
-| `slt-tools` | Helper CLIs for generating TLS/QUIC ClientHello packets |
+| `slt-tools` | Developer-only helper CLIs for generating TLS/QUIC ClientHello packets |
 
 An Android client (Kotlin/Compose) lives under [`android/`](android/).
 

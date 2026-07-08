@@ -253,7 +253,7 @@ SLT is organized into five Rust crates:
 | `slt-server` | VPN server with TCP/UDP front doors, client authentication, session management, TUN integration |
 | `slt-client` | VPN client with connection establishment, authentication, transport switching |
 | `slt-cli` | WireGuard-style management CLI (`slt` binary) for project init, key/cert generation, and client management |
-| `slt-tools` | CLI utilities for generating TLS/QUIC ClientHello packets |
+| `slt-tools` | Developer-only CLI utilities for generating TLS/QUIC ClientHello packets |
 
 ## Key Protocol Concepts
 

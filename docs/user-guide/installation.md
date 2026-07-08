@@ -72,9 +72,10 @@ cargo build --release
 
 The initial build will compile BoringSSL from source, which may take several minutes. Subsequent builds will be faster due to caching.
 
-## Binaries
+## Release Binaries
 
-After a successful build, the following binaries are available in `target/release/`:
+Release tarballs and source builds provide the following runtime and
+management binaries:
 
 | Binary | Description |
 |--------|-------------|
@@ -82,9 +83,13 @@ After a successful build, the following binaries are available in `target/releas
 | `slt-server` | VPN server - handles client authentication, session management, and traffic routing |
 | `slt` | CLI utility - generates keys, certificates, and manages configuration |
 
-### Additional Tools
+For source builds, these binaries are available in `target/release/`.
 
-The `slt-tools` crate provides debugging utilities (also in `target/release/`):
+### Development Tools
+
+The `slt-tools` crate is for repository development and debugging. These
+utilities are built by a source workspace build, but they are not included in
+release tarballs and are not required for normal deployments:
 
 | Binary | Description |
 |--------|-------------|
