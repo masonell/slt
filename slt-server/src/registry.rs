@@ -16,6 +16,15 @@ use crate::sessions::SessionTx;
 pub enum CidInsertError {
     /// The CID prefix is already registered to another session.
     PrefixCollision(CidPrefix),
+    /// The caller's session is no longer active for the client.
+    StaleSession {
+        /// Client whose session attempted the insert.
+        client_id: ClientId,
+        /// Session that attempted the insert.
+        session_id: u64,
+        /// Current active session for the client, if one exists.
+        active_session_id: Option<u64>,
+    },
 }
 
 /// Internal CID routing entry.
@@ -200,19 +209,41 @@ impl SessionRegistry {
 
     /// Insert a CID prefix for routing.
     ///
-    /// Returns an error if the prefix is owned by a different session.
+    /// Returns an error if the caller is no longer active or the prefix is
+    /// owned by a different session.
     ///
     /// # Errors
     ///
-    /// Returns `CidInsertError::PrefixCollision` if another session already
-    /// registered the same prefix.
+    /// Returns `CidInsertError::StaleSession` if `session_id` is not the
+    /// active session for `client_id`, or `CidInsertError::PrefixCollision` if
+    /// another session already registered the same prefix.
     pub fn insert_cid(
         &self,
+        client_id: ClientId,
         session_id: u64,
         prefix: CidPrefix,
         tx: SessionTx,
     ) -> Result<(), CidInsertError> {
         let mut inner = self.inner.write();
+        let active_session_id = inner
+            .sessions
+            .get(&client_id)
+            .map(|handle| handle.session_id);
+        if active_session_id != Some(session_id) {
+            warn!(
+                session_id = session_id,
+                active_session_id = ?active_session_id,
+                client_id = %client_id,
+                prefix = ?prefix,
+                "stale session attempted CID route insert"
+            );
+            return Err(CidInsertError::StaleSession {
+                client_id,
+                session_id,
+                active_session_id,
+            });
+        }
+
         if let Some(route) = inner.cid_routes.get(&prefix)
             && route.session_id != session_id
         {
@@ -328,7 +359,7 @@ mod tests {
 
         let prefix = CidPrefix::from([0xAA; MAX_DCID_LEN]);
         registry
-            .insert_cid(handle.session_id, prefix, make_tx())
+            .insert_cid(handle.client_id, handle.session_id, prefix, make_tx())
             .unwrap();
         assert!(registry.has_cid(prefix));
         assert!(registry.lookup_ip(ip_old.addr()).is_some());
@@ -344,24 +375,97 @@ mod tests {
     #[test]
     fn registry_rejects_cid_collisions() {
         let registry = SessionRegistry::new();
+        let client_a = ClientId([0x11; 16]);
+        let client_b = ClientId([0x22; 16]);
+        let (handle_a, old) = registry.register_session(
+            client_a,
+            AssignedIp(Ipv4Addr::new(10, 0, 0, 1)),
+            make_tx(),
+            CancellationToken::new(),
+        );
+        assert!(old.is_none());
+        let (handle_b, old) = registry.register_session(
+            client_b,
+            AssignedIp(Ipv4Addr::new(10, 0, 0, 2)),
+            make_tx(),
+            CancellationToken::new(),
+        );
+        assert!(old.is_none());
         let prefix = CidPrefix::from([0xBB; MAX_DCID_LEN]);
 
-        registry.insert_cid(1, prefix, make_tx()).unwrap();
+        registry
+            .insert_cid(handle_a.client_id, handle_a.session_id, prefix, make_tx())
+            .unwrap();
         assert!(matches!(
-            registry.insert_cid(2, prefix, make_tx()),
+            registry.insert_cid(handle_b.client_id, handle_b.session_id, prefix, make_tx()),
             Err(CidInsertError::PrefixCollision(p)) if p == prefix
         ));
     }
 
     #[test]
+    fn registry_rejects_replaced_session_cid_insert() {
+        let registry = SessionRegistry::new();
+        let client_id = ClientId([0x33; 16]);
+        let old_ip = AssignedIp(Ipv4Addr::new(10, 0, 0, 1));
+        let new_ip = AssignedIp(Ipv4Addr::new(10, 0, 0, 2));
+        let old_prefix = CidPrefix::from([0xAB; MAX_DCID_LEN]);
+        let stale_prefix = CidPrefix::from([0xAC; MAX_DCID_LEN]);
+
+        let (old_handle, old) =
+            registry.register_session(client_id, old_ip, make_tx(), CancellationToken::new());
+        assert!(old.is_none());
+        registry
+            .insert_cid(
+                old_handle.client_id,
+                old_handle.session_id,
+                old_prefix,
+                make_tx(),
+            )
+            .unwrap();
+
+        let (new_handle, old) =
+            registry.register_session(client_id, new_ip, make_tx(), CancellationToken::new());
+        assert!(old.is_some());
+
+        assert!(matches!(
+            registry.insert_cid(
+                old_handle.client_id,
+                old_handle.session_id,
+                stale_prefix,
+                make_tx(),
+            ),
+            Err(CidInsertError::StaleSession {
+                client_id: err_client_id,
+                session_id,
+                active_session_id: Some(active_session_id),
+            }) if err_client_id == client_id
+                && session_id == old_handle.session_id
+                && active_session_id == new_handle.session_id
+        ));
+        assert!(!registry.has_cid(old_prefix));
+        assert!(!registry.has_cid(stale_prefix));
+    }
+
+    #[test]
     fn registry_keeps_selected_cids() {
         let registry = SessionRegistry::new();
+        let (handle, old) = registry.register_session(
+            ClientId([0x44; 16]),
+            AssignedIp(Ipv4Addr::new(10, 0, 0, 1)),
+            make_tx(),
+            CancellationToken::new(),
+        );
+        assert!(old.is_none());
         let keep = CidPrefix::from([0xCC; MAX_DCID_LEN]);
         let drop = CidPrefix::from([0xDD; MAX_DCID_LEN]);
 
-        registry.insert_cid(42, keep, make_tx()).unwrap();
-        registry.insert_cid(42, drop, make_tx()).unwrap();
-        registry.remove_cids_for_session_except(42, keep);
+        registry
+            .insert_cid(handle.client_id, handle.session_id, keep, make_tx())
+            .unwrap();
+        registry
+            .insert_cid(handle.client_id, handle.session_id, drop, make_tx())
+            .unwrap();
+        registry.remove_cids_for_session_except(handle.session_id, keep);
 
         assert!(registry.has_cid(keep));
         assert!(!registry.has_cid(drop));

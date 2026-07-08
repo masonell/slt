@@ -16,6 +16,7 @@ use super::common::{
     spawn_session, spawn_session_with_udp_qsp_config,
 };
 use crate::test_support::TlsDuplexStream;
+use crate::{AssignedIp, ClientId};
 
 async fn assert_register_response_fail(
     client: &mut TlsDuplexStream,
@@ -271,8 +272,20 @@ async fn session_register_rejects_prefix_collision() {
     let dcid = Cid::from([0xCD; MAX_DCID_LEN]);
     let scid = Cid::from([0xDE; MAX_DCID_LEN]);
     let (dummy_tx, _dummy_rx) = mpsc::channel(1);
+    let (dummy_handle, old) = registry.register_session(
+        ClientId([0xCD; 16]),
+        AssignedIp(Ipv4Addr::new(10, 0, 0, 10)),
+        dummy_tx.clone(),
+        CancellationToken::new(),
+    );
+    assert!(old.is_none());
     registry
-        .insert_cid(999, dcid.prefix().unwrap(), dummy_tx)
+        .insert_cid(
+            dummy_handle.client_id,
+            dummy_handle.session_id,
+            dcid.prefix().unwrap(),
+            dummy_tx,
+        )
         .unwrap();
 
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);

@@ -610,7 +610,7 @@ mod tests {
     use slt_core::config::ServerConfig;
     use slt_core::transport::gro_datagram_ranges;
     use slt_core::types::{
-        QUIC_DCID_PREFIX_LEN, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig,
+        CidPrefix, QUIC_DCID_PREFIX_LEN, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig,
         ServerTransportConfig, SharedSecret, TlsMaterial, TunConfig,
     };
     use tokio::sync::mpsc;
@@ -620,7 +620,8 @@ mod tests {
     use super::{PeerEntry, QuicEndpoint, QuicNatState};
     use crate::metrics::Metrics;
     use crate::registry::SessionRegistry;
-    use crate::sessions::SessionEvent;
+    use crate::sessions::{SessionEvent, SessionTx};
+    use crate::{AssignedIp, ClientId};
 
     /// The GRO stride-split math must produce one range per coalesced datagram,
     /// with the last range clipped to `len`, and never panic/infinite-loop on a
@@ -704,6 +705,26 @@ mod tests {
         buf.extend_from_slice(dcid_prefix);
         buf.extend_from_slice(&[0u8; 16]); // some payload
         buf
+    }
+
+    fn register_test_cid_route(
+        registry: &SessionRegistry,
+        dcid_prefix: [u8; QUIC_DCID_PREFIX_LEN],
+        tx: SessionTx,
+    ) {
+        let client_id = ClientId([dcid_prefix[0]; 16]);
+        let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, dcid_prefix[0]));
+        let (handle, old) =
+            registry.register_session(client_id, assigned, tx.clone(), CancellationToken::new());
+        assert!(old.is_none());
+        registry
+            .insert_cid(
+                handle.client_id,
+                handle.session_id,
+                CidPrefix::from(dcid_prefix),
+                tx,
+            )
+            .unwrap();
     }
 
     fn make_quic_long_header() -> Vec<u8> {
@@ -1000,9 +1021,7 @@ mod tests {
         // Register a CID prefix
         let dcid_prefix = [0xAA; QUIC_DCID_PREFIX_LEN];
         let (tx, mut rx) = mpsc::channel(1);
-        registry
-            .insert_cid(1, slt_core::types::CidPrefix::from(dcid_prefix), tx)
-            .unwrap();
+        register_test_cid_route(&registry, dcid_prefix, tx);
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let cancel = CancellationToken::new();
@@ -1147,9 +1166,7 @@ mod tests {
         let dcid_prefix = [0xCC; QUIC_DCID_PREFIX_LEN];
         let (tx, rx) = mpsc::channel(1);
         drop(rx); // Close the receiver to make try_send fail
-        registry
-            .insert_cid(1, slt_core::types::CidPrefix::from(dcid_prefix), tx)
-            .unwrap();
+        register_test_cid_route(&registry, dcid_prefix, tx);
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let cancel = CancellationToken::new();
@@ -1188,9 +1205,7 @@ mod tests {
         let dcid_prefix = [0xDD; QUIC_DCID_PREFIX_LEN];
         let (tx, rx) = mpsc::channel(1);
         let _rx = rx;
-        registry
-            .insert_cid(1, slt_core::types::CidPrefix::from(dcid_prefix), tx)
-            .unwrap();
+        register_test_cid_route(&registry, dcid_prefix, tx);
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
         let cancel = CancellationToken::new();

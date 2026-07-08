@@ -43,7 +43,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// - Sends `RegisterFail` with `InvalidCid` if the payload is malformed
     /// - Sends `RegisterFail` with `InvalidKeys` if key derivation fails
-    /// - Sends `RegisterFail` with `InvalidCid` if the DCID prefix collides
+    /// - Sends `RegisterFail` with `InvalidCid` if the session is stale or the
+    ///   DCID prefix collides
     /// - Resets upgrade-tracking state and waits for explicit upgrade commit
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_register_cid(
@@ -115,21 +116,42 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             return Ok(SessionControl::Continue);
         };
 
-        if let Err(CidInsertError::PrefixCollision(_)) =
-            self.registry
-                .insert_cid(self.session_id, dcid_prefix, self.tx.clone())
-        {
-            warn!(
-                session_id = self.session_id,
-                client_id = %self.client_id,
-                active_transport = ?self.active_transport,
-                dcid_prefix = ?dcid_prefix,
-                reason = "prefix_collision",
-                "register_cid rejected"
-            );
-            self.send_register_fail(RegisterFailCode::InvalidCid)
-                .await?;
-            return Ok(SessionControl::Continue);
+        match self.registry.insert_cid(
+            self.client_id,
+            self.session_id,
+            dcid_prefix,
+            self.tx.clone(),
+        ) {
+            Ok(()) => {}
+            Err(CidInsertError::PrefixCollision(_)) => {
+                warn!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    active_transport = ?self.active_transport,
+                    dcid_prefix = ?dcid_prefix,
+                    reason = "prefix_collision",
+                    "register_cid rejected"
+                );
+                self.send_register_fail(RegisterFailCode::InvalidCid)
+                    .await?;
+                return Ok(SessionControl::Continue);
+            }
+            Err(CidInsertError::StaleSession {
+                active_session_id, ..
+            }) => {
+                warn!(
+                    session_id = self.session_id,
+                    active_session_id = ?active_session_id,
+                    client_id = %self.client_id,
+                    active_transport = ?self.active_transport,
+                    dcid_prefix = ?dcid_prefix,
+                    reason = "stale_session",
+                    "register_cid rejected"
+                );
+                self.send_register_fail(RegisterFailCode::InvalidCid)
+                    .await?;
+                return Ok(SessionControl::Continue);
+            }
         }
 
         self.registry
