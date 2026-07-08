@@ -3,24 +3,47 @@ use slt_core::config::ClientConfig;
 use crate::runtime::observer::ClientEvent;
 use crate::transport::socket_protector::SocketKind;
 
+/// Errors returned through the Android UniFFI boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum SltInteropError {
+    /// The supplied client configuration could not be parsed or validated.
     #[error("invalid config: {detail}")]
-    InvalidConfig { detail: String },
+    InvalidConfig {
+        /// Human-readable error detail safe to report to Android.
+        detail: String,
+    },
+    /// A caller supplied an argument that cannot be used by the native runtime.
     #[error("invalid argument: {detail}")]
-    InvalidArgument { detail: String },
+    InvalidArgument {
+        /// Human-readable error detail safe to report to Android.
+        detail: String,
+    },
+    /// The native VPN session failed to start.
     #[error("session start failed: {detail}")]
-    SessionStart { detail: String },
+    SessionStart {
+        /// Human-readable error detail safe to report to Android.
+        detail: String,
+    },
+    /// An Android platform callback failed or returned unusable data.
     #[error("platform callback failed: {detail}")]
-    Platform { detail: String },
+    Platform {
+        /// Human-readable error detail safe to report to Android.
+        detail: String,
+    },
 }
 
+/// Parsed client configuration details exposed to Android before starting a session.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ClientConfigSummary {
+    /// IPv4 address assigned to the client tunnel interface.
     pub assigned_ipv4: String,
+    /// Tunnel MTU configured for the client.
     pub tun_mtu: i32,
+    /// Server hostname from the client network configuration.
     pub server_host: String,
+    /// Server TCP/UDP port from the client network configuration.
     pub server_port: i32,
+    /// Client identity identifier from the client configuration.
     pub client_id: String,
 }
 
@@ -38,15 +61,16 @@ impl TryFrom<&ClientConfig> for ClientConfigSummary {
     }
 }
 
+/// Android-provided services required by the native transport runtime.
 #[uniffi::export(with_foreign)]
 pub trait PlatformServices: Send + Sync {
     /// Protect an already-created transport socket before Rust connects or sends.
     ///
-    /// This callback is intentionally synchronous: Android implementations must
-    /// only perform the local `VpnService.protect(fd)` call and bind the socket
-    /// to the currently selected underlying network. Those operations are
-    /// required before the socket is used and should not perform DNS, network
-    /// I/O, retries, or other blocking work. Blocking host lookup belongs in
+    /// The runtime invokes this callback synchronously on the socket setup path.
+    /// Android implementations must return promptly and must not block
+    /// indefinitely. The implementation should only perform the local
+    /// `VpnService.protect(fd)` call and bind the socket to the currently
+    /// selected underlying network. Blocking host lookup belongs in
     /// [`Self::resolve_host`], which the runtime invokes on a blocking worker.
     fn protect_socket(&self, fd: i32, kind: SocketKind) -> bool;
 
@@ -62,9 +86,11 @@ pub trait PlatformServices: Send + Sync {
 /// `handle` / `seq`.
 #[uniffi::export(with_foreign)]
 pub trait NativeSessionCallback: Send + Sync {
+    /// Deliver a native runtime event to the Android session owner.
     fn on_event(&self, event: ClientEvent);
 }
 
+/// Parse and validate a client TOML configuration for Android UI previews.
 #[uniffi::export]
 pub fn validate_client_config(config_toml: &str) -> Result<ClientConfigSummary, SltInteropError> {
     let config =
@@ -74,11 +100,13 @@ pub fn validate_client_config(config_toml: &str) -> Result<ClientConfigSummary, 
     ClientConfigSummary::try_from(&config)
 }
 
+/// Initialize file-backed native logging for the Android process.
 #[uniffi::export]
 pub fn init_log_sink(file_path: &str) -> bool {
     super::logging::init(file_path)
 }
 
+/// Start a native VPN session using a protected TUN file descriptor.
 #[uniffi::export]
 pub fn start_session(
     config_toml: &str,
