@@ -5,6 +5,7 @@ import dev.slt.android.profile.rules.exportVpnRouteRules
 import dev.slt.android.profile.rules.parseVpnRouteRules
 import dev.slt.android.profile.rules.vpnRouteActionForAddress
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
@@ -121,6 +122,15 @@ class VpnRouteRulesTest {
     }
 
     @Test
+    fun rejectsIpv6Routes() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            parseVpnRouteRules("2001:db8::/32")
+        }
+
+        assertEquals("Line 1: IPv6 routes are not supported", error.message)
+    }
+
+    @Test
     fun exportsRouteRules() {
         val text = exportVpnRouteRules(
             listOf(
@@ -156,5 +166,6 @@ class VpnRouteRulesTest {
             VpnRouteRule(cidr = "10.0.0.0/8", excluded = true),
             vpnRouteActionForAddress(routes, "10.20.1.1"),
         )
+        assertNull(vpnRouteActionForAddress(routes, "2001:4860:4860::8888"))
     }
 }

@@ -12,6 +12,10 @@ import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.VpnRouteRule
 import dev.slt.android.profile.rules.dnsExcludedRouteWarnings
 import dev.slt.android.profile.rules.dnsHostRoutesToAdd
+import dev.slt.android.profile.rules.exportDnsServers
+import dev.slt.android.profile.rules.exportVpnRouteRules
+import dev.slt.android.profile.rules.parseDnsSettings
+import dev.slt.android.profile.rules.parseVpnRouteRules
 import java.net.InetAddress
 
 internal class VpnProfileApplier(
@@ -25,11 +29,27 @@ internal class VpnProfileApplier(
         get() = service.packageName
 
     fun apply(builder: VpnService.Builder, profile: SltProfile) {
-        applyRoutes(builder, profile.metadata.routes)
-        applyDnsRoutes(builder, profile.metadata.routes, profile.metadata.dns)
-        applyDns(builder, profile.metadata.dns)
+        val routes = validateRoutes(profile.metadata.routes)
+        val dns = validateDns(profile.metadata.dns)
+        applyRoutes(builder, routes)
+        applyDnsRoutes(builder, routes, dns)
+        applyDns(builder, dns)
         applyAppRules(builder, profile.metadata.appRules)
     }
+
+    private fun validateRoutes(routes: List<VpnRouteRule>): List<VpnRouteRule> =
+        try {
+            parseVpnRouteRules(exportVpnRouteRules(routes))
+        } catch (error: IllegalArgumentException) {
+            throw IllegalArgumentException("Invalid VPN routes: ${error.message}", error)
+        }
+
+    private fun validateDns(dns: DnsSettings): DnsSettings =
+        try {
+            parseDnsSettings(dns.mode, exportDnsServers(dns.servers))
+        } catch (error: IllegalArgumentException) {
+            throw IllegalArgumentException("Invalid DNS settings: ${error.message}", error)
+        }
 
     private fun applyRoutes(builder: VpnService.Builder, routes: List<VpnRouteRule>) {
         if (routes.isEmpty()) {

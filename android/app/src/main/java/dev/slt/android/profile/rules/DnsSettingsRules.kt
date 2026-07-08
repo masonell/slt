@@ -76,7 +76,7 @@ private fun parseNumericDnsServer(server: String, lineNumber: Int): String {
             throw IllegalArgumentException("Line $lineNumber: DNS server is not valid IPv6")
         }
         require(parsed is Inet6Address) { "Line $lineNumber: DNS server is not valid IPv6" }
-        parsed
+        throw IllegalArgumentException("Line $lineNumber: IPv6 DNS servers are not supported")
     } else {
         require(server.contains('.')) { "Line $lineNumber: DNS server must be a numeric IP address" }
         require(server.all { it.isDigit() || it == '.' }) {
@@ -96,7 +96,7 @@ private fun parseNumericDnsServer(server: String, lineNumber: Int): String {
         InetAddress.getByAddress(bytes)
     }
 
-    require(address is Inet4Address || address is Inet6Address) {
+    require(address is Inet4Address) {
         "Line $lineNumber: DNS server must be a numeric IP address"
     }
     return checkNotNull(address.hostAddress) { "DNS server address has no host address" }

@@ -118,7 +118,7 @@ private fun parsedHostRouteForAddress(address: String): ParsedVpnRouteRule {
         else -> error("unsupported address family")
     }
     val canonicalAddress = InetAddress.getByAddress(parsedAddress.address).hostAddress
-    return parseVpnRouteRuleLine("$canonicalAddress/$prefixLength", 1)
+    return parseVpnRouteRuleLine("$canonicalAddress/$prefixLength", 1, allowIpv6 = true)
 }
 
 private val parsedRouteComparator = Comparator<ParsedVpnRouteRule> { left, right ->
@@ -127,7 +127,11 @@ private val parsedRouteComparator = Comparator<ParsedVpnRouteRule> { left, right
         ?: compareNetworkBytes(left.networkBytes, right.networkBytes)
 }
 
-private fun parseVpnRouteRuleLine(line: String, lineNumber: Int): ParsedVpnRouteRule {
+private fun parseVpnRouteRuleLine(
+    line: String,
+    lineNumber: Int,
+    allowIpv6: Boolean = false,
+): ParsedVpnRouteRule {
     val excluded = line.startsWith('!')
     val cidr = if (excluded) line.drop(1).trim() else line
     require(cidr.isNotEmpty()) { "Line $lineNumber: route CIDR is empty" }
@@ -143,7 +147,10 @@ private fun parseVpnRouteRuleLine(line: String, lineNumber: Int): ParsedVpnRoute
         ?: throw IllegalArgumentException("Line $lineNumber: route prefix is not a number")
     val maxPrefixLength = when (address) {
         is Inet4Address -> 32
-        is Inet6Address -> 128
+        is Inet6Address -> {
+            require(allowIpv6) { "Line $lineNumber: IPv6 routes are not supported" }
+            128
+        }
         else -> error("unsupported address family")
     }
     require(prefixLength in 0..maxPrefixLength) {

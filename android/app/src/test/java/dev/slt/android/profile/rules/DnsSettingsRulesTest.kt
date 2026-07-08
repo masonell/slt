@@ -18,7 +18,7 @@ class DnsSettingsRulesTest {
             DnsMode.Custom,
             """
             1.1.1.1
-            8.8.8.8, 2001:4860:4860::8888
+            8.8.8.8
             1.1.1.1
             """.trimIndent(),
         )
@@ -29,7 +29,6 @@ class DnsSettingsRulesTest {
                 servers = listOf(
                     "1.1.1.1",
                     "8.8.8.8",
-                    "2001:4860:4860:0:0:0:0:8888",
                 ),
             ),
             dns,
@@ -57,6 +56,15 @@ class DnsSettingsRulesTest {
         }
 
         assertEquals("Line 1: DNS server must be a numeric IP address", error.message)
+    }
+
+    @Test
+    fun rejectsIpv6DnsServers() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            parseDnsSettings(DnsMode.Custom, "2001:4860:4860::8888")
+        }
+
+        assertEquals("Line 1: IPv6 DNS servers are not supported", error.message)
     }
 
     @Test
