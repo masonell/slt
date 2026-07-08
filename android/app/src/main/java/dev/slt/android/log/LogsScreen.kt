@@ -1,7 +1,5 @@
 package dev.slt.android.log
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.Orientation
@@ -52,6 +50,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import dev.slt.android.ui.copySensitiveText
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -122,10 +121,7 @@ internal fun LogsScreen(
                 actions = {
                     TextButton(
                         onClick = {
-                            val clipboard = context.getSystemService(ClipboardManager::class.java)
-                            clipboard?.setPrimaryClip(
-                                ClipData.newPlainText("SLT log", logViewerState.copyText),
-                            )
+                            context.copySensitiveText("SLT log", logViewerState.copyText)
                             Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
                         },
                     ) {
