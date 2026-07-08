@@ -26,13 +26,15 @@ class MainActivity : ComponentActivity() {
         }
 
     private val notificationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             // Notification permission is optional for VPN startup: Android shows the
             // active tunnel through the system VPN indicator, and users can enable
             // app notifications later from system settings. The notification adds
             // drawer status and a Stop action, so denial still proceeds into VPN
             // preparation.
-            prepareVpnAndStart()
+            handleVpnStartAction(
+                vpnStartActionAfterNotificationPermissionResult(permissionGrant(granted)),
+            )
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,14 +51,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestStart() {
-        if (
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            return
-        }
+        val hasNotificationPermission =
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
-        prepareVpnAndStart()
+        handleVpnStartAction(vpnStartActionForNotificationPermission(hasNotificationPermission))
+    }
+
+    private fun handleVpnStartAction(action: VpnStartAction) {
+        when (action) {
+            VpnStartAction.RequestNotificationPermission ->
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            VpnStartAction.PrepareVpn -> prepareVpnAndStart()
+        }
     }
 
     private fun prepareVpnAndStart() {

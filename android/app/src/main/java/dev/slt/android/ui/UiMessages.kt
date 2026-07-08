@@ -31,11 +31,27 @@ internal enum class UiMessageSeverity {
     Error,
 }
 
+internal data class SensitiveClipboardText(
+    val label: String,
+    val text: String,
+    val booleanExtras: Map<String, Boolean>,
+)
+
+internal fun sensitiveClipboardText(label: String, text: String): SensitiveClipboardText =
+    SensitiveClipboardText(
+        label = label,
+        text = text,
+        booleanExtras = mapOf(ClipDescription.EXTRA_IS_SENSITIVE to true),
+    )
+
 internal fun Context.copySensitiveText(label: String, text: String) {
     val clipboardManager = getSystemService(ClipboardManager::class.java)
-    val clip = ClipData.newPlainText(label, text)
+    val clipboardText = sensitiveClipboardText(label, text)
+    val clip = ClipData.newPlainText(clipboardText.label, clipboardText.text)
     clip.description.extras = PersistableBundle().apply {
-        putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+        clipboardText.booleanExtras.forEach { (key, value) ->
+            putBoolean(key, value)
+        }
     }
     clipboardManager.setPrimaryClip(clip)
 }

@@ -20,10 +20,16 @@ import java.util.UUID
 import kotlin.text.get
 
 private val Context.profileDataStore by preferencesDataStore(name = "profiles")
+private val ACTIVE_PROFILE_ID = stringPreferencesKey("activeProfileId")
 
-class ProfileRepository(context: Context) {
-    private val appContext = context.applicationContext
-    private val profilesDir = File(appContext.filesDir, "profiles")
+class ProfileRepository internal constructor(
+    private val profilesDir: File,
+    private val activeProfileStore: ActiveProfileStore,
+) {
+    constructor(context: Context) : this(
+        profilesDir = File(context.applicationContext.filesDir, "profiles"),
+        activeProfileStore = DataStoreActiveProfileStore(context.applicationContext),
+    )
 
     suspend fun loadState(): ProfileStoreState =
         withContext(Dispatchers.IO) {
@@ -93,17 +99,11 @@ class ProfileRepository(context: Context) {
         }
 
     suspend fun setActiveProfileId(id: String?) {
-        appContext.profileDataStore.edit { preferences ->
-            if (id == null) {
-                preferences.remove(ACTIVE_PROFILE_ID)
-            } else {
-                preferences[ACTIVE_PROFILE_ID] = id
-            }
-        }
+        activeProfileStore.setActiveProfileId(id)
     }
 
     private suspend fun activeProfileId(): String? =
-        appContext.profileDataStore.data.first()[ACTIVE_PROFILE_ID]
+        activeProfileStore.activeProfileId()
 
     private fun listProfiles(activeProfileId: String?): List<ProfileListItem> {
         val profileDirs = profilesDir.listFiles { file -> file.isDirectory }.orEmpty()
@@ -201,7 +201,29 @@ class ProfileRepository(context: Context) {
 
     private companion object {
         const val TAG = "ProfileRepository"
-        val ACTIVE_PROFILE_ID = stringPreferencesKey("activeProfileId")
         val saveMutex = Mutex()
+    }
+}
+
+internal interface ActiveProfileStore {
+    suspend fun activeProfileId(): String?
+
+    suspend fun setActiveProfileId(id: String?)
+}
+
+private class DataStoreActiveProfileStore(
+    private val context: Context,
+) : ActiveProfileStore {
+    override suspend fun activeProfileId(): String? =
+        context.profileDataStore.data.first()[ACTIVE_PROFILE_ID]
+
+    override suspend fun setActiveProfileId(id: String?) {
+        context.profileDataStore.edit { preferences ->
+            if (id == null) {
+                preferences.remove(ACTIVE_PROFILE_ID)
+            } else {
+                preferences[ACTIVE_PROFILE_ID] = id
+            }
+        }
     }
 }
