@@ -91,11 +91,12 @@ pub fn up(
 ///
 /// Returns an error if the config cannot be read or parsed.
 pub fn down(config_path: &Path, masquerade: bool, quiet: bool) -> Result<()> {
+    let tun = load_tun_config(config_path)?;
+
     if masquerade {
         delete_nft_table_if_exists();
     }
 
-    let tun = load_tun_config(config_path)?;
     run_command_ignore_error(
         "ip",
         &[
