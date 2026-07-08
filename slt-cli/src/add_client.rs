@@ -3,19 +3,99 @@
 //! Generates a new client configuration with Ed25519 keypair, assigns the specified
 //! IP address, and updates the server configuration.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions, Permissions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::Ipv4Addr;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::SigningKey;
+use slt_core::config::ServerConfig;
 use slt_core::types::{ClientId, ClientNetworkConfig, PrivKeyEd25519, PubKeyEd25519, ServerClient};
 
 use crate::cert::extract_domain_from_cert;
 use crate::client_config::build_client_config;
-use crate::config_io::{
-    load_server_config, read_cert_content, save_client_config, save_server_config,
-};
+use crate::config_io::{read_cert_content, save_client_config};
+
+struct LockedServerConfigFile {
+    file: File,
+}
+
+impl LockedServerConfigFile {
+    fn open(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .with_context(|| {
+                format!(
+                    "failed to open server config for locking: {}",
+                    path.display()
+                )
+            })?;
+        lock_server_config(&file, path)?;
+        Ok(Self { file })
+    }
+
+    fn load(&mut self, path: &Path) -> Result<ServerConfig> {
+        self.file
+            .seek(SeekFrom::Start(0))
+            .with_context(|| format!("failed to seek server config {}", path.display()))?;
+
+        let mut contents = String::new();
+        self.file
+            .read_to_string(&mut contents)
+            .with_context(|| format!("failed to read server config from {}", path.display()))?;
+
+        ServerConfig::from_toml_str(&contents)
+            .with_context(|| format!("failed to parse server config from {}", path.display()))
+    }
+
+    fn save(&mut self, path: &Path, config: &ServerConfig) -> Result<()> {
+        let contents =
+            toml::to_string_pretty(config).context("failed to serialize server config")?;
+        fs::set_permissions(path, Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "failed to restrict permissions on server config {}",
+                path.display()
+            )
+        })?;
+
+        // Keep persistence on the locked inode; replacing the path would move
+        // new lockers to a different inode while this operation is still active.
+        self.file
+            .seek(SeekFrom::Start(0))
+            .with_context(|| format!("failed to seek server config {}", path.display()))?;
+        self.file
+            .set_len(0)
+            .with_context(|| format!("failed to truncate server config {}", path.display()))?;
+        self.file
+            .write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write server config to {}", path.display()))?;
+        self.file
+            .flush()
+            .with_context(|| format!("failed to flush server config {}", path.display()))
+    }
+}
+
+fn lock_server_config(file: &File, path: &Path) -> Result<()> {
+    loop {
+        // SAFETY: `file.as_raw_fd()` is a valid borrowed file descriptor for
+        // this call, and `flock` neither stores nor takes ownership of it.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result == 0 {
+            return Ok(());
+        }
+
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err)
+                .with_context(|| format!("failed to lock server config {}", path.display()));
+        }
+    }
+}
 
 /// Add a new client to the server configuration.
 ///
@@ -37,7 +117,8 @@ pub fn add_client(
     ip: &str,
     quiet: bool,
 ) -> Result<()> {
-    let mut config = load_server_config(config_path)?;
+    let mut locked_config = LockedServerConfigFile::open(config_path)?;
+    let mut config = locked_config.load(config_path)?;
 
     let assigned_ipv4: Ipv4Addr = ip
         .parse()
@@ -122,14 +203,14 @@ pub fn add_client(
     // credentials the server does not recognize. A server-only orphan — a client
     // entry whose file was never written — is inert and removable, whereas a
     // client-only orphan hands a user a key that auth rejects with no clue why.
-    save_server_config(config_path, &config)?;
+    locked_config.save(config_path, &config)?;
 
     // Revert the server mutation if the client config cannot be persisted, so the
     // two files never disagree. A failed restore leaves the inert server orphan
     // above (the safe direction); the reported error then carries both failures.
     if let Err(client_err) = save_client_config(&client_path, &client_config) {
         config.clients.truncate(original_client_count);
-        if let Err(restore_err) = save_server_config(config_path, &config) {
+        if let Err(restore_err) = locked_config.save(config_path, &config) {
             bail!(
                 "failed to write client config to {}, and failed to roll back the server config: {restore_err}",
                 client_path.display()
@@ -157,12 +238,15 @@ pub fn add_client(
 mod tests {
     use std::fs;
     use std::io::Write;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
 
     use rcgen::{CertificateParams, DnType, KeyPair, SanType};
     use slt_core::config::ClientConfig;
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
+    use crate::config_io::load_server_config;
 
     fn write_test_config_with_cert_and_port(cert_pem: &str, port: u16) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -312,6 +396,53 @@ metrics_interval = "5m"
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already assigned"));
+    }
+
+    #[test]
+    fn add_client_waits_for_server_config_lock() {
+        let file = write_test_config();
+        let output_dir = TempDir::new().unwrap();
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(file.path())
+            .unwrap();
+        lock_server_config(&lock_file, file.path()).unwrap();
+
+        let config_path = file.path().to_path_buf();
+        let output_path = output_dir.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let result = add_client(
+                &config_path,
+                &output_path,
+                Some("vpn.example.com"),
+                "10.10.0.100",
+                true,
+            );
+            tx.send(result.is_ok()).unwrap();
+        });
+
+        let early_result = rx.recv_timeout(Duration::from_millis(100));
+        let waited_for_lock = matches!(early_result, Err(RecvTimeoutError::Timeout));
+
+        drop(lock_file);
+
+        let add_succeeded = match early_result {
+            Ok(succeeded) => succeeded,
+            Err(RecvTimeoutError::Timeout) => rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(RecvTimeoutError::Disconnected) => false,
+        };
+
+        handle.join().unwrap();
+        assert!(
+            waited_for_lock,
+            "add_client should wait for the config lock"
+        );
+        assert!(add_succeeded);
+
+        let config = load_server_config(file.path()).unwrap();
+        assert_eq!(config.clients.len(), 1);
     }
 
     #[test]

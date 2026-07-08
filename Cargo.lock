@@ -1806,6 +1806,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "hex",
+ "libc",
  "quiche",
  "rand",
  "rcgen",
