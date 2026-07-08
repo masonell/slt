@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local = socket.local_addr()?;
 
     let mut config = quic_client_chrome_config()?;
+    config.set_application_protos(&[args.alpn.as_bytes()])?;
 
     let scid = ConnectionId::from_ref(&[]);
 
