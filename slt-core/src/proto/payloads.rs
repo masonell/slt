@@ -447,8 +447,10 @@ impl RegisterOkPayload {
             });
         }
 
+        let cid_offset = 1;
+        let cid_end = cid_offset + cid_len;
         Ok(Self {
-            client_to_server_cid: Cid::try_from(&payload[1..=cid_len])
+            client_to_server_cid: Cid::try_from(&payload[cid_offset..cid_end])
                 .map_err(|_| PayloadError::InvalidClientToServerCidLen(cid_len))?,
         })
     }
