@@ -254,7 +254,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     /// - Data: Forwards to TUN device if valid
     /// - `UpgradeProbe`: Sends UDP probe ack and may trigger TCP switch commit
     /// - Close: Initiates session shutdown
-    /// - `RegisterCid`: Handles CID registration
+    /// - `RegisterCid`: Fails as a protocol violation
     /// - Other control messages: Silently ignored
     ///
     /// # Parameters
@@ -303,7 +303,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             }
             Message::UpgradeProbe { payload } => self.handle_upgrade_probe(payload).await,
             Message::Close { .. } => Ok(self.peer_close_control(false)),
-            Message::RegisterCid { payload } => self.handle_register_cid(payload).await,
+            Message::RegisterCid { .. } => Err(SessionError::ProtocolViolation),
             Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. }

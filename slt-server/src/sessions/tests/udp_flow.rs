@@ -425,6 +425,74 @@ async fn valid_udp_packet_from_new_peer_updates_reply_peer() {
 }
 
 #[tokio::test]
+async fn register_cid_over_udp_is_protocol_violation() {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+
+    let dcid = Cid::from([0xB5; MAX_DCID_LEN]);
+    let scid = Cid::from([0xB6; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut reg_buf = Vec::new();
+    register.encode(&mut reg_buf).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
+    let peer = SocketAddr::from(([127, 0, 0, 1], 45680));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1204,
+    )
+    .await;
+
+    let mut udp_register_frame = Vec::new();
+    encode_message(
+        Message::RegisterCid { payload: &reg_buf },
+        &mut udp_register_frame,
+    )
+    .unwrap();
+    let udp_register = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx + 1,
+            register.key_phase,
+            &udp_register_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer,
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: udp_register,
+    }))
+    .await
+    .unwrap();
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(SessionError::ProtocolViolation)));
+}
+
+#[tokio::test]
 async fn session_ignores_udp_control_messages() {
     let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
