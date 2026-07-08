@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -79,7 +80,7 @@ internal class ConnectionTestRunner(
             ),
         )
         val outcome = try {
-            httpClient.get(url)
+            httpClient.get(url, host, addresses)
         } catch (error: IOException) {
             ConnectionTestOutcome.Failure("GET failed: ${error.readableMessage()}")
         }
@@ -161,7 +162,7 @@ internal object JvmHostResolver : HostResolver {
 
 internal fun interface TestHttpClient {
     @Throws(IOException::class)
-    fun get(url: String): ConnectionTestOutcome
+    fun get(url: String, host: String, addresses: List<InetAddress>): ConnectionTestOutcome
 }
 
 internal object OkHttpTestHttpClient : TestHttpClient {
@@ -171,14 +172,32 @@ internal object OkHttpTestHttpClient : TestHttpClient {
         .callTimeout(5, TimeUnit.SECONDS)
         .build()
 
-    override fun get(url: String): ConnectionTestOutcome =
-        client.newCall(Request.Builder().url(url).build()).execute().use { response ->
-            val code = response.code
-            if (code in 200..399) {
-                ConnectionTestOutcome.Success(code)
-            } else {
-                ConnectionTestOutcome.Failure("GET returned HTTP $code")
+    override fun get(url: String, host: String, addresses: List<InetAddress>): ConnectionTestOutcome =
+        client.newBuilder()
+            .dns(PinnedHostDns(host, addresses))
+            .build()
+            .newCall(Request.Builder().url(url).build())
+            .execute()
+            .use { response ->
+                val code = response.code
+                if (code in 200..399) {
+                    ConnectionTestOutcome.Success(code)
+                } else {
+                    ConnectionTestOutcome.Failure("GET returned HTTP $code")
+                }
             }
+}
+
+internal class PinnedHostDns(
+    private val host: String,
+    private val addresses: List<InetAddress>,
+    private val fallback: Dns = Dns.SYSTEM,
+) : Dns {
+    override fun lookup(hostname: String): List<InetAddress> =
+        if (hostname.equals(host, ignoreCase = true)) {
+            addresses
+        } else {
+            fallback.lookup(hostname)
         }
 }
 

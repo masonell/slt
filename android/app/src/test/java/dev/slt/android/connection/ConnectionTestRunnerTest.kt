@@ -7,6 +7,7 @@ import java.io.IOException
 import java.net.InetAddress
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import okhttp3.Dns
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,7 +49,7 @@ class ConnectionTestRunnerTest {
     fun runnerStreamsResolvingCheckingDoneWithResolvedAddressesAndStatus() = runBlocking {
         val runner = ConnectionTestRunner(
             resolver = HostResolver { listOf(InetAddress.getByName("8.8.8.8")) },
-            httpClient = TestHttpClient { ConnectionTestOutcome.Success(204) },
+            httpClient = TestHttpClient { _, _, _ -> ConnectionTestOutcome.Success(204) },
         )
 
         val entries = runner.run(
@@ -70,10 +71,56 @@ class ConnectionTestRunnerTest {
     }
 
     @Test
+    fun runnerPassesResolvedAddressesToHttpClient() = runBlocking {
+        val resolvedAddresses = listOf(
+            InetAddress.getByName("203.0.113.10"),
+            InetAddress.getByName("203.0.113.11"),
+        )
+        var httpHost: String? = null
+        var httpAddresses: List<InetAddress>? = null
+        val runner = ConnectionTestRunner(
+            resolver = HostResolver { resolvedAddresses },
+            httpClient = TestHttpClient { _, host, addresses ->
+                httpHost = host
+                httpAddresses = addresses
+                ConnectionTestOutcome.Success(204)
+            },
+        )
+
+        runner.run(
+            profile(
+                testUrls = listOf("https://example.com/check"),
+                routes = emptyList(),
+            ),
+        ).toList()
+
+        assertEquals("example.com", httpHost)
+        assertEquals(resolvedAddresses, httpAddresses)
+    }
+
+    @Test
+    fun pinnedHostDnsReturnsResolvedAddressesForOriginalHost() {
+        val resolvedAddresses = listOf(InetAddress.getByName("203.0.113.10"))
+        val fallback = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> =
+                listOf(InetAddress.getByName("198.51.100.20"))
+        }
+        val dns = PinnedHostDns(
+            host = "example.com",
+            addresses = resolvedAddresses,
+            fallback = fallback,
+        )
+
+        assertEquals(resolvedAddresses, dns.lookup("example.com"))
+        assertEquals(resolvedAddresses, dns.lookup("EXAMPLE.COM"))
+        assertEquals(listOf(InetAddress.getByName("198.51.100.20")), dns.lookup("redirect.example.com"))
+    }
+
+    @Test
     fun runnerReportsDnsFailureAsDoneEntry() = runBlocking {
         val runner = ConnectionTestRunner(
             resolver = HostResolver { throw IOException("host not found") },
-            httpClient = TestHttpClient { ConnectionTestOutcome.Success(200) },
+            httpClient = TestHttpClient { _, _, _ -> ConnectionTestOutcome.Success(200) },
         )
 
         val entries = runner.run(
