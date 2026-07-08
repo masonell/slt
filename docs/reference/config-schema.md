@@ -17,7 +17,12 @@ Quick reference for SLT configuration fields. For detailed explanations, see [Us
 | `udp_nat_max_entries` | integer | No | `1024` | > 0 |
 | `session_queue_size` | integer | No | `256` | > 0 |
 | `max_auth_inflight` | integer | No | `128` | > 0 |
+| `tcp_connection_cap` | integer | No | `512 * detected CPU count` | > 0 |
 | `clients` | array of tables | Yes | - | At least one entry |
+
+`tcp_connection_cap` is evaluated on the host that deserializes the config when
+the field is omitted. Size it against nginx `worker_connections` and nginx's
+connection timeout window for pass-through TCP traffic.
 
 ### `[network]`
 
@@ -58,6 +63,7 @@ and refuses to start if any field mismatches.
 | `auth_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `idle_timeout` | duration | No | `"5m"` | > 0, <= 1h |
 | `metrics_interval` | duration | No | `"5m"` | > 0, <= 1h |
+| `tcp_classification_timeout` | duration | No | `"60s"` | > 0, <= 1h |
 
 ### `[transport.udp_qsp]` (Server)
 
@@ -85,6 +91,7 @@ server_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456
 udp_nat_max_entries = 1024
 session_queue_size = 256
 max_auth_inflight = 128
+tcp_connection_cap = 1024
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -108,6 +115,7 @@ ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "5m"
 metrics_interval = "5m"
+tcp_classification_timeout = "60s"
 
 [transport.udp_qsp]
 allowed_ciphers = ["aes-128-gcm", "chacha20-poly1305"]
@@ -332,5 +340,6 @@ nginx_tcp_upstream = "127.0.0.1:8080"
 | `RequireUdpNeedsUpgrade` | `require_udp = true` without `enable_upgrade = true` |
 | `ZeroSessionQueueSize` | Server `session_queue_size` is 0 |
 | `ZeroMaxAuthInflight` | Server `max_auth_inflight` is 0 |
+| `ZeroTcpConnectionCap` | Server `tcp_connection_cap` is 0 |
 | `ZeroUdpNatMaxEntries` | Server `udp_nat_max_entries` is 0 |
 | `EmptyUdpQspAllowedCiphers` | Server `transport.udp_qsp.allowed_ciphers` is empty |

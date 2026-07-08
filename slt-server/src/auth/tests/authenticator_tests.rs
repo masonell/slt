@@ -45,11 +45,13 @@ fn authenticator_from_config_tracks_enabled_clients() {
             auth_timeout: std::time::Duration::from_secs(3),
             idle_timeout: std::time::Duration::from_secs(4),
             metrics_interval: std::time::Duration::from_secs(5),
+            tcp_classification_timeout: std::time::Duration::from_secs(6),
         },
         transport: ServerTransportConfig::default(),
         udp_nat_max_entries: 32,
         session_queue_size: 8,
         max_auth_inflight: 128,
+        tcp_connection_cap: 512,
         clients: vec![client_enabled, client_disabled],
     };
 

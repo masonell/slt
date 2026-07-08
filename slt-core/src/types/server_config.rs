@@ -194,13 +194,19 @@ pub struct ServerTimingConfig {
         with = "humantime_serde"
     )]
     pub metrics_interval: Duration,
+    /// Maximum time to wait for enough `ClientHello` bytes to classify TCP.
+    #[serde(
+        default = "crate::config::default_tcp_classification_timeout",
+        with = "humantime_serde"
+    )]
+    pub tcp_classification_timeout: Duration,
 }
 
 impl Default for ServerTimingConfig {
     fn default() -> Self {
         use crate::config::{
             default_auth_timeout, default_idle_timeout, default_metrics_interval, default_ping_max,
-            default_ping_min,
+            default_ping_min, default_tcp_classification_timeout,
         };
         Self {
             ping_min: default_ping_min(),
@@ -208,6 +214,7 @@ impl Default for ServerTimingConfig {
             auth_timeout: default_auth_timeout(),
             idle_timeout: default_idle_timeout(),
             metrics_interval: default_metrics_interval(),
+            tcp_classification_timeout: default_tcp_classification_timeout(),
         }
     }
 }
@@ -225,6 +232,10 @@ impl ServerTimingConfig {
         validate_timeout("auth_timeout", self.auth_timeout)?;
         validate_timeout("idle_timeout", self.idle_timeout)?;
         validate_timeout("metrics_interval", self.metrics_interval)?;
+        validate_timeout(
+            "tcp_classification_timeout",
+            self.tcp_classification_timeout,
+        )?;
         Ok(())
     }
 }
@@ -249,6 +260,7 @@ mod tests {
             auth_timeout: Duration::from_secs(10),
             idle_timeout: Duration::from_mins(1),
             metrics_interval: Duration::from_mins(5),
+            tcp_classification_timeout: Duration::from_secs(60),
         }
     }
 
@@ -378,6 +390,10 @@ mod tests {
             config.metrics_interval,
             crate::config::DEFAULT_METRICS_INTERVAL
         );
+        assert_eq!(
+            config.tcp_classification_timeout,
+            crate::config::DEFAULT_TCP_CLASSIFICATION_TIMEOUT
+        );
     }
 
     #[test]
@@ -389,6 +405,19 @@ mod tests {
             err,
             ConfigError::ZeroTimeout {
                 field: "metrics_interval"
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_tcp_classification_timeout() {
+        let mut config = test_timing_config();
+        config.tcp_classification_timeout = Duration::ZERO;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroTimeout {
+                field: "tcp_classification_timeout"
             }
         ));
     }

@@ -155,6 +155,7 @@ The server configuration file contains:
 # Pre-shared secret for client classification
 server_secret = { hex = "hex-encoded-32-byte-secret" }
 max_auth_inflight = 128
+tcp_connection_cap = 1024
 
 [network]
 listen_tcp = "0.0.0.0:443"        # TCP listener address
@@ -178,6 +179,7 @@ ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "5m"
 metrics_interval = "5m"
+tcp_classification_timeout = "60s"
 
 # Client entries are added by `slt add-client`
 [[clients]]

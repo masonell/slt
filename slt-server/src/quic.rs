@@ -677,11 +677,13 @@ mod tests {
                 auth_timeout: Duration::from_secs(10),
                 idle_timeout: Duration::from_mins(1),
                 metrics_interval: Duration::from_mins(5),
+                tcp_classification_timeout: Duration::from_secs(60),
             },
             transport: ServerTransportConfig::default(),
             udp_nat_max_entries: 1024,
             session_queue_size: 256,
             max_auth_inflight: 128,
+            tcp_connection_cap: 512,
             clients: vec![],
         }
     }

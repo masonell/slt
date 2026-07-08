@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use slt_core::config::ServerConfig;
+use slt_core::config::{ServerConfig, default_tcp_connection_cap};
 use slt_core::types::{
     ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, ServerTransportConfig, SharedSecret,
     TlsMaterial, TunConfig,
@@ -126,6 +126,7 @@ pub fn init(
         udp_nat_max_entries: 1024,
         session_queue_size: DEFAULT_SESSION_QUEUE_SIZE,
         max_auth_inflight: DEFAULT_MAX_AUTH_INFLIGHT,
+        tcp_connection_cap: default_tcp_connection_cap(),
         clients: Vec::new(),
     };
 

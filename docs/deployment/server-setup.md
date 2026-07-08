@@ -158,6 +158,7 @@ Create the server configuration at `/etc/slt/server.toml`:
 
 server_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
 max_auth_inflight = 128
+tcp_connection_cap = 1024
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -180,6 +181,11 @@ client_id = "0102030405060708090a0b0c0d0e0f10"
 pubkey_ed25519 = "client-public-key-in-hex-32-bytes-here"
 assigned_ipv4 = "10.10.0.2"
 ```
+
+Set `tcp_connection_cap` with nginx capacity in mind. Pass-through TCP
+connections occupy front-door slots until nginx closes them, so nginx timeout
+settings such as `client_header_timeout`, `client_body_timeout`, `send_timeout`,
+and `keepalive_timeout` should remain bounded for the deployment.
 
 See [Configuration Reference](../user-guide/configuration.md) for all options.
 

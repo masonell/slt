@@ -17,6 +17,9 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 /// Default metrics reporting interval.
 pub const DEFAULT_METRICS_INTERVAL: Duration = Duration::from_mins(5);
 
+/// Default TCP `ClientHello` classification timeout.
+pub const DEFAULT_TCP_CLASSIFICATION_TIMEOUT: Duration = Duration::from_mins(1);
+
 /// Default UDP-QSP registration timeout (client only).
 pub const DEFAULT_REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -57,6 +60,12 @@ pub const fn default_idle_timeout() -> Duration {
 #[must_use]
 pub const fn default_metrics_interval() -> Duration {
     DEFAULT_METRICS_INTERVAL
+}
+
+/// Returns the default TCP `ClientHello` classification timeout.
+#[must_use]
+pub const fn default_tcp_classification_timeout() -> Duration {
+    DEFAULT_TCP_CLASSIFICATION_TIMEOUT
 }
 
 /// Returns the default UDP-QSP registration timeout (client only).

@@ -116,6 +116,29 @@ The implementation in `slt-core/src/classifier.rs` uses a streaming parser that:
 - Performs constant-time HMAC comparisons using `boring::memcmp::eq`.
 - Returns early on any parse error with `PASS` verdict.
 
+TCP sockets that have not reached a definite verdict stay in the front-door
+classifier until more data arrives or `tcp_classification_timeout` expires.
+They are not forwarded to nginx as ordinary `PASS` traffic. The front door
+counts classifying sockets and nginx-proxied sockets against
+`tcp_connection_cap`; definite `CLAIM` connections leave this cap before VPN
+TLS/AUTH admission. When the cap is full, the server first evicts the oldest
+classifier socket that has not received any bytes. If no empty classifier socket
+is available, the newly accepted socket follows nginx-style overload handling:
+it gets one nonblocking peek and can proceed only if the already-buffered bytes
+classify as `CLAIM`; otherwise it is dropped.
+
+Incomplete TCP buffers are retried quickly while their visible length changes.
+If repeated peeks see the same incomplete byte count, classification backs off
+up to one second between retries until more bytes arrive or the timeout expires.
+
+Connections classified as `PASS` stay counted against `tcp_connection_cap` while
+the front door proxies bytes to nginx. Their lifetime is intentionally bounded by
+nginx's connection timeout configuration, including `client_header_timeout`,
+`client_body_timeout`, `send_timeout`, and `keepalive_timeout`; the front door
+does not add a shorter pass-through idle timeout. Size `tcp_connection_cap`
+relative to nginx's `worker_connections` budget, and keep nginx timeouts within
+the deployment's intended connection-retention window.
+
 After a TCP connection is classified as `CLAIM`, the server applies
 `max_auth_inflight` admission control before TLS termination and AUTH. This cap
 limits concurrent VPN-claimed connections in the TLS/AUTH phase. It does not

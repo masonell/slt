@@ -23,6 +23,7 @@ server_secret = { hex = "..." }  # 32-byte hex object
 udp_nat_max_entries = 1024
 session_queue_size = 256
 max_auth_inflight = 128
+tcp_connection_cap = 1024
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -46,6 +47,7 @@ ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "5m"
 metrics_interval = "5m"
+tcp_classification_timeout = "60s"
 
 [[clients]]
 client_id = "..."
@@ -68,7 +70,14 @@ enabled = true
 | `udp_nat_max_entries` | integer | No | Maximum UDP NAT peers for nginx forwarding. Default: `1024`. Must be > 0. |
 | `session_queue_size` | integer | No | Bounded queue size for per-session event channels. Default: `256`. Must be > 0. |
 | `max_auth_inflight` | integer | No | Maximum VPN-claimed TCP connections concurrently in TLS/AUTH. Default: `128`. Must be > 0. |
+| `tcp_connection_cap` | integer | No | Maximum classifying and nginx-proxied TCP connections held by the front door. Default: `512 * detected CPU count` on the host loading the config. Must be > 0. |
 | `clients` | array of [ServerClient](#clients-section) | Yes | List of authorized clients. |
+
+`tcp_connection_cap` should be sized relative to nginx's `worker_connections`
+and timeout configuration. Connections classified as pass-through stay in this
+front-door cap until nginx closes them through settings such as
+`client_header_timeout`, `client_body_timeout`, `send_timeout`, and
+`keepalive_timeout`.
 
 #### Network Section
 
@@ -104,6 +113,7 @@ enabled = true
 | `auth_timeout` | duration | No | `10s` | Timeout for authentication handshake. Must be > 0 and <= 1 hour. |
 | `idle_timeout` | duration | No | `5m` | Idle connection timeout. Must be > 0 and <= 1 hour. |
 | `metrics_interval` | duration | No | `5m` | Metrics snapshot logging interval. Must be > 0 and <= 1 hour. |
+| `tcp_classification_timeout` | duration | No | `60s` | Maximum time to wait for enough TCP `ClientHello` bytes to classify. Must be > 0 and <= 1 hour. |
 
 #### Clients Section
 
@@ -124,6 +134,7 @@ server_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456
 udp_nat_max_entries = 1024
 session_queue_size = 256
 max_auth_inflight = 128
+tcp_connection_cap = 1024
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -147,6 +158,7 @@ ping_max = "30s"
 auth_timeout = "10s"
 idle_timeout = "5m"
 metrics_interval = "5m"
+tcp_classification_timeout = "60s"
 
 [[clients]]
 client_id = "0102030405060708090a0b0c0d0e0f10"
@@ -590,4 +602,5 @@ Both server and client configurations are validated when loaded. Common validati
 | `RequireUdpNeedsUpgrade` | `require_udp = true` but `enable_upgrade = false` | Set `enable_upgrade = true` |
 | `ZeroSessionQueueSize` | Server `session_queue_size` is 0 | Use positive integer |
 | `ZeroMaxAuthInflight` | Server `max_auth_inflight` is 0 | Use positive integer |
+| `ZeroTcpConnectionCap` | Server `tcp_connection_cap` is 0 | Use positive integer |
 | `ZeroUdpNatMaxEntries` | Server `udp_nat_max_entries` is 0 | Use positive integer |

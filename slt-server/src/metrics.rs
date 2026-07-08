@@ -15,6 +15,9 @@ pub struct Metrics {
     claimed: AtomicU64,
     passed: AtomicU64,
     dropped: AtomicU64,
+    tcp_frontdoor_cap_drops: AtomicU64,
+    tcp_empty_classification_evictions: AtomicU64,
+    tcp_classification_timeouts: AtomicU64,
     upstream_send_failures: AtomicU64,
     tun_session_queue_full_drops: AtomicU64,
     tun_writer_queue_full_drops: AtomicU64,
@@ -53,6 +56,12 @@ pub struct MetricsSnapshot {
     pub passed: u64,
     /// Classified connections dropped.
     pub dropped: u64,
+    /// TCP front-door drops while the classifying/proxying cap was full.
+    pub tcp_frontdoor_cap_drops: u64,
+    /// Empty classifying TCP connections evicted to admit newer sockets.
+    pub tcp_empty_classification_evictions: u64,
+    /// TCP connections dropped after classification timeout.
+    pub tcp_classification_timeouts: u64,
     /// Failed sends to upstream UDP socket.
     pub upstream_send_failures: u64,
     /// TUN packets dropped because a session event queue was full.
@@ -139,6 +148,33 @@ impl Metrics {
     pub fn inc_dropped(&self) {
         let count = inc(&self.dropped);
         trace!(dropped = count, "Connection dropped");
+    }
+
+    /// Increment TCP front-door admission-cap drop counter.
+    pub fn inc_tcp_frontdoor_cap_drops(&self) {
+        let count = inc(&self.tcp_frontdoor_cap_drops);
+        trace!(
+            tcp_frontdoor_cap_drops = count,
+            "TCP front-door admission cap dropped connection"
+        );
+    }
+
+    /// Increment empty TCP classification eviction counter.
+    pub fn inc_tcp_empty_classification_evictions(&self) {
+        let count = inc(&self.tcp_empty_classification_evictions);
+        trace!(
+            tcp_empty_classification_evictions = count,
+            "TCP front-door evicted empty classifying connection"
+        );
+    }
+
+    /// Increment TCP classification timeout counter.
+    pub fn inc_tcp_classification_timeouts(&self) {
+        let count = inc(&self.tcp_classification_timeouts);
+        trace!(
+            tcp_classification_timeouts = count,
+            "TCP front-door classification timeout"
+        );
     }
 
     /// Increment upstream-send-failure counter.
@@ -332,6 +368,11 @@ impl Metrics {
             claimed: self.claimed.load(Ordering::Relaxed),
             passed: self.passed.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            tcp_frontdoor_cap_drops: self.tcp_frontdoor_cap_drops.load(Ordering::Relaxed),
+            tcp_empty_classification_evictions: self
+                .tcp_empty_classification_evictions
+                .load(Ordering::Relaxed),
+            tcp_classification_timeouts: self.tcp_classification_timeouts.load(Ordering::Relaxed),
             upstream_send_failures: self.upstream_send_failures.load(Ordering::Relaxed),
             tun_session_queue_full_drops: self.tun_session_queue_full_drops.load(Ordering::Relaxed),
             tun_writer_queue_full_drops: self.tun_writer_queue_full_drops.load(Ordering::Relaxed),

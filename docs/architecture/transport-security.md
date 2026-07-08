@@ -63,8 +63,12 @@ The server caps concurrent claimed connections in this TLS/AUTH phase with
 limit after authentication completes.
 
 **Unknown connections**: Connections that fail the classifier check are passed
-through to nginx without TLS termination. The wrapper pipes bytes
+through to nginx without TLS termination. TCP connections that have not provided
+enough bytes for a definite classifier verdict remain in the front door until
+`tcp_classification_timeout` or an admission-cap decision; they are not proxied
+to nginx as ordinary unknown traffic. The wrapper pipes bytes
 bidirectionally between the client and nginx's TLS endpoint on `127.0.0.1:8080`.
+Nginx timeout settings bound the lifetime of these pass-through proxy slots.
 This ensures real HTTPS and HTTP/3 traffic reaches nginx unchanged.
 
 ## 3. UDP-QSP Security (QUIC-shaped, Custom)

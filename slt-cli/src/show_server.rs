@@ -86,12 +86,17 @@ pub fn show_server(config_path: &Path, reveal_secrets: bool) -> Result<()> {
     println!("  Auth Timeout:   {:?}", config.timing.auth_timeout);
     println!("  Idle Timeout:   {:?}", config.timing.idle_timeout);
     println!("  Metrics Intvl:  {:?}", config.timing.metrics_interval);
+    println!(
+        "  TCP Classify:   {:?}",
+        config.timing.tcp_classification_timeout
+    );
     println!();
 
     // Advanced settings
     println!("Advanced:");
     println!("  UDP NAT Entries:  {}", config.udp_nat_max_entries);
     println!("  Session Queue:    {}", config.session_queue_size);
+    println!("  TCP Conn Cap:     {}", config.tcp_connection_cap);
     println!();
 
     // Clients

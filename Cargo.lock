@@ -1876,6 +1876,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "fastrand",
+ "libc",
  "lru",
  "parking_lot",
  "quinn-udp",

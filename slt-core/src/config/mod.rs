@@ -11,11 +11,12 @@ pub use client::ClientConfig;
 pub use defaults::{
     DEFAULT_AUTH_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_METRICS_INTERVAL, DEFAULT_PING_MAX,
     DEFAULT_PING_MIN, DEFAULT_QUIC_DISCOVERY_TIMEOUT, DEFAULT_RECONNECT_MAX, DEFAULT_RECONNECT_MIN,
-    DEFAULT_REGISTER_TIMEOUT, default_auth_timeout, default_idle_timeout, default_metrics_interval,
-    default_ping_max, default_ping_min, default_quic_discovery_timeout, default_reconnect_max,
-    default_reconnect_min, default_register_timeout,
+    DEFAULT_REGISTER_TIMEOUT, DEFAULT_TCP_CLASSIFICATION_TIMEOUT, default_auth_timeout,
+    default_idle_timeout, default_metrics_interval, default_ping_max, default_ping_min,
+    default_quic_discovery_timeout, default_reconnect_max, default_reconnect_min,
+    default_register_timeout, default_tcp_classification_timeout,
 };
-pub use server::ServerConfig;
+pub use server::{DEFAULT_TCP_CONNECTIONS_PER_WORKER, ServerConfig, default_tcp_connection_cap};
 use thiserror::Error;
 pub use validate::{validate_ping_interval, validate_timeout};
 
@@ -116,6 +117,9 @@ pub enum ConfigError {
     /// Concurrent TLS/AUTH admission limit is zero.
     #[error("max_auth_inflight must be greater than zero")]
     ZeroMaxAuthInflight,
+    /// TCP front-door connection cap is zero.
+    #[error("tcp_connection_cap must be greater than zero")]
+    ZeroTcpConnectionCap,
     /// UDP NAT max entries is zero.
     #[error("udp_nat_max_entries must be greater than zero")]
     ZeroUdpNatMaxEntries,
@@ -273,6 +277,14 @@ mod tests {
         let err = ConfigError::ZeroMaxAuthInflight;
         let msg = err.to_string();
         assert!(msg.contains("max_auth_inflight"));
+        assert!(msg.contains("greater than zero"));
+    }
+
+    #[test]
+    fn config_error_zero_tcp_connection_cap_display() {
+        let err = ConfigError::ZeroTcpConnectionCap;
+        let msg = err.to_string();
+        assert!(msg.contains("tcp_connection_cap"));
         assert!(msg.contains("greater than zero"));
     }
 
