@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use slt_core::config::ClientConfig;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use super::uniffi_api::{NativeSessionCallback, PlatformServices, SltInteropError};
 use crate::runtime::control::{
@@ -121,7 +121,20 @@ pub struct NativeSession {
 #[uniffi::export]
 impl NativeSession {
     pub fn handle(&self) -> i64 {
-        i64::try_from(self.handle).unwrap_or(i64::MAX)
+        match i64::try_from(self.handle) {
+            Ok(handle) => handle,
+            Err(_) => {
+                warn!(
+                    handle = self.handle,
+                    "native session handle exceeds Kotlin i64 range; clamping exported handle"
+                );
+                debug_assert!(
+                    i64::try_from(self.handle).is_ok(),
+                    "native session handle exceeds Kotlin i64 range"
+                );
+                i64::MAX
+            }
+        }
     }
 
     pub fn stop(&self) {
