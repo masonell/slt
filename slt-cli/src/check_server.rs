@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use boring::ssl::{HandshakeError, Ssl, SslStream, SslVerifyMode};
 use quiche::ConnectionId;
+use slt_core::config::ClientConfig;
 use slt_core::crypto::client_hello::client_hello_session_id_callback;
 use slt_core::crypto::{
     configure_ca_store, configure_client_chrome_ssl, configure_host_ca_store,
@@ -64,13 +65,13 @@ pub fn check_server(domain: &str, client_config: Option<&Path>, quiet: bool) -> 
     let https = fetch_https(domain);
     outcomes.push(outcome(
         "HTTPS reaches nginx (system-CA verified)",
-        https.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
+        https.as_ref().map(|_| ()).map_err(Clone::clone),
     ));
     outcomes.push(outcome(
         "ALT-SVC header present",
         match &https {
             Ok(resp) => check_alt_svc(resp),
-            Err(e) => Err(format!("no HTTPS response: {e:#}")),
+            Err(e) => Err(format!("no HTTPS response: {e}")),
         },
     ));
 
@@ -116,13 +117,52 @@ fn outcome(name: &'static str, res: Result<(), String>) -> Outcome {
     }
 }
 
-/// Resolve `domain:port` to a single address.
-fn resolve(domain: &str, port: u16) -> Result<SocketAddr> {
-    (domain, port)
+fn resolve_all(domain: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let addrs: Vec<SocketAddr> = (domain, port)
         .to_socket_addrs()
         .with_context(|| format!("failed to resolve {domain}:{port}"))?
-        .next()
-        .with_context(|| format!("no addresses returned for {domain}:{port}"))
+        .collect();
+    if addrs.is_empty() {
+        bail!("no addresses returned for {domain}:{port}");
+    }
+    Ok(addrs)
+}
+
+fn try_resolved<T, F>(domain: &str, port: u16, probe: F) -> Result<T, String>
+where
+    F: FnMut(SocketAddr) -> Result<T, String>,
+{
+    let addrs = resolve_all(domain, port).map_err(|e| format!("{e:#}"))?;
+    try_addresses(&addrs, probe)
+}
+
+fn try_addresses<T, F>(addrs: &[SocketAddr], mut probe: F) -> Result<T, String>
+where
+    F: FnMut(SocketAddr) -> Result<T, String>,
+{
+    let mut failures = Vec::new();
+    for &addr in addrs {
+        match probe(addr) {
+            Ok(value) => return Ok(value),
+            Err(err) => failures.push((addr, err)),
+        }
+    }
+    Err(format_address_failures(&failures))
+}
+
+fn format_address_failures(failures: &[(SocketAddr, String)]) -> String {
+    match failures {
+        [] => "no addresses to try".to_string(),
+        [(addr, detail)] => format!("{addr}: {detail}"),
+        _ => {
+            let details = failures
+                .iter()
+                .map(|(addr, detail)| format!("{addr}: {detail}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("all {} addresses failed: {details}", failures.len())
+        }
+    }
 }
 
 fn set_timeouts(stream: &TcpStream, d: Duration) -> Result<()> {
@@ -137,9 +177,14 @@ fn set_timeouts(stream: &TcpStream, d: Duration) -> Result<()> {
 
 /// Check 1: port 80 must redirect to `https://`.
 fn check_http_redirect(domain: &str) -> Result<(), String> {
-    let addr = resolve(domain, HTTP_PORT).map_err(|e| format!("{e:#}"))?;
+    try_resolved(domain, HTTP_PORT, |addr| {
+        check_http_redirect_addr(domain, addr)
+    })
+}
+
+fn check_http_redirect_addr(domain: &str, addr: SocketAddr) -> Result<(), String> {
     let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
-        .map_err(|e| format!("connect {addr} failed: {e}"))?;
+        .map_err(|e| format!("connect failed: {e}"))?;
     set_timeouts(&stream, HTTP_TIMEOUT).map_err(|e| format!("{e:#}"))?;
 
     let resp = http_probe::get(&mut stream, domain).map_err(|e| format!("{e:#}"))?;
@@ -163,10 +208,14 @@ fn check_http_redirect(domain: &str) -> Result<(), String> {
 /// proxies to nginx. A successful handshake against the system CA + an HTTP response
 /// means nginx answered; if the VPN server claimed the connection it would present a
 /// self-signed cert and the handshake would fail.
-fn fetch_https(domain: &str) -> Result<HttpResponse> {
-    let addr = resolve(domain, HTTPS_PORT)?;
-    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
-        .with_context(|| format!("connect {addr} failed"))?;
+fn fetch_https(domain: &str) -> Result<HttpResponse, String> {
+    try_resolved(domain, HTTPS_PORT, |addr| {
+        fetch_https_addr(domain, addr).map_err(|e| format!("{e:#}"))
+    })
+}
+
+fn fetch_https_addr(domain: &str, addr: SocketAddr) -> Result<HttpResponse> {
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).context("connect failed")?;
     set_timeouts(&stream, HTTP_TIMEOUT)?;
     let mut tls = connect_tls(stream, domain, TlsMode::PublicCa)?;
     let resp = http_probe::get(&mut tls, domain)?;
@@ -183,7 +232,10 @@ fn check_alt_svc(resp: &HttpResponse) -> Result<(), String> {
 
 /// Check 4: send a QUIC Initial and confirm any UDP response from `domain:443`.
 fn check_quic(domain: &str) -> Result<(), String> {
-    let peer = resolve(domain, HTTPS_PORT).map_err(|e| format!("{e:#}"))?;
+    try_resolved(domain, HTTPS_PORT, |peer| check_quic_addr(domain, peer))
+}
+
+fn check_quic_addr(domain: &str, peer: SocketAddr) -> Result<(), String> {
     // Bind a local socket of the same family as the peer: an IPv4 socket can't send to an
     // IPv6 peer (and vice versa), so follow whatever `resolve` returned.
     let bind_ip: IpAddr = if peer.is_ipv6() {
@@ -246,22 +298,26 @@ fn check_vpn_auth(client_config_path: &Path) -> Result<(), String> {
         load_client_config(client_config_path).map_err(|e| format!("load client config: {e:#}"))?;
 
     let sni = config.network.hostname.clone();
-    let addr = match config.network.ip {
-        Some(ip) => SocketAddr::new(ip, config.network.port),
-        None => resolve(&sni, config.network.port).map_err(|e| format!("{e:#}"))?,
+    let addrs = match config.network.ip {
+        Some(ip) => vec![SocketAddr::new(ip, config.network.port)],
+        None => resolve_all(&sni, config.network.port).map_err(|e| format!("{e:#}"))?,
     };
+    try_addresses(&addrs, |addr| check_vpn_auth_addr(&config, &sni, addr))
+}
+
+fn check_vpn_auth_addr(config: &ClientConfig, sni: &str, addr: SocketAddr) -> Result<(), String> {
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
-        .map_err(|e| format!("connect {addr} failed: {e}"))?;
+        .map_err(|e| format!("connect failed: {e}"))?;
     set_timeouts(&stream, AUTH_PROBE_TIMEOUT).map_err(|e| format!("{e:#}"))?;
 
     let mode = TlsMode::Pinned {
         ca: config.tls.tls_ca.clone(),
         secret: config.identity.shared_secret,
     };
-    let mut tls = connect_tls(stream, &sni, mode).map_err(|e| format!("{e:#}"))?;
+    let mut tls = connect_tls(stream, sni, mode).map_err(|e| format!("{e:#}"))?;
 
     let challenge = export_auth_challenge(tls.ssl()).map_err(|e| format!("TLS export: {e}"))?;
-    let payload = slt_core::proto::build_auth_payload(&config, challenge);
+    let payload = slt_core::proto::build_auth_payload(config, challenge);
     let mut payload_buf = Vec::new();
     payload.encode(&mut payload_buf);
     let mut frame = Vec::new();
@@ -386,6 +442,41 @@ mod tests {
         let o = outcome("test", Ok(()));
         assert!(o.ok);
         assert!(o.detail.is_none());
+    }
+
+    #[test]
+    fn try_addresses_returns_first_successful_candidate() {
+        let first: SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let second: SocketAddr = "192.0.2.2:443".parse().unwrap();
+        let mut attempts = Vec::new();
+
+        let found = try_addresses(&[first, second], |addr| {
+            attempts.push(addr);
+            if addr == first {
+                Err("connect failed".to_string())
+            } else {
+                Ok(addr)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(found, second);
+        assert_eq!(attempts, vec![first, second]);
+    }
+
+    #[test]
+    fn try_addresses_reports_each_failed_candidate() {
+        let first: SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let second: SocketAddr = "192.0.2.2:443".parse().unwrap();
+
+        let err = try_addresses::<(), _>(&[first, second], |addr| {
+            Err(format!("probe failed for {addr}"))
+        })
+        .unwrap_err();
+
+        assert!(err.starts_with("all 2 addresses failed:"));
+        assert!(err.contains("192.0.2.1:443: probe failed for 192.0.2.1:443"));
+        assert!(err.contains("192.0.2.2:443: probe failed for 192.0.2.2:443"));
     }
 
     #[test]
