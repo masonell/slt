@@ -10,6 +10,7 @@ mod udp_io;
 mod upgrade;
 
 use std::collections::VecDeque;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,7 +25,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 use tun_rs::AsyncDevice;
 
 pub use self::error::{SessionError, UdpQspError};
@@ -44,6 +45,13 @@ use super::{AssignedIp, ClientId};
 use crate::tun::TunDeviceIo;
 
 const BEST_EFFORT_IO_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy)]
+enum UdpFailureRecovery {
+    RetryMessageOnTcp,
+    SignalTcpWithPing,
+    RetireOnly,
+}
 
 #[derive(Debug, Clone, Default)]
 struct UdpUpgradeState {
@@ -186,9 +194,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 .await?;
             }
             ActiveTransport::UdpQsp => {
-                self.send_udp_message(Message::Data {
-                    packet: packet.as_slice(),
-                })
+                self.send_udp_message(
+                    Message::Data {
+                        packet: packet.as_slice(),
+                    },
+                    UdpFailureRecovery::RetryMessageOnTcp,
+                )
                 .await?;
             }
         }
@@ -251,7 +262,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     async fn send_message(&mut self, message: Message<'_>) -> Result<(), SessionError> {
         match self.active_transport {
             ActiveTransport::Tcp => self.send_tcp_message(message).await,
-            ActiveTransport::UdpQsp => self.send_udp_message_and_flush(message).await,
+            ActiveTransport::UdpQsp => {
+                self.send_udp_message_and_flush(message, UdpFailureRecovery::RetryMessageOnTcp)
+                    .await
+            }
         }
     }
 
@@ -275,7 +289,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// In both cases, the session's peer has already been set by `handle_udp_claim`,
     /// so we can safely send without checking for a valid peer address.
-    async fn send_udp_message(&mut self, message: Message<'_>) -> Result<(), UdpQspError> {
+    async fn queue_udp_message(&mut self, message: Message<'_>) -> Result<(), UdpQspError> {
         let Some(session) = self.udp_session.as_mut() else {
             return Ok(());
         };
@@ -304,19 +318,124 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         }
     }
 
+    async fn send_udp_message(
+        &mut self,
+        message: Message<'_>,
+        recovery: UdpFailureRecovery,
+    ) -> Result<(), SessionError> {
+        match self.queue_udp_message(message).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.recover_from_udp_send_error(message, recovery, err)
+                    .await
+            }
+        }
+    }
+
     async fn send_udp_message_and_flush(
         &mut self,
         message: Message<'_>,
+        recovery: UdpFailureRecovery,
     ) -> Result<(), SessionError> {
-        self.send_udp_message(message).await?;
-        self.flush_udp_session().await
+        self.send_udp_message(message, recovery).await?;
+        match self.flush_udp_session().await {
+            Ok(()) => Ok(()),
+            Err(source) => {
+                self.recover_from_udp_flush_error(Some(message), recovery, source)
+                    .await
+            }
+        }
     }
 
-    async fn flush_udp_session(&mut self) -> Result<(), SessionError> {
+    async fn flush_udp_session(&mut self) -> io::Result<()> {
         if let Some(session) = self.udp_session.as_mut() {
             session.flush().await?;
         }
         Ok(())
+    }
+
+    async fn recover_from_udp_send_error(
+        &mut self,
+        message: Message<'_>,
+        recovery: UdpFailureRecovery,
+        err: UdpQspError,
+    ) -> Result<(), SessionError> {
+        if !matches!(err, UdpQspError::Qsp(_) | UdpQspError::Io(_)) {
+            return Err(err.into());
+        }
+
+        warn!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            error = %err,
+            "UDP-QSP send failed; clearing udp state"
+        );
+        self.retire_udp_transport();
+        self.apply_udp_failure_recovery(Some(message), recovery, err.into())
+            .await
+    }
+
+    async fn recover_from_udp_flush_error(
+        &mut self,
+        message: Option<Message<'_>>,
+        recovery: UdpFailureRecovery,
+        source: io::Error,
+    ) -> Result<(), SessionError> {
+        warn!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            error = %source,
+            "UDP-QSP flush failed; clearing udp state"
+        );
+        self.retire_udp_transport();
+        self.apply_udp_failure_recovery(
+            message,
+            recovery,
+            SessionError::UdpQsp(UdpQspError::Io(source)),
+        )
+        .await
+    }
+
+    async fn apply_udp_failure_recovery(
+        &mut self,
+        message: Option<Message<'_>>,
+        recovery: UdpFailureRecovery,
+        fallback_error: SessionError,
+    ) -> Result<(), SessionError> {
+        if !self.tcp_alive {
+            return Err(fallback_error);
+        }
+
+        self.set_active_transport(ActiveTransport::Tcp);
+        match recovery {
+            UdpFailureRecovery::RetryMessageOnTcp => {
+                let Some(message) = message else {
+                    return self.send_tcp_ping_after_udp_fallback().await;
+                };
+                self.send_tcp_message(message).await
+            }
+            UdpFailureRecovery::SignalTcpWithPing => self.send_tcp_ping_after_udp_fallback().await,
+            UdpFailureRecovery::RetireOnly => Ok(()),
+        }
+    }
+
+    async fn send_tcp_ping_after_udp_fallback(&mut self) -> Result<(), SessionError> {
+        let nonce = fastrand::u64(..);
+        let ping = PingPayload { nonce };
+        let mut buf = Vec::with_capacity(8);
+        ping.encode(&mut buf);
+        debug!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            "sent immediate tcp ping after udp-qsp fallback"
+        );
+        self.send_tcp_message(Message::Ping { payload: &buf }).await
+    }
+
+    fn retire_udp_transport(&mut self) {
+        self.registry.remove_cids_for_session(self.session_id);
+        self.udp_session = None;
+        self.reset_udp_upgrade_state();
     }
 
     async fn flush_pending_udp_session_best_effort(&mut self) {
@@ -365,8 +484,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             self.send_tcp_message(Message::Close { payload: &buf })
                 .await
         } else {
-            self.send_udp_message_and_flush(Message::Close { payload: &buf })
-                .await
+            self.send_udp_message_and_flush(
+                Message::Close { payload: &buf },
+                UdpFailureRecovery::RetryMessageOnTcp,
+            )
+            .await
         }
     }
 

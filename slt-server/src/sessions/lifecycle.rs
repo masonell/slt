@@ -10,7 +10,7 @@ use tracing::{debug, error, info};
 
 use super::error::SessionError;
 use super::types::{SessionControl, SessionEvent};
-use super::{ActiveTransport, ClientSessionBase, UdpSessionIo};
+use super::{ActiveTransport, ClientSessionBase, UdpFailureRecovery, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
@@ -133,7 +133,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     }
                     Ok::<(), std::io::Error>(())
                 }, if should_flush_udp => {
-                    res.map_err(|source| SessionError::Connection { source })?;
+                    if let Err(source) = res {
+                        self.recover_from_udp_flush_error(
+                            None,
+                            UdpFailureRecovery::SignalTcpWithPing,
+                            source,
+                        )
+                        .await?;
+                    }
                 }
             }
         }
@@ -169,8 +176,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         match self.active_transport {
             ActiveTransport::Tcp => self.send_tcp_message(Message::Ping { payload: &buf }).await,
             ActiveTransport::UdpQsp => {
-                self.send_udp_message_and_flush(Message::Ping { payload: &buf })
-                    .await
+                self.send_udp_message_and_flush(
+                    Message::Ping { payload: &buf },
+                    UdpFailureRecovery::RetryMessageOnTcp,
+                )
+                .await
             }
         }
     }

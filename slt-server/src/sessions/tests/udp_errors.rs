@@ -9,7 +9,7 @@ use tokio::time::{Duration, timeout};
 use super::super::*;
 use super::common::{
     complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session,
+    spawn_session, spawn_session_with_udp_socket,
 };
 use crate::quic::UdpClaim;
 
@@ -413,6 +413,95 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
 
     // Session should still accept TCP data
     let tcp_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 81), 8);
+    let mut tcp_frame = Vec::new();
+    encode_message(
+        Message::Data {
+            packet: &tcp_packet,
+        },
+        &mut tcp_frame,
+    )
+    .unwrap();
+    client.write_all(&tcp_frame).await.unwrap();
+
+    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, tcp_packet);
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    let _ = join.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_retries_downlink_over_tcp_after_udp_send_failure() {
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, registry, udp) =
+        spawn_session_with_udp_socket().await;
+
+    let dcid = Cid::from([0xD3; MAX_DCID_LEN]);
+    let scid = Cid::from([0xD4; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut reg_buf = Vec::new();
+    register.encode(&mut reg_buf).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+    assert!(registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+
+    let peer = SocketAddr::from(([127, 0, 0, 1], 56791));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1503,
+    )
+    .await;
+
+    udp.fail_next_send();
+    let downlink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 82), 8);
+    tx.send(SessionEvent::TunPacket(downlink_packet.clone()))
+        .await
+        .unwrap();
+
+    let mut saw_data = false;
+    for _ in 0..8 {
+        let buf = timeout(
+            Duration::from_secs(1),
+            read_message_bytes(&mut client, limits),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::Data { packet } => {
+                assert_eq!(packet, downlink_packet);
+                saw_data = true;
+                break;
+            }
+            Message::Ping { .. } => {}
+            other => panic!("expected tcp data after udp send failure, got {other:?}"),
+        }
+    }
+    assert!(saw_data, "server did not retry downlink data over tcp");
+    assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+
+    let tcp_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 83), 8);
     let mut tcp_frame = Vec::new();
     encode_message(
         Message::Data {

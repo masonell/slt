@@ -1,14 +1,13 @@
 //! UDP message handling for client sessions.
 
-use fastrand;
 use slt_core::crypto::udp_qsp::QspSessionError;
-use slt_core::proto::{Message, PingPayload, PongPayload, decode_message};
+use slt_core::proto::{Message, PongPayload, decode_message};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 
 use super::error::SessionError;
 use super::types::SessionControl;
-use super::{ActiveTransport, ClientSessionBase, UdpSessionIo};
+use super::{ActiveTransport, ClientSessionBase, UdpFailureRecovery, UdpSessionIo};
 use crate::quic::UdpClaim;
 use crate::tun::TunDeviceIo;
 
@@ -135,9 +134,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     client_id = %self.client_id,
                     "UDP-QSP channel marked dead; clearing udp state"
                 );
-                self.registry.remove_cids_for_session(self.session_id);
-                self.udp_session = None;
-                self.reset_udp_upgrade_state();
+                self.retire_udp_transport();
                 return UdpOpenOutcome::ChannelDead;
             }
             Err(QspSessionError::Crypto(err)) => {
@@ -195,17 +192,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     async fn complete_dead_channel_fallback(&mut self) -> Result<SessionControl, SessionError> {
         if self.tcp_alive {
             self.set_active_transport(ActiveTransport::Tcp);
-            let nonce = fastrand::u64(..);
-            let ping = PingPayload { nonce };
-            let mut buf = Vec::with_capacity(8);
-            ping.encode(&mut buf);
-            debug!(
-                session_id = self.session_id,
-                client_id = %self.client_id,
-                "sent immediate tcp ping after udp-qsp dead-channel fallback"
-            );
-            self.send_tcp_message(Message::Ping { payload: &buf })
-                .await?;
+            self.send_tcp_ping_after_udp_fallback().await?;
             return Ok(SessionControl::Continue);
         }
         self.metrics.inc_disconnect_close();
@@ -273,8 +260,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         match message {
             Message::Ping { payload } => {
                 let payload = Self::pong_payload_for_ping(payload)?;
-                self.send_udp_message_and_flush(Message::Pong { payload: &payload })
-                    .await?;
+                self.send_udp_message_and_flush(
+                    Message::Pong { payload: &payload },
+                    UdpFailureRecovery::SignalTcpWithPing,
+                )
+                .await?;
                 Ok(SessionControl::Continue)
             }
             Message::Pong { payload } => {

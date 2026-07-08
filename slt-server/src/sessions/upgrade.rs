@@ -8,7 +8,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
 use super::error::SessionError;
-use super::{ClientSessionBase, SessionControl, UdpSessionIo};
+use super::{ClientSessionBase, SessionControl, UdpFailureRecovery, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
 const MAX_STALE_UPGRADE_IDS: usize = 16;
@@ -101,8 +101,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         };
         let mut ack_buf = Vec::with_capacity(16);
         ack.encode(&mut ack_buf);
-        self.send_udp_message_and_flush(Message::UpgradeProbeAck { payload: &ack_buf })
-            .await?;
+        self.send_udp_message_and_flush(
+            Message::UpgradeProbeAck { payload: &ack_buf },
+            UdpFailureRecovery::RetireOnly,
+        )
+        .await?;
         self.maybe_send_switch_to_udp().await?;
         Ok(SessionControl::Continue)
     }

@@ -21,32 +21,26 @@ use slt_core::proto::{FrameError, MessageError, PayloadError};
 
 /// A failure from the UDP-QSP transport on the server's session path.
 ///
-/// This is a **pure propagation wrapper**, not a policy type. The server handles
-/// UDP-QSP errors **inline at the source**, so there is no recoverable-vs-fatal
-/// decision for this type to encode (unlike the client's `UdpQspError`, whose
-/// `is_recoverable`/`is_dead_channel` the client's session loop consults via
-/// `handle_udp_error`):
+/// The server handles UDP-QSP errors inline at their source:
 ///
 /// - The **recv path** (`open_udp_packet` in `sessions/udp.rs`) matches every
 ///   `QspSessionError` variant at the source, drops the recoverable packet
 ///   errors (`Replay`/`TooOld`/`Crypto`/garbage) with metrics, and falls back
 ///   to TCP on `DeadChannel`. Those conditions never produce a `UdpQspError`.
-/// - The **send path** (`send_udp_message` in `sessions/mod.rs`) propagates
-///   every failure unchanged via `?` (it has no drop-and-continue option — a
-///   failed send can't be silently dropped without losing the outbound packet).
+/// - The **send/flush path** (`send_udp_message` and
+///   `recover_from_udp_flush_error` in `sessions/mod.rs`) retires UDP state and
+///   uses TCP for UDP transport failures when the TCP channel is alive.
 ///
-/// `UdpQspError` exists only to wrap `QspSessionError` (and the proto encode
-/// errors) for typed propagation through `SessionError::UdpQsp` and for faithful
-/// terminal `{:#}` display.
+/// `UdpQspError` reaches `SessionError::UdpQsp` when no local TCP recovery is
+/// available or the failure is not a UDP transport failure.
 #[derive(Debug, thiserror::Error)]
 pub enum UdpQspError {
     /// UDP-QSP session failure: a replayed/too-old packet number, a packet
     /// number overflow, a crypto (header-protection/AEAD) failure, or the
     /// dead-channel signal after too many consecutive decrypt failures.
     ///
-    /// Propagated unchanged — the recv path drops the recoverable variants at
-    /// the source, and the send path propagates everything (see the type-level
-    /// doc).
+    /// Send-side QSP failures are candidates for TCP fallback; receive-side
+    /// packet failures are handled before this wrapper is constructed.
     #[error(transparent)]
     Qsp(#[from] QspSessionError),
 
@@ -90,12 +84,11 @@ pub enum SessionError {
         source: io::Error,
     },
 
-    /// UDP-QSP transport failure (send-side propagation).
+    /// UDP-QSP transport failure that could not be recovered locally.
     ///
-    /// Only ever produced by the **send path** (`send_udp_message`); recv-side
-    /// UDP-QSP errors are handled inline by `open_udp_packet` (see the
-    /// [`UdpQspError`] type-level doc). [`UdpQspError`] is a pure propagation
-    /// wrapper with no recoverable policy.
+    /// Send and flush failures first try to retire UDP and continue over TCP.
+    /// This variant is returned when that recovery path is unavailable or the
+    /// failure is a framing/message error rather than a UDP transport error.
     #[error(transparent)]
     UdpQsp(#[from] UdpQspError),
 

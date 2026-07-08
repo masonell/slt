@@ -44,6 +44,18 @@ pub(super) type SpawnSessionWithPeerCaptureResult = (
     Arc<SessionRegistry>,
 );
 
+pub(super) type SpawnSessionWithUdpSocketResult = (
+    tokio::task::JoinHandle<Result<(), SessionError>>,
+    TlsDuplexStream,
+    SessionTx,
+    mpsc::Receiver<Vec<u8>>,
+    mpsc::Receiver<Vec<u8>>,
+    MessageLimits,
+    AssignedIp,
+    Arc<SessionRegistry>,
+    Arc<TestUdpSocket>,
+);
+
 pub(super) async fn spawn_session() -> SpawnSessionResult {
     spawn_session_with_timeouts_and_udp_qsp_config(
         default_session_timeouts(),
@@ -60,6 +72,42 @@ pub(super) async fn spawn_session_with_udp_qsp_config(
     udp_qsp_config: ServerUdpQspConfig,
 ) -> SpawnSessionResult {
     spawn_session_with_timeouts_and_udp_qsp_config(default_session_timeouts(), udp_qsp_config).await
+}
+
+pub(super) async fn spawn_session_with_udp_socket() -> SpawnSessionWithUdpSocketResult {
+    let (server_tls, client_tls) = tls_pair().await;
+    let (tun, tun_rx) = TestTun::new(8);
+    let (udp, udp_rx) = TestUdpSocket::new(16);
+    let registry = Arc::new(SessionRegistry::new());
+    let metrics = Arc::new(Metrics::default());
+    let (tx, rx) = mpsc::channel(8);
+    let shutdown = CancellationToken::new();
+    let client_id = ClientId([0xA5; 16]);
+    let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
+    let (handle, _old) =
+        registry.register_session(client_id, assigned, tx.clone(), shutdown.clone());
+    let limits = MessageLimits::from_mtu(1500);
+    let udp_io_factory = Arc::new(UdpIoFactory::new(udp.clone()));
+    let session = ClientSessionBase::new(
+        handle.session_id,
+        client_id,
+        assigned,
+        TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
+        tun,
+        udp_io_factory,
+        registry.clone(),
+        metrics,
+        tx.clone(),
+        rx,
+        shutdown,
+        limits,
+        default_session_timeouts(),
+        ServerUdpQspConfig::default(),
+    );
+    let join = tokio::spawn(async move { session.run().await });
+    (
+        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, udp,
+    )
 }
 
 async fn spawn_session_with_timeouts_and_udp_qsp_config(

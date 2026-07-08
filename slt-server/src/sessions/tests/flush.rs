@@ -9,12 +9,13 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use slt_core::crypto::udp_qsp::{PeerUpdate, SessionIo, UdpQspKeys};
 use slt_core::proto::{
-    CipherSuite, Message, MessageLimits, PingPayload, RegisterCidPayload, decode_message,
-    encode_message,
+    CipherSuite, Message, MessageLimits, PingPayload, PongPayload, RegisterCidPayload,
+    decode_message, encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{Cid, MAX_DCID_LEN, ServerUdpQspConfig};
@@ -42,6 +43,7 @@ struct BufferingUdpIo {
     bytes_tx: mpsc::Sender<Vec<u8>>,
     /// Every flushed packet with its destination peer, for assertions.
     sent: Arc<Mutex<Vec<(Vec<u8>, SocketAddr)>>>,
+    flush_failures: Arc<AtomicUsize>,
 }
 
 impl SessionIo for BufferingUdpIo {
@@ -60,6 +62,19 @@ impl SessionIo for BufferingUdpIo {
     }
 
     async fn flush(&mut self) -> io::Result<()> {
+        if self
+            .flush_failures
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "injected UDP flush failure",
+            ));
+        }
+
         let drained = std::mem::take(&mut self.pending);
         let mut sent = self.sent.lock().expect("sent lock");
         for bytes in drained {
@@ -90,6 +105,7 @@ impl UdpSessionIo for BufferingUdpIo {}
 struct BufferingUdpIoFactory {
     bytes_tx: mpsc::Sender<Vec<u8>>,
     sent: Arc<Mutex<Vec<(Vec<u8>, SocketAddr)>>>,
+    flush_failures: Arc<AtomicUsize>,
 }
 
 impl UdpSessionIoFactory<BufferingUdpIo> for BufferingUdpIoFactory {
@@ -99,6 +115,7 @@ impl UdpSessionIoFactory<BufferingUdpIo> for BufferingUdpIoFactory {
             pending: Vec::new(),
             bytes_tx: self.bytes_tx.clone(),
             sent: self.sent.clone(),
+            flush_failures: self.flush_failures.clone(),
         })
     }
 }
@@ -111,6 +128,8 @@ type BufferingSpawnResult = (
     Arc<Mutex<Vec<(Vec<u8>, SocketAddr)>>>,
     MessageLimits,
     AssignedIp,
+    Arc<SessionRegistry>,
+    Arc<AtomicUsize>,
 );
 
 /// Spawn a session backed by the buffering UDP-QSP fake.
@@ -119,9 +138,11 @@ async fn spawn_session_buffering() -> BufferingSpawnResult {
     let (tun, _tun_rx) = TestTun::new(8);
     let (bytes_tx, bytes_rx) = mpsc::channel(256);
     let sent: Arc<Mutex<Vec<(Vec<u8>, SocketAddr)>>> = Arc::new(Mutex::new(Vec::new()));
+    let flush_failures = Arc::new(AtomicUsize::new(0));
     let factory = BufferingUdpIoFactory {
         bytes_tx,
         sent: sent.clone(),
+        flush_failures: flush_failures.clone(),
     };
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
@@ -149,7 +170,17 @@ async fn spawn_session_buffering() -> BufferingSpawnResult {
         ServerUdpQspConfig::default(),
     );
     let join = tokio::spawn(async move { session.run().await });
-    (join, client_tls, tx, bytes_rx, sent, limits, assigned)
+    (
+        join,
+        client_tls,
+        tx,
+        bytes_rx,
+        sent,
+        limits,
+        assigned,
+        registry,
+        flush_failures,
+    )
 }
 
 /// Register a CID and complete the full UDP upgrade handshake so the session is
@@ -237,7 +268,7 @@ async fn wait_for_flushed_data_peer(
 
 #[tokio::test]
 async fn lifecycle_idle_flush_drains_buffered_data() {
-    let (join, mut client, tx, mut udp_rx, sent, limits, assigned) =
+    let (join, mut client, tx, mut udp_rx, sent, limits, assigned, _registry, _flush_failures) =
         spawn_session_buffering().await;
 
     let dcid = Cid::from([0xC1; MAX_DCID_LEN]);
@@ -277,8 +308,87 @@ async fn lifecycle_idle_flush_drains_buffered_data() {
 }
 
 #[tokio::test]
+async fn lifecycle_flush_failure_falls_back_to_tcp() {
+    let (join, mut client, tx, mut udp_rx, _sent, limits, assigned, registry, flush_failures) =
+        spawn_session_buffering().await;
+
+    let dcid = Cid::from([0xC4; MAX_DCID_LEN]);
+    let scid = Cid::from([0xD4; MAX_DCID_LEN]);
+    let peer_a: SocketAddr = (Ipv4Addr::new(127, 0, 0, 1), 14111).into();
+    let (_keys, register) = register_and_upgrade(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        dcid,
+        scid,
+        peer_a,
+        0x2400,
+    )
+    .await;
+    assert!(registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+
+    flush_failures.fetch_add(1, Ordering::AcqRel);
+    let pkt = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 9), 12);
+    tx.send(SessionEvent::TunPacket(pkt)).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        super::common::read_message_bytes(&mut client, limits),
+    )
+    .await
+    .expect("fallback tcp ping within timeout")
+    .expect("read ok");
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::Ping { .. }
+    ));
+    assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+
+    let nonce = 0xA11C_E000_0000_2400u64;
+    let mut ping_payload = Vec::with_capacity(8);
+    PingPayload { nonce }.encode(&mut ping_payload);
+    let mut ping_frame = Vec::new();
+    encode_message(
+        Message::Ping {
+            payload: &ping_payload,
+        },
+        &mut ping_frame,
+    )
+    .unwrap();
+    client.write_all(&ping_frame).await.unwrap();
+
+    let mut saw_pong = false;
+    for _ in 0..8 {
+        let buf = timeout(
+            Duration::from_secs(1),
+            super::common::read_message_bytes(&mut client, limits),
+        )
+        .await
+        .expect("tcp pong within timeout")
+        .expect("read ok");
+        let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+        match message {
+            Message::Pong { payload } if PongPayload::decode(payload).unwrap().nonce == nonce => {
+                saw_pong = true;
+                break;
+            }
+            Message::Ping { .. } => {}
+            other => panic!("expected tcp pong after udp flush failure, got {other:?}"),
+        }
+    }
+    assert!(
+        saw_pong,
+        "session did not continue on tcp after udp flush failure"
+    );
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn shutdown_flush_drains_pending_buffered_data() {
-    let (join, mut client, tx, mut udp_rx, sent, limits, assigned) =
+    let (join, mut client, tx, mut udp_rx, sent, limits, assigned, _registry, _flush_failures) =
         spawn_session_buffering().await;
 
     let dcid = Cid::from([0xC2; MAX_DCID_LEN]);
@@ -319,7 +429,7 @@ async fn shutdown_flush_drains_pending_buffered_data() {
 
 #[tokio::test]
 async fn nat_peer_update_routes_downlink_to_new_peer() {
-    let (join, mut client, tx, mut udp_rx, sent, limits, assigned) =
+    let (join, mut client, tx, mut udp_rx, sent, limits, assigned, _registry, _flush_failures) =
         spawn_session_buffering().await;
 
     let dcid = Cid::from([0xC3; MAX_DCID_LEN]);
