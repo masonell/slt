@@ -56,6 +56,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         let mut next_ping_at = self.schedule_next_ping();
 
         loop {
+            if self.shutdown.is_cancelled() {
+                self.handle_shutdown_request();
+                return Ok(());
+            }
+
             if self.tcp_alive
                 && self.tcp.has_buffered_input()
                 && self.handle_tcp_read().await? == SessionControl::Close
@@ -65,6 +70,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
 
             let idle_deadline = self.last_activity + self.timeouts.idle_timeout;
             let should_flush_udp = self.has_pending_udp_flush();
+            let shutdown = self.shutdown.clone();
 
             // Keep UDP-QSP flush last on purpose. Session events and timers get
             // priority; full GSO slabs flush inline, and this branch sends only
@@ -72,6 +78,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             tokio::select! {
                 biased;
 
+                () = shutdown.cancelled() => {
+                    self.handle_shutdown_request();
+                    return Ok(());
+                }
                 res = self.tcp.read_more(), if self.tcp_alive => {
                     let n = res.map_err(|source| SessionError::Connection { source })?;
                     if n == 0 {
@@ -135,16 +145,20 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             SessionEvent::TunPacket(packet) => self.handle_tun_packet(packet).await,
             SessionEvent::Udp(claim) => self.handle_udp_claim(claim).await,
             SessionEvent::Shutdown => {
-                self.metrics.inc_disconnect_shutdown();
-                info!(
-                    session_id = self.session_id,
-                    client_id = %self.client_id,
-                    reason = "shutdown_request",
-                    "session disconnect"
-                );
+                self.handle_shutdown_request();
                 Ok(SessionControl::Close)
             }
         }
+    }
+
+    fn handle_shutdown_request(&self) {
+        self.metrics.inc_disconnect_shutdown();
+        info!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            reason = "shutdown_request",
+            "session disconnect"
+        );
     }
 
     async fn handle_ping_tick(&mut self) -> Result<(), SessionError> {

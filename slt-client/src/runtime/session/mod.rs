@@ -341,18 +341,15 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             SessionEvent::Shutdown => {
                 info!("shutdown requested");
                 self.metrics.inc_disconnect_shutdown();
-                if let Err(err) = self.send_close(CloseCode::Normal).await {
-                    debug!(error = %err, "failed to send close on shutdown");
-                }
+                self.send_close_best_effort(CloseCode::Normal, "shutdown")
+                    .await;
                 Ok(SessionControl::Close(SessionExit::Shutdown))
             }
             SessionEvent::Control(ClientCommand::Stop) => {
                 info!("stop command received");
                 self.cancel.cancel();
                 self.metrics.inc_disconnect_shutdown();
-                if let Err(err) = self.send_close(CloseCode::Normal).await {
-                    debug!(error = %err, "failed to send close on stop");
-                }
+                self.send_close_best_effort(CloseCode::Normal, "stop").await;
                 Ok(SessionControl::Close(SessionExit::Shutdown))
             }
             SessionEvent::Control(ClientCommand::NetworkChanged) => {
@@ -376,9 +373,8 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                 let Some(packet) = maybe else {
                     info!("tun channel closed");
                     self.metrics.inc_disconnect_close();
-                    if let Err(err) = self.send_close(CloseCode::Normal).await {
-                        debug!(error = %err, "failed to send close after tun shutdown");
-                    }
+                    self.send_close_best_effort(CloseCode::Normal, "tun_shutdown")
+                        .await;
                     return Ok(SessionControl::Close(SessionExit::TunClosed));
                 };
                 self.handle_tun_packet(packet).await
@@ -451,9 +447,8 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                 ActiveTransport::Tcp => {
                     info!("idle timeout reached");
                     self.metrics.inc_disconnect_idle_timeout();
-                    if let Err(err) = self.send_close(CloseCode::IdleTimeout).await {
-                        debug!(error = %err, "failed to send idle close");
-                    }
+                    self.send_close_best_effort(CloseCode::IdleTimeout, "idle_timeout")
+                        .await;
                     Ok(SessionControl::Close(SessionExit::IdleTimeout))
                 }
                 ActiveTransport::UdpQsp => {

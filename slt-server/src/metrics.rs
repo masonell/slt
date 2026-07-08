@@ -16,7 +16,8 @@ pub struct Metrics {
     passed: AtomicU64,
     dropped: AtomicU64,
     upstream_send_failures: AtomicU64,
-    tun_queue_overflow_drops: AtomicU64,
+    tun_session_queue_full_drops: AtomicU64,
+    tun_writer_queue_full_drops: AtomicU64,
     udp_claim_channel_full_drops: AtomicU64,
     auth_successes: AtomicU64,
     auth_failures: AtomicU64,
@@ -54,8 +55,10 @@ pub struct MetricsSnapshot {
     pub dropped: u64,
     /// Failed sends to upstream UDP socket.
     pub upstream_send_failures: u64,
-    /// TUN packets dropped because session queue was full.
-    pub tun_queue_overflow_drops: u64,
+    /// TUN packets dropped because a session event queue was full.
+    pub tun_session_queue_full_drops: u64,
+    /// TUN packets dropped because the TUN writer queue was full.
+    pub tun_writer_queue_full_drops: u64,
     /// UDP-claim datagrams dropped because the session queue was full or closed.
     pub udp_claim_channel_full_drops: u64,
     /// Authentication failures (all auth-phase failures: rejections + transport/decode).
@@ -147,12 +150,21 @@ impl Metrics {
         );
     }
 
-    /// Increment TUN queue-overflow drop counter.
-    pub fn inc_tun_queue_overflow_drops(&self) {
-        let count = inc(&self.tun_queue_overflow_drops);
+    /// Increment TUN-to-session queue-full drop counter.
+    pub fn inc_tun_session_queue_full_drops(&self) {
+        let count = inc(&self.tun_session_queue_full_drops);
         trace!(
-            tun_queue_overflow_drops = count,
+            tun_session_queue_full_drops = count,
             "TUN packet dropped: session queue full"
+        );
+    }
+
+    /// Increment session-to-TUN writer queue-full drop counter.
+    pub fn inc_tun_writer_queue_full_drops(&self) {
+        let count = inc(&self.tun_writer_queue_full_drops);
+        trace!(
+            tun_writer_queue_full_drops = count,
+            "TUN packet dropped: writer queue full"
         );
     }
 
@@ -321,7 +333,8 @@ impl Metrics {
             passed: self.passed.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
             upstream_send_failures: self.upstream_send_failures.load(Ordering::Relaxed),
-            tun_queue_overflow_drops: self.tun_queue_overflow_drops.load(Ordering::Relaxed),
+            tun_session_queue_full_drops: self.tun_session_queue_full_drops.load(Ordering::Relaxed),
+            tun_writer_queue_full_drops: self.tun_writer_queue_full_drops.load(Ordering::Relaxed),
             udp_claim_channel_full_drops: self.udp_claim_channel_full_drops.load(Ordering::Relaxed),
             auth_failures: self.auth_failures.load(Ordering::Relaxed),
             auth_rejections: self.auth_rejections.load(Ordering::Relaxed),

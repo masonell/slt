@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use tun_rs::AsyncDevice;
 
-use super::{TunChannels, TunHandles};
+use super::{TunChannels, TunHandles, TunQueueSend, send_to_session_queue};
 
 /// Attach the desktop TUN device and spawn its reader/writer tasks.
 ///
@@ -132,9 +132,13 @@ async fn run_tun_reader(
                 continue;
             }
 
-            if tx.send(packet.to_vec()).await.is_err() {
-                debug!(len = size, "tun queue closed, exiting reader");
-                return Ok(());
+            match send_to_session_queue(&tx, packet.to_vec(), &cancel).await {
+                TunQueueSend::Sent => {}
+                TunQueueSend::Closed => {
+                    debug!(len = size, "tun queue closed, exiting reader");
+                    return Ok(());
+                }
+                TunQueueSend::Cancelled => return Ok(()),
             }
         }
     }
@@ -212,14 +216,14 @@ async fn run_tun_writer(
         let input_packets = send_batch.packet_count();
 
         // Send batch with GSO
-        let written = match tun
-            .send_multiple(
+        let written = match tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            result = tun.send_multiple(
                 &mut gro_table,
                 send_batch.queued_buffers_mut(),
                 header_offset,
-            )
-            .await
-        {
+            ) => result,
+        } {
             Ok(bytes) => bytes,
             Err(err) => {
                 warn!(error = %err, count = input_packets, "tun send_multiple error");

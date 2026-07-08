@@ -85,11 +85,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 self.note_tcp_activity();
                 self.schedule_discovery_retry();
             }
-            if self.tun_channels.to_tun_tx.send(msg_buf).await.is_err() {
-                self.metrics.inc_disconnect_close();
-                return Ok(SessionControl::Close(SessionExit::TunClosed));
-            }
-            return Ok(SessionControl::Continue);
+            return Ok(self.send_to_tun_or_shutdown(msg_buf).await);
         }
 
         match msg_buf.message() {

@@ -5,6 +5,7 @@ use std::net::Ipv4Addr;
 
 use parking_lot::RwLock;
 use slt_core::types::CidPrefix;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use super::{AssignedIp, ClientId};
@@ -41,6 +42,8 @@ pub struct SessionHandle {
     pub assigned_ipv4: AssignedIp,
     /// Sender for delivering events to the session.
     pub tx: SessionTx,
+    /// Out-of-band shutdown signal for lifecycle control.
+    pub shutdown: CancellationToken,
 }
 
 /// Internal state of the session registry.
@@ -89,6 +92,7 @@ impl SessionRegistry {
         client_id: ClientId,
         assigned_ipv4: AssignedIp,
         tx: SessionTx,
+        shutdown: CancellationToken,
     ) -> (SessionHandle, Option<SessionHandle>) {
         let mut inner = self.inner.write();
         let session_id = inner.next_session_id;
@@ -99,6 +103,7 @@ impl SessionRegistry {
             client_id,
             assigned_ipv4,
             tx,
+            shutdown,
         };
 
         let old = inner.sessions.insert(client_id, handle.clone());
@@ -301,6 +306,7 @@ mod tests {
 
     use slt_core::types::MAX_DCID_LEN;
     use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -316,7 +322,8 @@ mod tests {
         let ip_old = AssignedIp(Ipv4Addr::new(10, 0, 0, 1));
         let ip_new = AssignedIp(Ipv4Addr::new(10, 0, 0, 2));
 
-        let (handle, old) = registry.register_session(client_id, ip_old, make_tx());
+        let (handle, old) =
+            registry.register_session(client_id, ip_old, make_tx(), CancellationToken::new());
         assert!(old.is_none());
 
         let prefix = CidPrefix::from([0xAA; MAX_DCID_LEN]);
@@ -326,7 +333,8 @@ mod tests {
         assert!(registry.has_cid(prefix));
         assert!(registry.lookup_ip(ip_old.addr()).is_some());
 
-        let (_handle_new, old) = registry.register_session(client_id, ip_new, make_tx());
+        let (_handle_new, old) =
+            registry.register_session(client_id, ip_new, make_tx(), CancellationToken::new());
         assert!(old.is_some());
         assert!(registry.lookup_ip(ip_old.addr()).is_none());
         assert!(registry.lookup_ip(ip_new.addr()).is_some());

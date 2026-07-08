@@ -111,6 +111,7 @@ where
     .await;
 
     cancel.cancel();
+    drop(tun_channels);
     tun_handles.shutdown().await;
     let _ = metrics_reporter.await;
 

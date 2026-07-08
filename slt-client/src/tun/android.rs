@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use tun_rs::AsyncDevice;
 
-use super::{TunChannels, TunHandles};
+use super::{TunChannels, TunHandles, TunQueueSend, send_to_session_queue};
 
 /// Wrap an Android `VpnService` fd and spawn TUN reader/writer tasks.
 ///
@@ -148,9 +148,13 @@ async fn run_tun_reader(
             continue;
         }
 
-        if tx.send(packet.to_vec()).await.is_err() {
-            debug!(len, "Android TUN queue closed, exiting reader");
-            return Ok(());
+        match send_to_session_queue(&tx, packet.to_vec(), &cancel).await {
+            TunQueueSend::Sent => {}
+            TunQueueSend::Closed => {
+                debug!(len, "Android TUN queue closed, exiting reader");
+                return Ok(());
+            }
+            TunQueueSend::Cancelled => return Ok(()),
         }
     }
 }
@@ -178,7 +182,10 @@ async fn run_tun_writer(
             continue;
         }
 
-        let written = tun.send(packet).await?;
+        let written = tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            result = tun.send(packet) => result?,
+        };
         if written != packet.len() {
             // Android/Linux TUN writes are packet-oriented: a successful write
             // accepts exactly one whole packet. A short positive write would

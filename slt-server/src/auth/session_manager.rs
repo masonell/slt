@@ -8,6 +8,7 @@ use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{ClientId, ServerUdpQspConfig};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 use crate::AssignedIp;
@@ -16,7 +17,7 @@ use crate::registry::SessionRegistry;
 #[cfg(test)]
 use crate::sessions::SessionKeyUpdater;
 use crate::sessions::{
-    ClientSessionBase, ServerUdpQspIoFactory, SessionEvent, SessionTcpChannel, SessionTimeouts,
+    ClientSessionBase, ServerUdpQspIoFactory, SessionTcpChannel, SessionTimeouts,
     UdpSessionIoFactory,
 };
 use crate::tun::TunDeviceIo;
@@ -113,16 +114,15 @@ impl<T: TunDeviceIo> SessionManager<T> {
     ) {
         debug_assert!(self.session_queue_size > 0);
         let (tx, rx) = mpsc::channel(self.session_queue_size);
+        let shutdown = CancellationToken::new();
 
-        let (handle, old) = self
-            .registry
-            .register_session(client_id, assigned_ip, tx.clone());
+        let (handle, old) =
+            self.registry
+                .register_session(client_id, assigned_ip, tx.clone(), shutdown.clone());
 
         if let Some(old) = old {
             debug!(client_id = %client_id, session_id = %handle.session_id, replaced_session_id = %old.session_id, "replacing existing session");
-            tokio::spawn(async move {
-                let _ = old.tx.send(SessionEvent::Shutdown).await;
-            });
+            old.shutdown.cancel();
         }
 
         let session = ClientSessionBase::new(
@@ -136,6 +136,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             self.metrics.clone(),
             tx,
             rx,
+            shutdown,
             self.limits,
             self.session_timeouts,
             self.udp_qsp_config.clone(),
@@ -192,15 +193,14 @@ impl<T: TunDeviceIo> SessionManager<T> {
     {
         debug_assert!(self.session_queue_size > 0);
         let (tx, rx) = mpsc::channel(self.session_queue_size);
+        let shutdown = CancellationToken::new();
 
-        let (handle, old) = self
-            .registry
-            .register_session(client_id, assigned_ip, tx.clone());
+        let (handle, old) =
+            self.registry
+                .register_session(client_id, assigned_ip, tx.clone(), shutdown.clone());
 
         if let Some(old) = old {
-            tokio::spawn(async move {
-                let _ = old.tx.send(SessionEvent::Shutdown).await;
-            });
+            old.shutdown.cancel();
         }
 
         let session = ClientSessionBase::new(
@@ -214,6 +214,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             self.metrics.clone(),
             tx,
             rx,
+            shutdown,
             self.limits,
             self.session_timeouts,
             self.udp_qsp_config.clone(),

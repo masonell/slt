@@ -12,7 +12,7 @@ mod upgrade;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession};
 use slt_core::proto::{
@@ -22,6 +22,8 @@ use slt_core::transport::UdpQspIo;
 use slt_core::types::ServerUdpQspConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio::time;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 use tun_rs::AsyncDevice;
 
@@ -40,6 +42,8 @@ use super::registry::SessionRegistry;
 use super::router::PacketRouter;
 use super::{AssignedIp, ClientId};
 use crate::tun::TunDeviceIo;
+
+const BEST_EFFORT_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Default)]
 struct UdpUpgradeState {
@@ -81,6 +85,7 @@ pub struct ClientSessionBase<
     registry: Arc<SessionRegistry>,
     metrics: Arc<Metrics>,
     tx: SessionTx,
+    shutdown: CancellationToken,
     tcp: SessionTcpChannel<S>,
     tun: Arc<T>,
     udp_io_factory: Arc<dyn UdpSessionIoFactory<I>>,
@@ -129,6 +134,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         metrics: Arc<Metrics>,
         tx: SessionTx,
         rx: SessionRx,
+        shutdown: CancellationToken,
         limits: MessageLimits,
         timeouts: SessionTimeouts,
         udp_qsp_config: ServerUdpQspConfig,
@@ -144,6 +150,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             registry,
             metrics,
             tx,
+            shutdown,
             tcp,
             tun,
             udp_io_factory,
@@ -319,13 +326,24 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         if !session.has_pending_flush() {
             return;
         }
-        if let Err(err) = session.flush().await {
-            debug!(
-                session_id = self.session_id,
-                client_id = %self.client_id,
-                error = %err,
-                "failed to flush pending udp-qsp packets during shutdown"
-            );
+        match time::timeout(BEST_EFFORT_IO_TIMEOUT, session.flush()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                debug!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    error = %err,
+                    "failed to flush pending udp-qsp packets during shutdown"
+                );
+            }
+            Err(_) => {
+                debug!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    timeout_ms = BEST_EFFORT_IO_TIMEOUT.as_millis(),
+                    "timed out flushing pending udp-qsp packets during shutdown"
+                );
+            }
         }
     }
 

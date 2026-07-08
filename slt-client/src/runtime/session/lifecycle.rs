@@ -3,15 +3,51 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use slt_core::proto::{CloseCode, ClosePayload, Message, PingPayload};
+use slt_core::proto::{CloseCode, ClosePayload, Message, OwnedMessageBuf, PingPayload};
+use tokio::time;
 use tracing::{debug, trace, warn};
 
-use super::ClientSession;
 use super::error::SessionError;
+use super::{ClientSession, SessionControl, SessionExit};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 
+const BEST_EFFORT_IO_TIMEOUT: Duration = Duration::from_secs(1);
+
 impl<S: ClientRuntimeServices> ClientSession<'_, S> {
+    /// Sends a server-originated DATA frame to the TUN writer queue.
+    pub(super) async fn send_to_tun_or_shutdown(&self, msg_buf: OwnedMessageBuf) -> SessionControl {
+        tokio::select! {
+            biased;
+
+            () = self.cancel.cancelled() => {
+                self.metrics.inc_disconnect_shutdown();
+                SessionControl::Close(SessionExit::Shutdown)
+            }
+            result = self.tun_channels.to_tun_tx.send(msg_buf) => {
+                if result.is_err() {
+                    self.metrics.inc_disconnect_close();
+                    SessionControl::Close(SessionExit::TunClosed)
+                } else {
+                    SessionControl::Continue
+                }
+            }
+        }
+    }
+
+    /// Sends CLOSE without allowing clean-exit signaling to stall shutdown.
+    pub(super) async fn send_close_best_effort(&mut self, code: CloseCode, reason: &'static str) {
+        match time::timeout(BEST_EFFORT_IO_TIMEOUT, self.send_close(code)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                debug!(error = %err, reason, "failed to send close");
+            }
+            Err(_) => {
+                debug!(reason, "timed out sending close");
+            }
+        }
+    }
+
     /// Sends a ping on the active transport.
     ///
     /// Generates a random nonce, encodes a `PING` message, and writes it
@@ -190,11 +226,17 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         if !udp.has_pending_flush() {
             return;
         }
-        if let Err(err) = udp.flush().await {
-            debug!(
-                error = %err,
-                "failed to flush pending udp-qsp packets during shutdown"
-            );
+        match time::timeout(BEST_EFFORT_IO_TIMEOUT, udp.flush()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                debug!(
+                    error = %err,
+                    "failed to flush pending udp-qsp packets during shutdown"
+                );
+            }
+            Err(_) => {
+                debug!("timed out flushing pending udp-qsp packets during shutdown");
+            }
         }
     }
 

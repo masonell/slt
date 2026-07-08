@@ -7,7 +7,9 @@ use slt_core::proto::{
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
+use tokio_util::sync::CancellationToken;
 
 use super::super::*;
 use super::common::{
@@ -262,6 +264,45 @@ async fn session_cleans_registry_on_shutdown() {
 
     assert!(registry.lookup_ip(assigned.addr()).is_none());
     assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+}
+
+#[tokio::test]
+async fn replacement_shutdown_exits_running_session_with_full_queue() {
+    let (join, _client, tx, _tun_rx, _udp_rx, _limits, assigned, registry) = spawn_session().await;
+
+    tokio::task::yield_now().await;
+
+    for i in 0..8 {
+        let packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 100 + i), 8);
+        tx.try_send(SessionEvent::TunPacket(packet)).unwrap();
+    }
+    let extra_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 200), 8);
+    assert!(matches!(
+        tx.try_send(SessionEvent::TunPacket(extra_packet)),
+        Err(mpsc::error::TrySendError::Full(SessionEvent::TunPacket(_)))
+    ));
+
+    let client_id = ClientId([0xA5; 16]);
+    let replacement_assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 10));
+    let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+    let replacement_shutdown = CancellationToken::new();
+    let (_replacement, old) = registry.register_session(
+        client_id,
+        replacement_assigned,
+        replacement_tx,
+        replacement_shutdown,
+    );
+    old.expect("old session must be registered")
+        .shutdown
+        .cancel();
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok());
+    assert!(registry.lookup_ip(assigned.addr()).is_none());
+    assert!(registry.lookup_ip(replacement_assigned.addr()).is_some());
 }
 
 #[tokio::test]

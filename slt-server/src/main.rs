@@ -89,7 +89,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
 
     // Channel for batched TUN writes
     let (tun_tx, tun_rx) = mpsc::channel(DEFAULT_TUN_CHANNEL_SIZE);
-    let tun_sender = Arc::new(TunSender::new(tun_tx));
+    let tun_sender = Arc::new(TunSender::new(tun_tx, metrics.clone()));
 
     let session_timeouts = SessionTimeouts {
         ping_min: config.timing.ping_min,
@@ -370,7 +370,8 @@ fn spawn_metrics_task(
                         passed = snap.passed,
                         dropped = snap.dropped,
                         upstream_send_failures = snap.upstream_send_failures,
-                        tun_queue_overflow_drops = snap.tun_queue_overflow_drops,
+                        tun_session_queue_full_drops = snap.tun_session_queue_full_drops,
+                        tun_writer_queue_full_drops = snap.tun_writer_queue_full_drops,
                         udp_claim_channel_full_drops = snap.udp_claim_channel_full_drops,
                         auth_successes = snap.auth_successes,
                         auth_failures = snap.auth_failures,
@@ -516,12 +517,17 @@ async fn run_tun_reader(
             trace!(len = size, dst_ip = %dst_ip, "tun packet received");
 
             if let Some(tx) = registry.lookup_ip(dst_ip) {
-                if tx
-                    .try_send(SessionEvent::TunPacket(packet.to_vec()))
-                    .is_err()
-                {
-                    metrics.inc_tun_queue_overflow_drops();
-                    debug!(dst_ip = %dst_ip, "tun packet dropped (session queue full)");
+                match tx.try_reserve() {
+                    Ok(permit) => {
+                        permit.send(SessionEvent::TunPacket(packet.to_vec()));
+                    }
+                    Err(mpsc::error::TrySendError::Full(())) => {
+                        metrics.inc_tun_session_queue_full_drops();
+                        debug!(dst_ip = %dst_ip, "tun packet dropped (session queue full)");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(())) => {
+                        debug!(dst_ip = %dst_ip, "tun packet dropped (session closed)");
+                    }
                 }
             } else {
                 debug!(dst_ip = %dst_ip, "tun packet dropped (no session)");
@@ -597,14 +603,14 @@ async fn run_tun_writer(
         let input_packets = send_batch.packet_count();
 
         // Send batch with GSO
-        let written = match tun
-            .send_multiple(
+        let written = match tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            result = tun.send_multiple(
                 &mut gro_table,
                 send_batch.queued_buffers_mut(),
                 header_offset,
-            )
-            .await
-        {
+            ) => result,
+        } {
             Ok(bytes) => bytes,
             Err(err) => {
                 warn!(error = %err, count = input_packets, "tun send_multiple error");

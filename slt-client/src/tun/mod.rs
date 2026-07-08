@@ -11,6 +11,7 @@ use std::io;
 use slt_core::proto::OwnedMessageBuf;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 /// TUN task handles for shutdown coordination.
@@ -25,6 +26,29 @@ pub struct TunChannels {
     pub to_session_rx: mpsc::Receiver<Vec<u8>>,
     /// Sends owned DATA frames from the session to TUN.
     pub to_tun_tx: mpsc::Sender<OwnedMessageBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunQueueSend {
+    Sent,
+    Closed,
+    Cancelled,
+}
+
+pub async fn send_to_session_queue(
+    tx: &mpsc::Sender<Vec<u8>>,
+    packet: Vec<u8>,
+    cancel: &CancellationToken,
+) -> TunQueueSend {
+    tokio::select! {
+        biased;
+
+        () = cancel.cancelled() => TunQueueSend::Cancelled,
+        result = tx.send(packet) => match result {
+            Ok(()) => TunQueueSend::Sent,
+            Err(_) => TunQueueSend::Closed,
+        },
+    }
 }
 
 impl TunHandles {
@@ -47,6 +71,32 @@ async fn join_task(name: &'static str, handle: JoinHandle<io::Result<()>>) {
         Err(err) => {
             warn!(task = name, error = %err, "task panicked");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{TunQueueSend, send_to_session_queue};
+
+    #[tokio::test]
+    async fn send_to_session_queue_exits_when_cancelled_while_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(vec![1]).await.unwrap();
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = send_to_session_queue(&tx, vec![2], &cancel).await;
+
+        assert_eq!(result, TunQueueSend::Cancelled);
+        assert_eq!(rx.try_recv().unwrap(), vec![1]);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 }
 

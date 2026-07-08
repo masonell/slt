@@ -144,11 +144,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 trace!("dropping udp data while tcp is active");
                 return Ok(SessionControl::Continue);
             }
-            if self.tun_channels.to_tun_tx.send(msg_buf).await.is_err() {
-                self.metrics.inc_disconnect_close();
-                return Ok(SessionControl::Close(SessionExit::TunClosed));
-            }
-            return Ok(SessionControl::Continue);
+            return Ok(self.send_to_tun_or_shutdown(msg_buf).await);
         }
 
         match msg_buf.message() {

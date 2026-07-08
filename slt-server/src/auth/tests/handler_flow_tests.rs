@@ -307,8 +307,15 @@ async fn auth_phase_replaces_existing_session() {
         .build_async()
         .await;
 
-    let (old_tx, mut old_rx) = tokio::sync::mpsc::channel(1);
-    registry.register_session(client_id, AssignedIp(assigned_ipv4), old_tx);
+    let (old_tx, _old_rx) = tokio::sync::mpsc::channel(1);
+    old_tx.send(SessionEvent::TunPacket(vec![1])).await.unwrap();
+    let old_shutdown = CancellationToken::new();
+    registry.register_session(
+        client_id,
+        AssignedIp(assigned_ipv4),
+        old_tx,
+        old_shutdown.clone(),
+    );
 
     let (server_tls, mut client_tls) = tls_pair().await;
     let limits = MessageLimits::from_mtu(1500);
@@ -331,11 +338,7 @@ async fn auth_phase_replaces_existing_session() {
     .await
     .unwrap();
 
-    let event = timeout(Duration::from_millis(100), old_rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(event, SessionEvent::Shutdown));
+    assert!(old_shutdown.is_cancelled());
 
     assert!(registry.lookup_ip(assigned_ipv4).is_some());
 

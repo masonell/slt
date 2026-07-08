@@ -13,6 +13,7 @@ use slt_core::types::{Cid, ServerUdpQspConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
+use tokio_util::sync::CancellationToken;
 
 use super::super::*;
 use crate::quic::UdpClaim;
@@ -71,9 +72,11 @@ async fn spawn_session_with_timeouts_and_udp_qsp_config(
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
     let (tx, rx) = mpsc::channel(8);
+    let shutdown = CancellationToken::new();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
-    let (handle, _old) = registry.register_session(client_id, assigned, tx.clone());
+    let (handle, _old) =
+        registry.register_session(client_id, assigned, tx.clone(), shutdown.clone());
     let limits = MessageLimits::from_mtu(1500);
     let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
     let session = ClientSessionBase::new(
@@ -87,6 +90,7 @@ async fn spawn_session_with_timeouts_and_udp_qsp_config(
         metrics,
         tx.clone(),
         rx,
+        shutdown,
         limits,
         timeouts,
         udp_qsp_config,
@@ -104,9 +108,11 @@ pub(super) async fn spawn_session_with_peer_capture() -> SpawnSessionWithPeerCap
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
     let (tx, rx) = mpsc::channel(8);
+    let shutdown = CancellationToken::new();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
-    let (handle, _old) = registry.register_session(client_id, assigned, tx.clone());
+    let (handle, _old) =
+        registry.register_session(client_id, assigned, tx.clone(), shutdown.clone());
     let limits = MessageLimits::from_mtu(1500);
     let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
     let session = ClientSessionBase::new(
@@ -120,6 +126,7 @@ pub(super) async fn spawn_session_with_peer_capture() -> SpawnSessionWithPeerCap
         metrics,
         tx.clone(),
         rx,
+        shutdown,
         limits,
         default_session_timeouts(),
         ServerUdpQspConfig::default(),
