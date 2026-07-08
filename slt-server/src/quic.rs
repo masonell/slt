@@ -587,12 +587,13 @@ impl QuicNatState {
         };
 
         if let Some(evicted) = self.peers.put(peer, entry) {
-            let fallback_addr = if upstream_addr.is_ipv6() {
-                SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0)
-            } else {
-                SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 0)
-            };
-            info!(evicted_peer = %evicted.socket.peer_addr().unwrap_or(fallback_addr), "Evicted peer from NAT LRU cache");
+            info!(
+                evicted_peer = %evicted
+                    .socket
+                    .peer_addr()
+                    .expect("NAT upstream sockets are connected before cache insertion"),
+                "Evicted peer from NAT LRU cache"
+            );
             evicted.task.abort();
         }
 
