@@ -131,6 +131,9 @@ impl ReplayWindow {
     pub fn check_and_update(&mut self, pn: u64) -> Result<(), ReplayError> {
         match self.largest_pn {
             None => {
+                if pn < self.initial_expected {
+                    return Err(ReplayError::TooOld);
+                }
                 self.bits.fill(0);
                 self.largest_pn = Some(pn);
                 self.set_bit(pn);
@@ -845,6 +848,13 @@ mod tests {
     }
 
     #[test]
+    fn replay_window_rejects_first_packet_below_initial_expected() {
+        let mut window = ReplayWindow::new(1000);
+        assert_eq!(window.check_and_update(999), Err(ReplayError::TooOld));
+        assert_eq!(window.largest_pn(), None);
+    }
+
+    #[test]
     fn replay_window_accepts_out_of_order() {
         let mut window = ReplayWindow::new(0);
         window.check_and_update(100).unwrap();
@@ -909,6 +919,49 @@ mod tests {
             session.recv(&mut buf).await,
             Err(QspSessionError::Replay)
         ));
+    }
+
+    #[tokio::test]
+    async fn session_recv_rejects_first_packet_below_initial_expected() {
+        struct TestIo {
+            packet: Vec<u8>,
+        }
+
+        impl SessionIo for TestIo {
+            async fn send(&mut self, _bytes: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+
+            async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let len = self.packet.len();
+                buf[..len].copy_from_slice(&self.packet);
+                Ok(len)
+            }
+        }
+
+        let keys = UdpQspKeys::from_packet_material(
+            CipherSuite::Aes128Gcm,
+            [0x11; HP_KEY_LEN],
+            [0x11; HP_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x33; AEAD_KEY_LEN],
+            [0x55; AEAD_IV_LEN],
+            [0x55; AEAD_IV_LEN],
+        )
+        .unwrap();
+        let scid = Cid::from([0xCD; 20]);
+        let packet = keys.protect(scid.as_slice(), 999, false, b"hello").unwrap();
+
+        let io = TestIo { packet };
+        let mut session =
+            QuicQspSession::new(io, scid, Cid::from([0xAB; 20]), keys, 0, 1000, false);
+        let mut buf = vec![0u8; 1500];
+
+        assert!(matches!(
+            session.recv(&mut buf).await,
+            Err(QspSessionError::TooOld)
+        ));
+        assert_eq!(session.expected_pn(), 1000);
     }
 
     #[tokio::test]
