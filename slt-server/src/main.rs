@@ -110,7 +110,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     let auth_handler = Arc::new(AuthHandlerBase::<TunSender>::new(
         acceptor,
         authenticator,
-        sessions,
+        sessions.clone(),
         config.timing.auth_timeout,
         config.max_auth_inflight,
     ));
@@ -149,6 +149,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
                 "graceful shutdown initiated"
             );
             cancel.cancel();
+            sessions.start_shutdown();
 
             let mut shutdown_result = classify_task_result(task, result);
             if task != "tcp" {
@@ -170,6 +171,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         }
         ShutdownTrigger::Cancelled => {
             info!(reason = "ctrl_c", "graceful shutdown initiated");
+            sessions.start_shutdown();
             join_ignoring_result(tcp_task).await;
             join_ignoring_result(udp_task).await;
             join_ignoring_result(tun_reader_task).await;
@@ -179,6 +181,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         }
     };
 
+    sessions.wait_for_shutdown().await;
     info!("server shutdown complete");
     shutdown_result.map_err(|err| Box::new(err) as Box<dyn std::error::Error>)
 }
