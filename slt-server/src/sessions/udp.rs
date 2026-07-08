@@ -1,7 +1,7 @@
 //! UDP message handling for client sessions.
 
 use slt_core::crypto::udp_qsp::QspSessionError;
-use slt_core::proto::{Message, PongPayload, decode_message};
+use slt_core::proto::{Message, PongPayload, decode_padded_message};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace, warn};
 
@@ -229,8 +229,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         &self,
         payload: &'a [u8],
     ) -> Result<Option<Message<'a>>, SessionError> {
-        let decoded = decode_message(payload, self.limits)?;
-        let Some((message, _consumed)) = decoded else {
+        let decoded = decode_padded_message(payload, self.limits)?;
+        let Some((message, _frame_bytes)) = decoded else {
             return Ok(None);
         };
         Ok(Some(message))

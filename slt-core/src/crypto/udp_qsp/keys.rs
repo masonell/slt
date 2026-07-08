@@ -541,6 +541,10 @@ impl UdpQspKeys {
 
     /// Protect a UDP-QSP payload into a QUIC short-header packet.
     ///
+    /// Short plaintexts are padded with zero bytes before encryption so the
+    /// protected packet has enough ciphertext for header-protection sampling.
+    /// [`open`](Self::open) returns that full plaintext, including padding.
+    ///
     /// `pn` becomes the AEAD nonce, so it must be unique for the lifetime of
     /// the current TX key. Reusing a `(key, pn)` pair is catastrophic AEAD
     /// nonce reuse: it leaks plaintext and enables forgery. Rotating the TX
@@ -620,6 +624,10 @@ impl UdpQspKeys {
 
     /// Unprotect a UDP-QSP short-header packet and return its plaintext.
     ///
+    /// The returned payload is the full AEAD plaintext. It can include trailing
+    /// zero padding added for header-protection sampling; VPN message callers
+    /// should decode it with [`crate::proto::decode_padded_message`].
+    ///
     /// `expected_pn` should be the next packet number you expect to receive
     /// (typically `largest_pn + 1`) to allow packet number reconstruction.
     /// The reconstructed packet number reproduces the sender's AEAD nonce;
@@ -649,7 +657,10 @@ impl UdpQspKeys {
 
     /// Unprotect a UDP-QSP short-header packet into the provided buffer.
     ///
-    /// The output buffer is cleared and reused for the decrypted payload.
+    /// The output buffer is cleared and reused for the full AEAD plaintext.
+    /// It can include trailing zero padding added for header-protection
+    /// sampling; VPN message callers should decode it with
+    /// [`crate::proto::decode_padded_message`].
     ///
     /// `expected_pn` should be the next packet number you expect to receive
     /// (typically `largest_pn + 1`) to allow packet number reconstruction.

@@ -16,7 +16,9 @@ pub use auth::{AUTH_CHALLENGE_LABEL, auth_signature_context, build_auth_payload}
 /// Frame encoding/decoding and frame types.
 pub use framing::{Frame, FrameError, HEADER_LEN, OwnedMessageBuf, decode_frame, encode_frame};
 /// Message-level helpers and limits.
-pub use message::{Message, MessageError, MessageLimits, decode_message, encode_message};
+pub use message::{
+    Message, MessageError, MessageLimits, decode_message, decode_padded_message, encode_message,
+};
 /// Payload schemas, constants, and codes.
 pub use payloads::{
     AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_CHALLENGE_LEN, AUTH_PAYLOAD_LEN, AUTH_SIGNATURE_LEN,

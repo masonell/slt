@@ -350,7 +350,10 @@ impl<I: SessionIo> QuicQspSession<I> {
 
     /// Receive and decrypt a UDP-QSP packet into the session buffer.
     ///
-    /// Returns a reference to the decrypted payload stored in the session.
+    /// Returns a reference to the decrypted UDP-QSP plaintext stored in the
+    /// session. VPN message packets can include trailing transport padding;
+    /// decode them with [`crate::proto::decode_padded_message`] when exact
+    /// frame bytes are required.
     ///
     /// # Errors
     ///
@@ -407,7 +410,10 @@ impl<I: SessionIo> QuicQspSession<I> {
 
     /// Open a protected UDP-QSP packet and update replay state.
     ///
-    /// Returns a reference to the decrypted payload stored in the session.
+    /// Returns a reference to the decrypted UDP-QSP plaintext stored in the
+    /// session. VPN message packets can include trailing transport padding;
+    /// decode them with [`crate::proto::decode_padded_message`] when exact
+    /// frame bytes are required.
     ///
     /// # Errors
     ///

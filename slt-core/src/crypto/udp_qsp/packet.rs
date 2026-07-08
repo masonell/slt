@@ -17,7 +17,12 @@ pub struct OpenedPacket {
     pub pn_len: usize,
     /// Key phase bit.
     pub key_phase: bool,
-    /// Decrypted payload.
+    /// Decrypted UDP-QSP plaintext.
+    ///
+    /// VPN message packets can include trailing zero padding added for
+    /// header-protection sampling. Decode with
+    /// [`crate::proto::decode_padded_message`] when exact frame bytes are
+    /// required.
     pub payload: Vec<u8>,
 }
 
@@ -30,7 +35,12 @@ pub struct OpenedPacketRef<'a> {
     pub pn_len: usize,
     /// Key phase bit.
     pub key_phase: bool,
-    /// Decrypted payload.
+    /// Decrypted UDP-QSP plaintext.
+    ///
+    /// VPN message packets can include trailing zero padding added for
+    /// header-protection sampling. Decode with
+    /// [`crate::proto::decode_padded_message`] when exact frame bytes are
+    /// required.
     pub payload: &'a [u8],
 }
 

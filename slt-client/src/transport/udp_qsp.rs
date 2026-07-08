@@ -359,12 +359,8 @@ impl<I: SessionIo> UdpQspTransport<I> {
                 }
             };
 
-            match slt_core::proto::decode_message(opened.payload, limits) {
-                Ok(Some((message, consumed))) => {
-                    // Per protocol.md Section 4.4: receivers MUST ignore any trailing bytes
-                    // after decoding the first framed message (may be padding for HP sample).
-                    Ok((message.ty(), opened.payload[..consumed].to_vec()))
-                }
+            match slt_core::proto::decode_padded_message(opened.payload, limits) {
+                Ok(Some((message, frame_bytes))) => Ok((message.ty(), frame_bytes.to_vec())),
                 Ok(None) => Err(UdpQspError::IncompleteMessage),
                 Err(err) => Err(err.into()),
             }

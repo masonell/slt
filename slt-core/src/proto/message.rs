@@ -223,6 +223,30 @@ pub fn decode_message(
     Ok(Some((Message::from(frame), consumed)))
 }
 
+/// Decode the first message from a buffer that may contain trailing padding.
+///
+/// Use this for UDP-QSP plaintexts, where transport padding can follow the
+/// framed VPN message. The returned byte slice contains exactly the decoded
+/// frame (`TYPE + LEN + PAYLOAD`); trailing bytes are ignored.
+///
+/// Returns `Ok(None)` if the buffer does not yet contain a full frame.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Frame decoding fails (see `decode_frame`)
+/// - The message is DATA and payload exceeds `max_data_len`
+pub fn decode_padded_message(
+    buf: &[u8],
+    limits: MessageLimits,
+) -> Result<Option<(Message<'_>, &[u8])>, MessageError> {
+    let Some((message, consumed)) = decode_message(buf, limits)? else {
+        return Ok(None);
+    };
+
+    Ok(Some((message, &buf[..consumed])))
+}
+
 /// Encode a message into the provided output buffer.
 ///
 /// # Errors
@@ -359,6 +383,28 @@ mod tests {
             decode_message(&buf, limits),
             Err(MessageError::DataTooLarge { len: 16, max: 8 })
         );
+    }
+
+    #[test]
+    fn decode_padded_message_returns_first_frame_bytes() {
+        let mut buf = Vec::new();
+        encode_message(Message::Ping { payload: b"ping" }, &mut buf).unwrap();
+        let frame_len = buf.len();
+        buf.extend_from_slice(&[0, 0, 0, 0xff]);
+
+        let limits = MessageLimits::new(1024, 1024);
+        let (decoded, frame_bytes) = decode_padded_message(&buf, limits).unwrap().unwrap();
+
+        assert_eq!(decoded, Message::Ping { payload: b"ping" });
+        assert_eq!(frame_bytes, &buf[..frame_len]);
+    }
+
+    #[test]
+    fn decode_padded_message_preserves_incomplete_result() {
+        let buf = [u8::from(MessageType::Ping), 0, 0];
+        let limits = MessageLimits::new(1024, 1024);
+
+        assert!(decode_padded_message(&buf, limits).unwrap().is_none());
     }
 
     /// `MessageError` is a real `std::error::Error` and its `Frame` variant
