@@ -13,12 +13,10 @@ use slt_core::types::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, timeout};
-use tokio_util::sync::CancellationToken;
 
 use super::authenticator::verify_auth_payload;
 use super::*;
 use crate::AssignedIp;
-use crate::sessions::SessionEvent;
 use crate::test_support::{TestAuthHandler, TlsDuplexStream, tls_pair};
 
 mod authenticator_tests;

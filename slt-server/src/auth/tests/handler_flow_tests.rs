@@ -307,22 +307,41 @@ async fn auth_phase_replaces_existing_session() {
         .build_async()
         .await;
 
-    let (old_tx, _old_rx) = tokio::sync::mpsc::channel(1);
-    old_tx.send(SessionEvent::TunPacket(vec![1])).await.unwrap();
-    let old_shutdown = CancellationToken::new();
-    registry.register_session(
-        client_id,
-        AssignedIp(assigned_ipv4),
-        old_tx,
-        old_shutdown.clone(),
-    );
+    let limits = MessageLimits::from_mtu(1500);
+
+    let (old_server_tls, mut old_client_tls) = tls_pair().await;
+    let old_challenge = slt_core::crypto::export_auth_challenge(old_server_tls.ssl()).unwrap();
+    let old_auth = handler.inner.clone();
+    let old_handle = tokio::spawn(async move { old_auth.handle_with_tls(old_server_tls).await });
+
+    let old_auth_payload = make_payload(client_id, assigned_ipv4, old_challenge, &signing_key);
+    let mut old_auth_buf = Vec::new();
+    old_auth_payload.encode(&mut old_auth_buf);
+    let mut old_frame = Vec::new();
+    slt_core::proto::encode_message(
+        Message::Auth {
+            payload: &old_auth_buf,
+        },
+        &mut old_frame,
+    )
+    .unwrap();
+    old_client_tls.write_all(&old_frame).await.unwrap();
+    let _ = timeout(
+        Duration::from_secs(2),
+        read_message(&mut old_client_tls, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let _ = old_handle.await.unwrap();
+    assert!(registry.lookup_ip(assigned_ipv4).is_some());
 
     let (server_tls, mut client_tls) = tls_pair().await;
-    let limits = MessageLimits::from_mtu(1500);
 
     let challenge = slt_core::crypto::export_auth_challenge(server_tls.ssl()).unwrap();
 
-    let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+    let auth = handler.inner.clone();
+    let handle = tokio::spawn(async move { auth.handle_with_tls(server_tls).await });
 
     let auth_payload = make_payload(client_id, assigned_ipv4, challenge, &signing_key);
     let mut auth_buf = Vec::new();
@@ -336,9 +355,15 @@ async fn auth_phase_replaces_existing_session() {
         read_message(&mut client_tls, limits),
     )
     .await
+    .unwrap()
     .unwrap();
 
-    assert!(old_shutdown.is_cancelled());
+    let mut eof = [0u8; 1];
+    let n = timeout(Duration::from_secs(2), old_client_tls.read(&mut eof))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(n, 0);
 
     assert!(registry.lookup_ip(assigned_ipv4).is_some());
 

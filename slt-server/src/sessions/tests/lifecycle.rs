@@ -9,12 +9,11 @@ use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
-use tokio_util::sync::CancellationToken;
 
 use super::super::*;
 use super::common::{
     complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session, spawn_session_with_timeouts,
+    spawn_session, spawn_session_with_shutdown, spawn_session_with_timeouts,
 };
 use crate::quic::UdpClaim;
 use crate::test_support::{TlsDuplexStream, default_session_timeouts};
@@ -324,8 +323,9 @@ async fn session_cleans_registry_on_shutdown() {
 }
 
 #[tokio::test]
-async fn replacement_shutdown_exits_running_session_with_full_queue() {
-    let (join, _client, tx, _tun_rx, _udp_rx, _limits, assigned, registry) = spawn_session().await;
+async fn shutdown_token_exits_running_session_with_full_queue() {
+    let (join, _client, tx, _tun_rx, _udp_rx, _limits, assigned, registry, shutdown) =
+        spawn_session_with_shutdown().await;
 
     tokio::task::yield_now().await;
 
@@ -339,19 +339,7 @@ async fn replacement_shutdown_exits_running_session_with_full_queue() {
         Err(mpsc::error::TrySendError::Full(SessionEvent::TunPacket(_)))
     ));
 
-    let client_id = ClientId([0xA5; 16]);
-    let replacement_assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 10));
-    let (replacement_tx, _replacement_rx) = mpsc::channel(1);
-    let replacement_shutdown = CancellationToken::new();
-    let (_replacement, old) = registry.register_session(
-        client_id,
-        replacement_assigned,
-        replacement_tx,
-        replacement_shutdown,
-    );
-    old.expect("old session must be registered")
-        .shutdown
-        .cancel();
+    shutdown.cancel();
 
     let result = timeout(Duration::from_secs(1), join)
         .await
@@ -359,7 +347,6 @@ async fn replacement_shutdown_exits_running_session_with_full_queue() {
         .unwrap();
     assert!(result.is_ok());
     assert!(registry.lookup_ip(assigned.addr()).is_none());
-    assert!(registry.lookup_ip(replacement_assigned.addr()).is_some());
 }
 
 #[tokio::test]

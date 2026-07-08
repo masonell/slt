@@ -715,9 +715,7 @@ mod tests {
     ) {
         let client_id = ClientId([dcid_prefix[0]; 16]);
         let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, dcid_prefix[0]));
-        let (handle, old) =
-            registry.register_session(client_id, assigned, tx.clone(), CancellationToken::new());
-        assert!(old.is_none());
+        let handle = registry.register_session(client_id, assigned, tx.clone());
         registry
             .insert_cid(
                 handle.client_id,

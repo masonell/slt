@@ -272,13 +272,11 @@ async fn session_register_rejects_prefix_collision() {
     let dcid = Cid::from([0xCD; MAX_DCID_LEN]);
     let scid = Cid::from([0xDE; MAX_DCID_LEN]);
     let (dummy_tx, _dummy_rx) = mpsc::channel(1);
-    let (dummy_handle, old) = registry.register_session(
+    let dummy_handle = registry.register_session(
         ClientId([0xCD; 16]),
         AssignedIp(Ipv4Addr::new(10, 0, 0, 10)),
         dummy_tx.clone(),
-        CancellationToken::new(),
     );
-    assert!(old.is_none());
     registry
         .insert_cid(
             dummy_handle.client_id,

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
@@ -7,6 +8,7 @@ use slt_core::transport::UdpQspIo;
 #[cfg(test)]
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{ClientId, ServerUdpQspConfig};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +50,40 @@ pub struct SessionManager<T: TunDeviceIo> {
 #[derive(Debug)]
 struct SessionManagerState {
     accepting_sessions: bool,
+    sessions: HashMap<ClientId, ManagedSession>,
+}
+
+#[derive(Debug)]
+struct ManagedSession {
+    session_id: u64,
+    shutdown: CancellationToken,
+}
+
+impl SessionManagerState {
+    fn replace_session(
+        &mut self,
+        client_id: ClientId,
+        session_id: u64,
+        shutdown: CancellationToken,
+    ) -> Option<ManagedSession> {
+        self.sessions.insert(
+            client_id,
+            ManagedSession {
+                session_id,
+                shutdown,
+            },
+        )
+    }
+
+    fn remove_session_if_current(&mut self, client_id: ClientId, session_id: u64) {
+        if self
+            .sessions
+            .get(&client_id)
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            self.sessions.remove(&client_id);
+        }
+    }
 }
 
 impl<T: TunDeviceIo> SessionManager<T> {
@@ -73,6 +109,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             tasks: TaskTracker::new(),
             state: Arc::new(Mutex::new(SessionManagerState {
                 accepting_sessions: true,
+                sessions: HashMap::new(),
             })),
             limits,
             session_timeouts,
@@ -138,14 +175,17 @@ impl<T: TunDeviceIo> SessionManager<T> {
     /// * `client_id` - The unique identifier for the client
     /// * `assigned_ip` - The IPv4 address assigned to this client
     /// * `tcp_channel` - The established TLS/TCP channel for the session
-    fn spawn_session(
+    fn spawn_session_with_channel<S>(
         &self,
         client_id: ClientId,
         assigned_ip: AssignedIp,
-        tcp_channel: SessionTcpChannel<TcpStream>,
-    ) -> io::Result<()> {
+        tcp_channel: SessionTcpChannel<S>,
+    ) -> io::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
         debug_assert!(self.session_queue_size > 0);
-        let state = self.state.lock();
+        let mut state = self.state.lock();
         if !state.accepting_sessions {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
@@ -156,17 +196,22 @@ impl<T: TunDeviceIo> SessionManager<T> {
         let (tx, rx) = mpsc::channel(self.session_queue_size);
         let shutdown = self.shutdown.child_token();
 
-        let (handle, old) =
-            self.registry
-                .register_session(client_id, assigned_ip, tx.clone(), shutdown.clone());
+        // Keep this lock across registry registration and lifecycle replacement
+        // so concurrent reconnects cannot make their active-session views diverge.
+        let handle = self
+            .registry
+            .register_session(client_id, assigned_ip, tx.clone());
 
-        if let Some(old) = old {
-            debug!(client_id = %client_id, session_id = %handle.session_id, replaced_session_id = %old.session_id, "replacing existing session");
-            old.shutdown.cancel();
+        if let Some(replaced) =
+            state.replace_session(client_id, handle.session_id, shutdown.clone())
+        {
+            debug!(client_id = %client_id, session_id = %handle.session_id, replaced_session_id = %replaced.session_id, "replacing existing session");
+            replaced.shutdown.cancel();
         }
 
+        let session_id = handle.session_id;
         let session = ClientSessionBase::new(
-            handle.session_id,
+            session_id,
             client_id,
             assigned_ip,
             tcp_channel,
@@ -181,12 +226,25 @@ impl<T: TunDeviceIo> SessionManager<T> {
             self.session_timeouts,
             self.udp_qsp_config.clone(),
         );
+        let cleanup_state = self.state.clone();
 
         drop(self.tasks.spawn(async move {
             let _ = session.run().await;
+            cleanup_state
+                .lock()
+                .remove_session_if_current(client_id, session_id);
         }));
         drop(state);
         Ok(())
+    }
+
+    fn spawn_session(
+        &self,
+        client_id: ClientId,
+        assigned_ip: AssignedIp,
+        tcp_channel: SessionTcpChannel<TcpStream>,
+    ) -> io::Result<()> {
+        self.spawn_session_with_channel(client_id, assigned_ip, tcp_channel)
     }
 
     /// Creates session channels and spawns the session.
@@ -231,50 +289,9 @@ impl<T: TunDeviceIo> SessionManager<T> {
         tcp_channel: TcpChannel<S, SessionKeyUpdater>,
     ) -> io::Result<()>
     where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        debug_assert!(self.session_queue_size > 0);
-        let state = self.state.lock();
-        if !state.accepting_sessions {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "server is shutting down",
-            ));
-        }
-
-        let (tx, rx) = mpsc::channel(self.session_queue_size);
-        let shutdown = self.shutdown.child_token();
-
-        let (handle, old) =
-            self.registry
-                .register_session(client_id, assigned_ip, tx.clone(), shutdown.clone());
-
-        if let Some(old) = old {
-            old.shutdown.cancel();
-        }
-
-        let session = ClientSessionBase::new(
-            handle.session_id,
-            client_id,
-            assigned_ip,
-            tcp_channel,
-            self.tun.clone(),
-            self.udp_io_factory.clone(),
-            self.registry.clone(),
-            self.metrics.clone(),
-            tx,
-            rx,
-            shutdown,
-            self.limits,
-            self.session_timeouts,
-            self.udp_qsp_config.clone(),
-        );
-
-        drop(self.tasks.spawn(async move {
-            let _ = session.run().await;
-        }));
-        drop(state);
-        Ok(())
+        self.spawn_session_with_channel(client_id, assigned_ip, tcp_channel)
     }
 
     /// Test-only session creation for generic streams.
@@ -303,6 +320,8 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use slt_core::transport::tcp::TcpChannel;
+    use tokio::io::AsyncReadExt;
+    use tokio::time::{Duration, timeout};
 
     use super::*;
     use crate::test_support::{NullTun, default_session_timeouts, tls_pair};
@@ -344,5 +363,41 @@ mod tests {
         manager.wait_for_shutdown().await;
 
         assert!(registry.lookup_ip(assigned_ip.addr()).is_none());
+    }
+
+    #[tokio::test]
+    async fn replacement_cancels_previous_session() {
+        let (manager, registry, metrics) = make_manager().await;
+        let client_id = ClientId([0x22; 16]);
+        let assigned_ip = AssignedIp(Ipv4Addr::new(10, 0, 0, 3));
+
+        let (old_server_tcp, mut old_client_tcp) = tls_pair().await;
+        let mut old_tcp = Some(TcpChannel::with_key_updater(
+            old_server_tcp,
+            SessionKeyUpdater::new(metrics.clone()),
+        ));
+        manager
+            .create_session_test(client_id, assigned_ip, &mut old_tcp)
+            .unwrap();
+
+        let (new_server_tcp, _new_client_tcp) = tls_pair().await;
+        let mut new_tcp = Some(TcpChannel::with_key_updater(
+            new_server_tcp,
+            SessionKeyUpdater::new(metrics),
+        ));
+        manager
+            .create_session_test(client_id, assigned_ip, &mut new_tcp)
+            .unwrap();
+
+        let mut eof = [0u8; 1];
+        let n = timeout(Duration::from_secs(1), old_client_tcp.read(&mut eof))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(registry.lookup_ip(assigned_ip.addr()).is_some());
+
+        manager.start_shutdown();
+        manager.wait_for_shutdown().await;
     }
 }

@@ -32,6 +32,18 @@ pub(super) type SpawnSessionResult = (
     Arc<SessionRegistry>,
 );
 
+pub(super) type SpawnSessionWithShutdownResult = (
+    tokio::task::JoinHandle<Result<(), SessionError>>,
+    TlsDuplexStream,
+    SessionTx,
+    mpsc::Receiver<Vec<u8>>,
+    mpsc::Receiver<Vec<u8>>,
+    MessageLimits,
+    AssignedIp,
+    Arc<SessionRegistry>,
+    CancellationToken,
+);
+
 pub(super) type SpawnSessionWithPeerCaptureResult = (
     tokio::task::JoinHandle<Result<(), SessionError>>,
     TlsDuplexStream,
@@ -74,6 +86,14 @@ pub(super) async fn spawn_session_with_udp_qsp_config(
     spawn_session_with_timeouts_and_udp_qsp_config(default_session_timeouts(), udp_qsp_config).await
 }
 
+pub(super) async fn spawn_session_with_shutdown() -> SpawnSessionWithShutdownResult {
+    spawn_session_with_shutdown_and_udp_qsp_config(
+        default_session_timeouts(),
+        ServerUdpQspConfig::default(),
+    )
+    .await
+}
+
 pub(super) async fn spawn_session_with_udp_socket() -> SpawnSessionWithUdpSocketResult {
     let (server_tls, client_tls) = tls_pair().await;
     let (tun, tun_rx) = TestTun::new(8);
@@ -84,8 +104,7 @@ pub(super) async fn spawn_session_with_udp_socket() -> SpawnSessionWithUdpSocket
     let shutdown = CancellationToken::new();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
-    let (handle, _old) =
-        registry.register_session(client_id, assigned, tx.clone(), shutdown.clone());
+    let handle = registry.register_session(client_id, assigned, tx.clone());
     let limits = MessageLimits::from_mtu(1500);
     let udp_io_factory = Arc::new(UdpIoFactory::new(udp.clone()));
     let session = ClientSessionBase::new(
@@ -114,6 +133,17 @@ async fn spawn_session_with_timeouts_and_udp_qsp_config(
     timeouts: SessionTimeouts,
     udp_qsp_config: ServerUdpQspConfig,
 ) -> SpawnSessionResult {
+    let (join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, _shutdown) =
+        spawn_session_with_shutdown_and_udp_qsp_config(timeouts, udp_qsp_config).await;
+    (
+        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
+    )
+}
+
+async fn spawn_session_with_shutdown_and_udp_qsp_config(
+    timeouts: SessionTimeouts,
+    udp_qsp_config: ServerUdpQspConfig,
+) -> SpawnSessionWithShutdownResult {
     let (server_tls, client_tls) = tls_pair().await;
     let (tun, tun_rx) = TestTun::new(8);
     let (udp, udp_rx) = TestUdpSocket::new(16);
@@ -123,8 +153,7 @@ async fn spawn_session_with_timeouts_and_udp_qsp_config(
     let shutdown = CancellationToken::new();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
-    let (handle, _old) =
-        registry.register_session(client_id, assigned, tx.clone(), shutdown.clone());
+    let handle = registry.register_session(client_id, assigned, tx.clone());
     let limits = MessageLimits::from_mtu(1500);
     let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
     let session = ClientSessionBase::new(
@@ -138,14 +167,14 @@ async fn spawn_session_with_timeouts_and_udp_qsp_config(
         metrics,
         tx.clone(),
         rx,
-        shutdown,
+        shutdown.clone(),
         limits,
         timeouts,
         udp_qsp_config,
     );
     let join = tokio::spawn(async move { session.run().await });
     (
-        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
+        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, shutdown,
     )
 }
 
@@ -159,8 +188,7 @@ pub(super) async fn spawn_session_with_peer_capture() -> SpawnSessionWithPeerCap
     let shutdown = CancellationToken::new();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
-    let (handle, _old) =
-        registry.register_session(client_id, assigned, tx.clone(), shutdown.clone());
+    let handle = registry.register_session(client_id, assigned, tx.clone());
     let limits = MessageLimits::from_mtu(1500);
     let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
     let session = ClientSessionBase::new(

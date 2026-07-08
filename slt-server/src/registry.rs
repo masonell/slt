@@ -5,7 +5,6 @@ use std::net::Ipv4Addr;
 
 use parking_lot::RwLock;
 use slt_core::types::CidPrefix;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use super::{AssignedIp, ClientId};
@@ -39,8 +38,8 @@ struct CidRoute {
 
 /// Handle for a registered session.
 ///
-/// Contains all metadata needed to route packets to a session and
-/// track its lifecycle. Cloned for use in routing tables.
+/// Contains metadata needed to route packets to a session. Cloned for use in
+/// routing tables.
 #[derive(Debug, Clone)]
 pub struct SessionHandle {
     /// Stable session identifier.
@@ -51,8 +50,6 @@ pub struct SessionHandle {
     pub assigned_ipv4: AssignedIp,
     /// Sender for delivering events to the session.
     pub tx: SessionTx,
-    /// Out-of-band shutdown signal for lifecycle control.
-    pub shutdown: CancellationToken,
 }
 
 /// Internal state of the session registry.
@@ -91,18 +88,16 @@ impl SessionRegistry {
         }
     }
 
-    /// Register a session, returning the new handle and any previous one.
+    /// Register a session, returning the new routing handle.
     ///
-    /// If a session already exists for the same `client_id`, it is replaced and
-    /// returned so the caller can shut it down. Any CID routes owned by the
-    /// replaced session are removed immediately.
+    /// If a session already exists for the same `client_id`, it is replaced.
+    /// Any CID routes owned by the replaced session are removed immediately.
     pub fn register_session(
         &self,
         client_id: ClientId,
         assigned_ipv4: AssignedIp,
         tx: SessionTx,
-        shutdown: CancellationToken,
-    ) -> (SessionHandle, Option<SessionHandle>) {
+    ) -> SessionHandle {
         let mut inner = self.inner.write();
         let session_id = inner.next_session_id;
         inner.next_session_id = inner.next_session_id.saturating_add(1);
@@ -112,7 +107,6 @@ impl SessionRegistry {
             client_id,
             assigned_ipv4,
             tx,
-            shutdown,
         };
 
         let old = inner.sessions.insert(client_id, handle.clone());
@@ -160,7 +154,7 @@ impl SessionRegistry {
         );
         inner.ip_routes.insert(assigned_ipv4.addr(), handle.clone());
         drop(inner);
-        (handle, old)
+        handle
     }
 
     /// Remove a session entry if it still matches `session_id`.
@@ -337,7 +331,6 @@ mod tests {
 
     use slt_core::types::MAX_DCID_LEN;
     use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -353,9 +346,7 @@ mod tests {
         let ip_old = AssignedIp(Ipv4Addr::new(10, 0, 0, 1));
         let ip_new = AssignedIp(Ipv4Addr::new(10, 0, 0, 2));
 
-        let (handle, old) =
-            registry.register_session(client_id, ip_old, make_tx(), CancellationToken::new());
-        assert!(old.is_none());
+        let handle = registry.register_session(client_id, ip_old, make_tx());
 
         let prefix = CidPrefix::from([0xAA; MAX_DCID_LEN]);
         registry
@@ -364,9 +355,7 @@ mod tests {
         assert!(registry.has_cid(prefix));
         assert!(registry.lookup_ip(ip_old.addr()).is_some());
 
-        let (_handle_new, old) =
-            registry.register_session(client_id, ip_new, make_tx(), CancellationToken::new());
-        assert!(old.is_some());
+        let _handle_new = registry.register_session(client_id, ip_new, make_tx());
         assert!(registry.lookup_ip(ip_old.addr()).is_none());
         assert!(registry.lookup_ip(ip_new.addr()).is_some());
         assert!(!registry.has_cid(prefix));
@@ -377,20 +366,10 @@ mod tests {
         let registry = SessionRegistry::new();
         let client_a = ClientId([0x11; 16]);
         let client_b = ClientId([0x22; 16]);
-        let (handle_a, old) = registry.register_session(
-            client_a,
-            AssignedIp(Ipv4Addr::new(10, 0, 0, 1)),
-            make_tx(),
-            CancellationToken::new(),
-        );
-        assert!(old.is_none());
-        let (handle_b, old) = registry.register_session(
-            client_b,
-            AssignedIp(Ipv4Addr::new(10, 0, 0, 2)),
-            make_tx(),
-            CancellationToken::new(),
-        );
-        assert!(old.is_none());
+        let handle_a =
+            registry.register_session(client_a, AssignedIp(Ipv4Addr::new(10, 0, 0, 1)), make_tx());
+        let handle_b =
+            registry.register_session(client_b, AssignedIp(Ipv4Addr::new(10, 0, 0, 2)), make_tx());
         let prefix = CidPrefix::from([0xBB; MAX_DCID_LEN]);
 
         registry
@@ -411,9 +390,7 @@ mod tests {
         let old_prefix = CidPrefix::from([0xAB; MAX_DCID_LEN]);
         let stale_prefix = CidPrefix::from([0xAC; MAX_DCID_LEN]);
 
-        let (old_handle, old) =
-            registry.register_session(client_id, old_ip, make_tx(), CancellationToken::new());
-        assert!(old.is_none());
+        let old_handle = registry.register_session(client_id, old_ip, make_tx());
         registry
             .insert_cid(
                 old_handle.client_id,
@@ -423,9 +400,7 @@ mod tests {
             )
             .unwrap();
 
-        let (new_handle, old) =
-            registry.register_session(client_id, new_ip, make_tx(), CancellationToken::new());
-        assert!(old.is_some());
+        let new_handle = registry.register_session(client_id, new_ip, make_tx());
 
         assert!(matches!(
             registry.insert_cid(
@@ -449,13 +424,11 @@ mod tests {
     #[test]
     fn registry_keeps_selected_cids() {
         let registry = SessionRegistry::new();
-        let (handle, old) = registry.register_session(
+        let handle = registry.register_session(
             ClientId([0x44; 16]),
             AssignedIp(Ipv4Addr::new(10, 0, 0, 1)),
             make_tx(),
-            CancellationToken::new(),
         );
-        assert!(old.is_none());
         let keep = CidPrefix::from([0xCC; MAX_DCID_LEN]);
         let drop = CidPrefix::from([0xDD; MAX_DCID_LEN]);
 

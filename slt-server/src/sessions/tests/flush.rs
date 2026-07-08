@@ -150,8 +150,7 @@ async fn spawn_session_buffering() -> BufferingSpawnResult {
     let shutdown = CancellationToken::new();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
-    let (handle, _old) =
-        registry.register_session(client_id, assigned, tx.clone(), shutdown.clone());
+    let handle = registry.register_session(client_id, assigned, tx.clone());
     let limits = MessageLimits::from_mtu(1500);
     let session = ClientSessionBase::new(
         handle.session_id,
