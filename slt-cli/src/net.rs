@@ -277,7 +277,11 @@ fn tun_subnet_cidr(tun: &TunConfig) -> String {
 
 fn ipv4_network_addr(addr: Ipv4Addr, prefix: u8) -> Ipv4Addr {
     let raw = u32::from(addr);
-    let mask = u32::MAX << (32 - u32::from(prefix));
+    let mask = match prefix {
+        0 => 0,
+        1..=32 => u32::MAX << (u32::BITS - u32::from(prefix)),
+        _ => u32::MAX,
+    };
     Ipv4Addr::from(raw & mask)
 }
 
@@ -367,6 +371,18 @@ tun_prefix = 24
         };
 
         assert_eq!(tun_subnet_cidr(&tun), "10.20.0.0/24");
+    }
+
+    #[test]
+    fn formats_zero_prefix_tun_subnet_cidr() {
+        let tun = TunConfig {
+            tun_name: "tun0".to_string(),
+            tun_mtu: 1406,
+            tun_ipv4: Ipv4Addr::new(10, 20, 0, 17),
+            tun_prefix: 0,
+        };
+
+        assert_eq!(tun_subnet_cidr(&tun), "0.0.0.0/0");
     }
 
     #[test]
