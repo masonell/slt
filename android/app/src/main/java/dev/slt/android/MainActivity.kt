@@ -27,6 +27,11 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            // Notification permission is optional for VPN startup: Android shows the
+            // active tunnel through the system VPN indicator, and users can enable
+            // app notifications later from system settings. The notification adds
+            // drawer status and a Stop action, so denial still proceeds into VPN
+            // preparation.
             prepareVpnAndStart()
         }
 
