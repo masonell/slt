@@ -615,8 +615,9 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 trace!(
                     expected_nonce = *last_probe_nonce,
                     received_nonce = ack.nonce,
-                    "received stale udp upgrade probe ack nonce"
+                    "ignoring stale udp upgrade probe ack nonce"
                 );
+                return Ok(SessionControl::Continue);
             }
             *probe_acked = true;
             !*ready_sent
@@ -1093,6 +1094,104 @@ mod tests {
             let buf = [u8::from(RegisterFailCode::NotAuthenticated)];
             let decoded = RegisterFailPayload::decode(&buf).unwrap();
             assert_eq!(decoded.code, RegisterFailCode::NotAuthenticated);
+        }
+    }
+
+    mod probe_ack_handling {
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        use slt_core::proto::OwnedMessageBuf;
+        use slt_core::transport::tcp::TcpChannel;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        use super::*;
+        use crate::metrics::Metrics;
+        use crate::runtime::services::DesktopServices;
+        use crate::test_support::{test_config, tls_tcp_stream_pair};
+        use crate::transport::tcp::{ClientKeyUpdater, TcpSession, TcpTransport};
+        use crate::tun::TunChannels;
+
+        async fn loopback_tcp_transport() -> TcpTransport {
+            let metrics = Arc::new(Metrics::default());
+            let updater = ClientKeyUpdater::new(metrics);
+            let (client_stream, _server_stream) = tls_tcp_stream_pair().await;
+            TcpChannel::with_key_updater(client_stream, updater)
+        }
+
+        fn tun_channels() -> TunChannels {
+            let (_to_session_tx, to_session_rx) = mpsc::channel::<Vec<u8>>(8);
+            let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(8);
+            TunChannels {
+                to_session_rx,
+                to_tun_tx,
+            }
+        }
+
+        #[tokio::test]
+        async fn stale_probe_ack_nonce_does_not_mark_probe_acked() {
+            let mut config = test_config();
+            config.enable_upgrade = true;
+            let services = DesktopServices::new();
+            let mut tun = tun_channels();
+            let metrics = Arc::new(Metrics::default());
+            let tcp_session = TcpSession {
+                transport: loopback_tcp_transport().await,
+                peer: None,
+                sni: None,
+            };
+            let mut session = ClientSession::new(
+                &config,
+                tcp_session,
+                &mut tun,
+                CancellationToken::new(),
+                metrics,
+                &services,
+                None,
+            );
+
+            let upgrade_id = 0xAA;
+            let last_probe_nonce = 0x11;
+            session.udp_upgrade = UdpUpgradeState::Upgrading {
+                upgrade_id,
+                deadline: Instant::now() + config.timing.register_timeout,
+                attempts: 2,
+                next_probe_at: Instant::now() + config.timing.reconnect_min,
+                last_probe_nonce,
+                probe_acked: false,
+                ready_sent: false,
+                probe_backoff: ReconnectBackoff::new(
+                    config.timing.reconnect_min,
+                    config.timing.reconnect_max,
+                ),
+            };
+
+            let ack = UpgradeProbeAckPayload {
+                upgrade_id,
+                nonce: last_probe_nonce + 1,
+            };
+            let mut payload = Vec::new();
+            ack.encode(&mut payload);
+
+            let control = session.handle_upgrade_probe_ack(&payload).await.unwrap();
+            assert!(
+                matches!(control, SessionControl::Continue),
+                "stale ack should be ignored, got {control:?}",
+            );
+
+            let UdpUpgradeState::Upgrading {
+                probe_acked,
+                ready_sent,
+                last_probe_nonce: stored_nonce,
+                ..
+            } = session.udp_upgrade
+            else {
+                panic!("stale ack should leave upgrade attempt active");
+            };
+            assert!(!probe_acked, "stale ack must not validate the udp path");
+            assert!(!ready_sent, "stale ack must not send udp_ready");
+            assert_eq!(stored_nonce, last_probe_nonce);
         }
     }
 
