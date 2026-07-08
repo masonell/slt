@@ -1,14 +1,17 @@
 package dev.slt.android.connection
 
+import dev.slt.android.profile.DnsMode
+import dev.slt.android.profile.DnsSettings
 import dev.slt.android.profile.ProfileMetadata
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.VpnRouteRule
-import java.io.IOException
 import java.net.InetAddress
+import java.net.UnknownHostException
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import okhttp3.Dns
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -48,8 +51,8 @@ class ConnectionTestRunnerTest {
     @Test
     fun runnerStreamsResolvingCheckingDoneWithResolvedAddressesAndStatus() = runBlocking {
         val runner = ConnectionTestRunner(
-            resolver = HostResolver { listOf(InetAddress.getByName("8.8.8.8")) },
-            httpClient = TestHttpClient { _, _, _ -> ConnectionTestOutcome.Success(204) },
+            dnsFactory = ConnectionTestDnsFactory { fixedDns("8.8.8.8") },
+            httpClient = TestHttpClient { _, _, _, _ -> ConnectionTestOutcome.Success(204) },
         )
 
         val entries = runner.run(
@@ -79,8 +82,8 @@ class ConnectionTestRunnerTest {
         var httpHost: String? = null
         var httpAddresses: List<InetAddress>? = null
         val runner = ConnectionTestRunner(
-            resolver = HostResolver { resolvedAddresses },
-            httpClient = TestHttpClient { _, host, addresses ->
+            dnsFactory = ConnectionTestDnsFactory { fixedDns(resolvedAddresses) },
+            httpClient = TestHttpClient { _, host, addresses, _ ->
                 httpHost = host
                 httpAddresses = addresses
                 ConnectionTestOutcome.Success(204)
@@ -96,6 +99,35 @@ class ConnectionTestRunnerTest {
 
         assertEquals("example.com", httpHost)
         assertEquals(resolvedAddresses, httpAddresses)
+    }
+
+    @Test
+    fun runnerBuildsDnsFromProfileSettings() = runBlocking {
+        val dnsSettings = DnsSettings(DnsMode.Custom, listOf("1.1.1.1"))
+        val profileDns = fixedDns("203.0.113.10")
+        var factoryDnsSettings: DnsSettings? = null
+        var httpFallbackDns: Dns? = null
+        val runner = ConnectionTestRunner(
+            dnsFactory = ConnectionTestDnsFactory { settings ->
+                factoryDnsSettings = settings
+                profileDns
+            },
+            httpClient = TestHttpClient { _, _, _, fallbackDns ->
+                httpFallbackDns = fallbackDns
+                ConnectionTestOutcome.Success(204)
+            },
+        )
+
+        runner.run(
+            profile(
+                testUrls = listOf("https://example.com/check"),
+                routes = emptyList(),
+                dns = dnsSettings,
+            ),
+        ).toList()
+
+        assertEquals(dnsSettings, factoryDnsSettings)
+        assertSame(profileDns, httpFallbackDns)
     }
 
     @Test
@@ -119,8 +151,8 @@ class ConnectionTestRunnerTest {
     @Test
     fun runnerReportsDnsFailureAsDoneEntry() = runBlocking {
         val runner = ConnectionTestRunner(
-            resolver = HostResolver { throw IOException("host not found") },
-            httpClient = TestHttpClient { _, _, _ -> ConnectionTestOutcome.Success(200) },
+            dnsFactory = ConnectionTestDnsFactory { failingDns(UnknownHostException("host not found")) },
+            httpClient = TestHttpClient { _, _, _, _ -> ConnectionTestOutcome.Success(200) },
         )
 
         val entries = runner.run(
@@ -143,6 +175,7 @@ class ConnectionTestRunnerTest {
     private fun profile(
         testUrls: List<String>,
         routes: List<VpnRouteRule>,
+        dns: DnsSettings = DnsSettings(),
     ): SltProfile =
         SltProfile(
             id = "profile-id",
@@ -150,7 +183,23 @@ class ConnectionTestRunnerTest {
             metadata = ProfileMetadata(
                 name = "Test",
                 routes = routes,
+                dns = dns,
                 testUrls = testUrls,
             ),
         )
+
+    private fun fixedDns(vararg addresses: String): Dns =
+        fixedDns(addresses.map(InetAddress::getByName))
+
+    private fun fixedDns(addresses: List<InetAddress>): Dns =
+        object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> = addresses
+        }
+
+    private fun failingDns(error: UnknownHostException): Dns =
+        object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                throw error
+            }
+        }
 }
