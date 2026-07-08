@@ -52,6 +52,7 @@ internal fun ProfileEditorHub(
     state: ProfileEditorState,
     profileId: String?,
     ownPackageName: String,
+    saveEnabled: Boolean,
     onNameChange: (String) -> Unit,
     onOpenScreen: (ProfileEditorNestedScreen) -> Unit,
     onSave: () -> Unit,
@@ -84,7 +85,10 @@ internal fun ProfileEditorHub(
                     }
                 },
                 actions = {
-                    TextButton(onClick = onSave) {
+                    TextButton(
+                        onClick = onSave,
+                        enabled = saveEnabled,
+                    ) {
                         Text("Save")
                     }
                 },

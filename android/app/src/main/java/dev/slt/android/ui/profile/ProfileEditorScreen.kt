@@ -27,6 +27,7 @@ internal fun ProfileEditorScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var editorState by remember(profileId) { mutableStateOf(ProfileEditorState()) }
+    var saving by remember(profileId) { mutableStateOf(false) }
 
     LaunchedEffect(profileId) {
         val profile = profileId?.let { profileRepository.loadProfile(it) }
@@ -51,27 +52,35 @@ internal fun ProfileEditorScreen(
             state = editorState,
             profileId = profileId,
             ownPackageName = context.packageName,
+            saveEnabled = !saving,
             onNameChange = { editorState = editorState.copy(name = it) },
             onOpenScreen = { editorState = editorState.copy(activeNestedScreen = it) },
             onSave = {
-                when (
-                    val result = prepareProfileEditorSave(
-                        state = editorState,
-                        ownPackageName = context.packageName,
-                        validateClientConfig = SltNative::validateClientConfig,
-                    )
-                ) {
-                    is ProfileEditorSaveResult.Blocked -> editorState = result.state
-                    is ProfileEditorSaveResult.Ready -> {
-                        editorState = result.state
-                        scope.launch {
-                            profileRepository.saveProfile(
-                                id = profileId,
-                                name = result.name,
-                                clientToml = result.clientToml,
-                                metadata = result.metadata,
-                            )
-                            onSaved()
+                if (!saving) {
+                    when (
+                        val result = prepareProfileEditorSave(
+                            state = editorState,
+                            ownPackageName = context.packageName,
+                            validateClientConfig = SltNative::validateClientConfig,
+                        )
+                    ) {
+                        is ProfileEditorSaveResult.Blocked -> editorState = result.state
+                        is ProfileEditorSaveResult.Ready -> {
+                            editorState = result.state
+                            saving = true
+                            scope.launch {
+                                try {
+                                    profileRepository.saveProfile(
+                                        id = profileId,
+                                        name = result.name,
+                                        clientToml = result.clientToml,
+                                        metadata = result.metadata,
+                                    )
+                                    onSaved()
+                                } finally {
+                                    saving = false
+                                }
+                            }
                         }
                     }
                 }

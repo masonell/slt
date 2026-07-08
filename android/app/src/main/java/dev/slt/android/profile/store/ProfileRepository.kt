@@ -11,6 +11,8 @@ import dev.slt.android.profile.ProfileStoreState
 import dev.slt.android.profile.SltProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -51,21 +53,23 @@ class ProfileRepository(context: Context) {
         metadata: ProfileMetadata?,
     ): SltProfile =
         withContext(Dispatchers.IO) {
-            val profileId = id ?: UUID.randomUUID().toString()
-            val profileMetadata = (metadata ?: ProfileMetadata(name = name)).copy(name = name)
-            val dir = profileDir(profileId)
-            if (!dir.exists() && !dir.mkdirs()) {
-                error("could not create profile directory: $dir")
-            }
+            saveMutex.withLock {
+                val profileId = id ?: UUID.randomUUID().toString()
+                val profileMetadata = (metadata ?: ProfileMetadata(name = name)).copy(name = name)
+                val dir = profileDir(profileId)
+                if (!dir.exists() && !dir.mkdirs()) {
+                    error("could not create profile directory: $dir")
+                }
 
-            writeTextAtomic(clientTomlFile(dir), clientToml)
-            writeTextAtomic(metadataFile(dir), profileMetadata.toProfileJson().toString(2))
+                writeTextAtomic(clientTomlFile(dir), clientToml)
+                writeTextAtomic(metadataFile(dir), profileMetadata.toProfileJson().toString(2))
 
-            val profile = SltProfile(profileId, clientToml, profileMetadata)
-            if (activeProfileId() == null) {
-                setActiveProfileId(profileId)
+                val profile = SltProfile(profileId, clientToml, profileMetadata)
+                if (activeProfileId() == null) {
+                    setActiveProfileId(profileId)
+                }
+                profile
             }
-            profile
         }
 
     suspend fun duplicateProfile(id: String): SltProfile? =
@@ -171,11 +175,11 @@ class ProfileRepository(context: Context) {
     private fun metadataFile(dir: File): File = File(dir, "metadata.json")
 
     private fun writeTextAtomic(target: File, text: String) {
-        // Stage to a sibling .tmp file and rename, so an interrupt during either
-        // write cannot leave a truncated file that loads as Corrupt. renameTo
-        // uses rename(2), which atomically replaces the destination on the same
-        // filesystem.
-        val tmp = File(target.parentFile, "${target.name}.tmp")
+        // Stage to a unique sibling temp file, so concurrent writers never share
+        // scratch files and an interrupt cannot leave a truncated profile file.
+        // renameTo uses rename(2), which atomically replaces the destination on
+        // the same filesystem.
+        val tmp = File.createTempFile("${target.name}.", ".tmp", target.parentFile)
         tmp.writeText(text)
         if (!tmp.renameTo(target)) {
             tmp.delete()
@@ -198,5 +202,6 @@ class ProfileRepository(context: Context) {
     private companion object {
         const val TAG = "ProfileRepository"
         val ACTIVE_PROFILE_ID = stringPreferencesKey("activeProfileId")
+        val saveMutex = Mutex()
     }
 }
