@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 mod add_client;
@@ -235,6 +235,10 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    if cli.json && !supports_json(&cli.command) {
+        bail!("--json is only supported for list-clients and show-client");
+    }
+
     match cli.command {
         Commands::Init {
             config_dir,
@@ -277,11 +281,11 @@ fn run(cli: Cli) -> Result<()> {
         }
         Commands::ListClients { config } => {
             let config_path = PathBuf::from(&config);
-            list_clients::list_clients(&config_path, cli.quiet)
+            list_clients::list_clients(&config_path, cli.quiet, cli.json)
         }
         Commands::ShowClient { client_id, config } => {
             let config_path = PathBuf::from(&config);
-            show_client::show_client(&config_path, &client_id, cli.quiet)
+            show_client::show_client(&config_path, &client_id, cli.quiet, cli.json)
         }
         Commands::ShowClientConfig {
             client_id,
@@ -319,6 +323,13 @@ fn run(cli: Cli) -> Result<()> {
         #[cfg(target_os = "linux")]
         Commands::Net { command } => run_net(command, cli.quiet),
     }
+}
+
+const fn supports_json(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::ListClients { .. } | Commands::ShowClient { .. }
+    )
 }
 
 #[cfg(target_os = "linux")]

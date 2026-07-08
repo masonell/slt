@@ -5,18 +5,33 @@
 use std::path::Path;
 
 use anyhow::Result;
+use serde::Serialize;
+use slt_core::types::ServerClient;
 
 use crate::config_io::load_server_config;
 
+#[derive(Serialize)]
+struct ListClientsOutput<'a> {
+    clients: &'a [ServerClient],
+}
+
 /// List all clients registered in the server config.
 ///
-/// Displays client ID, assigned IPv4 address, and enabled status in a table format.
+/// Displays client ID, assigned IPv4 address, and enabled status in text or JSON format.
 ///
 /// # Errors
 ///
-/// Returns an error if the config file cannot be read or parsed.
-pub fn list_clients(config_path: &Path, quiet: bool) -> Result<()> {
+/// Returns an error if the config file cannot be read, parsed, or rendered as JSON.
+pub fn list_clients(config_path: &Path, quiet: bool, json: bool) -> Result<()> {
     let config = load_server_config(config_path)?;
+
+    if json {
+        let output = ListClientsOutput {
+            clients: &config.clients,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
 
     if quiet {
         return Ok(());
@@ -97,7 +112,7 @@ metrics_interval = "5m"
     #[test]
     fn list_clients_empty() {
         let file = write_test_config("clients = []");
-        let result = list_clients(file.path(), false);
+        let result = list_clients(file.path(), false, false);
         if let Err(ref e) = result {
             eprintln!("Error: {e:?}");
         }
@@ -111,9 +126,9 @@ clients = [
     { client_id = "0102030405060708090a0b0c0d0e0f10", pubkey_ed25519 = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", assigned_ipv4 = "10.10.0.2", enabled = true },
     { client_id = "aabbccdd0102030405060708090a0b0c", pubkey_ed25519 = "aabbccdd05060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", assigned_ipv4 = "10.10.0.3", enabled = false },
 ]
-"#;
+        "#;
         let file = write_test_config(clients);
-        let result = list_clients(file.path(), false);
+        let result = list_clients(file.path(), false, false);
         if let Err(ref e) = result {
             eprintln!("Error: {e:?}");
         }
@@ -122,7 +137,28 @@ clients = [
 
     #[test]
     fn list_clients_missing_file() {
-        let result = list_clients(Path::new("/nonexistent/path.toml"), false);
+        let result = list_clients(Path::new("/nonexistent/path.toml"), false, false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_clients_json_shape() {
+        let clients = r#"
+clients = [
+    { client_id = "0102030405060708090a0b0c0d0e0f10", pubkey_ed25519 = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", assigned_ipv4 = "10.10.0.2", enabled = true },
+]
+"#;
+        let file = write_test_config(clients);
+        let config = load_server_config(file.path()).unwrap();
+        let output = ListClientsOutput {
+            clients: &config.clients,
+        };
+        let json = serde_json::to_value(output).unwrap();
+        assert_eq!(
+            json["clients"][0]["client_id"],
+            "0102030405060708090a0b0c0d0e0f10"
+        );
+        assert_eq!(json["clients"][0]["assigned_ipv4"], "10.10.0.2");
+        assert_eq!(json["clients"][0]["enabled"], true);
     }
 }

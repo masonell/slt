@@ -5,14 +5,20 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use slt_core::types::ClientId;
+use serde::Serialize;
+use slt_core::types::{ClientId, ServerClient};
 
 use crate::client_id::parse_client_id;
 use crate::config_io::load_server_config;
 
+#[derive(Serialize)]
+struct ShowClientOutput<'a> {
+    client: &'a ServerClient,
+}
+
 /// Display detailed information about a specific client.
 ///
-/// Shows client ID, public key, assigned IP, and enabled status.
+/// Shows client ID, public key, assigned IP, and enabled status in text or JSON format.
 ///
 /// # Errors
 ///
@@ -20,7 +26,8 @@ use crate::config_io::load_server_config;
 /// - The config file cannot be read or parsed
 /// - The client ID is not found
 /// - The client ID is invalid hex
-pub fn show_client(config_path: &Path, client_id: &str, quiet: bool) -> Result<()> {
+/// - JSON output cannot be rendered
+pub fn show_client(config_path: &Path, client_id: &str, quiet: bool, json: bool) -> Result<()> {
     let config = load_server_config(config_path)?;
 
     let client_id_bytes = parse_client_id(client_id)?;
@@ -30,6 +37,12 @@ pub fn show_client(config_path: &Path, client_id: &str, quiet: bool) -> Result<(
         .iter()
         .find(|c| c.client_id == ClientId(client_id_bytes))
         .context(format!("client {client_id} not found"))?;
+
+    if json {
+        let output = ShowClientOutput { client };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
 
     if quiet {
         return Ok(());
@@ -107,21 +120,36 @@ enabled = true
     #[test]
     fn show_client_found() {
         let file = write_test_config();
-        let result = show_client(file.path(), "0102030405060708090a0b0c0d0e0f10", false);
+        let result = show_client(
+            file.path(),
+            "0102030405060708090a0b0c0d0e0f10",
+            false,
+            false,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn show_client_with_0x_prefix() {
         let file = write_test_config();
-        let result = show_client(file.path(), "0x0102030405060708090a0b0c0d0e0f10", false);
+        let result = show_client(
+            file.path(),
+            "0x0102030405060708090a0b0c0d0e0f10",
+            false,
+            false,
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn show_client_not_found() {
         let file = write_test_config();
-        let result = show_client(file.path(), "ffffffffffffffffffffffffffffffff", false);
+        let result = show_client(
+            file.path(),
+            "ffffffffffffffffffffffffffffffff",
+            false,
+            false,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -129,14 +157,14 @@ enabled = true
     #[test]
     fn show_client_invalid_hex() {
         let file = write_test_config();
-        let result = show_client(file.path(), "not-valid-hex!", false);
+        let result = show_client(file.path(), "not-valid-hex!", false, false);
         assert!(result.is_err());
     }
 
     #[test]
     fn show_client_wrong_length() {
         let file = write_test_config();
-        let result = show_client(file.path(), "01020304", false);
+        let result = show_client(file.path(), "01020304", false, false);
         assert!(result.is_err());
         assert!(
             result
@@ -144,5 +172,19 @@ enabled = true
                 .to_string()
                 .contains("expected 16 bytes")
         );
+    }
+
+    #[test]
+    fn show_client_json_shape() {
+        let file = write_test_config();
+        let config = load_server_config(file.path()).unwrap();
+        let client = config.clients.first().unwrap();
+        let json = serde_json::to_value(ShowClientOutput { client }).unwrap();
+        assert_eq!(
+            json["client"]["client_id"],
+            "0102030405060708090a0b0c0d0e0f10"
+        );
+        assert_eq!(json["client"]["assigned_ipv4"], "10.10.0.2");
+        assert_eq!(json["client"]["enabled"], true);
     }
 }
