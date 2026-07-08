@@ -147,7 +147,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     }
 
     async fn handle_event(&mut self, event: SessionEvent) -> Result<SessionControl, SessionError> {
-        self.note_activity();
         match event {
             SessionEvent::TunPacket(packet) => self.handle_tun_packet(packet).await,
             SessionEvent::Udp(claim) => self.handle_udp_claim(claim).await,

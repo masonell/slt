@@ -6,7 +6,7 @@ use slt_core::proto::{
     encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
@@ -17,7 +17,7 @@ use super::common::{
     spawn_session, spawn_session_with_timeouts,
 };
 use crate::quic::UdpClaim;
-use crate::test_support::default_session_timeouts;
+use crate::test_support::{TlsDuplexStream, default_session_timeouts};
 
 #[tokio::test]
 async fn session_idle_timeout_sends_close() {
@@ -97,6 +97,31 @@ async fn partial_tcp_frame_does_not_reset_idle_timeout() {
 }
 
 #[tokio::test]
+async fn tun_downlink_does_not_reset_idle_timeout() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.idle_timeout = Duration::from_millis(300);
+    timeouts.ping_min = Duration::from_secs(5);
+    timeouts.ping_max = Duration::from_secs(5);
+
+    let (join, mut client, tx, _tun_rx, _udp_rx, limits, assigned, _registry) =
+        spawn_session_with_timeouts(timeouts).await;
+
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    let packet = ipv4_packet(Ipv4Addr::new(192, 0, 2, 10), assigned.addr(), 8);
+    tx.send(SessionEvent::TunPacket(packet)).await.unwrap();
+
+    let close_code = read_until_close_code(&mut client, limits, Duration::from_millis(180)).await;
+    assert_eq!(close_code, CloseCode::IdleTimeout);
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
 async fn session_sends_tcp_ping_on_schedule() {
     let mut timeouts = default_session_timeouts();
     timeouts.ping_min = Duration::from_millis(50);
@@ -120,6 +145,38 @@ async fn session_sends_tcp_ping_on_schedule() {
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
+}
+
+async fn read_until_close_code(
+    stream: &mut TlsDuplexStream,
+    limits: MessageLimits,
+    duration: Duration,
+) -> CloseCode {
+    timeout(duration, async {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(n, 0, "stream closed before close message");
+            buf.extend_from_slice(&chunk[..n]);
+
+            loop {
+                let Some((message, consumed)) = decode_message(&buf, limits).unwrap() else {
+                    break;
+                };
+                let close_code = match message {
+                    Message::Close { payload } => Some(ClosePayload::decode(payload).unwrap().code),
+                    _ => None,
+                };
+                buf.drain(..consumed);
+                if let Some(code) = close_code {
+                    return code;
+                }
+            }
+        }
+    })
+    .await
+    .expect("downlink event must not extend the original idle deadline")
 }
 
 #[tokio::test]

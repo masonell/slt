@@ -62,7 +62,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             UdpOpenOutcome::Opened => {
                 self.update_udp_peer(peer);
                 match self.decode_udp_message(&opened) {
-                    Ok(Some(message)) => self.dispatch_udp_message(message).await,
+                    Ok(Some(message)) => {
+                        self.note_activity();
+                        self.dispatch_udp_message(message).await
+                    }
                     Ok(None) => Ok(SessionControl::Continue),
                     Err(err) => Err(err),
                 }
