@@ -40,8 +40,17 @@ impl TryFrom<&ClientConfig> for ClientConfigSummary {
 
 #[uniffi::export(with_foreign)]
 pub trait PlatformServices: Send + Sync {
+    /// Protect an already-created transport socket before Rust connects or sends.
+    ///
+    /// This callback is intentionally synchronous: Android implementations must
+    /// only perform the local `VpnService.protect(fd)` call and bind the socket
+    /// to the currently selected underlying network. Those operations are
+    /// required before the socket is used and should not perform DNS, network
+    /// I/O, retries, or other blocking work. Blocking host lookup belongs in
+    /// [`Self::resolve_host`], which the runtime invokes on a blocking worker.
     fn protect_socket(&self, fd: i32, kind: SocketKind) -> bool;
 
+    /// Resolve `hostname` through the active Android underlying network.
     fn resolve_host(&self, hostname: String) -> Result<Vec<String>, SltInteropError>;
 }
 
