@@ -12,7 +12,7 @@ SLT uses two transport modes with distinct security properties:
 | Protocol | TLS 1.3 | Custom (QUIC wire format) |
 | Termination | VPN handler | N/A (already encrypted) |
 | Key Exchange | TLS handshake | Via TCP control channel |
-| Libraries | BoringSSL (patched) | BoringSSL (AES-128-GCM) |
+| Libraries | BoringSSL (patched) | BoringSSL AEADs (negotiated cipher suite) |
 | Use Case | Control plane + fallback | High-performance data plane |
 
 The client starts on TCP, authenticates, and may later upgrade to UDP-QSP for
@@ -113,7 +113,12 @@ Keys are **not** derived from a QUIC handshake. Instead:
 Header protection masks the packet number length, key phase, and reserved bits
 in the first byte, plus the packet number bytes themselves.
 
-**Algorithm**: AES-128-ECB on a 16-byte sample
+**Algorithm**: Follows the negotiated UDP-QSP cipher suite. AES-128-GCM uses
+AES-128-ECB on a 16-byte sample; ChaCha20-Poly1305 uses QUIC's ChaCha header
+protection mask. See the [UDP-QSP cipher suites](../protocol/udp-qsp.md#cipher-suites)
+table.
+
+For the AES-128-GCM suite:
 
 ```
 sample_offset = 1 + dcid_len + 4
@@ -129,7 +134,9 @@ MUST pad packets that would be too short to provide a 16-byte sample.
 
 ### 3.4 AEAD Payload Protection
 
-**Cipher**: AES-128-GCM (tag length 16 bytes)
+**Cipher**: Negotiated by `REGISTER_CID`; see the
+[UDP-QSP cipher suites](../protocol/udp-qsp.md#cipher-suites) table. Supported
+suites use a 16-byte tag.
 
 **Nonce construction**:
 
@@ -145,7 +152,7 @@ the 12-byte IV.
 **Encryption**:
 
 ```
-ciphertext || tag = AES-128-GCM-Seal(key, nonce, ad, plaintext)
+ciphertext || tag = AEAD-Seal(key, nonce, ad, plaintext)
 ```
 
 ### 3.5 Key Directionality
@@ -174,7 +181,7 @@ offset size field
 1      N    client_to_server_cid
 1+N    1    server_to_client_cid_len (0-20)
 2+N    M    server_to_client_cid
-...    1    cipher (0x01 = AES-128-GCM)
+...    1    cipher (see UDP-QSP cipher suites)
 ...    32   secret_tx
 ...    32   secret_rx
 ...    8    pn_start (server->client initial PN)
@@ -232,8 +239,8 @@ traffic secret.
 
 ### 5.1 What UDP-QSP Provides
 
-- **Confidentiality**: AES-128-GCM encrypts all payload data. Only parties
-  with the shared keys can decrypt.
+- **Confidentiality**: The negotiated AEAD encrypts all payload data. Only
+  parties with the shared keys can decrypt.
 
 - **Integrity**: The 16-byte AEAD tag authenticates both the ciphertext and
   the associated data (header). Any tampering is detected.

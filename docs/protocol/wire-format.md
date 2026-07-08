@@ -175,4 +175,4 @@ fn decode_frame(buf: &[u8], max_len: usize) -> Option<(Frame, usize)> {
 
 ### UDP-QSP Payload Format
 
-Each UDP datagram carries exactly one framed message using the same `TYPE + LEN + PAYLOAD` format as TCP. The frame is encrypted using AES-128-GCM with QUIC short-header packet protection.
+Each UDP datagram carries exactly one framed message using the same `TYPE + LEN + PAYLOAD` format as TCP. The frame is encrypted with the negotiated UDP-QSP cipher suite using QUIC short-header packet protection; see the [UDP-QSP cipher suites](udp-qsp.md#cipher-suites) table.
