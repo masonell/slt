@@ -13,10 +13,10 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, SanType,
 };
-use time::{Duration, OffsetDateTime};
+use time::{Duration, Month, OffsetDateTime};
 
 /// Default certificate validity period (10 years).
-const CERT_VALIDITY_YEARS: i64 = 10;
+const CERT_VALIDITY_YEARS: i32 = 10;
 
 /// Generate CA and server certificates.
 ///
@@ -103,7 +103,7 @@ pub fn generate_certs(config_dir: &Path, domain: &str, force: bool, quiet: bool)
 fn generate_cert_chain(domain: &str) -> Result<(String, String, String)> {
     let now = OffsetDateTime::now_utc();
     let not_before = now - Duration::hours(1); // Allow for clock skew
-    let not_after = now + Duration::days(CERT_VALIDITY_YEARS * 365);
+    let not_after = add_cert_validity_years(now)?;
 
     // Generate CA key and certificate
     let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
@@ -151,6 +151,23 @@ fn generate_cert_chain(domain: &str) -> Result<(String, String, String)> {
     Ok((ca_cert.pem(), server_cert.pem(), server_key.serialize_pem()))
 }
 
+fn add_cert_validity_years(now: OffsetDateTime) -> Result<OffsetDateTime> {
+    let target_year = now
+        .year()
+        .checked_add(CERT_VALIDITY_YEARS)
+        .context("certificate validity year overflow")?;
+
+    match now.replace_year(target_year) {
+        Ok(not_after) => Ok(not_after),
+        Err(_) if now.month() == Month::February && now.day() == 29 => now
+            .replace_day(28)
+            .context("failed to normalize leap-day certificate validity")?
+            .replace_year(target_year)
+            .context("failed to compute certificate validity end date"),
+        Err(err) => Err(err).context("failed to compute certificate validity end date"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +181,38 @@ mod tests {
         assert!(server_pem.contains("-----BEGIN CERTIFICATE-----"));
         // PKCS#8 format for private key
         assert!(key_pem.contains("-----BEGIN PRIVATE KEY-----"));
+    }
+
+    #[test]
+    fn cert_validity_uses_calendar_years() {
+        let now = time::Date::from_calendar_date(2023, Month::March, 1)
+            .unwrap()
+            .with_hms(12, 34, 56)
+            .unwrap()
+            .assume_utc();
+
+        let not_after = add_cert_validity_years(now).unwrap();
+
+        assert_eq!(not_after.year(), 2033);
+        assert_eq!(not_after.month(), Month::March);
+        assert_eq!(not_after.day(), 1);
+        assert_eq!(not_after.time(), now.time());
+    }
+
+    #[test]
+    fn cert_validity_normalizes_leap_day_to_feb_28() {
+        let now = time::Date::from_calendar_date(2024, Month::February, 29)
+            .unwrap()
+            .with_hms(12, 34, 56)
+            .unwrap()
+            .assume_utc();
+
+        let not_after = add_cert_validity_years(now).unwrap();
+
+        assert_eq!(not_after.year(), 2034);
+        assert_eq!(not_after.month(), Month::February);
+        assert_eq!(not_after.day(), 28);
+        assert_eq!(not_after.time(), now.time());
     }
 
     #[test]
