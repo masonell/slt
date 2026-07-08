@@ -43,6 +43,9 @@ internal class VpnRuntimePlatformServices(
             return false
         }
 
+        // Invariant: this fd is borrowed from Rust. fromFd() duplicates it, so
+        // closing this wrapper must only close the duplicate; Rust owns and
+        // closes the original fd.
         ParcelFileDescriptor.fromFd(fd).use { dup ->
             network.bindSocket(dup.fileDescriptor)
         }
