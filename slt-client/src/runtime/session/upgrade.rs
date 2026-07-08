@@ -1130,7 +1130,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stale_probe_ack_nonce_does_not_mark_probe_acked() {
+        async fn delayed_probe_ack_from_superseded_probe_does_not_mark_probe_acked() {
             let mut config = test_config();
             config.enable_upgrade = true;
             let services = DesktopServices::new();
@@ -1152,6 +1152,7 @@ mod tests {
             );
 
             let upgrade_id = 0xAA;
+            let superseded_probe_nonce = 0x10;
             let last_probe_nonce = 0x11;
             session.udp_upgrade = UdpUpgradeState::Upgrading {
                 upgrade_id,
@@ -1169,7 +1170,7 @@ mod tests {
 
             let ack = UpgradeProbeAckPayload {
                 upgrade_id,
-                nonce: last_probe_nonce + 1,
+                nonce: superseded_probe_nonce,
             };
             let mut payload = Vec::new();
             ack.encode(&mut payload);
@@ -1177,7 +1178,7 @@ mod tests {
             let control = session.handle_upgrade_probe_ack(&payload).await.unwrap();
             assert!(
                 matches!(control, SessionControl::Continue),
-                "stale ack should be ignored, got {control:?}",
+                "delayed superseded ack should be ignored, got {control:?}",
             );
 
             let UdpUpgradeState::Upgrading {
@@ -1187,10 +1188,16 @@ mod tests {
                 ..
             } = session.udp_upgrade
             else {
-                panic!("stale ack should leave upgrade attempt active");
+                panic!("delayed superseded ack should leave upgrade attempt active");
             };
-            assert!(!probe_acked, "stale ack must not validate the udp path");
-            assert!(!ready_sent, "stale ack must not send udp_ready");
+            assert!(
+                !probe_acked,
+                "delayed superseded ack must not validate the udp path"
+            );
+            assert!(
+                !ready_sent,
+                "delayed superseded ack must not send udp_ready"
+            );
             assert_eq!(stored_nonce, last_probe_nonce);
         }
     }
