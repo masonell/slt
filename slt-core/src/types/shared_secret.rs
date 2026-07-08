@@ -4,10 +4,16 @@ use serde::{Deserialize, Serialize};
 ///
 /// Used by both client and server to generate/verify the `legacy_session_id`
 /// in TLS `ClientHello` packets via HMAC-SHA256.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct SharedSecret(#[serde(with = "crate::types::serde::secret")] pub [u8; 32]);
+
+impl std::fmt::Debug for SharedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedSecret(<redacted>)")
+    }
+}
 
 impl SharedSecret {
     /// Returns the raw secret bytes.
@@ -53,6 +59,17 @@ mod tests {
 
         assert_eq!(secret1, secret2);
         assert_ne!(secret1, secret3);
+    }
+
+    #[test]
+    fn debug_redacts_secret_bytes() {
+        let bytes = [0xAB; 32];
+        let secret = SharedSecret(bytes);
+        let rendered = format!("{secret:?}");
+
+        assert_eq!(rendered, "SharedSecret(<redacted>)");
+        assert!(!rendered.contains(&format!("{bytes:?}")));
+        assert!(!rendered.contains(&hex::encode(bytes)));
     }
 
     #[test]

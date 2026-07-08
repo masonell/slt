@@ -16,10 +16,16 @@ impl PubKeyEd25519 {
 }
 
 /// Ed25519 private key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
 #[serde(transparent)]
 pub struct PrivKeyEd25519(#[serde(with = "crate::types::serde::secret")] pub [u8; 32]);
+
+impl std::fmt::Debug for PrivKeyEd25519 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PrivKeyEd25519(<redacted>)")
+    }
+}
 
 impl PrivKeyEd25519 {
     /// Returns the raw private key bytes.
@@ -60,6 +66,17 @@ mod tests {
         let bytes = [0xBB; 32];
         let key = PrivKeyEd25519(bytes);
         assert_eq!(key.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn privkey_debug_redacts_key_bytes() {
+        let bytes = [0xBC; 32];
+        let key = PrivKeyEd25519(bytes);
+        let rendered = format!("{key:?}");
+
+        assert_eq!(rendered, "PrivKeyEd25519(<redacted>)");
+        assert!(!rendered.contains(&format!("{bytes:?}")));
+        assert!(!rendered.contains(&hex::encode(bytes)));
     }
 
     #[test]

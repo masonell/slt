@@ -201,6 +201,32 @@ mod tests {
     }
 
     #[test]
+    fn debug_redacts_secret_material() {
+        const INLINE_PRIVATE_KEY: &str =
+            "-----BEGIN PRIVATE KEY----- client-secret -----END PRIVATE KEY-----";
+
+        let mut config = test_config();
+        config.tls.tls_ca = TlsMaterial::Pem(INLINE_PRIVATE_KEY.to_string());
+        config.identity.shared_secret = SharedSecret([0x51; 32]);
+        config.identity.privkey_ed25519 = PrivKeyEd25519([0x52; 32]);
+
+        let shared_secret_bytes = format!("{:?}", config.identity.shared_secret.as_bytes());
+        let shared_secret_hex = hex::encode(config.identity.shared_secret.as_bytes());
+        let privkey_bytes = format!("{:?}", config.identity.privkey_ed25519.as_bytes());
+        let privkey_hex = hex::encode(config.identity.privkey_ed25519.as_bytes());
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("SharedSecret(<redacted>)"));
+        assert!(rendered.contains("PrivKeyEd25519(<redacted>)"));
+        assert!(rendered.contains("Pem(<redacted>)"));
+        assert!(!rendered.contains(&shared_secret_bytes));
+        assert!(!rendered.contains(&shared_secret_hex));
+        assert!(!rendered.contains(&privkey_bytes));
+        assert!(!rendered.contains(&privkey_hex));
+        assert!(!rendered.contains(INLINE_PRIVATE_KEY));
+    }
+
+    #[test]
     fn serde_defaults_transport_cipher_to_auto_when_omitted() {
         let raw = r#"
             [network]

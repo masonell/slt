@@ -1,17 +1,27 @@
 //! TLS certificate/key material for configuration.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// TLS material provided inline as PEM or loaded from a file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TlsMaterial {
     /// PEM-encoded data embedded directly in the config.
     Pem(String),
     /// Path to a PEM-encoded file on disk.
     File { file: PathBuf },
+}
+
+impl fmt::Debug for TlsMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pem(_) => f.write_str("Pem(<redacted>)"),
+            Self::File { file } => f.debug_struct("File").field("file", file).finish(),
+        }
+    }
 }
 
 impl Serialize for TlsMaterial {
@@ -104,6 +114,15 @@ mod tests {
         let config: Config = toml::from_str("cert = { file = \"/path/to/cert.pem\" }").unwrap();
         assert!(config.cert.is_file());
         assert!(matches!(config.cert, TlsMaterial::File { file } if file == *"/path/to/cert.pem"));
+    }
+
+    #[test]
+    fn debug_redacts_inline_pem() {
+        let material = TlsMaterial::Pem(PEM_DATA.to_string());
+        let rendered = format!("{material:?}");
+
+        assert_eq!(rendered, "Pem(<redacted>)");
+        assert!(!rendered.contains(PEM_DATA));
     }
 
     #[test]
