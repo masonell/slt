@@ -37,7 +37,7 @@ fn parse_hex_32(s: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
     let args = Args::parse();
     let peer = args
         .addr
@@ -68,17 +68,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stream = std::net::TcpStream::connect(peer)?;
     match ssl.connect(stream) {
-        Ok(_) => eprintln!("handshake completed"),
+        Ok(_) => {
+            eprintln!("handshake completed");
+            Ok(std::process::ExitCode::SUCCESS)
+        }
         Err(HandshakeError::WouldBlock(_)) => {
             eprintln!("handshake would block");
+            Ok(std::process::ExitCode::FAILURE)
         }
         Err(HandshakeError::Failure(mid)) => {
             eprintln!("handshake failed: {:?}", mid.error());
+            Ok(std::process::ExitCode::FAILURE)
         }
         Err(HandshakeError::SetupFailure(err)) => {
             eprintln!("handshake setup failed: {err}");
+            Ok(std::process::ExitCode::FAILURE)
         }
     }
-
-    Ok(())
 }
