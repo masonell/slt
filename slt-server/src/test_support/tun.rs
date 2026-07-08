@@ -8,15 +8,20 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::tun::TunDeviceIo;
+use crate::tun::{TunDeviceIo, TunPacketSendOutcome};
 
 /// Null TUN device that discards all packets.
 #[derive(Clone, Copy, Debug)]
 pub struct NullTun;
 
 impl TunDeviceIo for NullTun {
-    fn send<'a>(&'a self, _buf: &'a [u8]) -> impl Future<Output = io::Result<usize>> + Send + 'a {
-        std::future::ready(Ok(0))
+    fn accept_packet<'a>(
+        &'a self,
+        packet: &'a [u8],
+    ) -> impl Future<Output = io::Result<TunPacketSendOutcome>> + Send + 'a {
+        std::future::ready(Ok(TunPacketSendOutcome::Dropped {
+            bytes: packet.len(),
+        }))
     }
 }
 
@@ -28,11 +33,16 @@ pub struct TestTun {
 }
 
 impl TunDeviceIo for TestTun {
-    fn send<'a>(&'a self, buf: &'a [u8]) -> impl Future<Output = io::Result<usize>> + Send + 'a {
+    fn accept_packet<'a>(
+        &'a self,
+        buf: &'a [u8],
+    ) -> impl Future<Output = io::Result<TunPacketSendOutcome>> + Send + 'a {
         let tx = self.tx.clone();
         async move {
-            let _ = tx.send(buf.to_vec()).await;
-            Ok(buf.len())
+            match tx.send(buf.to_vec()).await {
+                Ok(()) => Ok(TunPacketSendOutcome::Accepted),
+                Err(_) => Ok(TunPacketSendOutcome::Closed),
+            }
         }
     }
 }

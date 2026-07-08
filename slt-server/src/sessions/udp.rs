@@ -290,7 +290,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     return Ok(SessionControl::Continue);
                 }
                 if self.should_forward_packet_to_tun(packet) {
-                    self.tun.send(packet).await?;
+                    let outcome = self.tun.accept_packet(packet).await?;
+                    self.handle_tun_packet_send_outcome(outcome)?;
                 }
                 Ok(SessionControl::Continue)
             }

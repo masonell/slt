@@ -42,7 +42,7 @@ use super::metrics::Metrics;
 use super::registry::SessionRegistry;
 use super::router::PacketRouter;
 use super::{AssignedIp, ClientId};
-use crate::tun::TunDeviceIo;
+use crate::tun::{TunDeviceIo, TunPacketSendOutcome};
 
 const BEST_EFFORT_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -208,6 +208,27 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
 
     fn should_forward_packet_to_tun(&self, packet: &[u8]) -> bool {
         PacketRouter::validate_packet_src(self, packet)
+    }
+
+    fn handle_tun_packet_send_outcome(
+        &self,
+        outcome: TunPacketSendOutcome,
+    ) -> Result<(), SessionError> {
+        match outcome {
+            TunPacketSendOutcome::Accepted => Ok(()),
+            TunPacketSendOutcome::Dropped { bytes } => {
+                trace!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    bytes,
+                    "TUN packet dropped by delivery path"
+                );
+                Ok(())
+            }
+            TunPacketSendOutcome::Closed => {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "TUN delivery path closed").into())
+            }
+        }
     }
 
     fn pong_payload_for_ping(payload: &[u8]) -> Result<[u8; 8], SessionError> {
