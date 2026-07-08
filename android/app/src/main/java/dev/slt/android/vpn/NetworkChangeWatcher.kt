@@ -52,6 +52,12 @@ internal data class UnderlyingNetworkTransition<K>(
     val reconnect: Boolean,
 )
 
+private data class NetworkChangeAction(
+    val underlyingNetwork: Network?,
+    val notifyNetworkChanged: Boolean,
+    val reconnectGeneration: Long?,
+)
+
 /**
  * Pure transition decision for underlying-network watching.
  *
@@ -174,7 +180,6 @@ internal class NetworkChangeWatcher(
 ) {
     private val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
-    private val debounceRunnable = Runnable { onReconnect(pendingReconnectNetwork) }
     private val primingCompleteRunnable = Runnable {
         handleEvent(UnderlyingNetworkEvent.PrimingComplete)
     }
@@ -182,6 +187,9 @@ internal class NetworkChangeWatcher(
 
     private var registered = false
     private var pendingReconnectNetwork: Network? = null
+    private var pendingReconnectRunnable: Runnable? = null
+    // Invalidates delayed reconnect work captured before stop/start or a newer event.
+    private var reconnectGeneration = 0L
     private var state: UnderlyingNetworkState<Network> =
         UnderlyingNetworkState(
             current = initialNetwork,
@@ -208,6 +216,9 @@ internal class NetworkChangeWatcher(
                 available = listOfNotNull(initialNetwork),
                 primed = false,
             )
+            pendingReconnectNetwork = null
+            pendingReconnectRunnable = null
+            reconnectGeneration += 1
             val manager = connectivityManager ?: run {
                 Log.w(TAG, "No ConnectivityManager; auto-reconnect disabled")
                 return
@@ -234,9 +245,11 @@ internal class NetworkChangeWatcher(
     /** Stop observing. Idempotent; safe to call even if never started. */
     fun stop() {
         synchronized(lock) {
-            handler.removeCallbacks(debounceRunnable)
+            pendingReconnectRunnable?.let(handler::removeCallbacks)
             handler.removeCallbacks(primingCompleteRunnable)
             pendingReconnectNetwork = null
+            pendingReconnectRunnable = null
+            reconnectGeneration += 1
             state = UnderlyingNetworkState(current = null, available = emptyList(), primed = false)
             if (!registered) return
             registered = false
@@ -250,19 +263,62 @@ internal class NetworkChangeWatcher(
     }
 
     private fun handleEvent(event: UnderlyingNetworkEvent<Network>) {
-        synchronized(lock) {
+        val action = synchronized(lock) {
             val result = applyUnderlyingNetworkEvent(event, state)
             state = result.state
 
-            if (result.networkChanged) {
-                onUnderlyingNetworkChanged(result.state.current)
+            if (result.reconnect) {
+                pendingReconnectNetwork = result.state.current
+                reconnectGeneration += 1
             }
 
-            if (result.reconnect) {
-                handler.removeCallbacks(debounceRunnable)
-                pendingReconnectNetwork = result.state.current
-                handler.postDelayed(debounceRunnable, RECONNECT_DEBOUNCE_MS)
+            NetworkChangeAction(
+                underlyingNetwork = result.state.current,
+                notifyNetworkChanged = result.networkChanged,
+                reconnectGeneration = if (result.reconnect) reconnectGeneration else null,
+            )
+        }
+
+        if (action.notifyNetworkChanged) {
+            onUnderlyingNetworkChanged(action.underlyingNetwork)
+        }
+
+        action.reconnectGeneration?.let(::scheduleReconnect)
+    }
+
+    private fun scheduleReconnect(generation: Long) {
+        val runnable = Runnable { fireReconnect(generation) }
+        var shouldSchedule = false
+        val previousRunnable = synchronized(lock) {
+            if (registered && generation == reconnectGeneration) {
+                shouldSchedule = true
+                val previous = pendingReconnectRunnable
+                pendingReconnectRunnable = runnable
+                previous
+            } else {
+                null
             }
+        }
+
+        if (!shouldSchedule) return
+        previousRunnable?.let(handler::removeCallbacks)
+        handler.postDelayed(runnable, RECONNECT_DEBOUNCE_MS)
+    }
+
+    private fun fireReconnect(generation: Long) {
+        var shouldReconnect = false
+        val reconnectNetwork = synchronized(lock) {
+            if (registered && generation == reconnectGeneration) {
+                shouldReconnect = true
+                pendingReconnectRunnable = null
+                pendingReconnectNetwork
+            } else {
+                null
+            }
+        }
+
+        if (shouldReconnect) {
+            onReconnect(reconnectNetwork)
         }
     }
 
