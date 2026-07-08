@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn serde_defaults_transport_allowed_ciphers_when_omitted() {
         let raw = r#"
-            server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+            server_secret = { hex = "0000000000000000000000000000000000000000000000000000000000000000" }
 
             [network]
             listen_tcp = "0.0.0.0:443"
@@ -294,8 +294,8 @@ mod tests {
             nginx_udp_upstream = "127.0.0.1:8080"
 
             [tls]
-            tls_cert = ""
-            tls_key = ""
+            tls_cert = { pem = "" }
+            tls_key = { pem = "" }
 
             [tun]
             tun_name = "tun0"
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn serde_parses_udp_qsp_allowed_ciphers() {
         let raw = r#"
-            server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+            server_secret = { hex = "0000000000000000000000000000000000000000000000000000000000000000" }
 
             [network]
             listen_tcp = "0.0.0.0:443"
@@ -332,8 +332,8 @@ mod tests {
             nginx_udp_upstream = "127.0.0.1:8080"
 
             [tls]
-            tls_cert = ""
-            tls_key = ""
+            tls_cert = { pem = "" }
+            tls_key = { pem = "" }
 
             [tun]
             tun_name = "tun0"
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn serde_parses_max_auth_inflight() {
         let raw = r#"
-            server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+            server_secret = { hex = "0000000000000000000000000000000000000000000000000000000000000000" }
             max_auth_inflight = 64
 
             [network]
@@ -370,8 +370,8 @@ mod tests {
             nginx_udp_upstream = "127.0.0.1:8080"
 
             [tls]
-            tls_cert = ""
-            tls_key = ""
+            tls_cert = { pem = "" }
+            tls_key = { pem = "" }
 
             [tun]
             tun_name = "tun0"
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn serde_rejects_empty_udp_qsp_allowed_ciphers() {
         let raw = r#"
-            server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+            server_secret = { hex = "0000000000000000000000000000000000000000000000000000000000000000" }
 
             [network]
             listen_tcp = "0.0.0.0:443"
@@ -410,8 +410,8 @@ mod tests {
             nginx_udp_upstream = "127.0.0.1:8080"
 
             [tls]
-            tls_cert = ""
-            tls_key = ""
+            tls_cert = { pem = "" }
+            tls_key = { pem = "" }
 
             [tun]
             tun_name = "tun0"

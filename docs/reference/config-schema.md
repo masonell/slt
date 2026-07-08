@@ -8,7 +8,7 @@ Quick reference for SLT configuration fields. For detailed explanations, see [Us
 
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
-| `server_secret` | hex string (32 bytes) | Yes | - | 64 hex chars |
+| `server_secret` | secret object | Yes | - | `{ hex = "..." }` or `{ file = "..." }` |
 | `network` | table | Yes | - | See below |
 | `tls` | table | Yes | - | See below |
 | `tun` | table | Yes | - | See below |
@@ -81,7 +81,7 @@ The list must not be empty.
 ### Full Server Example
 
 ```toml
-server_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+server_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
 udp_nat_max_entries = 1024
 session_queue_size = 256
 max_auth_inflight = 128
@@ -156,9 +156,9 @@ enabled = true
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
 | `client_id` | hex string (16 bytes) | Yes | 32 hex chars |
-| `shared_secret` | hex string (32 bytes) | Yes | 64 hex chars |
+| `shared_secret` | secret object | Yes | `{ hex = "..." }` or `{ file = "..." }` |
 | `assigned_ipv4` | IPv4 address | Yes | e.g., `"10.10.0.2"` |
-| `privkey_ed25519` | hex string (32 bytes) | Yes | 64 hex chars |
+| `privkey_ed25519` | secret object | Yes | `{ hex = "..." }` or `{ file = "..." }` |
 
 ### `[tun]` (Client)
 
@@ -207,7 +207,7 @@ tls_ca = { file = "/etc/slt/ca.crt" }
 
 [identity]
 client_id = "0102030405060708090a0b0c0d0e0f10"
-shared_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+shared_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
 assigned_ipv4 = "10.10.0.2"
 privkey_ed25519 = { file = "/etc/slt/client.key" }
 
@@ -245,19 +245,19 @@ TLS certificates and keys can be specified inline or via file reference.
 
 | Format | Syntax | Example |
 |--------|--------|---------|
-| Inline PEM | string | `tls_cert = "-----BEGIN CERTIFICATE-----\n..."` |
+| Inline PEM | table | `tls_cert = { pem = "-----BEGIN CERTIFICATE-----\n..." }` |
 | File reference | table | `tls_cert = { file = "/etc/slt/server.crt" }` |
 
-**Shorthand for inline PEM:**
-
-```toml
-tls_cert = "-----BEGIN CERTIFICATE-----\nMIIBIjAN...\n-----END CERTIFICATE-----"
-```
-
-**Alternative inline PEM syntax:**
+**Inline PEM syntax:**
 
 ```toml
 tls_cert = { pem = "-----BEGIN CERTIFICATE-----\nMIIBIjAN...\n-----END CERTIFICATE-----" }
+```
+
+**File reference syntax:**
+
+```toml
+tls_cert = { file = "/etc/slt/server.crt" }
 ```
 
 ### Duration

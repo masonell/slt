@@ -19,7 +19,7 @@ The server configuration (`ServerConfig`) defines how the SLT VPN server operate
 
 ```toml
 # Server configuration (server.toml)
-server_secret = "..."  # 32-byte hex string
+server_secret = { hex = "..." }  # 32-byte hex object
 udp_nat_max_entries = 1024
 session_queue_size = 256
 max_auth_inflight = 128
@@ -31,8 +31,8 @@ nginx_tcp_upstream = "127.0.0.1:8080"
 nginx_udp_upstream = "127.0.0.1:8080"
 
 [tls]
-tls_cert = "..."      # PEM string or { file = "path" }
-tls_key = "..."       # PEM string or { file = "path" }
+tls_cert = { pem = "..." }      # { pem = "..." } or { file = "path" }
+tls_key = { pem = "..." }       # { pem = "..." } or { file = "path" }
 
 [tun]
 tun_name = "tun0"
@@ -60,7 +60,7 @@ enabled = true
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `server_secret` | 32-byte hex string | Yes | Pre-shared secret for ClientHello classification. Used to generate/verify the HMAC token in TLS `legacy_session_id`. |
+| `server_secret` | secret object | Yes | Pre-shared secret for ClientHello classification. Used to generate/verify the HMAC token in TLS `legacy_session_id`. |
 | `network` | [ServerNetworkConfig](#network-section) | Yes | Network listener and upstream configuration. |
 | `tls` | [ServerTlsConfig](#tls-section) | Yes | TLS certificate and key configuration. |
 | `tun` | [TunConfig](#tun-section) | Yes | TUN interface settings. |
@@ -120,7 +120,7 @@ Each entry in the `[[clients]]` array has the following fields:
 
 ```toml
 # Server configuration example
-server_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+server_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
 udp_nat_max_entries = 1024
 session_queue_size = 256
 max_auth_inflight = 128
@@ -184,14 +184,14 @@ port = 443
 ip = "203.0.113.50"  # Optional: bypass DNS
 
 [tls]
-tls_ca = "..."       # PEM string or { file = "path" }
-quic_ca = "..."      # Optional: for QUIC discovery
+tls_ca = { pem = "..." }       # { pem = "..." } or { file = "path" }
+quic_ca = { pem = "..." }      # Optional: for QUIC discovery
 
 [identity]
 client_id = "..."
-shared_secret = "..."
+shared_secret = { hex = "..." }
 assigned_ipv4 = "10.10.0.2"
-privkey_ed25519 = "..."
+privkey_ed25519 = { hex = "..." }
 
 [tun]
 tun_name = "tun0"
@@ -240,9 +240,9 @@ reconnect_max = "5s"
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `client_id` | 16-byte hex string | Yes | Stable client identifier assigned by server admin. |
-| `shared_secret` | 32-byte hex string or file | Yes | Pre-shared secret for ClientHello classification. Must match server's `server_secret`. |
+| `shared_secret` | secret object | Yes | Pre-shared secret for ClientHello classification. Must match server's `server_secret`. |
 | `assigned_ipv4` | IPv4 address | Yes | VPN IP address assigned to this client. |
-| `privkey_ed25519` | 32-byte hex string or file | Yes | Ed25519 private key for authentication. Corresponds to `pubkey_ed25519` in server config. |
+| `privkey_ed25519` | secret object | Yes | Ed25519 private key for authentication. Corresponds to `pubkey_ed25519` in server config. |
 
 #### TUN Section
 
@@ -301,7 +301,7 @@ tls_ca = { file = "/etc/slt/ca.crt" }
 
 [identity]
 client_id = "0102030405060708090a0b0c0d0e0f10"
-shared_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+shared_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
 assigned_ipv4 = "10.10.0.2"
 # Private key can be loaded from a file for better security
 privkey_ed25519 = { file = "/etc/slt/client.key" }
@@ -360,10 +360,10 @@ client_id = "  0102030405060708090a0b0c0d0e0f10  "  # With whitespace
 
 TLS material (certificates and keys) can be provided in two ways:
 
-**1. Inline PEM string:**
+**1. Inline PEM object:**
 
 ```toml
-tls_cert = "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkq...\n-----END CERTIFICATE-----"
+tls_cert = { pem = "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkq...\n-----END CERTIFICATE-----" }
 ```
 
 **2. File reference:**
@@ -375,11 +375,14 @@ tls_key = { file = "/etc/slt/server.key" }
 
 For server configurations, using file references is recommended to keep certificates and keys in separate files.
 
-### Secret File References
+### Secret Values
 
-Secret fields (`shared_secret`, `privkey_ed25519`) can also be loaded from files for improved security:
+Secret fields (`server_secret`, `shared_secret`, `privkey_ed25519`) can be provided as hex or loaded from files:
 
 ```toml
+# Inline hex
+shared_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+
 # Load from file containing raw bytes or hex text
 shared_secret = { file = "/etc/slt/secret.key" }
 privkey_ed25519 = { file = "/etc/slt/client.key" }
@@ -447,7 +450,7 @@ Route all traffic through the VPN:
 **Server:**
 
 ```toml
-server_secret = "your-32-byte-secret-in-hex-here-0123456789abcdef"
+server_secret = { hex = "your-32-byte-secret-in-hex-here-0123456789abcdef" }
 max_auth_inflight = 128
 
 [network]
@@ -486,7 +489,7 @@ tls_ca = { file = "/etc/slt/ca.crt" }
 
 [identity]
 client_id = "client1-id-in-hex-16-bytes"
-shared_secret = "your-32-byte-secret-in-hex-here-0123456789abcdef"
+shared_secret = { hex = "your-32-byte-secret-in-hex-here-0123456789abcdef" }
 assigned_ipv4 = "10.10.0.2"
 privkey_ed25519 = { file = "/etc/slt/client.key" }
 

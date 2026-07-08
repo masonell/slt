@@ -156,7 +156,7 @@ Create the server configuration at `/etc/slt/server.toml`:
 ```toml
 # /etc/slt/server.toml
 
-server_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+server_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
 max_auth_inflight = 128
 
 [network]

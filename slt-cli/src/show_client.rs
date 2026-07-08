@@ -65,7 +65,7 @@ mod tests {
     fn write_test_config() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         let config = r#"
-server_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+server_secret = { hex = "0000000000000000000000000000000000000000000000000000000000000000" }
 
 [network]
 listen_tcp = "0.0.0.0:443"
@@ -73,11 +73,13 @@ listen_udp = "0.0.0.0:443"
 nginx_tcp_upstream = "127.0.0.1:8080"
 nginx_udp_upstream = "127.0.0.1:8080"
 
-[tls]
-tls_cert = '''-----BEGIN CERTIFICATE-----
+[tls.tls_cert]
+pem = '''-----BEGIN CERTIFICATE-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA test
 -----END CERTIFICATE-----'''
-tls_key = { file = "server-key.pem" }
+
+[tls.tls_key]
+file = "server-key.pem"
 
 [tun]
 tun_name = "tun0"

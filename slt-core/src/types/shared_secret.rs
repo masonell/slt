@@ -57,15 +57,15 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_hex() {
-        let short_hex = "secret = \"abcdef\""; // 3 bytes instead of 32
+        let short_hex = "secret = { hex = \"abcdef\" }";
         let result: Result<SecretWrapper, _> = toml::from_str(short_hex);
         assert!(result.is_err());
     }
 
     #[test]
     fn rejects_invalid_hex_chars() {
-        let invalid_hex =
-            "secret = \"gg00000000000000000000000000000000000000000000000000000000000000gg\"";
+        let invalid_hex = "secret = { hex = \
+                           \"gg00000000000000000000000000000000000000000000000000000000000000gg\" }";
         let result: Result<SecretWrapper, _> = toml::from_str(invalid_hex);
         assert!(result.is_err());
     }

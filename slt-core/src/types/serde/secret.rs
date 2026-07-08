@@ -1,41 +1,48 @@
 use std::path::{Path, PathBuf};
 
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serializer, de};
 
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum SecretRef {
-    Hex(String),
-    File { file: PathBuf },
+#[serde(deny_unknown_fields)]
+struct SecretRef {
+    hex: Option<String>,
+    file: Option<PathBuf>,
 }
 
-/// Serialize the secret as lowercase hex.
+/// Serialize the secret as a lowercase hex object.
 ///
 /// # Errors
 ///
-/// Returns the serializer's error if the string cannot be serialized.
+/// Returns the serializer's error if the object cannot be serialized.
 pub fn serialize<const N: usize, S>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    crate::types::serde::hex::serialize(bytes, serializer)
+    let mut map = serializer.serialize_map(Some(1))?;
+    map.serialize_entry("hex", &hex::encode(bytes))?;
+    map.end()
 }
 
-/// Deserialize the secret from hex or a file reference.
+/// Deserialize the secret from a hex object or a file reference.
 ///
 /// # Errors
 ///
-/// Returns the deserializer's error if the input is not a valid hex string or a valid file reference.
+/// Returns the deserializer's error if the input is not valid hex or a valid file reference.
 pub fn deserialize<'de, const N: usize, D>(deserializer: D) -> Result<[u8; N], D::Error>
 where
     D: Deserializer<'de>,
 {
     let secret = SecretRef::deserialize(deserializer)?;
-    match secret {
-        SecretRef::Hex(s) => {
-            crate::types::serde::hex::decode_hex::<N>(&s).map_err(de::Error::custom)
+    match (secret.hex, secret.file) {
+        (Some(hex), None) => {
+            crate::types::serde::hex::decode_hex::<N>(&hex).map_err(de::Error::custom)
         }
-        SecretRef::File { file } => read_secret_file::<N>(&file).map_err(de::Error::custom),
+        (None, Some(file)) => read_secret_file::<N>(&file).map_err(de::Error::custom),
+        (None, None) => Err(de::Error::custom("secret must contain `hex` or `file`")),
+        (Some(_), Some(_)) => Err(de::Error::custom(
+            "secret must contain only one of `hex` or `file`",
+        )),
     }
 }
 
@@ -51,7 +58,7 @@ fn read_secret_file<const N: usize>(path: &Path) -> Result<[u8; N], String> {
     crate::types::serde::hex::decode_hex::<N>(text)
 }
 
-/// Newtype wrapper for serializing secrets as hex or file references.
+/// Newtype wrapper for serializing secrets as hex objects or file references.
 pub struct SerdeSecret<const N: usize>(pub [u8; N]);
 
 impl<const N: usize> serde::Serialize for SerdeSecret<N> {
@@ -106,7 +113,7 @@ mod tests {
     #[test]
     fn parses_hex_secret() {
         let secret = [0x22; 32];
-        let encoded = format!("secret = \"{}\"", hex::encode(secret));
+        let encoded = format!("secret = {{ hex = \"{}\" }}", hex::encode(secret));
         let decoded: Wrapper = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded.secret, secret);
     }
@@ -142,6 +149,16 @@ mod tests {
         let encoded = r#"secret = { file = "/nonexistent/path/that/does/not/exist" }"#;
         let result: Result<Wrapper, _> = toml::from_str(encoded);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_map_key_with_valid_key_hint() {
+        let encoded = r#"secret = { path = "/tmp/secret" }"#;
+        let result: Result<Wrapper, _> = toml::from_str(encoded);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"));
+        assert!(err.contains("file"));
+        assert!(err.contains("hex"));
     }
 
     #[test]

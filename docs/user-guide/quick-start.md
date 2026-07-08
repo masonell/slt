@@ -153,7 +153,7 @@ The server configuration file contains:
 
 ```toml
 # Pre-shared secret for client classification
-server_secret = "hex-encoded-32-byte-secret"
+server_secret = { hex = "hex-encoded-32-byte-secret" }
 max_auth_inflight = 128
 
 [network]
@@ -196,16 +196,16 @@ The client configuration file contains:
 hostname = "vpn.example.com"  # Server domain
 port = 443
 
-[tls]
-tls_ca = '''-----BEGIN CERTIFICATE-----
+[tls.tls_ca]
+pem = '''-----BEGIN CERTIFICATE-----
 ... embedded server certificate for pinning ...
 -----END CERTIFICATE-----'''
 
 [identity]
 client_id = "a1b2c3d4e5f67890a1b2c3d4e5f67890"
-shared_secret = "hex-encoded-32-byte-secret"
+shared_secret = { hex = "hex-encoded-32-byte-secret" }
 assigned_ipv4 = "10.10.0.2"
-privkey_ed25519 = "hex-encoded-32-byte-private-key"
+privkey_ed25519 = { hex = "hex-encoded-32-byte-private-key" }
 
 [tun]
 tun_name = "tun0"

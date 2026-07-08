@@ -48,7 +48,7 @@ tls_ca = { file = "/etc/slt/ca.crt" }
 
 [identity]
 client_id = "0102030405060708090a0b0c0d0e0f10"
-shared_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+shared_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
 assigned_ipv4 = "10.10.0.2"
 privkey_ed25519 = { file = "/etc/slt/client.key" }
 

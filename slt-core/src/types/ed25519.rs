@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn privkey_rejects_wrong_length_hex() {
-        let short_hex = "key = \"abcdef\""; // 3 bytes instead of 32
+        let short_hex = "key = { hex = \"abcdef\" }";
         let result: Result<PrivKeyWrapper, _> = toml::from_str(short_hex);
         assert!(result.is_err());
     }
@@ -102,8 +102,8 @@ mod tests {
 
     #[test]
     fn privkey_rejects_invalid_hex_chars() {
-        let invalid_hex =
-            "key = \"gg00000000000000000000000000000000000000000000000000000000000000gg\"";
+        let invalid_hex = "key = { hex = \
+                           \"gg00000000000000000000000000000000000000000000000000000000000000gg\" }";
         let result: Result<PrivKeyWrapper, _> = toml::from_str(invalid_hex);
         assert!(result.is_err());
     }

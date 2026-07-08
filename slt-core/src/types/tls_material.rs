@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use serde::ser::SerializeMap;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// TLS material provided inline as PEM or loaded from a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,27 +14,17 @@ pub enum TlsMaterial {
     File { file: PathBuf },
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum TlsMaterialRef {
-    Pem(String),
-    PemMap { pem: String },
-    File { file: PathBuf },
-}
-
 impl Serialize for TlsMaterial {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
+        let mut map = serializer.serialize_map(Some(1))?;
         match self {
-            Self::Pem(pem) => serializer.serialize_str(pem),
-            Self::File { file } => {
-                let mut map = serializer.serialize_map(Some(1))?;
-                map.serialize_entry("file", file)?;
-                map.end()
-            }
+            Self::Pem(pem) => map.serialize_entry("pem", pem)?,
+            Self::File { file } => map.serialize_entry("file", file)?,
         }
+        map.end()
     }
 }
 
@@ -44,11 +34,24 @@ impl<'de> Deserialize<'de> for TlsMaterial {
         D: Deserializer<'de>,
     {
         let material = TlsMaterialRef::deserialize(deserializer)?;
-        match material {
-            TlsMaterialRef::Pem(pem) | TlsMaterialRef::PemMap { pem } => Ok(Self::Pem(pem)),
-            TlsMaterialRef::File { file } => Ok(Self::File { file }),
+        match (material.pem, material.file) {
+            (Some(pem), None) => Ok(Self::Pem(pem)),
+            (None, Some(file)) => Ok(Self::File { file }),
+            (None, None) => Err(de::Error::custom(
+                "TLS material must contain `pem` or `file`",
+            )),
+            (Some(_), Some(_)) => Err(de::Error::custom(
+                "TLS material must contain only one of `pem` or `file`",
+            )),
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TlsMaterialRef {
+    pem: Option<String>,
+    file: Option<PathBuf>,
 }
 
 impl TlsMaterial {
@@ -83,14 +86,14 @@ mod tests {
     const PEM_DATA: &str = "-----BEGIN CERTIFICATE----- MIIBIjAN -----END CERTIFICATE-----";
 
     #[test]
-    fn deserialize_pem_string_directly() {
-        let config: Config = toml::from_str(&format!("cert = \"{PEM_DATA}\"")).unwrap();
+    fn deserialize_pem_table() {
+        let config: Config = toml::from_str(&format!("[cert]\npem = \"{PEM_DATA}\"")).unwrap();
         assert!(config.cert.is_pem());
         assert!(matches!(config.cert, TlsMaterial::Pem(s) if s == PEM_DATA));
     }
 
     #[test]
-    fn deserialize_pem_via_map() {
+    fn deserialize_pem_inline_map() {
         let config: Config = toml::from_str(&format!("cert = {{ pem = \"{PEM_DATA}\" }}")).unwrap();
         assert!(config.cert.is_pem());
         assert!(matches!(config.cert, TlsMaterial::Pem(s) if s == PEM_DATA));
@@ -104,12 +107,32 @@ mod tests {
     }
 
     #[test]
-    fn serialize_pem_as_string() {
+    fn rejects_unknown_map_key_with_valid_key_hint() {
+        let result: Result<Config, _> = toml::from_str(r#"cert = { path = "/path/to/cert.pem" }"#);
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field"));
+        assert!(err.contains("pem"));
+        assert!(err.contains("file"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_map_shape() {
+        let result: Result<Config, _> = toml::from_str(&format!(
+            r#"cert = {{ pem = "{PEM_DATA}", file = "/path" }}"#
+        ));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("only one of"));
+        assert!(err.contains("pem"));
+        assert!(err.contains("file"));
+    }
+
+    #[test]
+    fn serialize_pem_as_map() {
         let material = TlsMaterial::Pem(PEM_DATA.to_string());
         let wrapper = ConfigRef { cert: &material };
         let toml_str = toml::to_string(&wrapper).unwrap();
         assert!(toml_str.contains(PEM_DATA));
-        assert!(!toml_str.contains("pem ="));
+        assert!(toml_str.contains("pem ="));
     }
 
     #[test]
