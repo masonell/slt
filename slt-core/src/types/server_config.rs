@@ -22,6 +22,37 @@ pub struct ServerNetworkConfig {
     pub nginx_udp_upstream: SocketAddr,
 }
 
+impl ServerNetworkConfig {
+    /// Validate server network endpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::ZeroPort`] if any configured endpoint uses port zero.
+    pub const fn validate(&self) -> Result<(), ConfigError> {
+        if self.listen_tcp.port() == 0 {
+            return Err(ConfigError::ZeroPort {
+                field: "network.listen_tcp",
+            });
+        }
+        if self.listen_udp.port() == 0 {
+            return Err(ConfigError::ZeroPort {
+                field: "network.listen_udp",
+            });
+        }
+        if self.nginx_tcp_upstream.port() == 0 {
+            return Err(ConfigError::ZeroPort {
+                field: "network.nginx_tcp_upstream",
+            });
+        }
+        if self.nginx_udp_upstream.port() == 0 {
+            return Err(ConfigError::ZeroPort {
+                field: "network.nginx_udp_upstream",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Server TLS configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerTlsConfig {
@@ -202,6 +233,15 @@ impl ServerTimingConfig {
 mod tests {
     use super::*;
 
+    fn test_network_config() -> ServerNetworkConfig {
+        ServerNetworkConfig {
+            listen_tcp: SocketAddr::from(([0, 0, 0, 0], 443)),
+            listen_udp: SocketAddr::from(([0, 0, 0, 0], 443)),
+            nginx_tcp_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            nginx_udp_upstream: SocketAddr::from(([127, 0, 0, 1], 8080)),
+        }
+    }
+
     fn test_timing_config() -> ServerTimingConfig {
         ServerTimingConfig {
             ping_min: Duration::from_secs(10),
@@ -210,6 +250,64 @@ mod tests {
             idle_timeout: Duration::from_mins(1),
             metrics_interval: Duration::from_mins(5),
         }
+    }
+
+    #[test]
+    fn validate_accepts_valid_network_config() {
+        let config = test_network_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_listen_tcp_port() {
+        let mut config = test_network_config();
+        config.listen_tcp.set_port(0);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroPort {
+                field: "network.listen_tcp"
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_listen_udp_port() {
+        let mut config = test_network_config();
+        config.listen_udp.set_port(0);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroPort {
+                field: "network.listen_udp"
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_nginx_tcp_upstream_port() {
+        let mut config = test_network_config();
+        config.nginx_tcp_upstream.set_port(0);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroPort {
+                field: "network.nginx_tcp_upstream"
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_nginx_udp_upstream_port() {
+        let mut config = test_network_config();
+        config.nginx_udp_upstream.set_port(0);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroPort {
+                field: "network.nginx_udp_upstream"
+            }
+        ));
     }
 
     #[test]

@@ -61,6 +61,7 @@ impl ServerConfig {
     /// # Errors
     ///
     /// Returns `ConfigError` if any constraint is violated:
+    /// - `ZeroPort` if a configured network endpoint uses port zero
     /// - `EmptyTunName` if `tun_name` is empty
     /// - `InvalidTunMtu` if `tun_mtu` is out of range
     /// - `InvalidTunPrefix` if `tun_prefix` is out of range
@@ -76,6 +77,7 @@ impl ServerConfig {
     /// - `ZeroTimeout` if any timeout is zero
     /// - `TimeoutTooLarge` if any timeout exceeds 1 hour
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.network.validate()?;
         self.tun.validate()?;
         let mut seen_client_ids = HashSet::new();
         let mut seen_assigned_ipv4 = HashSet::new();
@@ -182,6 +184,19 @@ mod tests {
     fn validate_accepts_valid_config() {
         let config = test_config();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_listen_tcp_port() {
+        let mut config = test_config();
+        config.network.listen_tcp.set_port(0);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroPort {
+                field: "network.listen_tcp"
+            }
+        ));
     }
 
     #[test]

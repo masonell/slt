@@ -26,10 +26,15 @@ impl ClientNetworkConfig {
     ///
     /// # Errors
     ///
-    /// Returns `ConfigError::EmptyHostname` if hostname is empty.
+    /// Returns `ConfigError` if hostname is empty or `port` is zero.
     pub const fn validate(&self) -> Result<(), ConfigError> {
         if self.hostname.is_empty() {
             return Err(ConfigError::EmptyHostname);
+        }
+        if self.port == 0 {
+            return Err(ConfigError::ZeroPort {
+                field: "network.port",
+            });
         }
         Ok(())
     }
@@ -244,6 +249,19 @@ mod tests {
         config.hostname = String::new();
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::EmptyHostname));
+    }
+
+    #[test]
+    fn validate_rejects_zero_port() {
+        let mut config = test_network_config();
+        config.port = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroPort {
+                field: "network.port"
+            }
+        ));
     }
 
     #[test]

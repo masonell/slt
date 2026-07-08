@@ -40,6 +40,7 @@ impl ClientConfig {
     ///
     /// Returns `ConfigError` if any constraint is violated:
     /// - `EmptyHostname` if `hostname` is empty
+    /// - `ZeroPort` if `network.port` is zero
     /// - `EmptyTunName` if `tun_name` is empty
     /// - `InvalidTunMtu` if `tun_mtu` is out of range
     /// - `InvalidTunPrefix` if `tun_prefix` is out of range
@@ -141,6 +142,19 @@ mod tests {
         config.network.hostname = String::new();
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::EmptyHostname));
+    }
+
+    #[test]
+    fn validate_rejects_zero_network_port() {
+        let mut config = test_config();
+        config.network.port = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroPort {
+                field: "network.port"
+            }
+        ));
     }
 
     #[test]

@@ -59,6 +59,12 @@ pub enum ConfigError {
     /// Hostname is empty.
     #[error("hostname must not be empty")]
     EmptyHostname,
+    /// A network port is zero.
+    #[error("{field} must be greater than zero")]
+    ZeroPort {
+        /// Field name.
+        field: &'static str,
+    },
     /// TUN name is empty.
     #[error("tun_name must not be empty")]
     EmptyTunName,
@@ -216,6 +222,16 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("hostname"));
         assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn config_error_zero_port_display() {
+        let err = ConfigError::ZeroPort {
+            field: "network.port",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("network.port"));
+        assert!(msg.contains("greater than zero"));
     }
 
     #[test]
