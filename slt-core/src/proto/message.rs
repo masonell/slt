@@ -407,6 +407,23 @@ mod tests {
         assert!(decode_padded_message(&buf, limits).unwrap().is_none());
     }
 
+    #[test]
+    fn decode_padded_message_rejects_length_too_large() {
+        let mut buf = Vec::new();
+        buf.push(u8::from(MessageType::Ping));
+        buf.extend_from_slice(&4096u32.to_be_bytes());
+        buf.extend_from_slice(&[0; 16]);
+
+        let limits = MessageLimits::new(1024, 1024);
+        assert_eq!(
+            decode_padded_message(&buf, limits),
+            Err(MessageError::Frame(FrameError::LengthTooLarge {
+                len: 4096,
+                max: 1024,
+            }))
+        );
+    }
+
     /// `MessageError` is a real `std::error::Error` and its `Frame` variant
     /// converts from `FrameError` via `#[from]`. Pins the conversion and the
     /// `Display` shape so downstream `#[from]` propagation stays valid and the
