@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
 
 use boring::pkey::PKey;
@@ -26,6 +27,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::EnvFilter;
@@ -115,12 +117,13 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         config.max_auth_inflight,
     ));
     let cancel = CancellationToken::new();
+    let auth_tasks = AuthTaskTracker::new();
 
     spawn_ctrl_c(cancel.clone());
 
     debug!("server runtime: spawning worker tasks");
 
-    let mut tcp_task = spawn_tcp_task(frontdoor, auth_handler, cancel.clone());
+    let mut tcp_task = spawn_tcp_task(frontdoor, auth_handler, cancel.clone(), auth_tasks.clone());
     let mut udp_task = spawn_udp_task(quic, cancel.clone());
     let (mut tun_reader_task, mut tun_writer_task) = spawn_tun_tasks(
         tun,
@@ -150,6 +153,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
             );
             cancel.cancel();
             sessions.start_shutdown();
+            auth_tasks.close();
 
             let mut shutdown_result = classify_task_result(task, result);
             if task != "tcp" {
@@ -172,6 +176,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         ShutdownTrigger::Cancelled => {
             info!(reason = "ctrl_c", "graceful shutdown initiated");
             sessions.start_shutdown();
+            auth_tasks.close();
             join_ignoring_result(tcp_task).await;
             join_ignoring_result(udp_task).await;
             join_ignoring_result(tun_reader_task).await;
@@ -181,9 +186,54 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         }
     };
 
+    auth_tasks.wait().await;
     sessions.wait_for_shutdown().await;
     info!("server shutdown complete");
     shutdown_result.map_err(|err| Box::new(err) as Box<dyn std::error::Error>)
+}
+
+#[derive(Clone)]
+struct AuthTaskTracker {
+    accepting: Arc<AtomicBool>,
+    tasks: TaskTracker,
+}
+
+impl AuthTaskTracker {
+    fn new() -> Self {
+        Self {
+            accepting: Arc::new(AtomicBool::new(true)),
+            tasks: TaskTracker::new(),
+        }
+    }
+
+    fn spawn<F>(&self, task: F) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let token = self.tasks.token();
+        // Reserve tracker ownership before reading the gate. If shutdown closes
+        // the tracker between this check and spawn, wait() still sees the token.
+        if !self.accepting.load(Ordering::Acquire) {
+            drop(token);
+            return false;
+        }
+
+        drop(self.tasks.spawn(async move {
+            let task_reservation = token;
+            task.await;
+            drop(task_reservation);
+        }));
+        true
+    }
+
+    fn close(&self) {
+        self.accepting.store(false, Ordering::Release);
+        self.tasks.close();
+    }
+
+    async fn wait(&self) {
+        self.tasks.wait().await;
+    }
 }
 
 /// Spawns a task that listens for Ctrl+C and triggers graceful shutdown.
@@ -209,6 +259,7 @@ fn spawn_ctrl_c(cancel: CancellationToken) {
 /// * `frontdoor` - TCP listener and connection classifier
 /// * `auth_handler` - Handler for TLS and client authentication
 /// * `cancel` - Token to signal graceful shutdown
+/// * `auth_tasks` - Tracker for claimed connection authentication tasks
 ///
 /// # Returns
 ///
@@ -217,17 +268,33 @@ fn spawn_tcp_task<T: TunDeviceIo>(
     frontdoor: TcpFrontDoor,
     auth_handler: Arc<AuthHandlerBase<T>>,
     cancel: CancellationToken,
+    auth_tasks: AuthTaskTracker,
 ) -> tokio::task::JoinHandle<io::Result<()>> {
     tokio::spawn(async move {
+        let auth_cancel = cancel.clone();
         frontdoor
             .run(cancel, move |stream: TcpStream, addr| {
+                if auth_cancel.is_cancelled() {
+                    debug!(peer = %addr, "dropping claimed tcp connection during shutdown");
+                    return;
+                }
                 let auth_handler = auth_handler.clone();
-                tokio::spawn(async move {
+                let auth_cancel = auth_cancel.clone();
+                if !auth_tasks.spawn(async move {
                     info!(peer = %addr, "claimed tcp connection");
-                    if let Err(err) = auth_handler.handle(stream).await {
-                        warn!(peer = %addr, error = %err, "auth handler error");
+                    tokio::select! {
+                        () = auth_cancel.cancelled() => {
+                            debug!(peer = %addr, "auth handler cancelled during shutdown");
+                        }
+                        result = auth_handler.handle(stream) => {
+                            if let Err(err) = result {
+                                warn!(peer = %addr, error = %err, "auth handler error");
+                            }
+                        }
                     }
-                });
+                }) {
+                    debug!(peer = %addr, "dropping claimed tcp connection during shutdown");
+                }
             })
             .await
     })
