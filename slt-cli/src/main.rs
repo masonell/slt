@@ -132,7 +132,7 @@ enum Commands {
         config: String,
     },
 
-    /// Output client configuration file.
+    /// Output recoverable client configuration fields.
     ShowClientConfig {
         /// Client ID (hex).
         client_id: String,

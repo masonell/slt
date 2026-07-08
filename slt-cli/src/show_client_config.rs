@@ -1,25 +1,51 @@
 //! Show client config command.
 //!
-//! Reconstructs and outputs a complete client.toml from server data.
+//! Outputs client configuration fields recoverable from server data.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use slt_core::types::{ClientId, PrivKeyEd25519};
+use serde::Serialize;
+use slt_core::types::{ClientId, SharedSecret, TlsMaterial, TunConfig};
 
 use crate::cert::extract_domain_from_cert;
-use crate::client_config::build_client_config;
 use crate::client_id::parse_client_id;
 use crate::config_io::{load_server_config, read_cert_content};
 
-/// Output complete client configuration to stdout.
-///
-/// Reconstructs a client.toml from the server's client entry. The output
-/// includes a placeholder private key (all zeros) since the server only
-/// stores the public key.
+const DEFAULT_CLIENT_PORT: u16 = 443;
+
+#[derive(Serialize)]
+struct RecoverableClientConfig {
+    network: RecoverableClientNetwork,
+    tls: RecoverableClientTls,
+    identity: RecoverableClientIdentity,
+    tun: TunConfig,
+}
+
+#[derive(Serialize)]
+struct RecoverableClientNetwork {
+    hostname: String,
+    port: u16,
+}
+
+#[derive(Serialize)]
+struct RecoverableClientTls {
+    tls_ca: TlsMaterial,
+}
+
+#[derive(Serialize)]
+struct RecoverableClientIdentity {
+    client_id: ClientId,
+    shared_secret: SharedSecret,
+    assigned_ipv4: std::net::Ipv4Addr,
+}
+
+/// Output client configuration fields recoverable from server data to stdout.
 ///
 /// The domain is extracted from the server certificate if not provided.
 /// The server certificate (not CA) is embedded for certificate pinning.
+/// The client private key is intentionally omitted because the server stores
+/// only the corresponding public key.
 ///
 /// # Errors
 ///
@@ -34,6 +60,20 @@ pub fn show_client_config(
     domain: Option<&str>,
     quiet: bool,
 ) -> Result<()> {
+    let output = recoverable_client_config_output(config_path, client_id, domain)?;
+
+    if !quiet {
+        print!("{output}");
+    }
+
+    Ok(())
+}
+
+fn recoverable_client_config_output(
+    config_path: &Path,
+    client_id: &str,
+    domain: Option<&str>,
+) -> Result<String> {
     let config = load_server_config(config_path)?;
 
     let client_id_bytes = parse_client_id(client_id)?;
@@ -52,28 +92,36 @@ pub fn show_client_config(
         extract_domain_from_cert(&cert_pem)?
     };
 
-    let client_config = build_client_config(
-        config.server_secret,
-        client.client_id,
-        PrivKeyEd25519([0u8; 32]), // Placeholder - server doesn't store privkey
-        client.assigned_ipv4,
-        &domain,
-        &cert_pem,
-        &config.tun,
-    );
+    let recoverable = RecoverableClientConfig {
+        network: RecoverableClientNetwork {
+            hostname: domain,
+            port: DEFAULT_CLIENT_PORT,
+        },
+        tls: RecoverableClientTls {
+            tls_ca: TlsMaterial::Pem(cert_pem),
+        },
+        identity: RecoverableClientIdentity {
+            client_id: client.client_id,
+            shared_secret: config.server_secret,
+            assigned_ipv4: client.assigned_ipv4,
+        },
+        tun: TunConfig {
+            tun_name: config.tun.tun_name,
+            tun_mtu: config.tun.tun_mtu,
+            tun_ipv4: client.assigned_ipv4,
+            tun_prefix: config.tun.tun_prefix,
+        },
+    };
 
-    if quiet {
-        return Ok(());
-    }
-
-    println!("# WARNING: Private key is a PLACEHOLDER (all zeros).");
-    println!("# Replace privkey_ed25519 with the original key from client creation.");
-    println!();
     let toml =
-        toml::to_string_pretty(&client_config).context("failed to serialize client config")?;
-    println!("{toml}");
+        toml::to_string_pretty(&recoverable).context("failed to serialize recoverable fields")?;
 
-    Ok(())
+    Ok(format!(
+        "# Partial client configuration for {client_id}.\n\
+         # Not runnable: the server does not store identity.privkey_ed25519.\n\
+         # Restore the original client-{client_id}.toml created by add-client, or remove and re-add the client.\n\n\
+         {toml}"
+    ))
 }
 
 #[cfg(test)]
@@ -155,6 +203,30 @@ enabled = true
             false,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn show_client_config_output_omits_private_key() {
+        let file = write_test_config();
+        let output = recoverable_client_config_output(
+            file.path(),
+            "0102030405060708090a0b0c0d0e0f10",
+            Some("vpn.example.com"),
+        )
+        .unwrap();
+
+        assert!(output.contains("# Partial client configuration"));
+        assert!(output.contains("client-0102030405060708090a0b0c0d0e0f10.toml"));
+        assert!(output.contains("[identity]"));
+        assert!(output.contains("[identity.shared_secret]"));
+        assert!(output.contains("assigned_ipv4 = \"10.10.0.2\""));
+        assert!(!output.contains("privkey_ed25519 ="));
+        assert!(
+            !output.contains("0000000000000000000000000000000000000000000000000000000000000000")
+        );
+
+        let err = slt_core::config::ClientConfig::from_toml_str(&output).unwrap_err();
+        assert!(err.to_string().contains("privkey_ed25519"));
     }
 
     #[test]
