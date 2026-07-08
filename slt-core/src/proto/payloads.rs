@@ -280,19 +280,11 @@ impl RegisterCidPayload {
         out
     }
 
-    fn read_u64(
-        payload: &[u8],
-        offset: &mut usize,
-        expected_len: usize,
-    ) -> Result<u64, PayloadError> {
-        let value = u64::from_be_bytes(payload[*offset..*offset + 8].try_into().map_err(|_| {
-            PayloadError::LengthMismatch {
-                expected: expected_len,
-                actual: payload.len(),
-            }
-        })?);
+    fn read_u64(payload: &[u8], offset: &mut usize) -> u64 {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&payload[*offset..*offset + 8]);
         *offset += 8;
-        Ok(value)
+        u64::from_be_bytes(bytes)
     }
 
     /// Decode a `REGISTER_CID` payload.
@@ -356,8 +348,8 @@ impl RegisterCidPayload {
         offset += 1;
         let secret_tx = Self::read_secret(payload, &mut offset);
         let secret_rx = Self::read_secret(payload, &mut offset);
-        let pn_start = Self::read_u64(payload, &mut offset, expected_len)?;
-        let pn_start_rx = Self::read_u64(payload, &mut offset, expected_len)?;
+        let pn_start = Self::read_u64(payload, &mut offset);
+        let pn_start_rx = Self::read_u64(payload, &mut offset);
         let key_phase = match payload[offset] {
             0 => false,
             1 => true,
