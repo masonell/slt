@@ -41,7 +41,7 @@ pub struct Metrics {
 }
 
 /// Snapshot of metric counters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct MetricsSnapshot {
     /// Accepted TCP connections.
     pub tcp_accepted: u64,
