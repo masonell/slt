@@ -6,7 +6,10 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 
 use boring::ssl::{SslAcceptor, SslConnector, SslFiletype, SslMethod, SslVerifyMode};
 use ed25519_dalek::{Signature, Verifier};
@@ -16,7 +19,8 @@ use slt_core::proto::{
     PingPayload, PongPayload, RegisterOkPayload,
 };
 use slt_core::transport::tcp::TcpChannel;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
+use tokio::sync::Notify;
 use tokio_boring::SslStream;
 
 /// Boxed error used by the mock server's protocol helpers so that slt-core's
@@ -64,6 +68,98 @@ pub async fn tls_server_pair() -> (SslStream<DuplexStream>, SslStream<DuplexStre
     let server = tokio_boring::accept(&acceptor, server_io);
     let client = tokio_boring::connect(connector.configure().unwrap(), "localhost", client_io);
     tokio::try_join!(server, client).unwrap()
+}
+
+/// Gate that can park client writes after a TLS handshake completes.
+#[derive(Debug, Default)]
+pub struct WriteGate {
+    parked: AtomicBool,
+    blocked_write_seen: AtomicBool,
+    blocked_write_notify: Notify,
+}
+
+impl WriteGate {
+    /// Make subsequent writes remain pending.
+    pub fn park(&self) {
+        self.parked.store(true, Ordering::Release);
+    }
+
+    /// Allow subsequent writes to proceed.
+    pub fn unpark(&self) {
+        self.parked.store(false, Ordering::Release);
+    }
+
+    /// Wait until a write has observed the parked gate.
+    pub async fn wait_until_write_blocked(&self) {
+        loop {
+            let notified = self.blocked_write_notify.notified();
+            if self.blocked_write_seen.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// In-memory stream whose writes can be parked after TLS setup.
+#[derive(Debug)]
+pub struct ParkableWriteStream {
+    inner: DuplexStream,
+    gate: Arc<WriteGate>,
+}
+
+impl AsyncRead for ParkableWriteStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ParkableWriteStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if this.gate.parked.load(Ordering::Acquire) {
+            this.gate.blocked_write_seen.store(true, Ordering::Release);
+            this.gate.blocked_write_notify.notify_waiters();
+            return Poll::Pending;
+        }
+        Pin::new(&mut this.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// Create a TLS pair whose client-side writes can be parked after setup.
+pub async fn tls_pair_with_parkable_client_writes() -> (
+    SslStream<ParkableWriteStream>,
+    SslStream<DuplexStream>,
+    Arc<WriteGate>,
+) {
+    let acceptor = tls_acceptor();
+    let connector = tls_connector();
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let gate = Arc::new(WriteGate::default());
+    let client_io = ParkableWriteStream {
+        inner: client_io,
+        gate: gate.clone(),
+    };
+    let server = tokio_boring::accept(&acceptor, server_io);
+    let client = tokio_boring::connect(connector.configure().unwrap(), "localhost", client_io);
+    let (server_tls, client_tls) = tokio::join!(server, client);
+    (client_tls.unwrap(), server_tls.unwrap(), gate)
 }
 
 /// Create a TLS pair with a client `TcpChannel` ready for protocol use.

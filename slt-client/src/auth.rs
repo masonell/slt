@@ -1,17 +1,18 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, Message, MessageLimits,
     PingPayload, PongPayload,
 };
-use slt_core::transport::tcp::{KeyUpdater, TcpChannel};
+use slt_core::transport::tcp::{KeyUpdater, TcpChannel, TcpWriteError};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time;
 use tracing::{debug, info, trace, warn};
 
 use crate::error::ConnectError;
 use crate::metrics::Metrics;
+use crate::transport::tcp::write_message_with_timeout;
 
 const AUTH_MAX_FRAME: usize = 16 * 1024;
 
@@ -44,35 +45,42 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     K: KeyUpdater,
 {
+    let deadline = Instant::now() + config.timing.auth_timeout;
+    time::timeout_at(
+        deadline.into(),
+        run_auth_flow(tcp, config, metrics, config.timing.tcp_write_timeout),
+    )
+    .await
+    .unwrap_or(Err(ConnectError::AuthTimeout))
+}
+
+async fn run_auth_flow<S, K>(
+    tcp: &mut TcpChannel<S, K>,
+    config: &ClientConfig,
+    metrics: &Metrics,
+    tcp_write_timeout: Duration,
+) -> Result<(), ConnectError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    K: KeyUpdater,
+{
     let challenge = export_challenge(tcp)?;
     let payload = build_auth_payload(config, challenge);
-    send_auth(tcp, &payload).await?;
+    send_auth(tcp, &payload, tcp_write_timeout).await?;
 
     let limits = MessageLimits::new(AUTH_MAX_FRAME, AUTH_MAX_FRAME);
-    let deadline = Instant::now() + config.timing.auth_timeout;
 
     loop {
-        let timeout = time::sleep_until(deadline.into());
-        tokio::select! {
-            () = timeout => {
-                return Err(ConnectError::AuthTimeout);
-            }
-            res = tcp.read_more() => {
-                // read_more returns io::Result<usize>; a 0-byte read is EOF
-                // (server closed), any other I/O failure flows through via the
-                // generic Io variant. Both are surfaced as AuthDisconnected
-                // only for the EOF case — a genuine I/O error stays generic so
-                // its kind survives for the retry policy.
-                match res {
-                    Ok(0) => return Err(ConnectError::AuthDisconnected),
-                    Ok(n) => trace!(bytes_read = n, "received auth data"),
-                    Err(e) => return Err(ConnectError::Io(e)),
-                }
-            }
+        // A 0-byte read is EOF (server closed). A genuine I/O error stays
+        // typed so its kind survives for retry policy.
+        match tcp.read_more().await {
+            Ok(0) => return Err(ConnectError::AuthDisconnected),
+            Ok(n) => trace!(bytes_read = n, "received auth data"),
+            Err(err) => return Err(ConnectError::Io(err)),
         }
 
         while let Some(msg_buf) = tcp.try_pop_message(limits)? {
-            match handle_auth_message(tcp, msg_buf.message(), config).await {
+            match handle_auth_message(tcp, msg_buf.message(), config, tcp_write_timeout).await {
                 Ok(AuthResult::Continue) => {}
                 Ok(AuthResult::Accepted) => {
                     metrics.inc_auth_successes();
@@ -149,6 +157,7 @@ pub fn build_auth_payload(
 async fn send_auth<S, K>(
     tcp: &mut TcpChannel<S, K>,
     payload: &AuthPayload,
+    tcp_write_timeout: Duration,
 ) -> Result<(), ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -156,10 +165,15 @@ where
 {
     let mut payload_buf = Vec::with_capacity(slt_core::proto::AUTH_PAYLOAD_LEN);
     payload.encode(&mut payload_buf);
-    tcp.write_message(Message::Auth {
-        payload: &payload_buf,
-    })
-    .await?;
+    write_message_with_timeout(
+        tcp,
+        Message::Auth {
+            payload: &payload_buf,
+        },
+        tcp_write_timeout,
+    )
+    .await
+    .map_err(map_auth_write_error)?;
     Ok(())
 }
 
@@ -167,6 +181,7 @@ async fn handle_auth_message<S, K>(
     tcp: &mut TcpChannel<S, K>,
     message: Message<'_>,
     config: &ClientConfig,
+    tcp_write_timeout: Duration,
 ) -> Result<AuthResult, ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -196,8 +211,13 @@ where
             let pong_payload = PongPayload { nonce: ping.nonce };
             let mut pong_buf = Vec::with_capacity(8);
             pong_payload.encode(&mut pong_buf);
-            tcp.write_message(Message::Pong { payload: &pong_buf })
-                .await?;
+            write_message_with_timeout(
+                tcp,
+                Message::Pong { payload: &pong_buf },
+                tcp_write_timeout,
+            )
+            .await
+            .map_err(map_auth_write_error)?;
             Ok(AuthResult::Continue)
         }
         Message::Close { .. } => {
@@ -211,6 +231,15 @@ where
             // use `AuthUnexpectedMessage` so the distinction survives.
             Err(ConnectError::AuthUnexpectedMessage)
         }
+    }
+}
+
+fn map_auth_write_error(err: TcpWriteError) -> ConnectError {
+    match err {
+        TcpWriteError::Io(source) if source.kind() == std::io::ErrorKind::TimedOut => {
+            ConnectError::AuthTimeout
+        }
+        other => other.into(),
     }
 }
 
@@ -263,7 +292,9 @@ mod integration_tests {
     use tokio::io::DuplexStream;
 
     use super::*;
-    use crate::test_support::{MockTlsServer, test_config, tls_server_pair};
+    use crate::test_support::{
+        MockTlsServer, test_config, tls_pair_with_parkable_client_writes, tls_server_pair,
+    };
 
     /// Create a mock TCP transport pair for testing.
     /// Returns (`client_transport`, `server_stream`).
@@ -339,6 +370,36 @@ mod integration_tests {
             matches!(err, crate::error::ConnectError::AuthTimeout),
             "expected AuthTimeout, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn auth_write_observes_tcp_write_timeout() {
+        let mut config = test_config();
+        config.timing.auth_timeout = Duration::from_secs(1);
+        config.timing.tcp_write_timeout = Duration::from_millis(40);
+        let (client_stream, _server_stream, write_gate) =
+            tls_pair_with_parkable_client_writes().await;
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let updater = crate::transport::tcp::ClientKeyUpdater::new(metrics.clone());
+        let mut client = TcpChannel::with_key_updater(client_stream, updater);
+        write_gate.park();
+
+        let err = time::timeout(
+            Duration::from_secs(1),
+            authenticate_with_channel(&mut client, &config, &metrics),
+        )
+        .await
+        .expect("auth write deadline must fire")
+        .expect_err("parked AUTH write must fail");
+
+        assert!(err.is_retriable());
+        assert!(matches!(err, ConnectError::AuthTimeout));
+        time::timeout(
+            Duration::from_secs(1),
+            write_gate.wait_until_write_blocked(),
+        )
+        .await
+        .expect("AUTH write reached the parked transport");
     }
 
     #[tokio::test]

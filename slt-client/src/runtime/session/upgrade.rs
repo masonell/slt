@@ -14,7 +14,7 @@ use tokio::time;
 use tracing::{debug, info, trace, warn};
 
 use super::error::SessionError;
-use super::{ClientSession, SessionControl, SessionExit, UdpState};
+use super::{ClientSession, ClientTcpIo, SessionControl, SessionExit, UdpState};
 use crate::runtime::observer::{ClientEventKind, Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::{ActiveTransport, PendingUdpQspRegistration, UdpUpgradeState};
@@ -45,7 +45,7 @@ const fn barrier_upgrade_id_for_nonce(state: &UdpUpgradeState, nonce: u64) -> Op
     }
 }
 
-impl<S: ClientRuntimeServices> ClientSession<'_, S> {
+impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     /// Spawns a QUIC discovery task.
     ///
     /// Returns a `JoinHandle` for the background task that will resolve to
@@ -101,9 +101,15 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     ///
     /// If the session is in `Pending` state without an in-flight registration,
     /// prepares and sends `REGISTER_CID` over TCP, then stores the prepared
-    /// state with a deadline. If preparation or sending fails, retries unless
-    /// `require_udp` is enabled, in which case the session closes.
-    pub(super) async fn attempt_udp_registration(&mut self) -> SessionControl {
+    /// state with a deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bounded TCP write fails. A TCP write failure
+    /// ends the session so the runtime can reconnect the control channel.
+    pub(super) async fn attempt_udp_registration(
+        &mut self,
+    ) -> Result<SessionControl, SessionError> {
         let quic_ids = match &mut self.udp_state {
             UdpState::Pending {
                 quic_ids,
@@ -111,40 +117,45 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 ..
             } => {
                 if registration.is_some() {
-                    return SessionControl::Continue;
+                    return Ok(SessionControl::Continue);
                 }
                 quic_ids.clone()
             }
-            _ => return SessionControl::Continue,
+            _ => return Ok(SessionControl::Continue),
         };
 
-        match register::start_udp_qsp_registration(&mut self.tcp, &quic_ids, self.udp_cipher_policy)
-            .await
-        {
-            Ok(prepared) => {
-                let deadline = Instant::now() + self.config.timing.register_timeout;
-                if let UdpState::Pending { registration, .. } = &mut self.udp_state {
-                    *registration =
-                        Some(Box::new(PendingUdpQspRegistration { prepared, deadline }));
-                }
-                self.services
-                    .observer()
-                    .emit(ClientEventKind::UdpRegisterStarted);
-            }
-            Err(err) => {
-                warn!(error = %err, "register_cid failed");
-                if self.config.require_udp {
-                    warn!("register_cid failed with require_udp=true");
-                    return SessionControl::Close(SessionExit::UdpUpgradeRequired);
-                }
-                self.services
-                    .observer()
-                    .emit(ClientEventKind::UdpRegisterFailed {
-                        detail: err.to_string(),
-                    });
-                self.schedule_registration_retry();
-            }
+        let cipher = register::select_udp_qsp_cipher(self.udp_cipher_policy);
+        let prepared = match register::prepare_udp_qsp_registration(&quic_ids, cipher) {
+            Ok(prepared) => prepared,
+            Err(err) => return Ok(self.handle_registration_setup_failure(&err)),
+        };
+        self.write_tcp_message(Message::RegisterCid {
+            payload: &prepared.payload_buf,
+        })
+        .await?;
+
+        let deadline = Instant::now() + self.config.timing.register_timeout;
+        if let UdpState::Pending { registration, .. } = &mut self.udp_state {
+            *registration = Some(Box::new(PendingUdpQspRegistration { prepared, deadline }));
         }
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpRegisterStarted);
+        Ok(SessionControl::Continue)
+    }
+
+    fn handle_registration_setup_failure(&mut self, err: &SessionError) -> SessionControl {
+        warn!(error = %err, "failed to prepare register_cid");
+        if self.config.require_udp {
+            warn!("register_cid preparation failed with require_udp=true");
+            return SessionControl::Close(SessionExit::UdpUpgradeRequired);
+        }
+        self.services
+            .observer()
+            .emit(ClientEventKind::UdpRegisterFailed {
+                detail: err.to_string(),
+            });
+        self.schedule_registration_retry();
         SessionControl::Continue
     }
 
@@ -638,8 +649,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         };
         let mut buf = Vec::with_capacity(8);
         ready.encode(&mut buf);
-        self.tcp
-            .write_message(Message::UdpReady { payload: &buf })
+        self.write_tcp_message(Message::UdpReady { payload: &buf })
             .await?;
 
         if let UdpUpgradeState::Upgrading { ready_sent, .. } = &mut self.udp_upgrade {
@@ -702,11 +712,10 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         };
         let mut switch_ack_buf = Vec::with_capacity(8);
         ack.encode(&mut switch_ack_buf);
-        self.tcp
-            .write_message(Message::SwitchAck {
-                payload: &switch_ack_buf,
-            })
-            .await?;
+        self.write_tcp_message(Message::SwitchAck {
+            payload: &switch_ack_buf,
+        })
+        .await?;
 
         let barrier_nonce = fastrand::u64(..);
         let barrier_ping = PingPayload {
@@ -714,11 +723,10 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         };
         let mut barrier_ping_buf = Vec::with_capacity(8);
         barrier_ping.encode(&mut barrier_ping_buf);
-        self.tcp
-            .write_message(Message::Ping {
-                payload: &barrier_ping_buf,
-            })
-            .await?;
+        self.write_tcp_message(Message::Ping {
+            payload: &barrier_ping_buf,
+        })
+        .await?;
 
         self.udp_upgrade = UdpUpgradeState::AwaitingSwitchCommit {
             upgrade_id: switch.upgrade_id,
@@ -1076,6 +1084,221 @@ mod tests {
             assert!(past_deadline < now);
             // Future deadline should be after now
             assert!(future_deadline > now);
+        }
+    }
+
+    mod registration_and_tcp_write_failures {
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        use slt_core::proto::{OwnedMessageBuf, UpgradeProbeAckPayload};
+        use slt_core::transport::tcp::TcpChannel;
+        use tokio::io::DuplexStream;
+        use tokio::sync::mpsc;
+        use tokio::time;
+        use tokio_boring::SslStream;
+        use tokio_util::sync::CancellationToken;
+
+        use super::*;
+        use crate::metrics::Metrics;
+        use crate::runtime::services::DesktopServices;
+        use crate::test_support::{
+            ParkableWriteStream, WriteGate, mock_quic_ids, test_config,
+            tls_pair_with_parkable_client_writes,
+        };
+        use crate::transport::tcp::{ClientKeyUpdater, TcpSession};
+        use crate::tun::TunChannels;
+
+        fn tun_channels() -> TunChannels {
+            let (_to_session_tx, to_session_rx) = mpsc::channel::<Vec<u8>>(8);
+            let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(8);
+            TunChannels {
+                to_session_rx,
+                to_tun_tx,
+            }
+        }
+
+        async fn parkable_session<'a>(
+            config: &'a slt_core::config::ClientConfig,
+            tun: &'a mut TunChannels,
+            services: &'a DesktopServices,
+        ) -> (
+            ClientSession<'a, DesktopServices, ParkableWriteStream>,
+            SslStream<DuplexStream>,
+            Arc<WriteGate>,
+        ) {
+            let metrics = Arc::new(Metrics::default());
+            let updater = ClientKeyUpdater::new(metrics.clone());
+            let (client_stream, server_stream, write_gate) =
+                tls_pair_with_parkable_client_writes().await;
+            let tcp_session = TcpSession {
+                transport: TcpChannel::with_key_updater(client_stream, updater),
+                peer: None,
+                sni: None,
+            };
+            (
+                ClientSession::new(
+                    config,
+                    tcp_session,
+                    tun,
+                    CancellationToken::new(),
+                    metrics,
+                    services,
+                    None,
+                ),
+                server_stream,
+                write_gate,
+            )
+        }
+
+        #[tokio::test]
+        async fn register_cid_write_observes_tcp_write_timeout() {
+            let mut config = test_config();
+            config.enable_upgrade = true;
+            config.timing.tcp_write_timeout = Duration::from_millis(40);
+            let services = DesktopServices::new();
+            let mut tun = tun_channels();
+            let (mut session, _server_stream, write_gate) =
+                parkable_session(&config, &mut tun, &services).await;
+            session.udp_state = UdpState::Pending {
+                quic_ids: mock_quic_ids().await,
+                backoff: ReconnectBackoff::new(
+                    config.timing.reconnect_min,
+                    config.timing.reconnect_max,
+                ),
+                reconnect_at: Instant::now(),
+                registration: None,
+            };
+            write_gate.park();
+
+            let err = time::timeout(Duration::from_secs(1), session.attempt_udp_registration())
+                .await
+                .expect("REGISTER_CID write deadline must fire")
+                .expect_err("parked REGISTER_CID write must fail");
+
+            assert!(matches!(
+                &err,
+                SessionError::Io(source)
+                    if source.kind() == std::io::ErrorKind::TimedOut
+            ));
+            assert_eq!(err.exit(), SessionExit::ConnectionError);
+        }
+
+        #[tokio::test]
+        async fn optional_registration_setup_failure_schedules_retry() {
+            let mut config = test_config();
+            config.enable_upgrade = true;
+            let services = DesktopServices::new();
+            let mut tun = tun_channels();
+            let (mut session, _server_stream, _write_gate) =
+                parkable_session(&config, &mut tun, &services).await;
+            session.udp_state = UdpState::Pending {
+                quic_ids: mock_quic_ids().await,
+                backoff: ReconnectBackoff::new(
+                    config.timing.reconnect_min,
+                    config.timing.reconnect_max,
+                ),
+                reconnect_at: Instant::now(),
+                registration: None,
+            };
+            let retry_started = Instant::now();
+            let setup_error = SessionError::Io(std::io::Error::other(
+                "failed to duplicate udp discovery socket",
+            ));
+
+            let control = session.handle_registration_setup_failure(&setup_error);
+
+            assert_eq!(control, SessionControl::Continue);
+            let UdpState::Pending {
+                reconnect_at,
+                registration,
+                ..
+            } = &session.udp_state
+            else {
+                panic!("optional setup failure must keep pending registration state");
+            };
+            assert!(*reconnect_at > retry_started);
+            assert!(registration.is_none());
+        }
+
+        #[tokio::test]
+        async fn required_registration_setup_failure_is_fatal() {
+            let mut config = test_config();
+            config.enable_upgrade = true;
+            config.require_udp = true;
+            let services = DesktopServices::new();
+            let mut tun = tun_channels();
+            let (mut session, _server_stream, _write_gate) =
+                parkable_session(&config, &mut tun, &services).await;
+            let original_reconnect_at = Instant::now();
+            session.udp_state = UdpState::Pending {
+                quic_ids: mock_quic_ids().await,
+                backoff: ReconnectBackoff::new(
+                    config.timing.reconnect_min,
+                    config.timing.reconnect_max,
+                ),
+                reconnect_at: original_reconnect_at,
+                registration: None,
+            };
+            let setup_error = SessionError::Io(std::io::Error::other(
+                "failed to duplicate udp discovery socket",
+            ));
+
+            let control = session.handle_registration_setup_failure(&setup_error);
+
+            assert_eq!(
+                control,
+                SessionControl::Close(SessionExit::UdpUpgradeRequired)
+            );
+            let UdpState::Pending { reconnect_at, .. } = &session.udp_state else {
+                panic!("required setup failure must leave pending state intact");
+            };
+            assert_eq!(*reconnect_at, original_reconnect_at);
+        }
+
+        #[tokio::test]
+        async fn udp_ready_write_observes_tcp_write_timeout() {
+            let mut config = test_config();
+            config.enable_upgrade = true;
+            config.timing.tcp_write_timeout = Duration::from_millis(40);
+            let services = DesktopServices::new();
+            let mut tun = tun_channels();
+            let (mut session, _server_stream, write_gate) =
+                parkable_session(&config, &mut tun, &services).await;
+            let upgrade_id = 0xAA;
+            let nonce = 0xBB;
+            session.udp_upgrade = UdpUpgradeState::Upgrading {
+                upgrade_id,
+                deadline: Instant::now() + config.timing.register_timeout,
+                attempts: 1,
+                next_probe_at: Instant::now() + config.timing.reconnect_min,
+                last_probe_nonce: nonce,
+                probe_acked: false,
+                ready_sent: false,
+                probe_backoff: ReconnectBackoff::new(
+                    config.timing.reconnect_min,
+                    config.timing.reconnect_max,
+                ),
+            };
+            let ack = UpgradeProbeAckPayload { upgrade_id, nonce };
+            let mut payload = Vec::new();
+            ack.encode(&mut payload);
+            write_gate.park();
+
+            let err = time::timeout(
+                Duration::from_secs(1),
+                session.handle_upgrade_probe_ack(&payload),
+            )
+            .await
+            .expect("UDP_READY write deadline must fire")
+            .expect_err("parked UDP_READY write must fail");
+
+            assert!(matches!(
+                &err,
+                SessionError::Io(source)
+                    if source.kind() == std::io::ErrorKind::TimedOut
+            ));
+            assert_eq!(err.exit(), SessionExit::ConnectionError);
         }
     }
 

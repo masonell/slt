@@ -11,14 +11,14 @@ use tokio::time;
 use tracing::{info, trace, warn};
 
 use super::error::SessionError;
-use super::{ClientSession, SessionControl, SessionExit};
+use super::{ClientSession, ClientTcpIo, SessionControl, SessionExit};
 use crate::runtime::observer::{ClientEventKind, Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 use crate::transport::quic_discovery;
 use crate::transport::udp_qsp::client_udp_qsp_io;
 
-impl<S: ClientRuntimeServices> ClientSession<'_, S> {
+impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     /// Handles a host-reported network change.
     ///
     /// If UDP-QSP is the active data path, first tries to validate the existing

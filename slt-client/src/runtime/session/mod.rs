@@ -28,6 +28,7 @@ use slt_core::config::ClientConfig;
 use slt_core::proto::{CloseCode, Message, MessageLimits};
 use slt_core::types::ClientUdpQspCipher;
 use state::{ActiveTransport, UdpState, UdpUpgradeState};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
@@ -47,9 +48,13 @@ use crate::tun::TunChannels;
 ///
 /// Handles the complete lifecycle of a VPN session including TCP/UDP transport
 /// management, message handling, transport upgrades, and idle timeout detection.
-pub(super) struct ClientSession<'a, S: ClientRuntimeServices> {
+pub(super) struct ClientSession<
+    'a,
+    S: ClientRuntimeServices,
+    T: ClientTcpIo = tokio::net::TcpStream,
+> {
     config: &'a ClientConfig,
-    tcp: TcpTransport,
+    tcp: TcpTransport<T>,
     peer: Option<SocketAddr>,
     tun_channels: &'a mut TunChannels,
     services: &'a S,
@@ -73,6 +78,10 @@ pub(super) struct ClientSession<'a, S: ClientRuntimeServices> {
     tcp_alive: bool,
     control_rx: Option<&'a mut ClientCommandReceiver>,
 }
+
+pub(super) trait ClientTcpIo: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + Sync> ClientTcpIo for T {}
 
 /// Outcome of running a session to completion.
 ///
@@ -135,7 +144,7 @@ impl SessionOutcome {
     }
 }
 
-impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
+impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
     /// Creates a new session from an authenticated TCP connection.
     ///
     /// Initializes the session with the given TCP transport, configuration,
@@ -144,7 +153,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
     /// based on the effective upgrade policy (`enable_upgrade || require_udp`).
     pub(super) fn new(
         config: &'a ClientConfig,
-        tcp: TcpSession,
+        tcp: TcpSession<T>,
         tun_channels: &'a mut TunChannels,
         cancel: CancellationToken,
         metrics: Arc<Metrics>,
@@ -203,8 +212,31 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
     /// Dispatches each event to the appropriate handler and continues until
     /// the session exits for any reason.
     pub(super) async fn run(&mut self) -> SessionOutcome {
+        let cancel = self.cancel.clone();
+        let outcome = tokio::select! {
+            biased;
+
+            () = cancel.cancelled() => None,
+            outcome = self.run_inner() => Some(outcome),
+        };
+        let outcome = outcome.unwrap_or_else(|| {
+            info!("shutdown requested");
+            self.metrics.inc_disconnect_shutdown();
+            SessionOutcome::from_exit(SessionExit::Shutdown)
+        });
+
+        if outcome.exit == SessionExit::Shutdown {
+            self.send_close_best_effort(CloseCode::Normal, "shutdown")
+                .await;
+        }
+        self.flush_pending_udp_transport_best_effort().await;
+        self.shutdown_background_tasks().await;
+        outcome
+    }
+
+    async fn run_inner(&mut self) -> SessionOutcome {
         let mut next_ping_at = self.schedule_next_ping();
-        let outcome = loop {
+        loop {
             if self.tcp_alive && self.tcp.has_buffered_input() {
                 match self.handle_tcp_read().await {
                     Ok(SessionControl::Continue) => {}
@@ -231,11 +263,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                     break SessionOutcome::from_error(err);
                 }
             }
-        };
-
-        self.flush_pending_udp_transport_best_effort().await;
-        self.shutdown_background_tasks().await;
-        outcome
+        }
     }
 
     /// Records an active-transport change: updates the tracked transport on the
@@ -368,15 +396,12 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
             SessionEvent::Shutdown => {
                 info!("shutdown requested");
                 self.metrics.inc_disconnect_shutdown();
-                self.send_close_best_effort(CloseCode::Normal, "shutdown")
-                    .await;
                 Ok(SessionControl::Close(SessionExit::Shutdown))
             }
             SessionEvent::Control(ClientCommand::Stop) => {
                 info!("stop command received");
                 self.cancel.cancel();
                 self.metrics.inc_disconnect_shutdown();
-                self.send_close_best_effort(CloseCode::Normal, "stop").await;
                 Ok(SessionControl::Close(SessionExit::Shutdown))
             }
             SessionEvent::Control(ClientCommand::NetworkChanged) => {
@@ -509,7 +534,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                     }
                     UdpState::Pending { .. } => {
                         debug!("udp reconnect tick; attempting registration");
-                        return Ok(self.attempt_udp_registration().await);
+                        return self.attempt_udp_registration().await;
                     }
                     _ => {}
                 }
@@ -577,11 +602,10 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                 // Typed non-transport session error from the UDP path; propagate.
                 return Err(err);
             }
-            self.tcp
-                .write_message(Message::Data {
-                    packet: packet.as_slice(),
-                })
-                .await?;
+            self.write_tcp_message(Message::Data {
+                packet: packet.as_slice(),
+            })
+            .await?;
         }
         Ok(SessionControl::Continue)
     }
@@ -624,14 +648,19 @@ mod tests {
     use slt_core::config::ClientConfig;
     use slt_core::proto::OwnedMessageBuf;
     use slt_core::transport::tcp::TcpChannel;
+    use tokio::io::DuplexStream;
     use tokio::sync::mpsc;
+    use tokio::time;
     use tokio_boring::SslStream;
     use tokio_util::sync::CancellationToken;
 
-    use super::{ClientSession, SessionEvent};
+    use super::{ClientSession, SessionError, SessionEvent, SessionExit};
     use crate::metrics::Metrics;
     use crate::runtime::services::DesktopServices;
-    use crate::test_support::{test_config, tls_tcp_stream_pair};
+    use crate::test_support::{
+        ParkableWriteStream, WriteGate, test_config, tls_pair_with_parkable_client_writes,
+        tls_tcp_stream_pair,
+    };
     use crate::transport::tcp::{ClientKeyUpdater, TcpSession};
     use crate::tun::TunChannels;
 
@@ -662,6 +691,32 @@ mod tests {
                 None,
             ),
             server_stream,
+        )
+    }
+
+    async fn parkable_test_session<'a>(
+        config: &'a ClientConfig,
+        tun: &'a mut TunChannels,
+        services: &'a DesktopServices,
+        cancel: CancellationToken,
+    ) -> (
+        ClientSession<'a, DesktopServices, ParkableWriteStream>,
+        SslStream<DuplexStream>,
+        Arc<WriteGate>,
+    ) {
+        let metrics = Arc::new(Metrics::default());
+        let updater = ClientKeyUpdater::new(metrics.clone());
+        let (client_stream, server_stream, write_gate) =
+            tls_pair_with_parkable_client_writes().await;
+        let tcp_session = TcpSession {
+            transport: TcpChannel::with_key_updater(client_stream, updater),
+            peer: None,
+            sni: None,
+        };
+        (
+            ClientSession::new(config, tcp_session, tun, cancel, metrics, services, None),
+            server_stream,
+            write_gate,
         )
     }
 
@@ -707,5 +762,79 @@ mod tests {
             .unwrap();
 
         assert!(matches!(event, SessionEvent::PingTick));
+    }
+
+    #[tokio::test]
+    async fn established_tcp_write_timeout_exits_for_reconnect() {
+        let mut config = test_config();
+        config.timing.tcp_write_timeout = Duration::from_millis(40);
+        let services = DesktopServices::new();
+        let (tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(1);
+        tun_tx.try_send(vec![0x45; 20]).unwrap();
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, _server_stream, write_gate) =
+            parkable_test_session(&config, &mut tun, &services, CancellationToken::new()).await;
+        write_gate.park();
+
+        let outcome = time::timeout(Duration::from_secs(1), session.run())
+            .await
+            .expect("parked DATA write must observe its deadline");
+
+        assert_eq!(outcome.exit, SessionExit::ConnectionError);
+        assert!(matches!(
+            outcome.error,
+            Some(SessionError::Io(ref source))
+                if source.kind() == std::io::ErrorKind::TimedOut
+        ));
+        time::timeout(
+            Duration::from_secs(1),
+            write_gate.wait_until_write_blocked(),
+        )
+        .await
+        .expect("DATA write reached the parked transport");
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_blocked_established_tcp_write() {
+        let mut config = test_config();
+        config.timing.tcp_write_timeout = Duration::from_secs(60);
+        let services = DesktopServices::new();
+        let cancel = CancellationToken::new();
+        let (tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(1);
+        tun_tx.try_send(vec![0x45; 20]).unwrap();
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, _server_stream, write_gate) =
+            parkable_test_session(&config, &mut tun, &services, cancel.clone()).await;
+        write_gate.park();
+        let run = session.run();
+        tokio::pin!(run);
+
+        time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                outcome = &mut run => panic!("session exited before cancellation: {:?}", outcome.exit),
+                () = write_gate.wait_until_write_blocked() => {}
+            }
+        })
+        .await
+        .expect("DATA write reached the parked transport");
+
+        // The parked write does not register a waker. Cancellation wakes the
+        // outer session guard, which drops that write before sending CLOSE.
+        write_gate.unpark();
+        cancel.cancel();
+        let outcome = time::timeout(Duration::from_secs(1), &mut run)
+            .await
+            .expect("shutdown must cancel the parked DATA write");
+
+        assert_eq!(outcome.exit, SessionExit::Shutdown);
+        assert!(outcome.error.is_none());
     }
 }

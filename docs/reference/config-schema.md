@@ -198,6 +198,7 @@ ChaCha20-Poly1305 otherwise.
 | `ping_min` | duration | No | `"10s"` | <= `ping_max` |
 | `ping_max` | duration | No | `"30s"` | - |
 | `auth_timeout` | duration | No | `"10s"` | > 0, <= 1h |
+| `tcp_write_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `register_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `quic_discovery_timeout` | duration | No | `"15s"` | > 0, <= 1h |
 | `idle_timeout` | duration | No | `"5m"` | > 0, <= 1h |
@@ -237,6 +238,7 @@ cipher = "auto"
 ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
+tcp_write_timeout = "10s"
 register_timeout = "10s"
 quic_discovery_timeout = "15s"
 idle_timeout = "5m"

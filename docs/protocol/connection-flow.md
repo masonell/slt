@@ -487,7 +487,7 @@ On session termination:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | auth_timeout | 10s | End-to-end server TLS and AUTH deadline |
-| tcp_write_timeout | 10s | Maximum established-session TCP message write time |
+| tcp_write_timeout | 10s | Maximum TCP message write time; clients also apply it during authentication and UDP upgrade |
 | idle_timeout | 300s | Max idle time before disconnect |
 | ping_min | 10s | Minimum keepalive interval |
 | ping_max | 30s | Maximum keepalive interval |

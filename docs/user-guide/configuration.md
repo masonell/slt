@@ -225,6 +225,7 @@ cipher = "auto"
 ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
+tcp_write_timeout = "10s"
 register_timeout = "10s"
 quic_discovery_timeout = "15s"
 idle_timeout = "5m"
@@ -291,6 +292,7 @@ ChaCha20-Poly1305 otherwise.
 | `ping_min` | duration | No | `10s` | Minimum ping interval. Must be <= `ping_max`. |
 | `ping_max` | duration | No | `30s` | Maximum ping interval. |
 | `auth_timeout` | duration | No | `10s` | Timeout for authentication handshake. Must be > 0 and <= 1 hour. |
+| `tcp_write_timeout` | duration | No | `10s` | Maximum time for one TCP message write during authentication, registration, upgrade, or an established session. Must be > 0 and <= 1 hour. |
 | `register_timeout` | duration | No | `10s` | Timeout for UDP-QSP registration. Must be > 0 and <= 1 hour. |
 | `quic_discovery_timeout` | duration | No | `15s` | Timeout for the full QUIC DCID discovery attempt. Must be > 0 and <= 1 hour. |
 | `idle_timeout` | duration | No | `5m` | Session idle timeout. Must be > 0 and <= 1 hour. |
@@ -338,6 +340,7 @@ cipher = "auto"
 ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
+tcp_write_timeout = "10s"
 register_timeout = "10s"
 quic_discovery_timeout = "15s"
 idle_timeout = "5m"
@@ -558,6 +561,7 @@ For environments requiring faster reconnection and lower latency:
 ping_min = "5s"
 ping_max = "15s"
 auth_timeout = "5s"
+tcp_write_timeout = "5s"
 register_timeout = "5s"
 quic_discovery_timeout = "8s"
 idle_timeout = "2m"
@@ -575,6 +579,7 @@ For unstable networks requiring more tolerance:
 ping_min = "15s"
 ping_max = "45s"
 auth_timeout = "30s"
+tcp_write_timeout = "30s"
 register_timeout = "30s"
 quic_discovery_timeout = "45s"
 idle_timeout = "10m"

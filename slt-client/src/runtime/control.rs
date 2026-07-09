@@ -8,6 +8,10 @@ pub enum ClientCommand {
     /// The underlying platform network changed.
     NetworkChanged,
     /// Stop the runtime cleanly.
+    ///
+    /// Cancel the runtime token as well when the stop must preempt an in-flight
+    /// operation. A command-only stop is observed after the current operation
+    /// completes; TCP writes remain bounded by `tcp_write_timeout`.
     Stop,
 }
 

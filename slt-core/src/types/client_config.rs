@@ -126,6 +126,12 @@ pub struct ClientTimingConfig {
         with = "humantime_serde"
     )]
     pub auth_timeout: Duration,
+    /// Maximum time for one TCP message write.
+    #[serde(
+        default = "crate::config::default_tcp_write_timeout",
+        with = "humantime_serde"
+    )]
+    pub tcp_write_timeout: Duration,
     /// Timeout for UDP-QSP registration.
     #[serde(
         default = "crate::config::default_register_timeout",
@@ -169,12 +175,13 @@ impl Default for ClientTimingConfig {
         use crate::config::{
             default_auth_timeout, default_idle_timeout, default_metrics_interval, default_ping_max,
             default_ping_min, default_quic_discovery_timeout, default_reconnect_max,
-            default_reconnect_min, default_register_timeout,
+            default_reconnect_min, default_register_timeout, default_tcp_write_timeout,
         };
         Self {
             ping_min: default_ping_min(),
             ping_max: default_ping_max(),
             auth_timeout: default_auth_timeout(),
+            tcp_write_timeout: default_tcp_write_timeout(),
             register_timeout: default_register_timeout(),
             quic_discovery_timeout: default_quic_discovery_timeout(),
             idle_timeout: default_idle_timeout(),
@@ -203,6 +210,7 @@ impl ClientTimingConfig {
             });
         }
         validate_timeout("auth_timeout", self.auth_timeout)?;
+        validate_timeout("tcp_write_timeout", self.tcp_write_timeout)?;
         validate_timeout("register_timeout", self.register_timeout)?;
         validate_timeout("quic_discovery_timeout", self.quic_discovery_timeout)?;
         validate_timeout("idle_timeout", self.idle_timeout)?;
@@ -228,6 +236,7 @@ mod tests {
             ping_min: Duration::from_secs(10),
             ping_max: Duration::from_secs(20),
             auth_timeout: Duration::from_secs(10),
+            tcp_write_timeout: Duration::from_secs(10),
             register_timeout: Duration::from_secs(10),
             quic_discovery_timeout: Duration::from_secs(15),
             idle_timeout: Duration::from_mins(1),
@@ -276,6 +285,15 @@ mod tests {
         assert_eq!(
             config.quic_discovery_timeout,
             crate::config::DEFAULT_QUIC_DISCOVERY_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn serde_defaults_tcp_write_timeout_when_omitted() {
+        let config: ClientTimingConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            config.tcp_write_timeout,
+            crate::config::DEFAULT_TCP_WRITE_TIMEOUT
         );
     }
 
@@ -355,6 +373,19 @@ mod tests {
             err,
             ConfigError::ZeroTimeout {
                 field: "quic_discovery_timeout"
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_tcp_write_timeout() {
+        let mut config = test_timing_config();
+        config.tcp_write_timeout = Duration::ZERO;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroTimeout {
+                field: "tcp_write_timeout"
             }
         ));
     }

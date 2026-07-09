@@ -1,11 +1,10 @@
 use boring::rand::rand_bytes;
 use slt_core::crypto::udp_qsp::{QuicQspSession, UdpQspKeys};
-use slt_core::proto::{CipherSuite, Message, RegisterCidPayload, UDP_QSP_TRAFFIC_SECRET_LEN};
+use slt_core::proto::{CipherSuite, RegisterCidPayload, UDP_QSP_TRAFFIC_SECRET_LEN};
 use slt_core::types::ClientUdpQspCipher;
 
 use crate::runtime::session::SessionError;
 use crate::transport::quic_discovery as quic;
-use crate::transport::tcp::TcpTransport;
 use crate::transport::udp_qsp::{ClientUdpQspIo, client_udp_qsp_io};
 
 /// Prepared state for a UDP-QSP `REGISTER_CID` exchange.
@@ -82,31 +81,6 @@ pub(super) fn prepare_udp_qsp_registration(
     })
 }
 
-/// Starts a UDP-QSP `REGISTER_CID` exchange by sending a prepared payload.
-///
-/// Prepares the registration payload and sends `REGISTER_CID` to the server
-/// over the TCP transport. Response handling is owned by the main session loop
-/// so TCP activity accounting and idle tracking remain centralized.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Registration preparation fails (see `prepare_udp_qsp_registration`)
-/// - TCP write fails
-pub(super) async fn start_udp_qsp_registration(
-    tcp: &mut TcpTransport,
-    ids: &quic::QuicIds,
-    cipher_policy: ClientUdpQspCipher,
-) -> Result<PreparedUdpQspRegistration, SessionError> {
-    let cipher = select_udp_qsp_cipher(cipher_policy);
-    let prepared = prepare_udp_qsp_registration(ids, cipher)?;
-    tcp.write_message(Message::RegisterCid {
-        payload: &prepared.payload_buf,
-    })
-    .await?;
-    Ok(prepared)
-}
-
 /// Fill a fixed-size array with cryptographically secure random bytes.
 ///
 /// The boring `ErrorStack` from `RAND_bytes` is preserved via
@@ -118,7 +92,7 @@ fn random_array<const N: usize>() -> Result<[u8; N], SessionError> {
     Ok(bytes)
 }
 
-fn select_udp_qsp_cipher(policy: ClientUdpQspCipher) -> CipherSuite {
+pub(super) fn select_udp_qsp_cipher(policy: ClientUdpQspCipher) -> CipherSuite {
     policy.select(aes_gcm_acceleration_available())
 }
 

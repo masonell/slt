@@ -6,7 +6,7 @@ use slt_core::proto::{
 use tracing::{debug, info, trace};
 
 use super::error::SessionError;
-use super::{ClientSession, SessionControl, SessionExit};
+use super::{ClientSession, ClientTcpIo, SessionControl, SessionExit};
 use crate::metrics::Metrics;
 use crate::runtime::observer::{Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
@@ -30,7 +30,7 @@ fn switch_to_tcp_on_server_traffic(
     true
 }
 
-impl<S: ClientRuntimeServices> ClientSession<'_, S> {
+impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     /// Processes buffered TCP data and dispatches messages.
     ///
     /// Repeatedly pops messages from the TCP transport buffer and handles
@@ -112,8 +112,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 };
                 let mut pong_buf = Vec::with_capacity(8);
                 pong_out.encode(&mut pong_buf);
-                self.tcp
-                    .write_message(Message::Pong { payload: &pong_buf })
+                self.write_tcp_message(Message::Pong { payload: &pong_buf })
                     .await?;
                 Ok(SessionControl::Continue)
             }

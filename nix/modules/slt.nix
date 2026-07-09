@@ -478,6 +478,8 @@ let
               pingMin = durationOption "10s" "10s" "Minimum ping interval.";
               pingMax = durationOption "30s" "30s" "Maximum ping interval.";
               authTimeout = durationOption "10s" "10s" "TLS/AUTH timeout.";
+              tcpWriteTimeout =
+                durationOption "10s" "10s" "Maximum time for one TCP message write.";
               registerTimeout = durationOption "10s" "10s" "UDP-QSP registration timeout.";
               quicDiscoveryTimeout = durationOption "15s" "15s" "QUIC discovery timeout.";
               idleTimeout = durationOption "5m" "5m" "Idle session timeout.";
@@ -605,6 +607,7 @@ let
         ping_min = client.timing.pingMin;
         ping_max = client.timing.pingMax;
         auth_timeout = client.timing.authTimeout;
+        tcp_write_timeout = client.timing.tcpWriteTimeout;
         register_timeout = client.timing.registerTimeout;
         quic_discovery_timeout = client.timing.quicDiscoveryTimeout;
         idle_timeout = client.timing.idleTimeout;

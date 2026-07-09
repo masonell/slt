@@ -4,17 +4,19 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use slt_core::proto::{CloseCode, ClosePayload, Message, OwnedMessageBuf, PingPayload};
+use slt_core::transport::tcp::TcpWriteError;
 use tokio::time;
 use tracing::{debug, trace, warn};
 
 use super::error::SessionError;
-use super::{ClientSession, SessionControl, SessionExit};
+use super::{ClientSession, ClientTcpIo, SessionControl, SessionExit};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
+use crate::transport::tcp::write_message_with_timeout;
 
 const BEST_EFFORT_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
-impl<S: ClientRuntimeServices> ClientSession<'_, S> {
+impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     /// Sends a server-originated DATA frame to the TUN writer queue.
     pub(super) async fn send_to_tun_or_shutdown(&self, msg_buf: OwnedMessageBuf) -> SessionControl {
         tokio::select! {
@@ -71,10 +73,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             self.write_udp_message_and_flush(Message::Ping { payload: &buf })
                 .await
         } else {
-            self.tcp
-                .write_message(Message::Ping { payload: &buf })
+            self.write_tcp_message(Message::Ping { payload: &buf })
                 .await
-                .map_err(SessionError::from)
         };
         if let Err(err) = result {
             if active != ActiveTransport::UdpQsp {
@@ -95,8 +95,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 // protocol violation, crypto) from the UDP path; propagate.
                 return Err(err);
             }
-            self.tcp
-                .write_message(Message::Ping { payload: &buf })
+            self.write_tcp_message(Message::Ping { payload: &buf })
                 .await?;
         }
         Ok(())
@@ -114,7 +113,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
     /// - Active transport write fails
     /// - TCP fallback also fails
     /// - Both transports are dead
-    pub(super) async fn send_close(&mut self, code: CloseCode) -> Result<(), SessionError> {
+    async fn send_close(&mut self, code: CloseCode) -> Result<(), SessionError> {
         let payload = ClosePayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
@@ -123,10 +122,8 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             self.write_udp_message_and_flush(Message::Close { payload: &buf })
                 .await
         } else {
-            self.tcp
-                .write_message(Message::Close { payload: &buf })
+            self.write_tcp_message_best_effort(Message::Close { payload: &buf })
                 .await
-                .map_err(SessionError::from)
         };
         if let Err(err) = result {
             if active != ActiveTransport::UdpQsp {
@@ -141,8 +138,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
             } else {
                 return Err(err);
             }
-            self.tcp
-                .write_message(Message::Close { payload: &buf })
+            self.write_tcp_message_best_effort(Message::Close { payload: &buf })
                 .await?;
         }
         Ok(())
@@ -162,11 +158,7 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
         message: Message<'_>,
     ) -> Result<(), SessionError> {
         match self.active_transport {
-            ActiveTransport::Tcp => self
-                .tcp
-                .write_message(message)
-                .await
-                .map_err(SessionError::from),
+            ActiveTransport::Tcp => self.write_tcp_message(message).await,
             ActiveTransport::UdpQsp => {
                 let udp = self.udp_state.as_active_mut().ok_or_else(|| {
                     SessionError::ProtocolViolation {
@@ -176,6 +168,46 @@ impl<S: ClientRuntimeServices> ClientSession<'_, S> {
                 udp.write_message(message).await.map_err(SessionError::from)
             }
         }
+    }
+
+    /// Writes one regular session message on TCP using the configured deadline.
+    pub(super) async fn write_tcp_message(
+        &mut self,
+        message: Message<'_>,
+    ) -> Result<(), SessionError> {
+        self.write_tcp_message_with_timeout(message, self.config.timing.tcp_write_timeout)
+            .await
+    }
+
+    // The caller's one-second timeout bounds the complete close attempt,
+    // including a UDP failure followed by TCP fallback.
+    async fn write_tcp_message_best_effort(
+        &mut self,
+        message: Message<'_>,
+    ) -> Result<(), SessionError> {
+        self.tcp
+            .write_message(message)
+            .await
+            .map_err(SessionError::from)
+    }
+
+    async fn write_tcp_message_with_timeout(
+        &mut self,
+        message: Message<'_>,
+        tcp_write_timeout: Duration,
+    ) -> Result<(), SessionError> {
+        let result = write_message_with_timeout(&mut self.tcp, message, tcp_write_timeout).await;
+        if matches!(
+            &result,
+            Err(TcpWriteError::Io(source)) if source.kind() == io::ErrorKind::TimedOut
+        ) {
+            warn!(
+                peer = ?self.peer,
+                timeout_ms = tcp_write_timeout.as_millis(),
+                "tcp message write timed out"
+            );
+        }
+        result.map_err(SessionError::from)
     }
 
     /// Writes a message on UDP-QSP and immediately flushes buffered packets.

@@ -11,7 +11,7 @@ pub const DEFAULT_PING_MAX: Duration = Duration::from_secs(30);
 /// Default authentication timeout.
 pub const DEFAULT_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Default timeout for one server-side TCP message write.
+/// Default timeout for one TCP message write.
 pub const DEFAULT_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default idle timeout.
@@ -53,7 +53,7 @@ pub const fn default_auth_timeout() -> Duration {
     DEFAULT_AUTH_TIMEOUT
 }
 
-/// Returns the default timeout for one server-side TCP message write.
+/// Returns the default timeout for one TCP message write.
 #[must_use]
 pub const fn default_tcp_write_timeout() -> Duration {
     DEFAULT_TCP_WRITE_TIMEOUT

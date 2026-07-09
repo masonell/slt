@@ -1,7 +1,9 @@
+use std::future::{Future, poll_fn};
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use boring::error::ErrorStack;
@@ -12,11 +14,13 @@ use slt_core::crypto::{
     configure_ca_store, configure_client_chrome_ssl, configure_hostname_verification,
     tcp_client_chrome_ctx_builder,
 };
+use slt_core::proto::Message;
 use slt_core::transport::tcp::{
-    IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
+    IntervalKeyUpdater, KeyUpdater, TcpChannel, TcpWriteError, default_interval_key_updater,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::time::timeout;
+use tokio::time::{self, timeout};
 use tracing::{debug, trace};
 
 use crate::error::{ConnectError, TlsError};
@@ -62,16 +66,52 @@ impl KeyUpdater for ClientKeyUpdater {
 }
 
 /// Client TCP transport for framed VPN protocol I/O.
-pub type TcpTransport = TcpChannel<TcpStream, ClientKeyUpdater>;
+pub type TcpTransport<S = TcpStream> = TcpChannel<S, ClientKeyUpdater>;
 
 /// Connected TCP TLS session metadata.
-pub struct TcpSession {
+pub struct TcpSession<S = TcpStream> {
     /// TLS-wrapped TCP transport for protocol I/O.
-    pub transport: TcpTransport,
+    pub transport: TcpTransport<S>,
     /// Connected peer address, if available.
     pub peer: Option<SocketAddr>,
     /// SNI hostname used for the handshake.
     pub sni: Option<String>,
+}
+
+/// Write one framed TCP message before `write_timeout` expires.
+///
+/// The timer is registered only after the first write poll reports backpressure,
+/// keeping immediately-ready writes on the direct path.
+///
+/// # Errors
+///
+/// Returns the channel's typed frame or I/O error. An expired deadline is an
+/// I/O error with [`io::ErrorKind::TimedOut`].
+pub async fn write_message_with_timeout<S, K>(
+    tcp: &mut TcpChannel<S, K>,
+    message: Message<'_>,
+    write_timeout: Duration,
+) -> Result<(), TcpWriteError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    K: KeyUpdater,
+{
+    let deadline = time::Instant::now() + write_timeout;
+    let write = tcp.write_message(message);
+    tokio::pin!(write);
+
+    let first_poll = poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx))).await;
+    match first_poll {
+        Poll::Ready(result) => result,
+        Poll::Pending => {
+            let Ok(result) = time::timeout_at(deadline, write.as_mut()).await else {
+                return Err(
+                    io::Error::new(io::ErrorKind::TimedOut, "tcp message write timed out").into(),
+                );
+            };
+            result
+        }
+    }
 }
 
 /// Connect to the server and perform a TLS handshake.

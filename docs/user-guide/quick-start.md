@@ -223,6 +223,7 @@ require_udp = false     # Don't fail if UDP upgrade fails
 [timing]
 ping_min = "10s"
 ping_max = "30s"
+tcp_write_timeout = "10s"
 metrics_interval = "5m"
 ```
 

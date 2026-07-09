@@ -146,6 +146,8 @@ Prefer `networking.nat` for masquerading instead of
 
     enableUpgrade = true;
     requireUdp = false;
+
+    timing.tcpWriteTimeout = "10s";
   };
 }
 ```

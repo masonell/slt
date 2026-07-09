@@ -217,7 +217,7 @@ pub enum ConnectError {
         assigned_ipv4: Ipv4Addr,
     },
 
-    /// Authentication exchange timed out waiting for `AUTH_OK`/`AUTH_FAIL`.
+    /// Authentication exchange or one of its TCP writes timed out.
     #[error("auth timed out")]
     AuthTimeout,
 
