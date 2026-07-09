@@ -1,0 +1,213 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+    tags-ignore:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_ABOUT_VERSION: "0.9.1"
+  CARGO_NDK_VERSION: "4.1.2"
+  CARGO_ZIGBUILD_VERSION: "0.23.0"
+  ZIGLANG_VERSION: "0.16.0"
+  UNIFFI_BINDGEN_VERSION: "0.32.0"
+  ANDROID_BUILD_TOOLS_VERSION: "35.0.0"
+  ANDROID_NDK_VERSION: "27.0.12077973"
+
+jobs:
+  rust:
+    name: rust fmt, build, test, clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install C/C++ build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config clang libclang-dev golang-go perl
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check --config imports_granularity=Module,group_imports=StdExternalCrate
+
+      - name: Build workspace
+        run: cargo build --workspace --locked
+
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+      - name: Clippy workspace
+        run: cargo clippy --workspace --all-targets --locked
+
+  android-debug:
+    name: android debug build, unit test, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }} ndk;${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Export NDK location
+        run: |
+          ndk="$ANDROID_HOME/ndk/${{ env.ANDROID_NDK_VERSION }}"
+          [ -d "$ndk" ] || { echo "::error::NDK $ndk not found after setup"; exit 1; }
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Install cargo-ndk and uniffi-bindgen
+        run: |
+          cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
+          cargo install uniffi --version "$UNIFFI_BINDGEN_VERSION" --locked --features cli --bin uniffi-bindgen
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Run Android checks
+        working-directory: android
+        run: ./gradlew testDebugUnitTest lintDebug --no-daemon --stacktrace
+
+  release-linux:
+    name: release dry run ${{ matrix.artifact }}
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    needs: rust
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - zig-target: x86_64-unknown-linux-gnu.2.17
+            rust-target: x86_64-unknown-linux-gnu
+            artifact: x86_64-linux-gnu
+          - zig-target: aarch64-unknown-linux-gnu.2.17
+            rust-target: aarch64-unknown-linux-gnu
+            artifact: aarch64-linux-gnu
+          - zig-target: x86_64-unknown-linux-musl
+            rust-target: x86_64-unknown-linux-musl
+            artifact: x86_64-linux-musl
+          - zig-target: aarch64-unknown-linux-musl
+            rust-target: aarch64-unknown-linux-musl
+            artifact: aarch64-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install C/C++ build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config clang libclang-dev golang-go perl python3-venv
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install cargo-zigbuild
+        run: |
+          venv="$RUNNER_TEMP/zigbuild-venv"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet --upgrade pip
+          "$venv/bin/pip" install --quiet \
+            "ziglang==$ZIGLANG_VERSION" \
+            "cargo-zigbuild==$CARGO_ZIGBUILD_VERSION"
+          echo "$venv/bin" >> "$GITHUB_PATH"
+
+      - name: Build release binaries
+        run: cargo zigbuild --release --locked --target "${{ matrix.zig-target }}" -p slt-client -p slt-server -p slt-cli
+
+      - name: Verify release binary outputs
+        run: |
+          test -x "target/${{ matrix.rust-target }}/release/slt-client"
+          test -x "target/${{ matrix.rust-target }}/release/slt-server"
+          test -x "target/${{ matrix.rust-target }}/release/slt"
+
+  android-release:
+    name: android release dry run
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    needs: android-debug
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }} ndk;${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Export NDK location
+        run: |
+          ndk="$ANDROID_HOME/ndk/${{ env.ANDROID_NDK_VERSION }}"
+          [ -d "$ndk" ] || { echo "::error::NDK $ndk not found after setup"; exit 1; }
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk and uniffi-bindgen
+        run: |
+          cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
+          cargo install uniffi --version "$UNIFFI_BINDGEN_VERSION" --locked --features cli --bin uniffi-bindgen
+
+      - name: Build unsigned release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Verify release APK and license report outputs
+        run: |
+          test -f android/app/build/outputs/apk/release/app-release-unsigned.apk
+          test -f android/app/build/reports/licensee/androidRelease/artifacts.json
+          test -f android/app/build/reports/licensee/androidRelease/validation.txt
+
+  release-notices:
+    name: release notices dry run
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    needs: rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-about
+        run: cargo install cargo-about --version "$CARGO_ABOUT_VERSION" --locked --features cli
+
+      - name: Generate third-party notices
+        run: cargo about generate .github/about/template.hbs --locked -o "$RUNNER_TEMP/THIRD_PARTY_NOTICES.html"
