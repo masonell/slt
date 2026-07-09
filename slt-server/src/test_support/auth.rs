@@ -21,6 +21,7 @@ pub fn default_session_timeouts() -> SessionTimeouts {
         ping_min: Duration::from_hours(1),
         ping_max: Duration::from_hours(1),
         idle_timeout: Duration::from_hours(1),
+        tcp_write_timeout: Duration::from_secs(10),
     }
 }
 

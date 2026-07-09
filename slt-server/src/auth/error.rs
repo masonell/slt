@@ -119,7 +119,8 @@ pub enum AuthError {
         source: ErrorStack,
     },
 
-    /// Auth phase timed out waiting for a message from the client.
+    /// End-to-end auth phase deadline expired while waiting for client I/O or
+    /// writing an auth response.
     #[error("auth phase timed out")]
     Timeout,
 

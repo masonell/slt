@@ -84,6 +84,7 @@ pub fn show_server(config_path: &Path, reveal_secrets: bool) -> Result<()> {
     println!("  Ping Min:       {:?}", config.timing.ping_min);
     println!("  Ping Max:       {:?}", config.timing.ping_max);
     println!("  Auth Timeout:   {:?}", config.timing.auth_timeout);
+    println!("  TCP Write:      {:?}", config.timing.tcp_write_timeout);
     println!("  Idle Timeout:   {:?}", config.timing.idle_timeout);
     println!("  Metrics Intvl:  {:?}", config.timing.metrics_interval);
     println!(

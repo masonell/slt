@@ -79,6 +79,37 @@ async fn auth_phase_responds_to_ping_with_pong() {
 }
 
 #[tokio::test]
+async fn auth_deadline_cancels_blocked_response_write() {
+    let (handler, _registry, metrics) = TestAuthHandler::builder()
+        .with_auth_timeout(Duration::from_millis(200))
+        .build_async()
+        .await;
+    let (server_tls, mut client_tls, write_gate) = tls_pair_with_parkable_server_writes().await;
+    write_gate.park();
+    let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+    let mut ping_buf = Vec::new();
+    PingPayload { nonce: 7 }.encode(&mut ping_buf);
+    let mut frame = Vec::new();
+    slt_core::proto::encode_message(Message::Ping { payload: &ping_buf }, &mut frame).unwrap();
+    client_tls.write_all(&frame).await.unwrap();
+    timeout(
+        Duration::from_secs(1),
+        write_gate.wait_until_write_blocked(),
+    )
+    .await
+    .expect("auth handler entered the parked response write");
+
+    let err = timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("auth deadline must cancel a parked response write")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(metrics.snapshot().auth_failures, 1);
+}
+
+#[tokio::test]
 async fn auth_phase_handles_close_message() {
     let (handler, _registry, _metrics) = TestAuthHandler::builder()
         .with_auth_timeout(Duration::from_secs(5))

@@ -270,6 +270,9 @@ let
               pingMin = durationOption "10s" "10s" "Minimum ping interval.";
               pingMax = durationOption "30s" "30s" "Maximum ping interval.";
               authTimeout = durationOption "10s" "10s" "TLS/AUTH timeout.";
+              tcpWriteTimeout =
+                durationOption "10s" "10s"
+                  "Maximum time for an established-session TCP message write.";
               idleTimeout = durationOption "5m" "5m" "Idle session timeout.";
               metricsInterval = durationOption "5m" "5m" "Metrics logging interval.";
               tcpClassificationTimeout = durationOption "60s" "60s" "TCP ClientHello classification timeout.";
@@ -533,6 +536,7 @@ let
         ping_min = server.timing.pingMin;
         ping_max = server.timing.pingMax;
         auth_timeout = server.timing.authTimeout;
+        tcp_write_timeout = server.timing.tcpWriteTimeout;
         idle_timeout = server.timing.idleTimeout;
         metrics_interval = server.timing.metricsInterval;
         tcp_classification_timeout = server.timing.tcpClassificationTimeout;

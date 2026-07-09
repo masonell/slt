@@ -126,7 +126,8 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         stream: TcpStream,
         peer_addr: Option<&SocketAddr>,
     ) -> Result<AuthPhaseResult, AuthError> {
-        let tls = self.tls_handshake(stream, peer_addr).await?;
+        let deadline = Instant::now() + self.auth_timeout;
+        let tls = self.tls_handshake(stream, peer_addr, deadline).await?;
 
         let mut tcp = Some(TcpChannel::with_key_updater(
             tls,
@@ -140,7 +141,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                 self.sessions.create_session(client_id, assigned_ip, tcp)
             };
 
-        self.run_auth_flow(&mut tcp, peer_addr, &mut create_session)
+        self.run_auth_flow(&mut tcp, peer_addr, deadline, &mut create_session)
             .await
     }
 
@@ -149,10 +150,11 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         &self,
         stream: TcpStream,
         peer_addr: Option<&SocketAddr>,
+        deadline: Instant,
     ) -> Result<tokio_boring::SslStream<TcpStream>, AuthError> {
         debug!(timeout_ms = self.auth_timeout.as_millis(), peer_addr = ?peer_addr, "starting TLS handshake");
 
-        match time::timeout(self.auth_timeout, tls_accept(&self.acceptor, stream)).await {
+        match time::timeout_at(deadline.into(), tls_accept(&self.acceptor, stream)).await {
             Ok(Ok(stream)) => {
                 debug!(peer_addr = ?peer_addr, "TLS handshake completed");
                 Ok(stream)
@@ -189,6 +191,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         &self,
         tcp: &mut Option<SessionTcpChannel<S>>,
         peer_addr: Option<&SocketAddr>,
+        deadline: Instant,
         create_session: &mut F,
     ) -> Result<AuthPhaseResult, AuthError>
     where
@@ -196,8 +199,15 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
     {
         let challenge = Self::generate_challenge(as_tcp_channel(tcp)?)?;
-        self.run_auth_loop(tcp, &challenge, peer_addr, create_session)
-            .await
+        time::timeout_at(
+            deadline.into(),
+            self.run_auth_loop(tcp, &challenge, peer_addr, create_session),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            warn!(peer_addr = ?peer_addr, "auth phase timed out");
+            Err(AuthError::Timeout)
+        })
     }
 
     /// Runs the main auth loop, processing messages until completion.
@@ -218,31 +228,16 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
     {
-        let deadline = Instant::now() + self.auth_timeout;
-
         loop {
-            let timeout_fut = time::sleep_until(deadline.into());
-            tokio::pin!(timeout_fut);
-
-            tokio::select! {
-                () = timeout_fut.as_mut() => {
-                    warn!(peer_addr = ?peer_addr, "auth phase timed out waiting for message");
-                    return Err(AuthError::Timeout);
-                },
-                res = async {
-                    as_tcp_channel(tcp)?.read_more().await
-                } => {
-                    // read_more returns io::Result<usize>; the channel-missing
-                    // case is already typed via as_tcp_channel. Map the raw
-                    // socket I/O into AuthError::Connection, preserving source.
-                    let n = res.map_err(|source| AuthError::Connection { source })?;
-                    if n == 0 {
-                        trace!(peer_addr = ?peer_addr, "connection closed during auth phase");
-                        return Err(AuthError::ConnectionClosed);
-                    }
-                    trace!(bytes_read = n, peer_addr = ?peer_addr, "received data during auth phase");
-                }
+            let n = as_tcp_channel(tcp)?
+                .read_more()
+                .await
+                .map_err(|source| AuthError::Connection { source })?;
+            if n == 0 {
+                trace!(peer_addr = ?peer_addr, "connection closed during auth phase");
+                return Err(AuthError::ConnectionClosed);
             }
+            trace!(bytes_read = n, peer_addr = ?peer_addr, "received data during auth phase");
 
             loop {
                 let msg_buf = match as_tcp_channel(tcp)?.try_pop_message(self.sessions.limits()) {
@@ -456,6 +451,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
         let _permit = self.acquire_auth_permit(None)?;
+        let deadline = Instant::now() + self.auth_timeout;
         let mut tcp = Some(TcpChannel::with_key_updater(
             tls,
             SessionKeyUpdater::new(self.sessions.metrics().clone()),
@@ -470,7 +466,7 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
             };
 
         let result = self
-            .run_auth_flow(&mut tcp, None, &mut create_session)
+            .run_auth_flow(&mut tcp, None, deadline, &mut create_session)
             .await;
         self.record_result(&result);
         result.map(|_outcome| ()).map_err(AuthError::into)

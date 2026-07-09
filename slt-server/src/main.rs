@@ -35,6 +35,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 const DEFAULT_TRACING_FILTER: &str = "slt_server=info,slt_core=info";
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Command-line arguments for the SLT server.
 #[derive(Parser, Debug)]
@@ -97,6 +98,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         ping_min: config.timing.ping_min,
         ping_max: config.timing.ping_max,
         idle_timeout: config.timing.idle_timeout,
+        tcp_write_timeout: config.timing.tcp_write_timeout,
     };
     let limits = MessageLimits::from_mtu(config.tun.tun_mtu);
     let sessions = SessionManager::new(
@@ -144,52 +146,92 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
         res = &mut metrics_task => ShutdownTrigger::WorkerFailed { task: "metrics", result: res },
         () = cancel.cancelled() => ShutdownTrigger::Cancelled,
     };
+    // Preserve the initiating worker failure in the bounded drain's timeout error.
+    let worker_failure = trigger.worker_failure_context();
 
-    let shutdown_result = match trigger {
-        ShutdownTrigger::WorkerFailed { task, result } => {
-            info!(
-                reason = task_failure_reason(task),
-                "graceful shutdown initiated"
-            );
-            cancel.cancel();
-            sessions.start_shutdown();
-            auth_tasks.close();
+    let shutdown_result = await_graceful_shutdown(
+        async move {
+            let shutdown_result = match trigger {
+                ShutdownTrigger::WorkerFailed { task, result } => {
+                    info!(
+                        reason = task_failure_reason(task),
+                        "graceful shutdown initiated"
+                    );
+                    cancel.cancel();
+                    sessions.start_shutdown();
+                    auth_tasks.close();
 
-            let mut shutdown_result = classify_task_result(task, result);
-            if task != "tcp" {
-                merge_task_result(&mut shutdown_result, "tcp", tcp_task.await);
-            }
-            if task != "udp" {
-                merge_task_result(&mut shutdown_result, "udp", udp_task.await);
-            }
-            if task != "tun_reader" {
-                merge_task_result(&mut shutdown_result, "tun_reader", tun_reader_task.await);
-            }
-            if task != "tun_writer" {
-                merge_task_result(&mut shutdown_result, "tun_writer", tun_writer_task.await);
-            }
-            if task != "metrics" {
-                merge_task_result(&mut shutdown_result, "metrics", metrics_task.await);
-            }
+                    let mut shutdown_result = classify_task_result(task, result);
+                    if task != "tcp" {
+                        merge_task_result(&mut shutdown_result, "tcp", tcp_task.await);
+                    }
+                    if task != "udp" {
+                        merge_task_result(&mut shutdown_result, "udp", udp_task.await);
+                    }
+                    if task != "tun_reader" {
+                        merge_task_result(
+                            &mut shutdown_result,
+                            "tun_reader",
+                            tun_reader_task.await,
+                        );
+                    }
+                    if task != "tun_writer" {
+                        merge_task_result(
+                            &mut shutdown_result,
+                            "tun_writer",
+                            tun_writer_task.await,
+                        );
+                    }
+                    if task != "metrics" {
+                        merge_task_result(&mut shutdown_result, "metrics", metrics_task.await);
+                    }
+                    shutdown_result
+                }
+                ShutdownTrigger::Cancelled => {
+                    info!(reason = "ctrl_c", "graceful shutdown initiated");
+                    sessions.start_shutdown();
+                    auth_tasks.close();
+                    join_ignoring_result(tcp_task).await;
+                    join_ignoring_result(udp_task).await;
+                    join_ignoring_result(tun_reader_task).await;
+                    join_ignoring_result(tun_writer_task).await;
+                    join_ignoring_result(metrics_task).await;
+                    Ok(())
+                }
+            };
+
+            auth_tasks.wait().await;
+            sessions.wait_for_shutdown().await;
+            info!("server shutdown complete");
             shutdown_result
-        }
-        ShutdownTrigger::Cancelled => {
-            info!(reason = "ctrl_c", "graceful shutdown initiated");
-            sessions.start_shutdown();
-            auth_tasks.close();
-            join_ignoring_result(tcp_task).await;
-            join_ignoring_result(udp_task).await;
-            join_ignoring_result(tun_reader_task).await;
-            join_ignoring_result(tun_writer_task).await;
-            join_ignoring_result(metrics_task).await;
-            Ok(())
-        }
-    };
-
-    auth_tasks.wait().await;
-    sessions.wait_for_shutdown().await;
-    info!("server shutdown complete");
+        },
+        GRACEFUL_SHUTDOWN_TIMEOUT,
+        worker_failure.as_deref(),
+    )
+    .await;
     shutdown_result.map_err(|err| Box::new(err) as Box<dyn std::error::Error>)
+}
+
+async fn await_graceful_shutdown<F>(
+    shutdown: F,
+    timeout: Duration,
+    worker_failure: Option<&str>,
+) -> io::Result<()>
+where
+    F: Future<Output = io::Result<()>>,
+{
+    time::timeout(timeout, shutdown).await.unwrap_or_else(|_| {
+        error!(
+            timeout_ms = timeout.as_millis(),
+            worker_failure = ?worker_failure,
+            "graceful shutdown timed out"
+        );
+        let message = worker_failure.map_or_else(
+            || "server graceful shutdown timed out".to_owned(),
+            |failure| format!("server graceful shutdown timed out after {failure}"),
+        );
+        Err(io::Error::new(io::ErrorKind::TimedOut, message))
+    })
 }
 
 #[derive(Clone)]
@@ -306,6 +348,19 @@ enum ShutdownTrigger {
         result: Result<io::Result<()>, tokio::task::JoinError>,
     },
     Cancelled,
+}
+
+impl ShutdownTrigger {
+    fn worker_failure_context(&self) -> Option<String> {
+        let Self::WorkerFailed { task, result } = self else {
+            return None;
+        };
+        Some(match result {
+            Ok(Ok(())) => format!("{task} worker exited unexpectedly"),
+            Ok(Err(err)) => format!("{task} worker failed: {err}"),
+            Err(err) => format!("{task} worker task failed: {err}"),
+        })
+    }
 }
 
 fn task_failure_reason(task: &'static str) -> &'static str {
@@ -712,11 +767,29 @@ async fn run_tun_writer(
 
 #[cfg(test)]
 mod tests {
-    use super::DEFAULT_TRACING_FILTER;
+    use std::io;
+
+    use tokio::time::Duration;
+
+    use super::{DEFAULT_TRACING_FILTER, await_graceful_shutdown};
 
     #[test]
     fn default_tracing_filter_includes_server_and_core_targets() {
         assert!(DEFAULT_TRACING_FILTER.contains("slt_server=info"));
         assert!(DEFAULT_TRACING_FILTER.contains("slt_core=info"));
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_wait_is_bounded() {
+        let err = await_graceful_shutdown(
+            std::future::pending::<io::Result<()>>(),
+            Duration::from_millis(10),
+            Some("udp worker failed: root cause"),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(err.to_string().contains("udp worker failed: root cause"));
     }
 }

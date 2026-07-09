@@ -11,10 +11,10 @@ pub use client::ClientConfig;
 pub use defaults::{
     DEFAULT_AUTH_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_METRICS_INTERVAL, DEFAULT_PING_MAX,
     DEFAULT_PING_MIN, DEFAULT_QUIC_DISCOVERY_TIMEOUT, DEFAULT_RECONNECT_MAX, DEFAULT_RECONNECT_MIN,
-    DEFAULT_REGISTER_TIMEOUT, DEFAULT_TCP_CLASSIFICATION_TIMEOUT, default_auth_timeout,
-    default_idle_timeout, default_metrics_interval, default_ping_max, default_ping_min,
-    default_quic_discovery_timeout, default_reconnect_max, default_reconnect_min,
-    default_register_timeout, default_tcp_classification_timeout,
+    DEFAULT_REGISTER_TIMEOUT, DEFAULT_TCP_CLASSIFICATION_TIMEOUT, DEFAULT_TCP_WRITE_TIMEOUT,
+    default_auth_timeout, default_idle_timeout, default_metrics_interval, default_ping_max,
+    default_ping_min, default_quic_discovery_timeout, default_reconnect_max, default_reconnect_min,
+    default_register_timeout, default_tcp_classification_timeout, default_tcp_write_timeout,
 };
 pub use server::{DEFAULT_TCP_CONNECTIONS_PER_WORKER, ServerConfig, default_tcp_connection_cap};
 use thiserror::Error;

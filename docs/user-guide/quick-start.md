@@ -177,6 +177,7 @@ tun_prefix = 24          # overlay subnet prefix length
 ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
+tcp_write_timeout = "10s"
 idle_timeout = "5m"
 metrics_interval = "5m"
 tcp_classification_timeout = "60s"

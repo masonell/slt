@@ -17,7 +17,9 @@ use tokio::time::{Duration, timeout};
 use super::authenticator::verify_auth_payload;
 use super::*;
 use crate::AssignedIp;
-use crate::test_support::{TestAuthHandler, TlsDuplexStream, tls_pair};
+use crate::test_support::{
+    TestAuthHandler, TlsDuplexStream, tls_pair, tls_pair_with_parkable_server_writes,
+};
 
 mod authenticator_tests;
 mod handler_flow_tests;

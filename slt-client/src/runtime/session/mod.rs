@@ -92,6 +92,27 @@ pub(super) struct SessionOutcome {
     pub(super) error: Option<SessionError>,
 }
 
+#[derive(Clone, Copy)]
+enum SessionTimer {
+    Ping,
+    Idle,
+    UdpReconnect,
+    Register,
+    UdpUpgrade,
+}
+
+impl SessionTimer {
+    const fn into_event(self) -> SessionEvent {
+        match self {
+            Self::Ping => SessionEvent::PingTick,
+            Self::Idle => SessionEvent::IdleTimeout,
+            Self::UdpReconnect => SessionEvent::UdpReconnectTick,
+            Self::Register => SessionEvent::RegisterTimeout,
+            Self::UdpUpgrade => SessionEvent::UdpUpgradeTick,
+        }
+    }
+}
+
 impl SessionOutcome {
     /// Builds an outcome from a typed session error: the exit reason is
     /// derived from the error via [`SessionError::exit`], and the error is
@@ -246,24 +267,61 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
         let register_deadline = self.udp_state.register_deadline();
         let udp_enabled = self.udp_state.as_active().is_some();
         let has_discovery_task = self.discovery_task.is_some();
-        let has_register_timeout = register_deadline.is_some();
         let udp_upgrade_timer_at = self.udp_upgrade.timer_at();
-        let has_udp_upgrade_timer = udp_upgrade_timer_at.is_some();
         let udp_pending_flush = self.active_transport == ActiveTransport::UdpQsp
             && self
                 .udp_state
                 .as_active()
                 .is_some_and(ClientTransport::has_pending_flush);
 
-        // Keep UDP-QSP flush last on purpose. Data/control work gets priority;
-        // full GSO slabs flush inline, and this branch drains only partial
-        // batches once the session has no immediately-ready work.
+        let mut timer_at = idle_deadline;
+        let mut timer = SessionTimer::Idle;
+        update_earliest_timer(
+            &mut timer_at,
+            &mut timer,
+            Some(next_ping_at),
+            SessionTimer::Ping,
+        );
+        if self.udp_state.is_waiting() && !has_discovery_task {
+            update_earliest_timer(
+                &mut timer_at,
+                &mut timer,
+                udp_reconnect_at,
+                SessionTimer::UdpReconnect,
+            );
+        }
+        update_earliest_timer(
+            &mut timer_at,
+            &mut timer,
+            register_deadline,
+            SessionTimer::Register,
+        );
+        update_earliest_timer(
+            &mut timer_at,
+            &mut timer,
+            udp_upgrade_timer_at,
+            SessionTimer::UdpUpgrade,
+        );
+        let timer_due = time::Instant::from_std(timer_at) <= time::Instant::now();
+
+        // An expired deadline precedes packet sources, while a future deadline
+        // stays below them so the hot path does not register and drop a Tokio
+        // timer on every packet. Rechecking on the next iteration bounds timer
+        // lateness to one packet. Keep UDP-QSP partial-batch flush last; full GSO
+        // slabs flush inline.
         tokio::select! {
             biased;
 
             () = self.cancel.cancelled() => Ok(SessionEvent::Shutdown),
             command = recv_control(&mut self.control_rx) => {
                 Ok(command.map_or(SessionEvent::Shutdown, SessionEvent::Control))
+            }
+            () = std::future::ready(()), if timer_due => Ok(timer.into_event()),
+            result = async {
+                let task = self.discovery_task.as_mut().expect("discovery_task checked");
+                task.await.unwrap_or(None)
+            }, if has_discovery_task => {
+                Ok(SessionEvent::DiscoveryResult(result))
             }
             res = self.tcp.read_more(), if self.tcp_alive => Ok(SessionEvent::TcpRead(res?)),
             maybe = self.tun_channels.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
@@ -290,38 +348,7 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
                 })?;
                 udp.read_next_message(self.limits).await
             }, if udp_enabled => Ok(SessionEvent::UdpResult(udp_res)),
-            () = time::sleep_until(next_ping_at.into()) => Ok(SessionEvent::PingTick),
-            () = time::sleep_until(idle_deadline.into()) => Ok(SessionEvent::IdleTimeout),
-            () = async {
-                match udp_reconnect_at {
-                    Some(at) => time::sleep_until(at.into()).await,
-                    None => std::future::pending().await,
-                }
-            }, if self.udp_state.is_waiting() && !has_discovery_task => {
-                Ok(SessionEvent::UdpReconnectTick)
-            }
-            () = async {
-                match register_deadline {
-                    Some(at) => time::sleep_until(at.into()).await,
-                    None => std::future::pending().await,
-                }
-            }, if has_register_timeout => {
-                Ok(SessionEvent::RegisterTimeout)
-            }
-            result = async {
-                let task = self.discovery_task.as_mut().expect("discovery_task checked");
-                task.await.unwrap_or(None)
-            }, if has_discovery_task => {
-                Ok(SessionEvent::DiscoveryResult(result))
-            }
-            () = async {
-                match udp_upgrade_timer_at {
-                    Some(at) => time::sleep_until(at.into()).await,
-                    None => std::future::pending().await,
-                }
-            }, if has_udp_upgrade_timer => {
-                Ok(SessionEvent::UdpUpgradeTick)
-            }
+            () = time::sleep_until(timer_at.into()), if !timer_due => Ok(timer.into_event()),
             () = std::future::ready(()), if udp_pending_flush => Ok(SessionEvent::UdpFlushReady),
         }
     }
@@ -560,6 +587,20 @@ impl<'a, S: ClientRuntimeServices> ClientSession<'a, S> {
     }
 }
 
+fn update_earliest_timer(
+    timer_at: &mut Instant,
+    timer: &mut SessionTimer,
+    candidate_at: Option<Instant>,
+    candidate: SessionTimer,
+) {
+    if let Some(candidate_at) = candidate_at
+        && candidate_at < *timer_at
+    {
+        *timer_at = candidate_at;
+        *timer = candidate;
+    }
+}
+
 async fn recv_control(
     control_rx: &mut Option<&mut ClientCommandReceiver>,
 ) -> Option<ClientCommand> {
@@ -572,5 +613,99 @@ async fn recv_control(
             command
         }
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use slt_core::config::ClientConfig;
+    use slt_core::proto::OwnedMessageBuf;
+    use slt_core::transport::tcp::TcpChannel;
+    use tokio::sync::mpsc;
+    use tokio_boring::SslStream;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{ClientSession, SessionEvent};
+    use crate::metrics::Metrics;
+    use crate::runtime::services::DesktopServices;
+    use crate::test_support::{test_config, tls_tcp_stream_pair};
+    use crate::transport::tcp::{ClientKeyUpdater, TcpSession};
+    use crate::tun::TunChannels;
+
+    async fn test_session<'a>(
+        config: &'a ClientConfig,
+        tun: &'a mut TunChannels,
+        services: &'a DesktopServices,
+    ) -> (
+        ClientSession<'a, DesktopServices>,
+        SslStream<tokio::net::TcpStream>,
+    ) {
+        let metrics = Arc::new(Metrics::default());
+        let updater = ClientKeyUpdater::new(metrics.clone());
+        let (client_stream, server_stream) = tls_tcp_stream_pair().await;
+        let tcp_session = TcpSession {
+            transport: TcpChannel::with_key_updater(client_stream, updater),
+            peer: None,
+            sni: None,
+        };
+        (
+            ClientSession::new(
+                config,
+                tcp_session,
+                tun,
+                CancellationToken::new(),
+                metrics,
+                services,
+                None,
+            ),
+            server_stream,
+        )
+    }
+
+    #[tokio::test]
+    async fn expired_idle_deadline_preempts_ready_tun_packet() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(1);
+        tun_tx.try_send(vec![0x45; 20]).unwrap();
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+        session.last_tcp_rx =
+            Instant::now() - config.timing.idle_timeout - Duration::from_millis(1);
+
+        let event = session
+            .poll_event(Instant::now() + Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        assert!(matches!(event, SessionEvent::IdleTimeout));
+    }
+
+    #[tokio::test]
+    async fn expired_ping_deadline_preempts_ready_tun_packet() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(1);
+        tun_tx.try_send(vec![0x45; 20]).unwrap();
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+
+        let event = session
+            .poll_event(Instant::now() - Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        assert!(matches!(event, SessionEvent::PingTick));
     }
 }

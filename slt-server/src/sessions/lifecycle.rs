@@ -13,6 +13,12 @@ use super::types::{SessionControl, SessionEvent};
 use super::{ActiveTransport, ClientSessionBase, UdpFailureRecovery, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
+#[derive(Clone, Copy)]
+enum SessionTimer {
+    Ping,
+    Idle,
+}
+
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
     ClientSessionBase<T, S, I>
 {
@@ -31,7 +37,17 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             assigned_ip = %self.assigned_ipv4,
             "session created"
         );
-        let result = self.run_inner().await;
+        let shutdown = self.shutdown.clone();
+        let result = tokio::select! {
+            biased;
+
+            () = shutdown.cancelled() => None,
+            result = self.run_inner() => Some(result),
+        };
+        let result = result.unwrap_or_else(|| {
+            self.handle_shutdown_request();
+            Ok(())
+        });
         self.flush_pending_udp_session_best_effort().await;
         if let Err(err) = result.as_ref() {
             self.metrics.inc_disconnect_error();
@@ -71,10 +87,26 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             let idle_deadline = self.last_activity + self.timeouts.idle_timeout;
             let should_flush_udp = self.has_pending_udp_flush();
             let shutdown = self.shutdown.clone();
+            let (timer_at, timer) = if idle_deadline <= next_ping_at {
+                (idle_deadline, SessionTimer::Idle)
+            } else {
+                (next_ping_at, SessionTimer::Ping)
+            };
+            let timer_due = time::Instant::from_std(timer_at) <= time::Instant::now();
 
-            // Keep UDP-QSP flush last on purpose. Session events and timers get
-            // priority; full GSO slabs flush inline, and this branch sends only
-            // partial batches once the session has no immediately-ready work.
+            if timer_due {
+                if self.handle_session_timer(timer, &mut next_ping_at).await?
+                    == SessionControl::Close
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+
+            // A future deadline stays below packet sources so the hot path does
+            // not register and drop a Tokio timer on every packet. The due check
+            // above bounds timer lateness to one packet. Keep UDP-QSP partial-
+            // batch flush last; full GSO slabs flush inline.
             tokio::select! {
                 biased;
 
@@ -112,20 +144,14 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                         return Ok(());
                     }
                 }
-                () = time::sleep_until(next_ping_at.into()) => {
-                    self.handle_ping_tick().await?;
-                    next_ping_at = self.schedule_next_ping();
-                }
-                () = time::sleep_until(idle_deadline.into()) => {
-                    self.metrics.inc_disconnect_idle_timeout();
-                    info!(
-                        session_id = self.session_id,
-                        client_id = %self.client_id,
-                        reason = "idle_timeout",
-                        "session disconnect"
-                    );
-                    let _ = self.send_close(CloseCode::IdleTimeout).await;
-                    return Ok(());
+                () = time::sleep_until(timer_at.into()) => {
+                    if self
+                        .handle_session_timer(timer, &mut next_ping_at)
+                        .await?
+                        == SessionControl::Close
+                    {
+                        return Ok(());
+                    }
                 }
                 res = async {
                     if let Some(session) = self.udp_session.as_mut() {
@@ -142,6 +168,31 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                         .await?;
                     }
                 }
+            }
+        }
+    }
+
+    async fn handle_session_timer(
+        &mut self,
+        timer: SessionTimer,
+        next_ping_at: &mut Instant,
+    ) -> Result<SessionControl, SessionError> {
+        match timer {
+            SessionTimer::Ping => {
+                self.handle_ping_tick().await?;
+                *next_ping_at = self.schedule_next_ping();
+                Ok(SessionControl::Continue)
+            }
+            SessionTimer::Idle => {
+                self.metrics.inc_disconnect_idle_timeout();
+                info!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    reason = "idle_timeout",
+                    "session disconnect"
+                );
+                let _ = self.send_close(CloseCode::IdleTimeout).await;
+                Ok(SessionControl::Close)
             }
         }
     }

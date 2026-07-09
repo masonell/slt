@@ -486,7 +486,8 @@ On session termination:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| auth_timeout | 10s | Time for client to send valid AUTH |
+| auth_timeout | 10s | End-to-end server TLS and AUTH deadline |
+| tcp_write_timeout | 10s | Maximum established-session TCP message write time |
 | idle_timeout | 300s | Max idle time before disconnect |
 | ping_min | 10s | Minimum keepalive interval |
 | ping_max | 30s | Maximum keepalive interval |
@@ -536,6 +537,7 @@ on idle_deadline_reached:
 |-------|--------|
 | TCP read returns 0 | If UDP active, continue on UDP; else terminate |
 | TCP write failure | Terminate session |
+| TCP write timeout | Terminate session |
 | Frame too large | Terminate with ProtocolError |
 | Invalid message type | Terminate with ProtocolError |
 

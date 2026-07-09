@@ -10,9 +10,11 @@ mod udp_io;
 mod upgrade;
 
 use std::collections::VecDeque;
+use std::future::{Future, poll_fn};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession};
@@ -291,15 +293,40 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     }
 
     async fn send_tcp_message(&mut self, message: Message<'_>) -> Result<(), SessionError> {
-        self.tcp
-            .write_message(message)
-            .await
-            .map_err(|err| match err {
-                slt_core::transport::tcp::TcpWriteError::Frame(frame) => SessionError::Frame(frame),
-                slt_core::transport::tcp::TcpWriteError::Io(source) => {
-                    SessionError::Connection { source }
-                }
-            })
+        let timeout = self.timeouts.tcp_write_timeout;
+        let write = self.tcp.write_message(message);
+        tokio::pin!(write);
+
+        // Most writes complete on their first poll. Only register a Tokio timer
+        // after socket/TLS backpressure actually makes the write pending.
+        let first_poll = poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx))).await;
+        let result = match first_poll {
+            Poll::Ready(result) => result,
+            Poll::Pending => {
+                let Ok(result) = time::timeout(timeout, write.as_mut()).await else {
+                    warn!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        timeout_ms = timeout.as_millis(),
+                        "tcp message write timed out"
+                    );
+                    return Err(SessionError::Connection {
+                        source: io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "tcp message write timed out",
+                        ),
+                    });
+                };
+                result
+            }
+        };
+
+        result.map_err(|err| match err {
+            slt_core::transport::tcp::TcpWriteError::Frame(frame) => SessionError::Frame(frame),
+            slt_core::transport::tcp::TcpWriteError::Io(source) => {
+                SessionError::Connection { source }
+            }
+        })
     }
 
     /// Send a message via UDP-QSP.

@@ -112,6 +112,7 @@ pub enum SessionControl {
 /// * `ping_min` - Minimum interval between keepalive pings
 /// * `ping_max` - Maximum interval between keepalive pings (actual interval is randomized)
 /// * `idle_timeout` - Maximum idle time before the session is terminated
+/// * `tcp_write_timeout` - Maximum time for one TCP message write
 #[derive(Debug, Clone, Copy)]
 pub struct SessionTimeouts {
     /// Minimum interval between keepalive pings.
@@ -120,4 +121,6 @@ pub struct SessionTimeouts {
     pub ping_max: Duration,
     /// Idle timeout for the session.
     pub idle_timeout: Duration,
+    /// Timeout for one TCP message write.
+    pub tcp_write_timeout: Duration,
 }

@@ -1,6 +1,7 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Instant;
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
@@ -18,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 use super::super::*;
 use crate::quic::UdpClaim;
 use crate::test_support::{
-    TestTun, TestUdpSocket, TlsDuplexStream, default_session_timeouts, tls_pair,
+    TestTun, TestUdpSocket, TlsDuplexStream, WriteGate, default_session_timeouts, tls_pair,
+    tls_pair_with_parkable_server_writes,
 };
 
 pub(super) type SpawnSessionResult = (
@@ -68,6 +70,16 @@ pub(super) type SpawnSessionWithUdpSocketResult = (
     Arc<TestUdpSocket>,
 );
 
+pub(super) type SpawnSessionWithParkedWritesResult = (
+    tokio::task::JoinHandle<Result<(), SessionError>>,
+    TlsDuplexStream,
+    SessionTx,
+    AssignedIp,
+    Arc<SessionRegistry>,
+    CancellationToken,
+    Arc<WriteGate>,
+);
+
 pub(super) async fn spawn_session() -> SpawnSessionResult {
     spawn_session_with_timeouts_and_udp_qsp_config(
         default_session_timeouts(),
@@ -78,6 +90,46 @@ pub(super) async fn spawn_session() -> SpawnSessionResult {
 
 pub(super) async fn spawn_session_with_timeouts(timeouts: SessionTimeouts) -> SpawnSessionResult {
     spawn_session_with_timeouts_and_udp_qsp_config(timeouts, ServerUdpQspConfig::default()).await
+}
+
+pub(super) async fn spawn_session_with_expired_idle_and_ready_packet(
+    timeouts: SessionTimeouts,
+) -> SpawnSessionResult {
+    let (server_tls, client_tls) = tls_pair().await;
+    let (tun, tun_rx) = TestTun::new(8);
+    let (udp, udp_rx) = TestUdpSocket::new(16);
+    let registry = Arc::new(SessionRegistry::new());
+    let metrics = Arc::new(Metrics::default());
+    let (tx, rx) = mpsc::channel(8);
+    let shutdown = CancellationToken::new();
+    let client_id = ClientId([0xA5; 16]);
+    let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
+    let handle = registry.register_session(client_id, assigned, tx.clone());
+    let limits = MessageLimits::from_mtu(1500);
+    let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
+    let mut session = ClientSessionBase::new(
+        handle.session_id,
+        client_id,
+        assigned,
+        TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
+        tun,
+        udp_io_factory,
+        registry.clone(),
+        metrics,
+        tx.clone(),
+        rx,
+        shutdown,
+        limits,
+        timeouts,
+        ServerUdpQspConfig::default(),
+    );
+    session.last_activity = Instant::now() - timeouts.idle_timeout - Duration::from_millis(1);
+    tx.try_send(SessionEvent::TunPacket(vec![0x45; 20]))
+        .unwrap();
+    let join = tokio::spawn(async move { session.run().await });
+    (
+        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
+    )
 }
 
 pub(super) async fn spawn_session_with_udp_qsp_config(
@@ -126,6 +178,43 @@ pub(super) async fn spawn_session_with_udp_socket() -> SpawnSessionWithUdpSocket
     let join = tokio::spawn(async move { session.run().await });
     (
         join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, udp,
+    )
+}
+
+pub(super) async fn spawn_session_with_parkable_server_writes(
+    timeouts: SessionTimeouts,
+) -> SpawnSessionWithParkedWritesResult {
+    let (server_tls, client_tls, write_gate) = tls_pair_with_parkable_server_writes().await;
+    let (tun, _tun_rx) = TestTun::new(8);
+    let (udp, _udp_rx) = TestUdpSocket::new(16);
+    let registry = Arc::new(SessionRegistry::new());
+    let metrics = Arc::new(Metrics::default());
+    let (tx, rx) = mpsc::channel(8);
+    let shutdown = CancellationToken::new();
+    let client_id = ClientId([0xA5; 16]);
+    let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
+    let handle = registry.register_session(client_id, assigned, tx.clone());
+    let limits = MessageLimits::from_mtu(1500);
+    let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
+    let session = ClientSessionBase::new(
+        handle.session_id,
+        client_id,
+        assigned,
+        TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
+        tun,
+        udp_io_factory,
+        registry.clone(),
+        metrics,
+        tx.clone(),
+        rx,
+        shutdown.clone(),
+        limits,
+        timeouts,
+        ServerUdpQspConfig::default(),
+    );
+    let join = tokio::spawn(async move { session.run().await });
+    (
+        join, client_tls, tx, assigned, registry, shutdown, write_gate,
     )
 }
 

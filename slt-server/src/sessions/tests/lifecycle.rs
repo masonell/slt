@@ -13,7 +13,9 @@ use tokio::time::{Duration, timeout};
 use super::super::*;
 use super::common::{
     complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session, spawn_session_with_shutdown, spawn_session_with_timeouts,
+    spawn_session, spawn_session_with_expired_idle_and_ready_packet,
+    spawn_session_with_parkable_server_writes, spawn_session_with_shutdown,
+    spawn_session_with_timeouts,
 };
 use crate::quic::UdpClaim;
 use crate::test_support::{TlsDuplexStream, default_session_timeouts};
@@ -93,6 +95,38 @@ async fn partial_tcp_frame_does_not_reset_idle_timeout() {
         .unwrap()
         .unwrap();
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn expired_idle_deadline_preempts_ready_session_queue() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.idle_timeout = Duration::from_secs(1);
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+        spawn_session_with_expired_idle_and_ready_packet(timeouts).await;
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+    match message {
+        Message::Close { payload } => {
+            let close = ClosePayload::decode(payload).unwrap();
+            assert_eq!(close.code, CloseCode::IdleTimeout);
+        }
+        _ => panic!("expected close"),
+    }
+
+    assert!(
+        timeout(Duration::from_secs(1), join)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -346,6 +380,63 @@ async fn shutdown_token_exits_running_session_with_full_queue() {
         .unwrap()
         .unwrap();
     assert!(result.is_ok());
+    assert!(registry.lookup_ip(assigned.addr()).is_none());
+}
+
+#[tokio::test]
+async fn shutdown_cancels_blocked_tcp_write() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.tcp_write_timeout = Duration::from_secs(60);
+    let (join, _client, tx, assigned, registry, shutdown, write_gate) =
+        spawn_session_with_parkable_server_writes(timeouts).await;
+    write_gate.park();
+    tx.send(SessionEvent::TunPacket(vec![0x45; 20]))
+        .await
+        .unwrap();
+    timeout(
+        Duration::from_secs(1),
+        write_gate.wait_until_write_blocked(),
+    )
+    .await
+    .expect("session entered the parked TCP write");
+
+    shutdown.cancel();
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .expect("session shutdown must cancel the parked write")
+        .unwrap();
+    assert!(result.is_ok());
+    assert!(registry.lookup_ip(assigned.addr()).is_none());
+}
+
+#[tokio::test]
+async fn blocked_tcp_write_times_out() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.tcp_write_timeout = Duration::from_millis(50);
+    let (join, _client, tx, assigned, registry, _shutdown, write_gate) =
+        spawn_session_with_parkable_server_writes(timeouts).await;
+    write_gate.park();
+    tx.send(SessionEvent::TunPacket(vec![0x45; 20]))
+        .await
+        .unwrap();
+    timeout(
+        Duration::from_secs(1),
+        write_gate.wait_until_write_blocked(),
+    )
+    .await
+    .expect("session entered the parked TCP write");
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .expect("parked TCP write must observe its deadline")
+        .unwrap();
+    let err = result.unwrap_err();
+    assert!(matches!(
+        err,
+        SessionError::Connection { ref source }
+            if source.kind() == std::io::ErrorKind::TimedOut
+    ));
     assert!(registry.lookup_ip(assigned.addr()).is_none());
 }
 
