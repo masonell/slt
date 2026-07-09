@@ -7,6 +7,7 @@ This section covers deploying SLT in production environments. It assumes you hav
 - [server-setup.md](server-setup.md) - Server OS configuration
 - [client-setup.md](client-setup.md) - Client configuration
 - [nginx-integration.md](nginx-integration.md) - nginx configuration for traffic passthrough
+- [nixos.md](nixos.md) - NixOS flake module deployment
 
 ## Prerequisites
 

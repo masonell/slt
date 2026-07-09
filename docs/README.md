@@ -37,6 +37,7 @@ Production deployment guides for servers and clients.
 - [Server Setup](deployment/server-setup.md) - Server OS configuration
 - [Client Setup](deployment/client-setup.md) - Client configuration
 - [nginx Integration](deployment/nginx-integration.md) - nginx configuration for traffic passthrough
+- [NixOS Deployment](deployment/nixos.md) - NixOS flake module deployment
 
 ### Reference
 
