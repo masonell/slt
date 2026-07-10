@@ -2,8 +2,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    CipherSuite, CloseCode, ClosePayload, Message, PingPayload, PongPayload, decode_message,
-    encode_message,
+    CipherSuite, CloseCode, ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message,
+    PingPayload, PongPayload, decode_message, encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -379,6 +379,150 @@ async fn udp_authenticated_liveness_timeout_falls_back_to_tcp() {
         Message::FallbackToTcp { .. }
     ));
     assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    assert!(join.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn unauthenticated_udp_noise_does_not_delay_liveness_fallback() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.ping_min = Duration::from_secs(5);
+    timeouts.ping_max = Duration::from_secs(5);
+    timeouts.udp_liveness_timeout = Duration::from_millis(120);
+    timeouts.idle_timeout = Duration::from_secs(5);
+
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, registry) =
+        spawn_session_with_timeouts(timeouts).await;
+
+    let dcid = Cid::from([0x45; MAX_DCID_LEN]);
+    let scid = Cid::from([0x46; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut reg_buf = Vec::new();
+    register.encode(&mut reg_buf).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let accepted_peer = SocketAddr::from(([127, 0, 0, 1], 33335));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        accepted_peer,
+        0x1402,
+    )
+    .await;
+
+    let dcid_prefix = register.client_to_server_cid.prefix().unwrap();
+    assert!(registry.has_cid(dcid_prefix));
+
+    let noise_tx = tx.clone();
+    let unvalidated_peer = SocketAddr::from(([127, 0, 0, 1], 33336));
+    let (noise_started_tx, noise_started_rx) = tokio::sync::oneshot::channel();
+    let noise = tokio::spawn(async move {
+        let mut noise_started_tx = Some(noise_started_tx);
+        loop {
+            if noise_tx
+                .send(SessionEvent::Udp(UdpClaim {
+                    peer: unvalidated_peer,
+                    dcid_prefix,
+                    payload: vec![0xBA; 32],
+                }))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            if let Some(started) = noise_started_tx.take() {
+                let _ = started.send(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    noise_started_rx.await.unwrap();
+
+    let fallback_frame = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .expect("unauthenticated UDP noise must not refresh the liveness deadline")
+    .unwrap();
+    assert!(
+        !noise.is_finished(),
+        "UDP noise stopped before the fallback deadline"
+    );
+    noise.abort();
+    let _ = noise.await;
+
+    let (message, _) = decode_message(&fallback_frame, limits).unwrap().unwrap();
+    let fallback = match message {
+        Message::FallbackToTcp { payload } => FallbackToTcpPayload::decode(payload).unwrap(),
+        other => panic!("expected fallback_to_tcp, got {other:?}"),
+    };
+    assert!(!registry.has_cid(dcid_prefix));
+
+    let fallback_ok = FallbackOkPayload {
+        fallback_id: fallback.fallback_id,
+    };
+    let mut fallback_ok_payload = Vec::new();
+    fallback_ok.encode(&mut fallback_ok_payload);
+    frame.clear();
+    encode_message(
+        Message::FallbackOk {
+            payload: &fallback_ok_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let uplink = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 40), 8);
+    frame.clear();
+    encode_message(Message::Data { packet: &uplink }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, uplink);
+
+    let downlink = ipv4_packet(Ipv4Addr::new(192, 0, 2, 41), assigned.addr(), 8);
+    tx.send(SessionEvent::TunPacket(downlink.clone()))
+        .await
+        .unwrap();
+    let data_frame = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    match decode_message(&data_frame, limits).unwrap().unwrap().0 {
+        Message::Data { packet } => assert_eq!(packet, downlink),
+        other => panic!("expected tcp data after fallback, got {other:?}"),
+    }
+    assert!(
+        timeout(Duration::from_millis(100), udp_rx.recv())
+            .await
+            .is_err(),
+        "retired UDP transport emitted a packet"
+    );
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     assert!(join.await.unwrap().is_ok());
