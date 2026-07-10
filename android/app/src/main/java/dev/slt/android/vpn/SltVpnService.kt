@@ -52,7 +52,6 @@ class SltVpnService : VpnService() {
         VpnRuntimePlatformServices(
             protect = ::protect,
             currentUnderlyingNetworks = ::currentUnderlyingNetworks,
-            publishUnderlyingNetwork = ::publishUnderlyingNetwork,
             dnsResolver = dnsResolver,
             logTag = TAG,
         )
@@ -328,12 +327,10 @@ class SltVpnService : VpnService() {
             activeTunnel?.underlyingNetwork
         }
 
-        val networks = (
+        return (
             listOfNotNull(tunnelNetwork) +
                 getSystemService(ConnectivityManager::class.java).findUnderlyingNetworks(TAG)
             ).distinct()
-        networks.firstOrNull()?.let(::publishUnderlyingNetwork)
-        return networks
     }
 
     private fun closeTunFd() {

@@ -8,37 +8,121 @@ import org.junit.Test
 class VpnRuntimePlatformServicesTest {
     @Test
     fun noUnderlyingNetworkReturnsTransientPlatformResult() {
-        val selection = selectSocketBinding<String>(protected = true) { null }
-
-        assertEquals(
-            SocketBindingSelection.Failure(SocketProtectionResult.NO_UNDERLYING_NETWORK),
-            selection,
+        var bindingAttempted = false
+        val result = bindProtectedSocket<String>(
+            protected = true,
+            currentUnderlyingNetworks = { emptyList() },
+            bindSocket = {
+                bindingAttempted = true
+                SocketProtectionResult.PROTECTED
+            },
         )
+
+        assertEquals(SocketProtectionResult.NO_UNDERLYING_NETWORK, result)
+        assertFalse(bindingAttempted)
     }
 
     @Test
     fun protectRejectionDoesNotQueryUnderlyingNetworks() {
         var queriedNetwork = false
+        var bindingAttempted = false
 
-        val selection = selectSocketBinding(
+        val result = bindProtectedSocket(
             protected = false,
-            currentUnderlyingNetwork = {
+            currentUnderlyingNetworks = {
                 queriedNetwork = true
-                "wifi"
+                listOf("wifi")
+            },
+            bindSocket = {
+                bindingAttempted = true
+                SocketProtectionResult.PROTECTED
             },
         )
 
-        assertEquals(
-            SocketBindingSelection.Failure(SocketProtectionResult.PROTECT_REJECTED),
-            selection,
-        )
+        assertEquals(SocketProtectionResult.PROTECT_REJECTED, result)
         assertFalse(queriedNetwork)
+        assertFalse(bindingAttempted)
     }
 
     @Test
-    fun protectedSocketSelectsAvailableUnderlyingNetwork() {
-        val selection = selectSocketBinding(protected = true) { "wifi" }
+    fun protectedSocketBindsAvailableUnderlyingNetwork() {
+        val result = bindProtectedSocket(
+            protected = true,
+            currentUnderlyingNetworks = { listOf("wifi") },
+            bindSocket = { SocketProtectionResult.PROTECTED },
+        )
 
-        assertEquals(SocketBindingSelection.Ready("wifi"), selection)
+        assertEquals(SocketProtectionResult.PROTECTED, result)
+    }
+
+    @Test
+    fun bindFailureFallsBackToNextUnderlyingNetwork() {
+        val attemptedNetworks = mutableListOf<String>()
+        val result = bindProtectedSocket(
+            protected = true,
+            currentUnderlyingNetworks = { listOf("wifi", "cellular") },
+            bindSocket = { network ->
+                attemptedNetworks += network
+                if (network == "wifi") {
+                    SocketProtectionResult.BIND_FAILED
+                } else {
+                    SocketProtectionResult.PROTECTED
+                }
+            },
+        )
+
+        assertEquals(SocketProtectionResult.PROTECTED, result)
+        assertEquals(listOf("wifi", "cellular"), attemptedNetworks)
+    }
+
+    @Test
+    fun fallbackBindingDoesNotBecomePreferredForNextSocket() {
+        val attemptedNetworks = mutableListOf<String>()
+        var wifiAcceptsBinding = false
+        val currentUnderlyingNetworks = { listOf("wifi", "cellular") }
+        val bindSocket = { network: String ->
+            attemptedNetworks += network
+            if (network == "wifi" && !wifiAcceptsBinding) {
+                SocketProtectionResult.BIND_FAILED
+            } else {
+                SocketProtectionResult.PROTECTED
+            }
+        }
+
+        assertEquals(
+            SocketProtectionResult.PROTECTED,
+            bindProtectedSocket(
+                protected = true,
+                currentUnderlyingNetworks = currentUnderlyingNetworks,
+                bindSocket = bindSocket,
+            ),
+        )
+
+        wifiAcceptsBinding = true
+        assertEquals(
+            SocketProtectionResult.PROTECTED,
+            bindProtectedSocket(
+                protected = true,
+                currentUnderlyingNetworks = currentUnderlyingNetworks,
+                bindSocket = bindSocket,
+            ),
+        )
+        assertEquals(listOf("wifi", "cellular", "wifi"), attemptedNetworks)
+    }
+
+    @Test
+    fun allBindFailuresReturnBindFailed() {
+        val attemptedNetworks = mutableListOf<String>()
+        val result = bindProtectedSocket(
+            protected = true,
+            currentUnderlyingNetworks = { listOf("wifi", "cellular") },
+            bindSocket = { network ->
+                attemptedNetworks += network
+                SocketProtectionResult.BIND_FAILED
+            },
+        )
+
+        assertEquals(SocketProtectionResult.BIND_FAILED, result)
+        assertEquals(listOf("wifi", "cellular"), attemptedNetworks)
     }
 }

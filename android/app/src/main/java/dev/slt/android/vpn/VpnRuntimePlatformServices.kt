@@ -7,28 +7,34 @@ import dev.slt.android.uniffi.PlatformServices
 import dev.slt.android.uniffi.SocketKind
 import dev.slt.android.uniffi.SocketProtectionResult
 
-internal sealed interface SocketBindingSelection<out N> {
-    data class Ready<N>(val network: N) : SocketBindingSelection<N>
-
-    data class Failure(val result: SocketProtectionResult) : SocketBindingSelection<Nothing>
-}
-
-internal fun <N> selectSocketBinding(
+internal fun <N> bindProtectedSocket(
     protected: Boolean,
-    currentUnderlyingNetwork: () -> N?,
-): SocketBindingSelection<N> {
+    currentUnderlyingNetworks: () -> List<N>,
+    bindSocket: (N) -> SocketProtectionResult,
+): SocketProtectionResult {
     if (!protected) {
-        return SocketBindingSelection.Failure(SocketProtectionResult.PROTECT_REJECTED)
+        return SocketProtectionResult.PROTECT_REJECTED
     }
-    val network = currentUnderlyingNetwork()
-        ?: return SocketBindingSelection.Failure(SocketProtectionResult.NO_UNDERLYING_NETWORK)
-    return SocketBindingSelection.Ready(network)
+
+    val networks = currentUnderlyingNetworks()
+    if (networks.isEmpty()) {
+        return SocketProtectionResult.NO_UNDERLYING_NETWORK
+    }
+
+    for (network in networks) {
+        when (val result = bindSocket(network)) {
+            SocketProtectionResult.PROTECTED -> return result
+            SocketProtectionResult.BIND_FAILED -> Unit
+            else -> return result
+        }
+    }
+
+    return SocketProtectionResult.BIND_FAILED
 }
 
 internal class VpnRuntimePlatformServices(
     private val protect: (Int) -> Boolean,
     private val currentUnderlyingNetworks: () -> List<Network>,
-    private val publishUnderlyingNetwork: (Network?) -> Unit,
     private val dnsResolver: UnderlyingNetworkDnsResolver,
     private val logTag: String,
 ) {
@@ -49,30 +55,31 @@ internal class VpnRuntimePlatformServices(
             return SocketProtectionResult.PLATFORM_FAILURE
         }
 
-        val selection = try {
-            selectSocketBinding(protected, ::currentUnderlyingNetwork)
+        val result = try {
+            bindProtectedSocket(
+                protected = protected,
+                currentUnderlyingNetworks = currentUnderlyingNetworks,
+                bindSocket = { network -> bindSocket(fd, kind, network) },
+            )
         } catch (error: Exception) {
-            Log.w(logTag, "Failed to select an underlying network: fd=$fd kind=$kind", error)
+            Log.w(logTag, "Failed to use underlying networks: fd=$fd kind=$kind", error)
             return SocketProtectionResult.PLATFORM_FAILURE
         }
 
-        return when (selection) {
-            is SocketBindingSelection.Failure -> {
-                when (selection.result) {
-                    SocketProtectionResult.PROTECT_REJECTED ->
-                        Log.w(logTag, "Android refused to protect SLT socket: fd=$fd kind=$kind")
-                    SocketProtectionResult.NO_UNDERLYING_NETWORK ->
-                        Log.w(
-                            logTag,
-                            "No underlying network available for SLT socket binding: fd=$fd kind=$kind",
-                        )
-                    else ->
-                        Log.w(logTag, "Unexpected socket binding selection: ${selection.result}")
-                }
-                selection.result
-            }
-            is SocketBindingSelection.Ready -> bindSocket(fd, kind, selection.network)
+        when (result) {
+            SocketProtectionResult.PROTECTED -> Unit
+            SocketProtectionResult.PROTECT_REJECTED ->
+                Log.w(logTag, "Android refused to protect SLT socket: fd=$fd kind=$kind")
+            SocketProtectionResult.NO_UNDERLYING_NETWORK ->
+                Log.w(
+                    logTag,
+                    "No underlying network available for SLT socket binding: fd=$fd kind=$kind",
+                )
+            SocketProtectionResult.BIND_FAILED ->
+                Log.w(logTag, "All underlying network bindings failed: fd=$fd kind=$kind")
+            SocketProtectionResult.PLATFORM_FAILURE -> Unit
         }
+        return result
     }
 
     private fun bindSocket(fd: Int, kind: SocketKind, network: Network): SocketProtectionResult {
@@ -94,11 +101,5 @@ internal class VpnRuntimePlatformServices(
             Log.w(logTag, "Failed to bind SLT socket: fd=$fd kind=$kind network=$network", error)
             SocketProtectionResult.BIND_FAILED
         }
-    }
-
-    private fun currentUnderlyingNetwork(): Network? {
-        val network = currentUnderlyingNetworks().firstOrNull()
-        publishUnderlyingNetwork(network)
-        return network
     }
 }
