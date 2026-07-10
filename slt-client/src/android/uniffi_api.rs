@@ -1,7 +1,7 @@
 use slt_core::config::ClientConfig;
 
 use crate::runtime::observer::ClientEvent;
-use crate::transport::socket_protector::SocketKind;
+use crate::transport::socket_protector::{SocketKind, SocketProtectionResult};
 
 /// Errors returned through the Android UniFFI boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -72,7 +72,7 @@ pub trait PlatformServices: Send + Sync {
     /// `VpnService.protect(fd)` call and bind the socket to the currently
     /// selected underlying network. Blocking host lookup belongs in
     /// [`Self::resolve_host`], which the runtime invokes on a blocking worker.
-    fn protect_socket(&self, fd: i32, kind: SocketKind) -> bool;
+    fn protect_socket(&self, fd: i32, kind: SocketKind) -> SocketProtectionResult;
 
     /// Resolve `hostname` through the active Android underlying network.
     fn resolve_host(&self, hostname: String) -> Result<Vec<String>, SltInteropError>;

@@ -331,10 +331,11 @@ impl ConnectError {
     /// transient I/O) that only the variant carries.
     ///
     /// - **Fatal** (won't self-heal): `EmptyHostname`, `TcpSocketCreate`,
-    ///   `SocketProtect`, `TlsHandshake` (cert/setup fault),
+    ///   `SocketProtect` (permission/platform fault), `TlsHandshake` (cert/setup fault),
     ///   `AuthRejected`, `AuthUnexpectedMessage`, `AuthTlsExport`, protocol
     ///   errors.
-    /// - **Retry**: `TcpConnectTimeout`, transient `TcpConnect`, `AuthTimeout`,
+    /// - **Retry**: `SocketProtect` (transient network state),
+    ///   `TcpConnectTimeout`, transient `TcpConnect`, `AuthTimeout`,
     ///   `AuthDisconnected`, `TlsHandshakeTimeout`, `DnsResolution`,
     ///   `TlsHandshake` (transient I/O), and transient generic `Io`.
     ///   `PermissionDenied` from `TcpConnect` or generic `Io` is a
@@ -354,7 +355,6 @@ impl ConnectError {
             // across a retry.
             Self::EmptyHostname
             | Self::TcpSocketCreate { .. }
-            | Self::SocketProtect { .. }
             | Self::AuthRejected { .. }
             | Self::AuthUnexpectedMessage
             | Self::AuthTlsExport { .. }
@@ -369,6 +369,13 @@ impl ConnectError {
             | Self::AuthDisconnected
             | Self::TlsHandshakeTimeout { .. }
             | Self::DnsResolution { .. } => true,
+            // Android reports an absent or stale underlying network through
+            // NotConnected/NetworkUnreachable. Local protection rejection and
+            // unexpected platform failures remain fatal.
+            Self::SocketProtect { source, .. } => matches!(
+                source.kind(),
+                io::ErrorKind::NotConnected | io::ErrorKind::NetworkUnreachable
+            ),
             // TCP connect(2): most failures are transient (refused, reset,
             // unreachable) and worth retrying. PermissionDenied (EACCES) is a
             // firewall/platform policy block that won't self-heal, so treat it
@@ -386,6 +393,7 @@ impl ConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::socket_protector::SocketProtectionResult;
 
     /// Build a boring `ErrorStack` for tests (preserves a cause string).
     fn test_error_stack() -> ErrorStack {
@@ -511,8 +519,7 @@ mod tests {
         );
     }
 
-    /// The retry/fatal policy, pinned per variant. Guardrail against
-    /// re-introducing `ErrorKind`-based guesswork.
+    /// The retry/fatal policy, pinned per variant and relevant source kind.
     #[test]
     fn is_retriable_matches_policy_table() {
         let peer: SocketAddr = "127.0.0.1:8443".parse().unwrap();
@@ -532,7 +539,20 @@ mod tests {
                 fd: 3,
                 kind: SocketKind::Tcp,
                 peer,
-                source: io::Error::from(io::ErrorKind::PermissionDenied),
+                source: SocketProtectionResult::ProtectRejected
+                    .into_io_result(3, SocketKind::Tcp)
+                    .unwrap_err(),
+            }
+            .is_retriable()
+        );
+        assert!(
+            !ConnectError::SocketProtect {
+                fd: 3,
+                kind: SocketKind::Tcp,
+                peer,
+                source: SocketProtectionResult::PlatformFailure
+                    .into_io_result(3, SocketKind::Tcp)
+                    .unwrap_err(),
             }
             .is_retriable()
         );
@@ -602,6 +622,28 @@ mod tests {
         );
 
         // Retry.
+        assert!(
+            ConnectError::SocketProtect {
+                fd: 3,
+                kind: SocketKind::Tcp,
+                peer,
+                source: SocketProtectionResult::NoUnderlyingNetwork
+                    .into_io_result(3, SocketKind::Tcp)
+                    .unwrap_err(),
+            }
+            .is_retriable()
+        );
+        assert!(
+            ConnectError::SocketProtect {
+                fd: 3,
+                kind: SocketKind::Tcp,
+                peer,
+                source: SocketProtectionResult::BindFailed
+                    .into_io_result(3, SocketKind::Tcp)
+                    .unwrap_err(),
+            }
+            .is_retriable()
+        );
         assert!(
             ConnectError::TcpConnectTimeout {
                 peer,

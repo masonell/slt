@@ -17,7 +17,7 @@ use crate::runtime::control::{
 use crate::runtime::observer::{ClientEvent, ClientEventKind, ClientObserver, ObserverSink};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::transport::host_resolver::{HostResolver, HostResolverFuture, ensure_non_empty};
-use crate::transport::socket_protector::{SocketKind, SocketProtector};
+use crate::transport::socket_protector::{SocketKind, SocketProtectionResult, SocketProtector};
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -232,16 +232,11 @@ impl SocketProtector for AndroidSocketProtector {
     fn protect(&self, fd: RawFd, kind: SocketKind) -> io::Result<()> {
         // `RawFd` is `i32` on Android, so it maps directly to the UniFFI
         // `protect_socket(fd: i32)` signature — no range conversion needed.
-        let protected = self.platform_services.protect_socket(fd, kind);
-        if protected {
+        let result = self.platform_services.protect_socket(fd, kind);
+        if result == SocketProtectionResult::Protected {
             debug!(fd, kind = ?kind, "Android socket protected");
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("Android protectSocket returned false for {kind:?} fd {fd}"),
-            ))
         }
+        result.into_io_result(fd, kind)
     }
 }
 

@@ -45,7 +45,9 @@ hand-maintained.
 - `NativeSession.handle()` — the session's globally unique identity.
 - `NativeSession.stop()` — request shutdown (joins the worker).
 - `NativeSession.network_changed()` — report an underlying-network handoff.
-- `PlatformServices.protect_socket(fd, kind) -> bool` — protect + bind a socket.
+- `PlatformServices.protect_socket(fd, kind) -> SocketProtectionResult` — protect
+  and bind a socket while preserving protect rejection, temporary network
+  absence, bind failure, and unexpected platform failure as distinct outcomes.
 - `PlatformServices.resolve_host(hostname) -> List<String>` — DNS on the active
   network.
 - `NativeSessionCallback.on_event(event)` — typed lifecycle callback.
