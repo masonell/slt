@@ -15,6 +15,7 @@ import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.uniffi.ClientConfigSummary
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -208,6 +209,13 @@ class SltVpnService : VpnService() {
                 underlyingNetwork = initialUnderlyingNetwork,
             )
         }
+        val selectedUnderlyingNetwork = startNetworkWatcher(initialUnderlyingNetwork)
+        if (selectedUnderlyingNetwork == null) {
+            failVpn("No non-VPN network available; stop the other VPN and try again")
+            return
+        }
+        publishUnderlyingNetwork(selectedUnderlyingNetwork)
+
         val session = nativeController.start(
             NativeSessionConfig(
                 clientToml = profile.clientToml,
@@ -223,17 +231,20 @@ class SltVpnService : VpnService() {
         )
         // Stay Starting until the runtime emits Authenticated (-> Running).
         updateNotification()
-
-        startNetworkWatcher(initialUnderlyingNetwork)
     }
 
-    private fun startNetworkWatcher(initialNetwork: Network?) {
-        networkWatcher = NetworkChangeWatcher(
-            this,
-            initialNetwork,
-            ::publishUnderlyingNetwork,
-        ) { network -> notifyNetworkChanged(network) }
-        networkWatcher?.start()
+    private suspend fun startNetworkWatcher(initialNetwork: Network?): Network? {
+        val initialSelection = CompletableDeferred<Network?>()
+        val watcher = NetworkChangeWatcher(
+            context = this,
+            initialNetwork = initialNetwork,
+            onInitialUnderlyingNetworkChanged = ::publishUnderlyingNetwork,
+            onInitialSelectionReady = { network -> initialSelection.complete(network) },
+            onReconnect = ::notifyNetworkChanged,
+        )
+        networkWatcher = watcher
+        watcher.start()
+        return initialSelection.await()
     }
 
     private fun publishUnderlyingNetwork(network: Network?) {

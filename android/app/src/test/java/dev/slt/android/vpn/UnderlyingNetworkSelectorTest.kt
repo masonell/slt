@@ -18,7 +18,7 @@ class UnderlyingNetworkSelectorTest {
     }
 
     @Test
-    fun ordersDefaultNetworkBeforeOtherUsableNetworks() {
+    fun keepsDefaultWifiAheadOfAvailableCellularBackup() {
         val selected = selectUnderlyingNetworks(
             listOf(
                 candidate("cellular", isDefault = false, hasInternet = true, isVpn = false),
