@@ -213,6 +213,17 @@ mod tests {
     }
 
     #[test]
+    fn from_toml_accepts_empty_client_list() {
+        let mut config = test_config();
+        config.clients.clear();
+        let raw = toml::to_string(&config).unwrap();
+
+        let parsed = ServerConfig::from_toml_str(&raw).unwrap();
+
+        assert!(parsed.clients.is_empty());
+    }
+
+    #[test]
     fn validate_rejects_zero_listen_tcp_port() {
         let mut config = test_config();
         config.network.listen_tcp.set_port(0);

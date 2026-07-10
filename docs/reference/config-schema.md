@@ -18,7 +18,7 @@ Quick reference for SLT configuration fields. For detailed explanations, see [Us
 | `session_queue_size` | integer | No | `256` | > 0 |
 | `max_auth_inflight` | integer | No | `128` | > 0 |
 | `tcp_connection_cap` | integer | No | `512 * detected CPU count` | > 0 |
-| `clients` | array of tables | Yes | - | At least one entry |
+| `clients` | array of tables | Yes | - | May be empty |
 
 `tcp_connection_cap` is evaluated on the host that deserializes the config when
 the field is omitted. Size it against nginx `worker_connections` and nginx's
@@ -78,6 +78,10 @@ supported but omitted from this list is rejected with `RegisterFailCode::Invalid
 The list must not be empty.
 
 ### `[[clients]]`
+
+The client list may be empty while provisioning a server. In that state, no VPN
+clients can authenticate. `slt init` creates the empty list, and `slt add-client`
+adds entries to it.
 
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
