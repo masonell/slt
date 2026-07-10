@@ -406,6 +406,31 @@ mod tests {
     }
 
     #[test]
+    fn classifier_waits_for_decisive_boring_client_hello_prefix() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let client_hello = generate_client_hello_tls_record(secret);
+        let first_claim_len = (0..=client_hello.len())
+            .find(|&len| classify_tcp_client_hello(&client_hello[..len], &secret) == Verdict::Claim)
+            .expect("complete ClientHello should be claimed");
+
+        for prefix_len in 0..first_claim_len {
+            assert_eq!(
+                classify_tcp_client_hello(&client_hello[..prefix_len], &secret),
+                Verdict::Incomplete,
+                "valid ClientHello prefix of {prefix_len} bytes must remain incomplete"
+            );
+        }
+
+        for prefix_len in first_claim_len..=client_hello.len() {
+            assert_eq!(
+                classify_tcp_client_hello(&client_hello[..prefix_len], &secret),
+                Verdict::Claim,
+                "ClientHello prefix of {prefix_len} bytes contains the decisive key share"
+            );
+        }
+    }
+
+    #[test]
     fn classifier_rejects_wrong_secret() {
         let secret = SharedSecret([0x11u8; 32]);
         let client_hello = generate_client_hello_tls_record(secret);

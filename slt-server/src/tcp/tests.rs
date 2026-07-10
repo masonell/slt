@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use slt_core::classifier::Verdict;
+use slt_core::classifier::{Verdict, classify_tcp_client_hello};
 use slt_core::config::ServerConfig;
-use slt_core::testing::generate_client_hello_tls_record;
+use slt_core::crypto::client_hello::LEGACY_SESSION_ID_LEN;
+use slt_core::testing::{TLS_RECORD_HEADER_LEN, generate_client_hello_tls_record};
 use slt_core::types::{
     ClientId, PubKeyEd25519, ServerClient, ServerNetworkConfig, ServerTimingConfig,
     ServerTlsConfig, ServerTransportConfig, SharedSecret, TlsMaterial, TunConfig,
@@ -374,6 +375,99 @@ async fn run_invokes_claim_handler_for_matching_client_hello() {
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.tcp_accepted, 1);
     assert_eq!(snapshot.claimed, 1);
+}
+
+#[tokio::test]
+async fn run_claims_delayed_fragmented_client_hello_once() {
+    let secret = SharedSecret([0x42u8; 32]);
+    let metrics = Arc::new(Metrics::default());
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    let config = test_config_with_tcp_limits(upstream_addr, 512, Duration::from_secs(2));
+
+    let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let listen_addr = front_door.listener().local_addr().unwrap();
+
+    let upstream_task = tokio::spawn(async move {
+        timeout(Duration::from_millis(500), upstream_listener.accept()).await
+    });
+
+    let claim_count = Arc::new(AtomicUsize::new(0));
+    let claim_count_clone = claim_count.clone();
+    let cancel_for_run = cancel.clone();
+    let cancel_for_handler = cancel.clone();
+    let run_task = tokio::spawn(async move {
+        front_door
+            .run(cancel_for_run, move |_, _| {
+                claim_count_clone.fetch_add(1, Ordering::SeqCst);
+                cancel_for_handler.cancel();
+            })
+            .await
+    });
+
+    let client_hello = generate_client_hello_tls_record(secret);
+    let first_claim_len = (0..=client_hello.len())
+        .find(|&len| classify_tcp_client_hello(&client_hello[..len], &secret) == Verdict::Claim)
+        .expect("complete ClientHello should be claimed");
+
+    const HANDSHAKE_HEADER_LEN: usize = 4;
+    const LEGACY_VERSION_LEN: usize = 2;
+    const CLIENT_RANDOM_LEN: usize = 32;
+    let handshake_header_end = TLS_RECORD_HEADER_LEN + HANDSHAKE_HEADER_LEN;
+    let random_end = handshake_header_end + LEGACY_VERSION_LEN + CLIENT_RANDOM_LEN;
+    let session_id_length_end = random_end + 1;
+    let session_id_end = session_id_length_end + LEGACY_SESSION_ID_LEN;
+    let mut split_points = vec![
+        2,
+        TLS_RECORD_HEADER_LEN,
+        handshake_header_end - 1,
+        handshake_header_end,
+        random_end,
+        session_id_length_end,
+        session_id_end - 1,
+        session_id_end,
+        first_claim_len - 1,
+        client_hello.len(),
+    ];
+    split_points.retain(|&end| end <= client_hello.len());
+    split_points.sort_unstable();
+    split_points.dedup();
+
+    let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+    let mut start = 0;
+    for end in split_points {
+        stream.write_all(&client_hello[start..end]).await.unwrap();
+        stream.flush().await.unwrap();
+        start = end;
+        tokio::time::sleep(CLASSIFY_RETRY_DELAY.saturating_mul(3)).await;
+    }
+
+    let result = timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("front door should stop after claiming the stream")
+        .expect("front-door task should not panic");
+    assert!(result.is_ok(), "front door should exit cleanly");
+    assert_eq!(
+        claim_count.load(Ordering::SeqCst),
+        1,
+        "fragmented ClientHello should be claimed exactly once"
+    );
+
+    assert!(
+        upstream_task
+            .await
+            .expect("upstream task should not panic")
+            .is_err(),
+        "claimed ClientHello must not be proxied upstream"
+    );
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.tcp_accepted, 1);
+    assert_eq!(snapshot.claimed, 1);
+    assert_eq!(snapshot.passed, 0);
+    assert_eq!(snapshot.dropped, 0);
+    assert_eq!(snapshot.tcp_classification_timeouts, 0);
 }
 
 #[tokio::test]
