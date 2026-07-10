@@ -45,6 +45,7 @@ impl ClientConfig {
     /// - `InvalidTunMtu` if `tun_mtu` is out of range
     /// - `InvalidTunPrefix` if `tun_prefix` is out of range
     /// - `ClientTunIpMismatch` if `tun_ipv4` differs from `assigned_ipv4`
+    /// - `IntervalTooSmall` if a ping or reconnect interval is below 1 millisecond
     /// - `InvalidPingInterval` if `ping_min` > `ping_max`
     /// - `InvalidReconnectInterval` if `reconnect_min` > `reconnect_max`
     /// - `RequireUdpNeedsUpgrade` if `require_udp` is true but `enable_upgrade` is false

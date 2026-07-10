@@ -19,12 +19,18 @@ pub use defaults::{
 };
 pub use server::{DEFAULT_TCP_CONNECTIONS_PER_WORKER, ServerConfig, default_tcp_connection_cap};
 use thiserror::Error;
-pub use validate::{validate_ping_interval, validate_timeout};
+pub use validate::{validate_interval, validate_ping_interval, validate_timeout};
 
 use crate::types::ClientId;
 
 /// Maximum allowed timeout duration (1 hour).
 pub const MAX_TIMEOUT: Duration = Duration::from_hours(1);
+
+/// Minimum supported ping or reconnect interval.
+///
+/// Runtime timer jitter is calculated with millisecond precision, so shorter
+/// intervals would behave as zero-duration timers.
+pub const MIN_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Ethernet IP MTU used as the transport envelope target.
 pub const ETHERNET_IP_MTU: u16 = 1500;
@@ -57,6 +63,16 @@ pub enum ConfigError {
     InvalidReconnectInterval {
         reconnect_min: Duration,
         reconnect_max: Duration,
+    },
+    /// A ping or reconnect interval is below the supported minimum.
+    #[error("{field} ({value:?}) is below minimum ({min:?})")]
+    IntervalTooSmall {
+        /// Configuration field containing the interval.
+        field: &'static str,
+        /// Configured interval.
+        value: Duration,
+        /// Minimum supported interval.
+        min: Duration,
     },
     /// Hostname is empty.
     #[error("hostname must not be empty")]
@@ -163,7 +179,7 @@ pub enum ConfigLoadError {
 mod tests {
     use std::time::Duration;
 
-    use super::{ConfigError, ConfigLoadError, ETHERNET_IP_MTU, MAX_TUN_MTU};
+    use super::{ConfigError, ConfigLoadError, ETHERNET_IP_MTU, MAX_TUN_MTU, MIN_INTERVAL};
     use crate::crypto::udp_qsp::AEAD_TAG_LEN;
     use crate::proto::HEADER_LEN;
     use crate::types::{ClientId, MAX_DCID_LEN};
@@ -219,6 +235,19 @@ mod tests {
         assert!(msg.contains("reconnect_min"));
         assert!(msg.contains("reconnect_max"));
         assert!(msg.contains("must not exceed"));
+    }
+
+    #[test]
+    fn config_error_interval_too_small_display() {
+        let err = ConfigError::IntervalTooSmall {
+            field: "reconnect_min",
+            value: Duration::ZERO,
+            min: MIN_INTERVAL,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("reconnect_min"));
+        assert!(msg.contains("below minimum"));
+        assert!(msg.contains("1ms"));
     }
 
     #[test]

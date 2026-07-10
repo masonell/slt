@@ -77,7 +77,8 @@ impl RuntimeError {
 /// Returns an error if the runtime exits due to a non-recoverable condition,
 /// such as an authentication rejection, a protocol error, a non-recoverable
 /// connection or authentication failure, a failed mandatory UDP upgrade, or
-/// an unexpected TUN task exit.
+/// an unexpected TUN task exit. An invalid client configuration is rejected
+/// before the runtime starts.
 ///
 /// Returns `Ok(())` when cancellation or a stop command requests clean
 /// shutdown.
@@ -92,6 +93,13 @@ pub async fn run_client<S>(
 where
     S: ClientRuntimeServices,
 {
+    if let Err(err) = config.validate() {
+        cancel.cancel();
+        drop(tun_channels);
+        tun_handles.shutdown().await;
+        return Err(err.into());
+    }
+
     let metrics = Arc::new(Metrics::default());
     run_client_with_metrics(
         config,
@@ -682,10 +690,62 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    use slt_core::config::ConfigError;
+    use tokio::sync::mpsc;
+
     use super::*;
+    use crate::runtime::services::DesktopServices;
+    use crate::test_support::test_config;
 
     fn millis(d: Duration) -> u64 {
         d.as_millis() as u64
+    }
+
+    #[tokio::test]
+    async fn run_client_rejects_invalid_config() {
+        let mut config = test_config();
+        config.timing.reconnect_min = Duration::ZERO;
+
+        let cancel = CancellationToken::new();
+        let reader_cancel = cancel.clone();
+        let writer_cancel = cancel.clone();
+        let reader = tokio::spawn(async move {
+            reader_cancel.cancelled().await;
+            Ok::<(), io::Error>(())
+        });
+        let writer = tokio::spawn(async move {
+            writer_cancel.cancelled().await;
+            Ok::<(), io::Error>(())
+        });
+        let tun_handles = tun::TunHandles::new(reader, writer);
+        let (_to_session_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let tun_channels = tun::TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+
+        let err = run_client(
+            config,
+            tun_handles,
+            tun_channels,
+            cancel.clone(),
+            DesktopServices::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(cancel.is_cancelled());
+        assert!(matches!(
+            err.downcast_ref::<ConfigError>(),
+            Some(ConfigError::IntervalTooSmall {
+                field: "reconnect_min",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -830,8 +890,8 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_backoff_zero_base() {
-        // Edge case: zero base duration
+    fn reconnect_backoff_unvalidated_zero_base_remains_zero() {
+        // This input is rejected by ClientConfig validation and the run_client boundary.
         let base = Duration::ZERO;
         let max = Duration::from_secs(10);
         let mut backoff = ReconnectBackoff::new(base, max);
@@ -844,6 +904,20 @@ mod tests {
 
         // Current doubles: 0 * 2 = 0
         assert_eq!(millis(backoff.current), 0);
+    }
+
+    #[test]
+    fn reconnect_backoff_from_validated_config_never_returns_zero() {
+        let mut config = test_config();
+        config.timing.reconnect_min = slt_core::config::MIN_INTERVAL;
+        config.timing.reconnect_max = slt_core::config::MIN_INTERVAL;
+        config.validate().unwrap();
+
+        let mut backoff =
+            ReconnectBackoff::new(config.timing.reconnect_min, config.timing.reconnect_max);
+        for _ in 0..10 {
+            assert!(!backoff.next_delay().is_zero());
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ConfigError, validate_ping_interval, validate_timeout};
+use crate::config::{ConfigError, validate_interval, validate_ping_interval, validate_timeout};
 use crate::proto::CipherSuite;
 use crate::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
 
@@ -198,11 +198,14 @@ impl ClientTimingConfig {
     /// # Errors
     ///
     /// Returns `ConfigError` if:
+    /// - A ping or reconnect interval is below 1 millisecond
     /// - `ping_min > ping_max`
     /// - `reconnect_min > reconnect_max`
     /// - Any timeout is zero or exceeds 1 hour
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_ping_interval(self.ping_min, self.ping_max)?;
+        validate_interval("reconnect_min", self.reconnect_min)?;
+        validate_interval("reconnect_max", self.reconnect_max)?;
         if self.reconnect_min > self.reconnect_max {
             return Err(ConfigError::InvalidReconnectInterval {
                 reconnect_min: self.reconnect_min,
@@ -336,6 +339,42 @@ mod tests {
         config.ping_min = Duration::from_secs(15);
         config.ping_max = Duration::from_secs(15);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_minimum_intervals() {
+        let mut config = test_timing_config();
+        config.ping_min = crate::config::MIN_INTERVAL;
+        config.ping_max = crate::config::MIN_INTERVAL;
+        config.reconnect_min = crate::config::MIN_INTERVAL;
+        config.reconnect_max = crate::config::MIN_INTERVAL;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_small_ping_and_reconnect_intervals() {
+        for value in [Duration::ZERO, Duration::from_micros(999)] {
+            for field in ["ping_min", "ping_max", "reconnect_min", "reconnect_max"] {
+                let mut config = test_timing_config();
+                match field {
+                    "ping_min" => config.ping_min = value,
+                    "ping_max" => config.ping_max = value,
+                    "reconnect_min" => config.reconnect_min = value,
+                    "reconnect_max" => config.reconnect_max = value,
+                    _ => unreachable!(),
+                }
+
+                let err = config.validate().unwrap_err();
+                assert!(matches!(
+                    err,
+                    ConfigError::IntervalTooSmall {
+                        field: rejected,
+                        value: rejected_value,
+                        min: crate::config::MIN_INTERVAL,
+                    } if rejected == field && rejected_value == value
+                ));
+            }
+        }
     }
 
     #[test]

@@ -86,6 +86,7 @@ impl ServerConfig {
     /// - `ClientUsesTunAddress` if a configured client IP equals `tun_ipv4`
     /// - `DuplicateClientId` if two clients share a `client_id`
     /// - `DuplicateAssignedIpv4` if two clients share an `assigned_ipv4`
+    /// - `IntervalTooSmall` if a ping interval is below 1 millisecond
     /// - `InvalidPingInterval` if `ping_min` > `ping_max`
     /// - `EmptyUdpQspAllowedCiphers` if UDP-QSP has no allowed cipher suites
     /// - `ZeroSessionQueueSize` if `session_queue_size` is zero

@@ -240,6 +240,7 @@ impl ServerTimingConfig {
     /// # Errors
     ///
     /// Returns `ConfigError` if:
+    /// - A ping interval is below 1 millisecond
     /// - `ping_min > ping_max`
     /// - Any timeout is zero or exceeds 1 hour
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -383,6 +384,20 @@ mod tests {
         config.ping_min = Duration::from_secs(15);
         config.ping_max = Duration::from_secs(15);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_small_ping_interval() {
+        let mut config = test_timing_config();
+        config.ping_min = Duration::from_micros(999);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::IntervalTooSmall {
+                field: "ping_min",
+                ..
+            }
+        ));
     }
 
     #[test]

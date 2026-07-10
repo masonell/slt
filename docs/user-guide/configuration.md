@@ -110,8 +110,8 @@ front-door cap until nginx closes them through settings such as
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `ping_min` | duration | No | `10s` | Minimum ping interval. Must be <= `ping_max`. |
-| `ping_max` | duration | No | `30s` | Maximum ping interval. |
+| `ping_min` | duration | No | `10s` | Minimum ping interval. Must be >= 1ms and <= `ping_max`. |
+| `ping_max` | duration | No | `30s` | Maximum ping interval. Must be >= 1ms. |
 | `auth_timeout` | duration | No | `10s` | End-to-end server TLS and authentication deadline. Must be > 0 and <= 1 hour. |
 | `tcp_write_timeout` | duration | No | `10s` | Maximum time for one established-session TCP message write. Must be > 0 and <= 1 hour. |
 | `udp_liveness_timeout` | duration | No | `90s` | Maximum time without authenticated UDP-QSP ingress before the server falls back to live TCP. Must be > 0 and <= 1 hour. |
@@ -292,16 +292,16 @@ ChaCha20-Poly1305 otherwise.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `ping_min` | duration | No | `10s` | Minimum ping interval. Must be <= `ping_max`. |
-| `ping_max` | duration | No | `30s` | Maximum ping interval. |
+| `ping_min` | duration | No | `10s` | Minimum ping interval. Must be >= 1ms and <= `ping_max`. |
+| `ping_max` | duration | No | `30s` | Maximum ping interval. Must be >= 1ms. |
 | `auth_timeout` | duration | No | `10s` | Timeout for authentication handshake. Must be > 0 and <= 1 hour. |
 | `tcp_write_timeout` | duration | No | `10s` | Maximum time for one TCP message write during authentication, registration, upgrade, or an established session. Must be > 0 and <= 1 hour. |
 | `register_timeout` | duration | No | `10s` | Timeout for UDP-QSP registration. Must be > 0 and <= 1 hour. |
 | `quic_discovery_timeout` | duration | No | `15s` | Timeout for the full QUIC DCID discovery attempt. Must be > 0 and <= 1 hour. |
 | `idle_timeout` | duration | No | `5m` | Session idle timeout. Must be > 0 and <= 1 hour. |
 | `metrics_interval` | duration | No | `5m` | Metrics snapshot logging interval. Must be > 0 and <= 1 hour. |
-| `reconnect_min` | duration | No | `200ms` | Minimum reconnect backoff delay. Must be <= `reconnect_max`. |
-| `reconnect_max` | duration | No | `5s` | Maximum reconnect backoff delay. |
+| `reconnect_min` | duration | No | `200ms` | Minimum reconnect backoff delay. Must be >= 1ms and <= `reconnect_max`. |
+| `reconnect_max` | duration | No | `5s` | Maximum reconnect backoff delay. Must be >= 1ms. |
 
 ### Client Configuration Example
 
@@ -608,6 +608,7 @@ Both server and client configurations are validated when loaded. Common validati
 | `ClientUsesTunAddress` | Server client IP equals the server's `tun_ipv4` | Assign a different client IP |
 | `InvalidPingInterval` | `ping_min` > `ping_max` | Ensure `ping_min` <= `ping_max` |
 | `InvalidReconnectInterval` | `reconnect_min` > `reconnect_max` | Ensure `reconnect_min` <= `reconnect_max` |
+| `IntervalTooSmall` | A ping or reconnect interval is below 1 millisecond | Use an interval of at least 1ms |
 | `ZeroTimeout` | Any timeout is 0 | Use positive duration |
 | `TimeoutTooLarge` | Any timeout > 1 hour | Use duration <= 1 hour |
 | `RequireUdpNeedsUpgrade` | `require_udp = true` but `enable_upgrade = false` | Set `enable_upgrade = true` |

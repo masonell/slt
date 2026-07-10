@@ -58,8 +58,8 @@ and refuses to start if any field mismatches.
 
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
-| `ping_min` | duration | No | `"10s"` | <= `ping_max` |
-| `ping_max` | duration | No | `"30s"` | - |
+| `ping_min` | duration | No | `"10s"` | >= 1ms, <= `ping_max` |
+| `ping_max` | duration | No | `"30s"` | >= 1ms |
 | `auth_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `tcp_write_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `udp_liveness_timeout` | duration | No | `"90s"` | > 0, <= 1h |
@@ -197,16 +197,16 @@ ChaCha20-Poly1305 otherwise.
 
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
-| `ping_min` | duration | No | `"10s"` | <= `ping_max` |
-| `ping_max` | duration | No | `"30s"` | - |
+| `ping_min` | duration | No | `"10s"` | >= 1ms, <= `ping_max` |
+| `ping_max` | duration | No | `"30s"` | >= 1ms |
 | `auth_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `tcp_write_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `register_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `quic_discovery_timeout` | duration | No | `"15s"` | > 0, <= 1h |
 | `idle_timeout` | duration | No | `"5m"` | > 0, <= 1h |
 | `metrics_interval` | duration | No | `"5m"` | > 0, <= 1h |
-| `reconnect_min` | duration | No | `"200ms"` | <= `reconnect_max` |
-| `reconnect_max` | duration | No | `"5s"` | - |
+| `reconnect_min` | duration | No | `"200ms"` | >= 1ms, <= `reconnect_max` |
+| `reconnect_max` | duration | No | `"5s"` | >= 1ms |
 
 ### Full Client Example
 
@@ -341,6 +341,7 @@ nginx_tcp_upstream = "127.0.0.1:8080"
 | `ClientUsesTunAddress` | Server client `assigned_ipv4` equals the server's `tun_ipv4` |
 | `InvalidPingInterval` | `ping_min` > `ping_max` |
 | `InvalidReconnectInterval` | `reconnect_min` > `reconnect_max` |
+| `IntervalTooSmall` | A ping or reconnect interval is below 1 millisecond |
 | `ZeroTimeout` | Any timeout is 0 |
 | `TimeoutTooLarge` | Any timeout > 1 hour |
 | `RequireUdpNeedsUpgrade` | `require_udp = true` without `enable_upgrade = true` |
