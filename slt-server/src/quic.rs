@@ -1,8 +1,10 @@
 //! QUIC front-door handling.
 
+use std::future::Future;
 use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +36,28 @@ const QUIC_BUF_LEN: usize = 2 * 1024;
 /// 64 datagrams on Linux) fits without truncation. Increase this if deploying on
 /// jumbo-frame links.
 const MAX_DATAGRAM: usize = 1500;
+
+type UpstreamSocketFuture = Pin<Box<dyn Future<Output = io::Result<UdpSocket>> + Send + 'static>>;
+
+trait UpstreamSocketFactory: Send + Sync {
+    fn create_connected(&self, upstream_addr: SocketAddr) -> UpstreamSocketFuture;
+}
+
+struct TokioUpstreamSocketFactory;
+
+impl UpstreamSocketFactory for TokioUpstreamSocketFactory {
+    fn create_connected(&self, upstream_addr: SocketAddr) -> UpstreamSocketFuture {
+        Box::pin(async move {
+            let bind_addr = match upstream_addr {
+                SocketAddr::V4(_) => SocketAddr::from(([0u8; 4], 0)),
+                SocketAddr::V6(_) => SocketAddr::from(([0u16; 8], 0)),
+            };
+            let socket = UdpSocket::bind(bind_addr).await?;
+            socket.connect(upstream_addr).await?;
+            Ok(socket)
+        })
+    }
+}
 
 /// Claimed UDP-QSP datagram metadata.
 ///
@@ -128,6 +152,7 @@ pub struct QuicEndpoint {
     socket: Arc<UdpSocket>,
     recv: QuicRecv,
     nginx_upstream: SocketAddr,
+    upstream_socket_factory: Arc<dyn UpstreamSocketFactory>,
     max_lru_entries: NonZeroUsize,
     idle_timeout: Duration,
     registry: Arc<SessionRegistry>,
@@ -185,6 +210,7 @@ impl QuicEndpoint {
             socket: Arc::new(socket),
             recv,
             nginx_upstream: config.network.nginx_udp_upstream,
+            upstream_socket_factory: Arc::new(TokioUpstreamSocketFactory),
             max_lru_entries,
             idle_timeout: config.timing.idle_timeout,
             registry,
@@ -227,11 +253,18 @@ impl QuicEndpoint {
             socket,
             recv,
             nginx_upstream,
+            upstream_socket_factory: Arc::new(TokioUpstreamSocketFactory),
             max_lru_entries,
             idle_timeout,
             registry,
             metrics,
         }
+    }
+
+    #[cfg(test)]
+    fn with_upstream_socket_factory(mut self, factory: Arc<dyn UpstreamSocketFactory>) -> Self {
+        self.upstream_socket_factory = factory;
+        self
     }
 
     /// Run the UDP accept loop and forward traffic to the nginx upstream.
@@ -276,7 +309,7 @@ impl QuicEndpoint {
                             &mut self.recv.meta,
                         )
                     }) {
-                        Ok(Ok(m)) => self.dispatch_recv_batch(&mut state, &cancel, m).await?,
+                        Ok(Ok(m)) => self.dispatch_recv_batch(&mut state, &cancel, m).await,
                         Ok(Err(e)) => return Err(e),
                         Err(_) => {} // WouldBlock: readiness auto-cleared (Ok(0) never happens on Linux)
                     }
@@ -297,7 +330,7 @@ impl QuicEndpoint {
         nat_state: &mut QuicNatState,
         cancel: &CancellationToken,
         count: usize,
-    ) -> io::Result<()> {
+    ) {
         for i in 0..count {
             let len = self.recv.meta[i].len;
             let stride = self.recv.meta[i].stride;
@@ -312,10 +345,9 @@ impl QuicEndpoint {
                 trace!(peer = %peer, len = payload.len(), "Received UDP datagram");
                 self.metrics.inc_udp_accepted();
                 self.handle_datagram(nat_state, cancel.clone(), peer, payload)
-                    .await?;
+                    .await;
             }
         }
-        Ok(())
     }
 
     /// Handle a single UDP datagram.
@@ -325,16 +357,13 @@ impl QuicEndpoint {
     /// - Forwards passthrough traffic to nginx upstream
     /// - Delivers claimed UDP-QSP traffic to registered sessions
     ///
-    /// # Errors
-    ///
-    /// Returns an error if sending to the upstream socket fails.
     async fn handle_datagram(
         &self,
         state: &mut QuicNatState,
         cancel: CancellationToken,
         peer: SocketAddr,
         payload: Vec<u8>,
-    ) -> io::Result<()> {
+    ) {
         let verdict = classify_quic_datagram(&payload);
         trace!(peer = %peer, verdict = ?verdict, payload_len = payload.len(), "QUIC datagram verdict");
 
@@ -342,23 +371,11 @@ impl QuicEndpoint {
             QuicVerdict::Drop => {
                 debug!(peer = %peer, payload_len = payload.len(), "QUIC datagram dropped");
                 self.metrics.inc_dropped();
-                return Ok(());
             }
             QuicVerdict::Pass => {
                 debug!(peer = %peer, payload_len = payload.len(), "QUIC datagram passed to upstream");
-                self.metrics.inc_passed();
-                let upstream_socket = state
-                    .get_or_create_upstream(self.socket.clone(), self.nginx_upstream, peer, cancel)
-                    .await?;
-                match upstream_socket.send(&payload).await {
-                    Ok(sent) => {
-                        trace!(peer = %peer, sent = sent, "Sent datagram to upstream");
-                    }
-                    Err(e) => {
-                        self.metrics.inc_upstream_send_failures();
-                        warn!(peer = %peer, error = %e, "Failed to send datagram to upstream");
-                    }
-                }
+                self.forward_to_upstream(state, cancel, peer, &payload)
+                    .await;
             }
             QuicVerdict::Short { dcid_prefix } => {
                 if let Some(tx) = self.registry.lookup_cid(dcid_prefix) {
@@ -389,28 +406,53 @@ impl QuicEndpoint {
                         payload_len = payload.len(),
                         "QUIC datagram passed to upstream (no session claim)"
                     );
-                    self.metrics.inc_passed();
-                    let upstream_socket = state
-                        .get_or_create_upstream(
-                            self.socket.clone(),
-                            self.nginx_upstream,
-                            peer,
-                            cancel,
-                        )
-                        .await?;
-                    match upstream_socket.send(&payload).await {
-                        Ok(sent) => {
-                            trace!(peer = %peer, sent = sent, dcid_prefix = ?dcid_prefix, "Sent datagram to upstream");
-                        }
-                        Err(e) => {
-                            self.metrics.inc_upstream_send_failures();
-                            warn!(peer = %peer, error = %e, dcid_prefix = ?dcid_prefix, "Failed to send datagram to upstream");
-                        }
-                    }
+                    self.forward_to_upstream(state, cancel, peer, &payload)
+                        .await;
                 }
             }
         }
-        Ok(())
+    }
+
+    async fn forward_to_upstream(
+        &self,
+        state: &mut QuicNatState,
+        cancel: CancellationToken,
+        peer: SocketAddr,
+        payload: &[u8],
+    ) {
+        self.metrics.inc_passed();
+        let upstream_socket = match state
+            .get_or_create_upstream(
+                self.upstream_socket_factory.as_ref(),
+                self.socket.clone(),
+                self.nginx_upstream,
+                peer,
+                cancel,
+            )
+            .await
+        {
+            Ok(socket) => socket,
+            Err(error) => {
+                self.metrics.inc_udp_upstream_setup_failure_drops();
+                warn!(
+                    peer = %peer,
+                    upstream_addr = %self.nginx_upstream,
+                    error = %error,
+                    "Failed to set up UDP upstream socket, dropping datagram"
+                );
+                return;
+            }
+        };
+
+        match upstream_socket.send(payload).await {
+            Ok(sent) => {
+                trace!(peer = %peer, sent, "Sent datagram to upstream");
+            }
+            Err(error) => {
+                self.metrics.inc_upstream_send_failures();
+                warn!(peer = %peer, error = %error, "Failed to send datagram to upstream");
+            }
+        }
     }
 
     /// Spawn a task that reads from upstream and forwards to the peer.
@@ -540,6 +582,7 @@ impl QuicNatState {
     /// Returns an error if socket binding or connection fails.
     async fn get_or_create_upstream(
         &mut self,
+        upstream_socket_factory: &dyn UpstreamSocketFactory,
         downstream: Arc<UdpSocket>,
         upstream_addr: SocketAddr,
         peer: SocketAddr,
@@ -552,18 +595,14 @@ impl QuicNatState {
             return Ok(entry.socket.clone());
         }
 
-        let bind_addr = match upstream_addr {
-            SocketAddr::V4(_) => SocketAddr::from(([0u8; 4], 0)),
-            SocketAddr::V6(_) => SocketAddr::from(([0u16; 8], 0)),
-        };
-        let socket = UdpSocket::bind(bind_addr).await?;
-        let local_addr = socket.local_addr()?;
-        socket.connect(upstream_addr).await?;
+        let socket = upstream_socket_factory
+            .create_connected(upstream_addr)
+            .await?;
         let socket = Arc::new(socket);
 
         debug!(
             peer = %peer,
-            local_addr = %local_addr,
+            local_addr = ?socket.local_addr().ok(),
             upstream_addr = %upstream_addr,
             "Created new upstream socket for NAT peer"
         );
@@ -603,9 +642,11 @@ impl QuicNatState {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::num::NonZeroUsize;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use slt_core::config::ServerConfig;
@@ -618,11 +659,50 @@ mod tests {
     use tokio::time::{Instant, timeout, timeout_at};
     use tokio_util::sync::CancellationToken;
 
-    use super::{PeerEntry, QuicEndpoint, QuicNatState};
+    use super::{
+        PeerEntry, QuicEndpoint, QuicNatState, TokioUpstreamSocketFactory, UpstreamSocketFactory,
+        UpstreamSocketFuture,
+    };
     use crate::metrics::Metrics;
     use crate::registry::SessionRegistry;
     use crate::sessions::{SessionEvent, SessionTx};
     use crate::{AssignedIp, ClientId};
+
+    struct FailingUpstreamSocketFactory {
+        failure_count: usize,
+        attempts: AtomicUsize,
+    }
+
+    impl FailingUpstreamSocketFactory {
+        const fn new(failure_count: usize) -> Self {
+            Self {
+                failure_count,
+                attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::Relaxed)
+        }
+    }
+
+    impl UpstreamSocketFactory for FailingUpstreamSocketFactory {
+        fn create_connected(&self, upstream_addr: SocketAddr) -> UpstreamSocketFuture {
+            let attempt = self.attempts.fetch_add(1, Ordering::Relaxed);
+            let should_fail = attempt < self.failure_count;
+            Box::pin(async move {
+                if should_fail {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrNotAvailable,
+                        "injected upstream socket setup failure",
+                    ));
+                }
+                TokioUpstreamSocketFactory
+                    .create_connected(upstream_addr)
+                    .await
+            })
+        }
+    }
 
     /// The GRO stride-split math must produce one range per coalesced datagram,
     /// with the last range clipped to `len`, and never panic/infinite-loop on a
@@ -849,6 +929,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_continues_after_upstream_socket_setup_failure() {
+        let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+
+        let mut config = test_config();
+        config.network.nginx_udp_upstream = upstream_addr;
+
+        let registry = Arc::new(SessionRegistry::new());
+        let metrics = Arc::new(Metrics::default());
+        let factory = Arc::new(FailingUpstreamSocketFactory::new(1));
+        let mut endpoint = QuicEndpoint::bind(&config, registry, metrics.clone())
+            .unwrap()
+            .with_upstream_socket_factory(factory.clone());
+        let listen_addr = endpoint.socket().local_addr().unwrap();
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let run_task = tokio::spawn(async move { endpoint.run(cancel_clone).await });
+
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let payload = make_quic_long_header();
+        peer.send_to(&payload, listen_addr).await.unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if metrics.snapshot().udp_upstream_setup_failure_drops == 1 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "failure metric did not update");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !run_task.is_finished(),
+            "UDP worker stopped after setup failure"
+        );
+
+        peer.send_to(&payload, listen_addr).await.unwrap();
+        let mut buf = [0u8; 256];
+        let (len, _) = timeout(Duration::from_secs(1), upstream_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, payload.len());
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.udp_accepted, 2);
+        assert_eq!(snapshot.passed, 2);
+        assert_eq!(snapshot.udp_upstream_setup_failure_drops, 1);
+        assert_eq!(factory.attempts(), 2);
+
+        cancel.cancel();
+        let run_result = timeout(Duration::from_secs(1), run_task).await.unwrap();
+        assert!(run_result.unwrap().is_ok());
+    }
+
+    #[tokio::test]
     async fn run_sweep_idle_recreates_nat_socket_after_timeout() {
         let upstream_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream_socket.local_addr().unwrap();
@@ -905,12 +1041,45 @@ mod tests {
         let payload = make_non_quic_packet();
 
         let before = endpoint.metrics.snapshot().dropped;
-        let result = endpoint
+        endpoint
             .handle_datagram(&mut state, cancel, peer, payload)
             .await;
-        assert!(result.is_ok());
         let after = endpoint.metrics.snapshot().dropped;
         assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_datagram_upstream_setup_failures_drop_and_continue() {
+        let factory = Arc::new(FailingUpstreamSocketFactory::new(2));
+        let endpoint = make_endpoint()
+            .await
+            .with_upstream_socket_factory(factory.clone());
+        let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let cancel = CancellationToken::new();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
+        let before = endpoint.metrics.snapshot();
+
+        endpoint
+            .handle_datagram(&mut state, cancel.clone(), peer, make_quic_long_header())
+            .await;
+        endpoint
+            .handle_datagram(
+                &mut state,
+                cancel,
+                peer,
+                make_quic_short_header(&[0xBE; QUIC_DCID_PREFIX_LEN]),
+            )
+            .await;
+
+        let after = endpoint.metrics.snapshot();
+        assert_eq!(after.passed, before.passed + 2);
+        assert_eq!(after.dropped, before.dropped);
+        assert_eq!(
+            after.udp_upstream_setup_failure_drops,
+            before.udp_upstream_setup_failure_drops + 2
+        );
+        assert_eq!(factory.attempts(), 2);
+        assert!(state.peers.is_empty());
     }
 
     #[tokio::test]
@@ -939,10 +1108,9 @@ mod tests {
         let payload = make_quic_long_header();
 
         let before = endpoint.metrics.snapshot().passed;
-        let result = endpoint
+        endpoint
             .handle_datagram(&mut state, cancel.clone(), peer, payload.clone())
             .await;
-        assert!(result.is_ok());
 
         // Receive the forwarded packet
         let mut buf = vec![0u8; 256];
@@ -993,10 +1161,9 @@ mod tests {
         );
 
         let before = metrics.snapshot();
-        let result = endpoint
+        endpoint
             .handle_datagram(&mut state, cancel, peer, payload)
             .await;
-        assert!(result.is_ok());
         let after = metrics.snapshot();
         assert_eq!(after.passed, before.passed + 1);
         assert_eq!(
@@ -1032,10 +1199,9 @@ mod tests {
         let payload = make_quic_short_header(&dcid_prefix);
 
         let before = endpoint.metrics.snapshot().claimed;
-        let result = endpoint
+        endpoint
             .handle_datagram(&mut state, cancel, peer, payload)
             .await;
-        assert!(result.is_ok());
 
         // Check that the session event was sent
         let event = timeout(Duration::from_millis(100), rx.recv())
@@ -1082,10 +1248,9 @@ mod tests {
         let payload = make_quic_short_header(&dcid_prefix);
 
         let before = endpoint.metrics.snapshot().passed;
-        let result = endpoint
+        endpoint
             .handle_datagram(&mut state, cancel.clone(), peer, payload.clone())
             .await;
-        assert!(result.is_ok());
 
         // Should be forwarded to upstream
         let mut buf = vec![0u8; 256];
@@ -1137,10 +1302,9 @@ mod tests {
         );
 
         let before = metrics.snapshot();
-        let result = endpoint
+        endpoint
             .handle_datagram(&mut state, cancel, peer, payload)
             .await;
-        assert!(result.is_ok());
         let after = metrics.snapshot();
         assert_eq!(after.passed, before.passed + 1);
         assert_eq!(
@@ -1176,11 +1340,9 @@ mod tests {
         let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
         let payload = make_quic_short_header(&dcid_prefix);
 
-        // Should not error even when channel is closed (try_send fails gracefully)
-        let result = endpoint
+        endpoint
             .handle_datagram(&mut state, cancel, peer, payload)
             .await;
-        assert!(result.is_ok());
 
         // Metric should still be incremented (we tried to claim)
         let snapshot = endpoint.metrics.snapshot();
@@ -1224,8 +1386,7 @@ mod tests {
                 peer,
                 make_quic_short_header(&dcid_prefix),
             )
-            .await
-            .unwrap();
+            .await;
         // Second datagram overflows while the channel is still open.
         endpoint
             .handle_datagram(
@@ -1234,8 +1395,7 @@ mod tests {
                 peer,
                 make_quic_short_header(&dcid_prefix),
             )
-            .await
-            .unwrap();
+            .await;
 
         let after = metrics.snapshot();
         assert_eq!(
@@ -1251,15 +1411,22 @@ mod tests {
         let upstream_addr = upstream_socket.local_addr().unwrap();
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let factory = TokioUpstreamSocketFactory;
         let cancel = CancellationToken::new();
         let peer = SocketAddr::from(([127, 0, 0, 1], 12345));
 
         let socket1 = state
-            .get_or_create_upstream(downstream.clone(), upstream_addr, peer, cancel.clone())
+            .get_or_create_upstream(
+                &factory,
+                downstream.clone(),
+                upstream_addr,
+                peer,
+                cancel.clone(),
+            )
             .await
             .unwrap();
         let socket2 = state
-            .get_or_create_upstream(downstream, upstream_addr, peer, cancel)
+            .get_or_create_upstream(&factory, downstream, upstream_addr, peer, cancel)
             .await
             .unwrap();
 
@@ -1274,16 +1441,23 @@ mod tests {
         let upstream_addr = upstream_socket.local_addr().unwrap();
 
         let mut state = QuicNatState::new(NonZeroUsize::new(1024).unwrap());
+        let factory = TokioUpstreamSocketFactory;
         let cancel = CancellationToken::new();
         let peer1 = SocketAddr::from(([127, 0, 0, 1], 12345));
         let peer2 = SocketAddr::from(([127, 0, 0, 1], 12346));
 
         let socket1 = state
-            .get_or_create_upstream(downstream.clone(), upstream_addr, peer1, cancel.clone())
+            .get_or_create_upstream(
+                &factory,
+                downstream.clone(),
+                upstream_addr,
+                peer1,
+                cancel.clone(),
+            )
             .await
             .unwrap();
         let socket2 = state
-            .get_or_create_upstream(downstream, upstream_addr, peer2, cancel)
+            .get_or_create_upstream(&factory, downstream, upstream_addr, peer2, cancel)
             .await
             .unwrap();
 
@@ -1304,6 +1478,7 @@ mod tests {
 
         // Create state with LRU size of 2
         let mut state = QuicNatState::new(NonZeroUsize::new(2).unwrap());
+        let factory = TokioUpstreamSocketFactory;
         let cancel = CancellationToken::new();
 
         let peer1 = SocketAddr::from(([127, 0, 0, 1], 12345));
@@ -1312,17 +1487,29 @@ mod tests {
 
         // Create entries for peer1 and peer2 (fills LRU)
         let _socket1 = state
-            .get_or_create_upstream(downstream.clone(), upstream_addr, peer1, cancel.clone())
+            .get_or_create_upstream(
+                &factory,
+                downstream.clone(),
+                upstream_addr,
+                peer1,
+                cancel.clone(),
+            )
             .await
             .unwrap();
         let _socket2 = state
-            .get_or_create_upstream(downstream.clone(), upstream_addr, peer2, cancel.clone())
+            .get_or_create_upstream(
+                &factory,
+                downstream.clone(),
+                upstream_addr,
+                peer2,
+                cancel.clone(),
+            )
             .await
             .unwrap();
 
         // Create entry for peer3 (should evict peer1)
         let _socket3 = state
-            .get_or_create_upstream(downstream, upstream_addr, peer3, cancel)
+            .get_or_create_upstream(&factory, downstream, upstream_addr, peer3, cancel)
             .await
             .unwrap();
 

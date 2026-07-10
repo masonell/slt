@@ -19,6 +19,7 @@ pub struct Metrics {
     tcp_empty_classification_evictions: AtomicU64,
     tcp_classification_timeouts: AtomicU64,
     upstream_send_failures: AtomicU64,
+    udp_upstream_setup_failure_drops: AtomicU64,
     tun_session_queue_full_drops: AtomicU64,
     tun_writer_queue_full_drops: AtomicU64,
     udp_claim_channel_full_drops: AtomicU64,
@@ -64,6 +65,8 @@ pub struct MetricsSnapshot {
     pub tcp_classification_timeouts: u64,
     /// Failed sends to upstream UDP socket.
     pub upstream_send_failures: u64,
+    /// UDP passthrough datagrams dropped because upstream socket setup failed.
+    pub udp_upstream_setup_failure_drops: u64,
     /// TUN packets dropped because a session event queue was full.
     pub tun_session_queue_full_drops: u64,
     /// TUN packets dropped because the TUN writer queue was full.
@@ -183,6 +186,15 @@ impl Metrics {
         trace!(
             upstream_send_failures = count,
             "Failed to send datagram to upstream"
+        );
+    }
+
+    /// Increment UDP-upstream-setup-failure drop counter.
+    pub fn inc_udp_upstream_setup_failure_drops(&self) {
+        let count = inc(&self.udp_upstream_setup_failure_drops);
+        trace!(
+            udp_upstream_setup_failure_drops = count,
+            "UDP passthrough datagram dropped: upstream socket setup failed"
         );
     }
 
@@ -377,6 +389,9 @@ impl Metrics {
                 .load(Ordering::Relaxed),
             tcp_classification_timeouts: self.tcp_classification_timeouts.load(Ordering::Relaxed),
             upstream_send_failures: self.upstream_send_failures.load(Ordering::Relaxed),
+            udp_upstream_setup_failure_drops: self
+                .udp_upstream_setup_failure_drops
+                .load(Ordering::Relaxed),
             tun_session_queue_full_drops: self.tun_session_queue_full_drops.load(Ordering::Relaxed),
             tun_writer_queue_full_drops: self.tun_writer_queue_full_drops.load(Ordering::Relaxed),
             udp_claim_channel_full_drops: self.udp_claim_channel_full_drops.load(Ordering::Relaxed),

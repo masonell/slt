@@ -499,6 +499,7 @@ fn spawn_metrics_task(
                         tcp_empty_classification_evictions = snap.tcp_empty_classification_evictions,
                         tcp_classification_timeouts = snap.tcp_classification_timeouts,
                         upstream_send_failures = snap.upstream_send_failures,
+                        udp_upstream_setup_failure_drops = snap.udp_upstream_setup_failure_drops,
                         tun_session_queue_full_drops = snap.tun_session_queue_full_drops,
                         tun_writer_queue_full_drops = snap.tun_writer_queue_full_drops,
                         udp_claim_channel_full_drops = snap.udp_claim_channel_full_drops,
