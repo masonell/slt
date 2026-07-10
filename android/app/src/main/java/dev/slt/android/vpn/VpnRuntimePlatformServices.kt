@@ -11,6 +11,7 @@ internal fun <N> bindProtectedSocket(
     protected: Boolean,
     currentUnderlyingNetworks: () -> List<N>,
     bindSocket: (N) -> SocketProtectionResult,
+    onBound: (N) -> Unit = {},
 ): SocketProtectionResult {
     if (!protected) {
         return SocketProtectionResult.PROTECT_REJECTED
@@ -23,7 +24,10 @@ internal fun <N> bindProtectedSocket(
 
     for (network in networks) {
         when (val result = bindSocket(network)) {
-            SocketProtectionResult.PROTECTED -> return result
+            SocketProtectionResult.PROTECTED -> {
+                onBound(network)
+                return result
+            }
             SocketProtectionResult.BIND_FAILED -> Unit
             else -> return result
         }
@@ -35,6 +39,7 @@ internal fun <N> bindProtectedSocket(
 internal class VpnRuntimePlatformServices(
     private val protect: (Int) -> Boolean,
     private val currentUnderlyingNetworks: () -> List<Network>,
+    private val onSocketBound: (SocketKind, Network) -> Unit,
     private val dnsResolver: UnderlyingNetworkDnsResolver,
     private val logTag: String,
 ) {
@@ -47,7 +52,10 @@ internal class VpnRuntimePlatformServices(
                 dnsResolver.resolveHost(hostname)
         }
 
-    private fun protectAndBindSocket(fd: Int, kind: SocketKind): SocketProtectionResult {
+    private fun protectAndBindSocket(
+        fd: Int,
+        kind: SocketKind,
+    ): SocketProtectionResult {
         val protected = try {
             protect(fd)
         } catch (error: Exception) {
@@ -60,6 +68,17 @@ internal class VpnRuntimePlatformServices(
                 protected = protected,
                 currentUnderlyingNetworks = currentUnderlyingNetworks,
                 bindSocket = { network -> bindSocket(fd, kind, network) },
+                onBound = { network ->
+                    try {
+                        onSocketBound(kind, network)
+                    } catch (error: Exception) {
+                        Log.w(
+                            logTag,
+                            "Failed to record bound SLT socket: fd=$fd kind=$kind network=$network",
+                            error,
+                        )
+                    }
+                },
             )
         } catch (error: Exception) {
             Log.w(logTag, "Failed to use underlying networks: fd=$fd kind=$kind", error)

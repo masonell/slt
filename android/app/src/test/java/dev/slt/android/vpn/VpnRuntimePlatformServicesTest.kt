@@ -3,6 +3,7 @@ package dev.slt.android.vpn
 import dev.slt.android.uniffi.SocketProtectionResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class VpnRuntimePlatformServicesTest {
@@ -58,6 +59,7 @@ class VpnRuntimePlatformServicesTest {
     @Test
     fun bindFailureFallsBackToNextUnderlyingNetwork() {
         val attemptedNetworks = mutableListOf<String>()
+        var boundNetwork: String? = null
         val result = bindProtectedSocket(
             protected = true,
             currentUnderlyingNetworks = { listOf("wifi", "cellular") },
@@ -69,10 +71,12 @@ class VpnRuntimePlatformServicesTest {
                     SocketProtectionResult.PROTECTED
                 }
             },
+            onBound = { network -> boundNetwork = network },
         )
 
         assertEquals(SocketProtectionResult.PROTECTED, result)
         assertEquals(listOf("wifi", "cellular"), attemptedNetworks)
+        assertEquals("cellular", boundNetwork)
     }
 
     @Test
@@ -113,6 +117,7 @@ class VpnRuntimePlatformServicesTest {
     @Test
     fun allBindFailuresReturnBindFailed() {
         val attemptedNetworks = mutableListOf<String>()
+        var boundNetwork: String? = null
         val result = bindProtectedSocket(
             protected = true,
             currentUnderlyingNetworks = { listOf("wifi", "cellular") },
@@ -120,9 +125,11 @@ class VpnRuntimePlatformServicesTest {
                 attemptedNetworks += network
                 SocketProtectionResult.BIND_FAILED
             },
+            onBound = { network -> boundNetwork = network },
         )
 
         assertEquals(SocketProtectionResult.BIND_FAILED, result)
         assertEquals(listOf("wifi", "cellular"), attemptedNetworks)
+        assertNull(boundNetwork)
     }
 }

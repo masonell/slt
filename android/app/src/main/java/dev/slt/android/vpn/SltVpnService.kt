@@ -14,6 +14,7 @@ import dev.slt.android.SltNative
 import dev.slt.android.profile.SltProfile
 import dev.slt.android.profile.store.ProfileRepository
 import dev.slt.android.uniffi.ClientConfigSummary
+import dev.slt.android.uniffi.SocketKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -29,6 +30,7 @@ class SltVpnService : VpnService() {
     private var terminalStatusReported = false
 
     private val stateLock = Any()
+    private val underlyingNetworkPublicationSequencer = UnderlyingNetworkPublicationSequencer()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var startJob: Job? = null
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
@@ -52,6 +54,7 @@ class SltVpnService : VpnService() {
         VpnRuntimePlatformServices(
             protect = ::protect,
             currentUnderlyingNetworks = ::currentUnderlyingNetworks,
+            onSocketBound = ::recordSocketBinding,
             dnsResolver = dnsResolver,
             logTag = TAG,
         )
@@ -178,6 +181,9 @@ class SltVpnService : VpnService() {
             .setSession(profile.metadata.name)
             .setMtu(summary.tunMtu)
             .addAddress(summary.assignedIpv4, CLIENT_ADDRESS_PREFIX)
+        configureInitialUnderlyingNetwork(preEstablishUnderlyingNetwork) { networks ->
+            builder.setUnderlyingNetworks(networks.toTypedArray())
+        }
         profileApplier.apply(builder, profile)
 
         val fd = builder.establish()
@@ -206,6 +212,7 @@ class SltVpnService : VpnService() {
                 clientToml = profile.clientToml,
                 tunMtu = summary.tunMtu,
                 underlyingNetwork = initialUnderlyingNetwork,
+                boundUnderlyingNetworks = emptyMap(),
             )
         }
         val selectedUnderlyingNetwork = startNetworkWatcher(initialUnderlyingNetwork)
@@ -247,13 +254,50 @@ class SltVpnService : VpnService() {
     }
 
     private fun publishUnderlyingNetwork(network: Network?) {
-        synchronized(stateLock) {
-            val tunnel = activeTunnel ?: return
-            if (tornDown) {
-                return
-            }
-            activeTunnel = tunnel.copy(underlyingNetwork = network)
+        publishUnderlyingNetworkIfActive(network)
+    }
+
+    private fun publishUnderlyingNetworkIfActive(network: Network?): Boolean =
+        updateUnderlyingNetworkPublication { tunnel ->
+            tunnel.copy(underlyingNetwork = network)
         }
+
+    private fun recordSocketBinding(kind: SocketKind, network: Network) {
+        updateUnderlyingNetworkPublication { tunnel ->
+            tunnel.copy(
+                boundUnderlyingNetworks = tunnel.boundUnderlyingNetworks + (kind to network),
+            )
+        }
+    }
+
+    private fun updateUnderlyingNetworkPublication(
+        update: (ActiveTunnel) -> ActiveTunnel,
+    ): Boolean = underlyingNetworkPublicationSequencer.sequence {
+        val networks = synchronized(stateLock) {
+            val tunnel = activeTunnel
+            if (tunnel == null || tornDown) {
+                null
+            } else {
+                val updated = update(tunnel)
+                activeTunnel = updated
+                liveUnderlyingNetworks(
+                    selectedNetwork = updated.underlyingNetwork,
+                    boundNetworks = updated.boundUnderlyingNetworks,
+                )
+            }
+        } ?: return@sequence false
+
+        try {
+            val published = publishLiveUnderlyingNetworks(networks) { currentNetworks ->
+                setUnderlyingNetworks(currentNetworks.toTypedArray())
+            }
+            if (!published) {
+                Log.w(TAG, "Android rejected the VPN underlying-network update")
+            }
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Failed to publish the VPN underlying network", error)
+        }
+        true
     }
 
     private suspend fun loadActiveProfile(): SltProfile =
@@ -309,12 +353,8 @@ class SltVpnService : VpnService() {
     /// Notify Rust that the underlying network changed. Rust owns reconnect and
     /// path recovery policy; Kotlin only maintains Android platform state.
     private fun notifyNetworkChanged(network: Network?) {
-        synchronized(stateLock) {
-            val tunnel = activeTunnel ?: return
-            if (tornDown) {
-                return
-            }
-            activeTunnel = tunnel.copy(underlyingNetwork = network)
+        if (!publishUnderlyingNetworkIfActive(network)) {
+            return
         }
         nativeController.notifyNetworkChanged()
     }
@@ -379,6 +419,7 @@ class SltVpnService : VpnService() {
         val clientToml: String,
         val tunMtu: Int,
         val underlyingNetwork: Network?,
+        val boundUnderlyingNetworks: Map<SocketKind, Network>,
     )
 
     companion object {
