@@ -47,6 +47,9 @@ class SltVpnService : VpnService() {
             cache = dnsCache,
             currentUnderlyingNetworks = ::currentUnderlyingNetworks,
             publishUnderlyingNetwork = ::publishUnderlyingNetwork,
+            resolveHostOnNetwork = { network, hostname ->
+                network.getAllByName(hostname).mapNotNull { address -> address.hostAddress }
+            },
             logTag = TAG,
         )
     }

@@ -1,14 +1,14 @@
 package dev.slt.android.vpn
 
-import android.net.Network
 import android.util.Log
 import dev.slt.android.uniffi.SltInteropException
 import kotlin.concurrent.thread
 
-internal class UnderlyingNetworkDnsResolver(
-    private val cache: DnsResolutionCache,
-    private val currentUnderlyingNetworks: () -> List<Network>,
-    private val publishUnderlyingNetwork: (Network?) -> Unit,
+internal class UnderlyingNetworkDnsResolver<N : Any>(
+    private val cache: DnsAddressCache,
+    private val currentUnderlyingNetworks: () -> List<N>,
+    private val publishUnderlyingNetwork: (N?) -> Unit,
+    private val resolveHostOnNetwork: (N, String) -> List<String>,
     private val logTag: String,
 ) {
     fun resolveHost(hostname: String): List<String> {
@@ -27,7 +27,7 @@ internal class UnderlyingNetworkDnsResolver(
 
         val cached = cache.load(hostname)
         if (cached.isNotEmpty()) {
-            Log.w(logTag, "Using cached DNS result for $hostname after live DNS failed")
+            logWarning("Using cached DNS result for $hostname after live DNS failed")
             return cached
         }
 
@@ -41,7 +41,7 @@ internal class UnderlyingNetworkDnsResolver(
             try {
                 warm(hostname)
             } catch (error: Exception) {
-                Log.w(logTag, "DNS cache warmup failed for $hostname", error)
+                logWarning("DNS cache warmup failed for $hostname", error)
             }
         }
     }
@@ -53,32 +53,41 @@ internal class UnderlyingNetworkDnsResolver(
             cache.save(hostname, resolved.addresses)
             return
         }
-        Log.w(logTag, "Could not warm DNS cache for $hostname: ${failures.joinToString("; ")}")
+        logWarning("Could not warm DNS cache for $hostname: ${failures.joinToString("; ")}")
     }
 
     private fun resolveHostOnNetworks(
         hostname: String,
-        networks: List<Network>,
+        networks: List<N>,
         failures: MutableList<String>,
-    ): ResolvedHost? {
+    ): ResolvedHost<N>? {
         for (network in networks) {
             try {
-                val addresses = network.getAllByName(hostname)
-                    .mapNotNull { it.hostAddress }
+                val addresses = resolveHostOnNetwork(network, hostname)
                 if (addresses.isNotEmpty()) {
                     return ResolvedHost(network, addresses)
                 }
                 failures += "network=$network: no addresses returned"
             } catch (error: Exception) {
-                Log.w(logTag, "Failed to resolve $hostname on underlying network=$network", error)
+                logWarning("Failed to resolve $hostname on underlying network=$network", error)
                 failures += "network=$network: ${error.message ?: error::class.java.simpleName}"
             }
         }
         return null
     }
 
-    private data class ResolvedHost(
-        val network: Network,
+    private fun logWarning(message: String, error: Throwable? = null) {
+        runCatching {
+            if (error == null) {
+                Log.w(logTag, message)
+            } else {
+                Log.w(logTag, message, error)
+            }
+        }
+    }
+
+    private data class ResolvedHost<N>(
+        val network: N,
         val addresses: List<String>,
     )
 }

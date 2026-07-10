@@ -40,7 +40,7 @@ internal class VpnRuntimePlatformServices(
     private val protect: (Int) -> Boolean,
     private val currentUnderlyingNetworks: () -> List<Network>,
     private val onSocketBound: (SocketKind, Network) -> Unit,
-    private val dnsResolver: UnderlyingNetworkDnsResolver,
+    private val dnsResolver: UnderlyingNetworkDnsResolver<Network>,
     private val logTag: String,
 ) {
     fun build(): PlatformServices =

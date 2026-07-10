@@ -6,13 +6,19 @@ import androidx.core.content.edit
 import org.json.JSONArray
 import org.json.JSONException
 
+internal interface DnsAddressCache {
+    fun save(hostname: String, addresses: List<String>)
+
+    fun load(hostname: String): List<String>
+}
+
 internal class DnsResolutionCache(
     private val prefs: SharedPreferences,
     private val logTag: String,
     private val maxAgeMs: Long = DEFAULT_MAX_AGE_MS,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
-) {
-    fun save(hostname: String, addresses: List<String>) {
+) : DnsAddressCache {
+    override fun save(hostname: String, addresses: List<String>) {
         val filtered = addresses.filter { it.isNotBlank() }
         if (filtered.isEmpty()) {
             return
@@ -24,7 +30,7 @@ internal class DnsResolutionCache(
         }
     }
 
-    fun load(hostname: String): List<String> {
+    override fun load(hostname: String): List<String> {
         val timestamp = prefs.getLong(timestampKey(hostname), 0L)
         if (timestamp == 0L || nowMs() - timestamp > maxAgeMs) {
             remove(hostname)
