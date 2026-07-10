@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use boring::ssl::SslAcceptor;
 use slt_core::proto::{
-    AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, Message,
-    PingPayload, PongPayload,
+    AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, CloseCode,
+    ClosePayload, Message, PingPayload, PongPayload,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::ClientId;
@@ -244,19 +244,28 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                     Ok(Some(buf)) => buf,
                     Ok(None) => break,
                     Err(err) => {
-                        // MessageError is not Display; render via Debug.
-                        warn!(error = ?err, peer_addr = ?peer_addr, "message parse error");
-                        if let Ok(channel) = as_tcp_channel(tcp) {
-                            let _ = self.send_auth_fail(channel, AuthFailCode::Unknown).await;
-                        }
+                        warn!(error = %err, peer_addr = ?peer_addr, "message parse error");
+                        self.send_protocol_error_close_best_effort(tcp, peer_addr)
+                            .await;
                         return Err(err.into());
                     }
                 };
 
-                match self
+                let step = match self
                     .handle_auth_message(msg_buf.message(), tcp, challenge, create_session)
-                    .await?
+                    .await
                 {
+                    Ok(step) => step,
+                    Err(err) => {
+                        if err.requires_protocol_close() {
+                            self.send_protocol_error_close_best_effort(tcp, peer_addr)
+                                .await;
+                        }
+                        return Err(err);
+                    }
+                };
+
+                match step {
                     AuthStep::Continue => {}
                     AuthStep::Done(result) => return Ok(result),
                 }
@@ -281,11 +290,12 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
                     .await
             }
             Message::Ping { payload } => self.handle_ping(payload, tcp).await,
-            Message::Close { .. } => {
-                trace!("received close message during auth phase");
+            Message::Close { payload } => {
+                let close = ClosePayload::decode(payload)?;
+                trace!(code = ?close.code, "received close message during auth phase");
                 Ok(AuthStep::Done(AuthPhaseResult::Completed))
             }
-            other => self.handle_unexpected_message(other, tcp).await,
+            other => Self::handle_unexpected_message(other),
         }
     }
 
@@ -348,20 +358,11 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
     }
 
     /// Handles unexpected messages during auth phase.
-    async fn handle_unexpected_message<S>(
-        &self,
-        message: Message<'_>,
-        tcp: &mut Option<SessionTcpChannel<S>>,
-    ) -> Result<AuthStep, AuthError>
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
-    {
+    fn handle_unexpected_message(message: Message<'_>) -> Result<AuthStep, AuthError> {
         warn!(message = ?message, "received unexpected message during auth phase");
-        self.send_auth_fail(as_tcp_channel(tcp)?, AuthFailCode::Unknown)
-            .await?;
-        Ok(AuthStep::Done(AuthPhaseResult::Rejected(
-            AuthFailCode::Unknown,
-        )))
+        Err(AuthError::ProtocolViolation {
+            message_type: message.ty(),
+        })
     }
 
     /// Record auth-phase metrics from the typed outcome.
@@ -431,6 +432,37 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         payload.encode(&mut buf);
         self.send_message(tcp, Message::AuthFail { payload: &buf })
             .await
+    }
+
+    async fn send_close<S>(
+        &self,
+        tcp: &mut SessionTcpChannel<S>,
+        code: CloseCode,
+    ) -> Result<(), AuthError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        let payload = ClosePayload { code };
+        let mut buf = Vec::with_capacity(1);
+        payload.encode(&mut buf);
+        self.send_message(tcp, Message::Close { payload: &buf })
+            .await
+    }
+
+    async fn send_protocol_error_close_best_effort<S>(
+        &self,
+        tcp: &mut Option<SessionTcpChannel<S>>,
+        peer_addr: Option<&SocketAddr>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        let result = match as_tcp_channel(tcp) {
+            Ok(channel) => self.send_close(channel, CloseCode::ProtocolError).await,
+            Err(err) => Err(err),
+        };
+        if let Err(err) = result {
+            warn!(error = %err, peer_addr = ?peer_addr, "failed to send protocol error close during auth phase");
+        }
     }
 
     /// Test-only accessor to validate session queue size.

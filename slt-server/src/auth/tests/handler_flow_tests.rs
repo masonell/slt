@@ -1,5 +1,51 @@
 use super::*;
 
+fn assert_protocol_error_close(buf: &[u8], limits: MessageLimits) {
+    let (message, _) = slt_core::proto::decode_message(buf, limits)
+        .unwrap()
+        .unwrap();
+    match message {
+        Message::Close { payload } => {
+            let close = ClosePayload::decode(payload).unwrap();
+            assert_eq!(close.code, CloseCode::ProtocolError);
+        }
+        _ => panic!("expected protocol error close, got {message:?}"),
+    }
+}
+
+async fn assert_pre_auth_protocol_error(message: Message<'_>) {
+    let (handler, _registry, metrics) = TestAuthHandler::builder()
+        .with_auth_timeout(Duration::from_secs(5))
+        .build_async()
+        .await;
+
+    let (server_tls, mut client_tls) = tls_pair().await;
+    let limits = MessageLimits::from_mtu(1500);
+    let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+    let mut frame = Vec::new();
+    slt_core::proto::encode_message(message, &mut frame).unwrap();
+    client_tls.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(2),
+        read_message(&mut client_tls, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_protocol_error_close(&buf, limits);
+
+    let err = handle
+        .await
+        .unwrap()
+        .expect_err("protocol violation must fail the auth phase");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.auth_failures, 1);
+    assert_eq!(snapshot.auth_rejections, 0);
+}
+
 #[test]
 fn ensure_session_queue_size_returns_ok_when_nonzero() {
     let (handler, _registry, _metrics) = TestAuthHandler::builder()
@@ -127,46 +173,29 @@ async fn auth_phase_handles_close_message() {
 }
 
 #[tokio::test]
-async fn auth_phase_rejects_unexpected_message_with_auth_fail() {
-    let (handler, _registry, _metrics) = TestAuthHandler::builder()
-        .with_auth_timeout(Duration::from_secs(5))
-        .build_async()
-        .await;
+async fn auth_phase_rejects_pre_auth_data_with_protocol_error() {
+    assert_pre_auth_protocol_error(Message::Data { packet: &[0x45] }).await;
+}
 
-    let (server_tls, mut client_tls) = tls_pair().await;
-    let limits = MessageLimits::from_mtu(1500);
+#[tokio::test]
+async fn auth_phase_rejects_pre_auth_register_cid_with_protocol_error() {
+    assert_pre_auth_protocol_error(Message::RegisterCid { payload: &[] }).await;
+}
 
-    let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+#[tokio::test]
+async fn auth_phase_rejects_invalid_auth_payload_with_protocol_error() {
+    assert_pre_auth_protocol_error(Message::Auth { payload: &[] }).await;
+}
 
-    let mut frame = Vec::new();
-    slt_core::proto::encode_message(Message::AuthOk { payload: &[] }, &mut frame).unwrap();
-    client_tls.write_all(&frame).await.unwrap();
-
-    let buf = timeout(
-        Duration::from_secs(2),
-        read_message(&mut client_tls, limits),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let (message, _) = slt_core::proto::decode_message(&buf, limits)
-        .unwrap()
-        .unwrap();
-    match message {
-        Message::AuthFail { payload } => {
-            let fail = AuthFailPayload::decode(payload).unwrap();
-            assert_eq!(fail.code, AuthFailCode::Unknown);
-        }
-        _ => panic!("expected auth fail, got {message:?}"),
-    }
-
-    let _ = handle.await.unwrap();
+#[tokio::test]
+async fn auth_phase_rejects_invalid_close_payload_with_protocol_error() {
+    assert_pre_auth_protocol_error(Message::Close { payload: &[] }).await;
 }
 
 /// Regression test for the message-parse-error path (`auth/handler.rs`):
 /// a malformed frame (unknown message type) makes `try_pop_message` return
 /// `Err(MessageError)`, which the handler must still answer with
-/// `AUTH_FAIL(Unknown)` on the wire before returning the typed error.
+/// `CLOSE(ProtocolError)` on the wire before returning the typed error.
 ///
 /// This path is security-relevant (the server must *respond* rather than drop
 /// the connection on a parse error) and carries a silent `ErrorKind`
@@ -174,7 +203,7 @@ async fn auth_phase_rejects_unexpected_message_with_auth_fail() {
 /// as `io::ErrorKind::InvalidData` via `AuthError::io_kind()`. The test pins
 /// both the on-wire response and the failure-metric count.
 #[tokio::test]
-async fn auth_phase_responds_with_auth_fail_on_malformed_frame() {
+async fn auth_phase_responds_with_protocol_error_close_on_malformed_frame() {
     let (handler, _registry, metrics) = TestAuthHandler::builder()
         .with_auth_timeout(Duration::from_secs(5))
         .build_async()
@@ -191,7 +220,7 @@ async fn auth_phase_responds_with_auth_fail_on_malformed_frame() {
     let malformed_frame = [0xFF, 0x00, 0x00, 0x00, 0x00];
     client_tls.write_all(&malformed_frame).await.unwrap();
 
-    // The server must still respond on-protocol with AUTH_FAIL(Unknown).
+    // The server reports the framing violation before terminating the stream.
     let buf = timeout(
         Duration::from_secs(2),
         read_message(&mut client_tls, limits),
@@ -199,16 +228,7 @@ async fn auth_phase_responds_with_auth_fail_on_malformed_frame() {
     .await
     .unwrap()
     .unwrap();
-    let (message, _) = slt_core::proto::decode_message(&buf, limits)
-        .unwrap()
-        .unwrap();
-    match message {
-        Message::AuthFail { payload } => {
-            let fail = AuthFailPayload::decode(payload).unwrap();
-            assert_eq!(fail.code, AuthFailCode::Unknown);
-        }
-        _ => panic!("expected auth fail for malformed frame, got {message:?}"),
-    }
+    assert_protocol_error_close(&buf, limits);
 
     // The handler returns Err(AuthError) (a MessageError, surfaced as
     // io::ErrorKind::InvalidData at the boundary) — recorded as an auth
@@ -228,6 +248,7 @@ async fn auth_phase_responds_with_auth_fail_on_malformed_frame() {
         1,
         "malformed frame must increment auth_failures"
     );
+    assert_eq!(metrics.snapshot().auth_rejections, 0);
 }
 
 #[tokio::test]

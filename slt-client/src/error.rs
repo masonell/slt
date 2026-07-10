@@ -225,6 +225,12 @@ pub enum ConnectError {
     #[error("auth connection closed by server")]
     AuthDisconnected,
 
+    /// Server terminated the authentication exchange because of a protocol
+    /// violation. Fatal because retrying the same protocol exchange will not
+    /// make it valid.
+    #[error("server reported protocol error during auth")]
+    AuthProtocolError,
+
     /// Client received an unexpected protocol message during the auth exchange.
     ///
     /// This is a client-detected protocol violation (a message that is not
@@ -317,6 +323,7 @@ impl ConnectError {
             Self::AuthRejected { .. }
             | Self::AuthTimeout
             | Self::AuthDisconnected
+            | Self::AuthProtocolError
             | Self::AuthUnexpectedMessage
             | Self::AuthTlsExport { .. }
             | Self::Frame(_)
@@ -332,8 +339,8 @@ impl ConnectError {
     ///
     /// - **Fatal** (won't self-heal): `EmptyHostname`, `TcpSocketCreate`,
     ///   `SocketProtect` (permission/platform fault), `TlsHandshake` (cert/setup fault),
-    ///   `AuthRejected`, `AuthUnexpectedMessage`, `AuthTlsExport`, protocol
-    ///   errors.
+    ///   `AuthRejected`, `AuthProtocolError`, `AuthUnexpectedMessage`,
+    ///   `AuthTlsExport`, protocol errors.
     /// - **Retry**: `SocketProtect` (transient network state),
     ///   `TcpConnectTimeout`, transient `TcpConnect`, `AuthTimeout`,
     ///   `AuthDisconnected`, `TlsHandshakeTimeout`, `DnsResolution`,
@@ -356,6 +363,7 @@ impl ConnectError {
             Self::EmptyHostname
             | Self::TcpSocketCreate { .. }
             | Self::AuthRejected { .. }
+            | Self::AuthProtocolError
             | Self::AuthUnexpectedMessage
             | Self::AuthTlsExport { .. }
             | Self::Frame(_)
@@ -442,6 +450,7 @@ mod tests {
             .stage(),
             Stage::TcpSocketCreate
         );
+        assert_eq!(ConnectError::AuthProtocolError.stage(), Stage::Auth);
         assert_eq!(ConnectError::AuthUnexpectedMessage.stage(), Stage::Auth);
         assert_eq!(
             ConnectError::Io(io::Error::other("x")).stage(),
@@ -564,6 +573,7 @@ mod tests {
             }
             .is_retriable()
         );
+        assert!(!ConnectError::AuthProtocolError.is_retriable());
         assert!(!ConnectError::AuthUnexpectedMessage.is_retriable());
         assert!(
             !ConnectError::AuthTlsExport {
@@ -766,6 +776,7 @@ mod tests {
             },
             ConnectError::AuthTimeout,
             ConnectError::AuthDisconnected,
+            ConnectError::AuthProtocolError,
             ConnectError::AuthUnexpectedMessage,
             ConnectError::AuthTlsExport {
                 source: test_error_stack(),
@@ -779,13 +790,14 @@ mod tests {
             ConnectError::Message(slt_core::proto::MessageError::DataTooLarge { len: 10, max: 5 }),
             ConnectError::Payload(PayloadError::InvalidCipher(0x99)),
         ];
-        // 18 variants: Cancelled, EmptyHostname, TcpSocketCreate, SocketProtect,
+        // 19 variants: Cancelled, EmptyHostname, TcpSocketCreate, SocketProtect,
         // TcpConnectTimeout, TcpConnect, TlsHandshakeTimeout, TlsHandshake,
-        // AuthRejected, AuthTimeout, AuthDisconnected, AuthUnexpectedMessage,
-        // AuthTlsExport, DnsResolution, Io, Frame, Message, Payload.
+        // AuthRejected, AuthTimeout, AuthDisconnected, AuthProtocolError,
+        // AuthUnexpectedMessage, AuthTlsExport, DnsResolution, Io, Frame,
+        // Message, Payload.
         assert_eq!(
             cases.len(),
-            18,
+            19,
             "representative_cases must cover every ConnectError variant; \
              update this count when adding a variant"
         );
@@ -826,11 +838,10 @@ mod tests {
                 );
             } else {
                 // Auth-stage variants must carry their auth-specific detail.
-                // AuthRejected carries its code; AuthTimeout/AuthDisconnected/
-                // AuthUnexpectedMessage/AuthTlsExport name themselves or their
-                // preserved source; proto errors are version mismatch/corruption
-                // surfaced during the auth exchange and render their own
-                // (non-auth-keyword) detail.
+                // AuthRejected carries its code; the other auth-specific
+                // variants name auth or preserve their source. Proto errors are
+                // version mismatch/corruption surfaced during the auth exchange
+                // and render their own non-auth-keyword detail.
                 match &err {
                     ConnectError::AuthRejected { code, .. } => {
                         assert!(
@@ -840,6 +851,7 @@ mod tests {
                     }
                     ConnectError::AuthTimeout
                     | ConnectError::AuthDisconnected
+                    | ConnectError::AuthProtocolError
                     | ConnectError::AuthUnexpectedMessage
                     | ConnectError::AuthTlsExport { .. } => {
                         assert!(

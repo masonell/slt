@@ -2,7 +2,7 @@
 //!
 //! [`AuthError`] covers the genuine failure paths of the inbound TLS + auth
 //! sequence: TLS handshake/setup faults, the auth-phase timeout, a peer
-//! disconnect, socket I/O, and protocol decode errors.
+//! disconnect, socket I/O, and protocol violations or decode errors.
 //!
 //! [`AuthPhaseResult`](super::types::AuthPhaseResult) is reserved for the auth
 //! loop's *outcomes* — the code the server chose to send in `AUTH_FAIL`, or the
@@ -13,7 +13,7 @@ use std::io;
 
 use boring::error::ErrorStack;
 use boring::ssl::ErrorCode;
-use slt_core::proto::{FrameError, MessageError, PayloadError};
+use slt_core::proto::{FrameError, MessageError, MessageType, PayloadError};
 
 /// A wrapper that preserves a boring TLS handshake failure, decoupled from the
 /// underlying stream type.
@@ -91,7 +91,8 @@ impl TlsError {
 /// (`Rejected(code)`), successful authentication, or normal completion are all
 /// `Ok` outcomes of the auth phase — they are not failures. [`AuthError`] covers
 /// only the genuine failure paths: TLS handshake/setup faults, the auth-phase
-/// timeout, a peer disconnect, socket I/O, and protocol decode errors.
+/// timeout, a peer disconnect, socket I/O, and protocol violations or decode
+/// errors.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     /// TLS handshake (server-side `accept`) failed.
@@ -137,6 +138,13 @@ pub enum AuthError {
         source: io::Error,
     },
 
+    /// A decoded message is not valid during the authentication phase.
+    #[error("unexpected {message_type:?} message during auth phase")]
+    ProtocolViolation {
+        /// Message type received in the invalid state.
+        message_type: MessageType,
+    },
+
     /// Protocol framing error.
     #[error(transparent)]
     Frame(#[from] FrameError),
@@ -149,6 +157,16 @@ pub enum AuthError {
 }
 
 impl AuthError {
+    /// Whether the peer should receive `CLOSE(ProtocolError)` before the auth
+    /// connection terminates.
+    #[must_use]
+    pub const fn requires_protocol_close(&self) -> bool {
+        matches!(
+            self,
+            Self::ProtocolViolation { .. } | Self::Message(_) | Self::Payload(_)
+        )
+    }
+
     /// Coarse `io::ErrorKind` projection for this failure.
     ///
     /// Used only by the binary entry point to satisfy the `handle()` ->
@@ -162,7 +180,10 @@ impl AuthError {
             Self::TlsHandshakeTimeout | Self::Timeout => io::ErrorKind::TimedOut,
             Self::ConnectionClosed => io::ErrorKind::ConnectionReset,
             Self::Connection { source } => source.kind(),
-            Self::Frame(_) | Self::Message(_) | Self::Payload(_) => io::ErrorKind::InvalidData,
+            Self::ProtocolViolation { .. }
+            | Self::Frame(_)
+            | Self::Message(_)
+            | Self::Payload(_) => io::ErrorKind::InvalidData,
         }
     }
 }
@@ -204,14 +225,17 @@ mod tests {
             AuthError::Connection {
                 source: io::Error::from(io::ErrorKind::ConnectionReset),
             },
+            AuthError::ProtocolViolation {
+                message_type: MessageType::Data,
+            },
             AuthError::Frame(FrameError::UnknownType(0xFF)),
             AuthError::Message(MessageError::DataTooLarge { len: 10, max: 5 }),
             AuthError::Payload(PayloadError::InvalidCipher(0x99)),
         ];
-        // 9 variants.
+        // 10 variants.
         assert_eq!(
             cases.len(),
-            9,
+            10,
             "representative_cases must cover every AuthError variant"
         );
         // Distinct variants via a HashSet of Discriminant values.
@@ -362,5 +386,23 @@ mod tests {
         let frame = FrameError::UnknownType(0x01);
         let err: AuthError = frame.into();
         assert!(matches!(err, AuthError::Frame(_)));
+    }
+
+    #[test]
+    fn peer_protocol_errors_require_a_protocol_close() {
+        assert!(
+            AuthError::ProtocolViolation {
+                message_type: MessageType::RegisterCid,
+            }
+            .requires_protocol_close()
+        );
+        assert!(
+            AuthError::Message(MessageError::DataTooLarge { len: 10, max: 5 })
+                .requires_protocol_close()
+        );
+        assert!(AuthError::Payload(PayloadError::InvalidCipher(0x99)).requires_protocol_close());
+        assert!(
+            !AuthError::Frame(FrameError::LengthOverflow(usize::MAX)).requires_protocol_close()
+        );
     }
 }

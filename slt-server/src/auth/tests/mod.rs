@@ -4,8 +4,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use ed25519_dalek::{Signer, SigningKey};
 use slt_core::config::ServerConfig;
 use slt_core::proto::{
-    AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthPayload, ClosePayload, Message,
-    MessageLimits, PingPayload, PongPayload,
+    AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthPayload, CloseCode, ClosePayload,
+    Message, MessageLimits, PingPayload, PongPayload,
 };
 use slt_core::types::{
     ClientId, PubKeyEd25519, ServerClient, ServerNetworkConfig, ServerTimingConfig,

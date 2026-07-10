@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
-    AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, Message, MessageLimits,
-    PingPayload, PongPayload,
+    AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, CloseCode, ClosePayload,
+    Message, MessageLimits, PingPayload, PongPayload,
 };
 use slt_core::transport::tcp::{KeyUpdater, TcpChannel, TcpWriteError};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -25,6 +25,7 @@ const AUTH_MAX_FRAME: usize = 16 * 1024;
 ///   the client id, and the assigned IPv4.
 /// - [`ConnectError::AuthTimeout`] if `AUTH_OK`/`AUTH_FAIL` does not arrive in time.
 /// - [`ConnectError::AuthDisconnected`] if the server closes the connection.
+/// - [`ConnectError::AuthProtocolError`] if the server reports a protocol violation.
 /// - [`ConnectError::AuthTlsExport`] if the TLS keying-material export fails.
 /// - Protocol decode errors surface as their typed variant.
 pub async fn authenticate(
@@ -220,9 +221,14 @@ where
             .map_err(map_auth_write_error)?;
             Ok(AuthResult::Continue)
         }
-        Message::Close { .. } => {
-            warn!("received close during auth");
-            Ok(AuthResult::Disconnected)
+        Message::Close { payload } => {
+            let close = ClosePayload::decode(payload)?;
+            warn!(code = ?close.code, "received close during auth");
+            if close.code == CloseCode::ProtocolError {
+                Err(ConnectError::AuthProtocolError)
+            } else {
+                Ok(AuthResult::Disconnected)
+            }
         }
         other => {
             warn!(message = ?other, "unexpected message during auth");
@@ -457,6 +463,30 @@ mod integration_tests {
             matches!(err, crate::error::ConnectError::AuthDisconnected),
             "expected AuthDisconnected, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn auth_classifies_protocol_error_close_as_fatal() {
+        let config = test_config();
+        let (mut client, server) = mock_transport_pair().await;
+        let mut server = MockTlsServer::new(server);
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+
+        let server_fut = async {
+            server.recv_auth_verify(&config).await?;
+            server.send_close(CloseCode::ProtocolError).await
+        };
+        let client_fut = authenticate_with_channel(&mut client, &config, &metrics);
+
+        let (client_result, server_result) = tokio::join!(client_fut, server_fut);
+        server_result.expect("server should complete without error");
+
+        let err = client_result.expect_err("client auth should fail on protocol error close");
+        assert!(
+            matches!(err, ConnectError::AuthProtocolError),
+            "expected AuthProtocolError, got {err:?}"
+        );
+        assert!(!err.is_retriable());
     }
 
     /// An unsolicited non-auth message during the auth exchange must be
