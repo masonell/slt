@@ -3,6 +3,8 @@ pub mod observer;
 mod register;
 pub mod services;
 mod session;
+#[cfg(test)]
+mod tun_tests;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,9 +30,9 @@ use crate::{auth, transport, tun};
 
 /// A non-recoverable runtime failure.
 ///
-/// Composes the two typed failure types at the `run_sessions` boundary: a
-/// connect-path failure ([`ConnectError`]) or a session-path failure
-/// ([`SessionError`]). Both preserve their sources, so the terminal
+/// Composes the typed failures at the runtime boundary: a connect-path failure
+/// ([`ConnectError`]), a session-path failure ([`SessionError`]), or a TUN task
+/// failure ([`tun::TunTaskError`]). Each preserves its source, so the terminal
 /// `{:#}` rendering carries the full cause chain. The terminal does not branch
 /// on the variant, so this is converted to `anyhow::Error` once at the
 /// [`run_client`] boundary — the design rule "typed where the caller branches;
@@ -43,13 +45,16 @@ pub enum RuntimeError {
     /// Fatal failure from an established session.
     #[error(transparent)]
     Session(#[from] SessionError),
+    /// Failure from a TUN reader or writer task.
+    #[error(transparent)]
+    Tun(#[from] tun::TunTaskError),
 }
 
 impl RuntimeError {
-    /// Whether Android should keep the VPN route installed and restart native
-    /// runtime after this terminal error.
+    /// Whether a supervising host may restart the runtime while keeping its
+    /// packet interface active after this terminal error.
     #[must_use]
-    pub fn is_android_restart_retriable(&self) -> bool {
+    pub fn is_restart_retriable(&self) -> bool {
         match self {
             Self::Connect(err) => err.is_retriable(),
             Self::Session(err) => matches!(
@@ -60,6 +65,7 @@ impl RuntimeError {
                     | session::SessionExit::ConnectionError
                     | session::SessionExit::NetworkChanged
             ),
+            Self::Tun(_) => false,
         }
     }
 }
@@ -70,22 +76,47 @@ impl RuntimeError {
 ///
 /// Returns an error if the runtime exits due to a non-recoverable condition,
 /// such as an authentication rejection, a protocol error, a non-recoverable
-/// connection or authentication failure, or a failed mandatory UDP upgrade.
+/// connection or authentication failure, a failed mandatory UDP upgrade, or
+/// an unexpected TUN task exit.
 ///
-/// Returns `Ok(())` on clean shutdown: cancellation requested, the TUN device
-/// closed, or the remote end closed the session.
+/// Returns `Ok(())` when cancellation or a stop command requests clean
+/// shutdown.
 pub async fn run_client<S>(
     config: ClientConfig,
     tun_handles: tun::TunHandles,
-    mut tun_channels: tun::TunChannels,
+    tun_channels: tun::TunChannels,
     cancel: CancellationToken,
     services: S,
-    mut control_rx: Option<ClientCommandReceiver>,
+    control_rx: Option<ClientCommandReceiver>,
 ) -> anyhow::Result<()>
 where
     S: ClientRuntimeServices,
 {
     let metrics = Arc::new(Metrics::default());
+    run_client_with_metrics(
+        config,
+        tun_handles,
+        tun_channels,
+        cancel,
+        services,
+        control_rx,
+        metrics,
+    )
+    .await
+}
+
+async fn run_client_with_metrics<S>(
+    config: ClientConfig,
+    mut tun_handles: tun::TunHandles,
+    mut tun_channels: tun::TunChannels,
+    cancel: CancellationToken,
+    services: S,
+    mut control_rx: Option<ClientCommandReceiver>,
+    metrics: Arc<Metrics>,
+) -> anyhow::Result<()>
+where
+    S: ClientRuntimeServices,
+{
     let metrics_reporter = spawn_metrics_task(
         metrics.clone(),
         cancel.clone(),
@@ -100,15 +131,38 @@ where
     observer.emit(ClientEventKind::Starting);
     observer.emit(ClientEventKind::TunReady);
 
-    let result = run_sessions(
-        &config,
-        &cancel,
-        &metrics,
-        &mut tun_channels,
-        &services,
-        &mut control_rx,
-    )
-    .await;
+    let tun_fault = CancellationToken::new();
+    let result = {
+        let sessions = run_sessions(
+            &config,
+            &cancel,
+            &tun_fault,
+            &metrics,
+            &mut tun_channels,
+            &services,
+            &mut control_rx,
+        );
+        tokio::pin!(sessions);
+
+        tokio::select! {
+            biased;
+
+            tun_error = tun_handles.wait_for_exit() => {
+                if cancel.is_cancelled() {
+                    sessions.await
+                } else {
+                    tun_fault.cancel();
+                    let _ = sessions.await;
+                    Err(RuntimeError::from(tun_error))
+                }
+            }
+            result = &mut sessions => result,
+        }
+    };
+    let result = resolve_tun_channel_failure(result, &mut tun_handles).await;
+    if matches!(&result, Err(RuntimeError::Tun(_))) {
+        metrics.inc_disconnect_error();
+    }
 
     cancel.cancel();
     drop(tun_channels);
@@ -125,22 +179,37 @@ where
             warn!(error = %err, "client runtime exited with error");
             observer.emit(ClientEventKind::Error {
                 detail: format!("{err:#}"),
-                retryable: err.is_android_restart_retriable(),
+                retryable: err.is_restart_retriable(),
             });
         }
     }
     result.map_err(Into::into)
 }
 
+async fn resolve_tun_channel_failure(
+    result: Result<(), RuntimeError>,
+    tun_handles: &mut tun::TunHandles,
+) -> Result<(), RuntimeError> {
+    let Err(RuntimeError::Tun(tun::TunTaskError::ChannelClosed { task })) = result else {
+        return result;
+    };
+
+    // The channel endpoint is owned by this task, so its closure means the task
+    // is completing even if Tokio has not published the JoinHandle output yet.
+    let task_error = tun_handles.wait_for_task(task).await;
+    Err(RuntimeError::from(task_error))
+}
+
 /// Run the session loop until shutdown or fatal error.
 ///
-/// Composes the connect path ([`ConnectError`]) and the session path
-/// ([`SessionError`]) into [`RuntimeError`]; the terminal does not branch on
-/// which path failed, so `RuntimeError` is the typed composition that converts
-/// to `anyhow` once at the [`run_client`] boundary.
+/// Composes connect failures ([`ConnectError`]), session failures
+/// ([`SessionError`]), and unexpected TUN channel closure into
+/// [`RuntimeError`]. The terminal does not branch on which path failed, so
+/// `RuntimeError` converts to `anyhow` once at the [`run_client`] boundary.
 async fn run_sessions<S>(
     config: &ClientConfig,
     cancel: &CancellationToken,
+    tun_fault: &CancellationToken,
     metrics: &Arc<Metrics>,
     tun_channels: &mut tun::TunChannels,
     services: &S,
@@ -152,11 +221,15 @@ where
     let mut backoff =
         ReconnectBackoff::new(config.timing.reconnect_min, config.timing.reconnect_max);
     let mut attempt: u64 = 0;
+    let signals = RuntimeSignals {
+        shutdown: cancel,
+        tun_fault,
+    };
 
     loop {
         match try_connect(
             config,
-            cancel,
+            signals,
             metrics,
             &mut backoff,
             &mut attempt,
@@ -176,16 +249,24 @@ where
                     services,
                     control_rx.as_mut(),
                 );
-                match handle_session_exit(session.run().await, cancel) {
+                match handle_session_exit(session.run(signals.tun_fault).await, signals.shutdown) {
                     SessionAction::Break => break Ok(()),
                     // The session path flows a typed `SessionError` to the
                     // terminal directly. The error carries its preserved source
                     // (proto error, io::Error, etc.) and renders useful,
                     // stage-specific detail via `{:#}`.
                     SessionAction::Fatal(err) => break Err(RuntimeError::from(err)),
+                    SessionAction::TunChannelClosed(task) => {
+                        break Err(RuntimeError::from(tun::TunTaskError::ChannelClosed {
+                            task,
+                        }));
+                    }
+                    SessionAction::TunFault => {
+                        break Err(RuntimeError::from(tun::TunTaskError::FaultSignalled));
+                    }
                     SessionAction::Reconnect => {
                         schedule_reconnect(
-                            cancel,
+                            signals,
                             &mut backoff,
                             services.observer(),
                             attempt + 1,
@@ -199,8 +280,17 @@ where
             ConnectOutcome::Reconnect => {} // backoff already handled in try_connect
             ConnectOutcome::FatalError(err) => break Err(RuntimeError::from(err)),
             ConnectOutcome::Shutdown => break Ok(()),
+            ConnectOutcome::TunFault => {
+                break Err(RuntimeError::from(tun::TunTaskError::FaultSignalled));
+            }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeSignals<'a> {
+    shutdown: &'a CancellationToken,
+    tun_fault: &'a CancellationToken,
 }
 
 /// Outcome of a connection attempt.
@@ -213,6 +303,8 @@ enum ConnectOutcome {
     FatalError(ConnectError),
     /// Shutdown requested.
     Shutdown,
+    /// Runtime supervision observed a TUN task failure.
+    TunFault,
 }
 
 /// Action to take after a session exits.
@@ -221,6 +313,10 @@ enum SessionAction {
     Break,
     /// Fatal error; exit with the typed session error.
     Fatal(SessionError),
+    /// A TUN packet channel closed before its task result was available.
+    TunChannelClosed(tun::TunTask),
+    /// Runtime supervision requested cleanup for an observed TUN task failure.
+    TunFault,
     /// Reconnect to the server (caller should sleep backoff).
     Reconnect,
     /// Reconnect to the server immediately.
@@ -230,7 +326,7 @@ enum SessionAction {
 /// Attempt to connect and authenticate with the server.
 async fn try_connect<S>(
     config: &ClientConfig,
-    cancel: &CancellationToken,
+    signals: RuntimeSignals<'_>,
     metrics: &Arc<Metrics>,
     backoff: &mut ReconnectBackoff,
     attempt: &mut u64,
@@ -240,7 +336,10 @@ async fn try_connect<S>(
 where
     S: ClientRuntimeServices,
 {
-    if cancel.is_cancelled() {
+    if signals.tun_fault.is_cancelled() {
+        return ConnectOutcome::TunFault;
+    }
+    if signals.shutdown.is_cancelled() {
         return ConnectOutcome::Shutdown;
     }
 
@@ -254,12 +353,15 @@ where
         .observer()
         .emit(ClientEventKind::Connecting { attempt: *attempt });
 
-    let connect = connect_authenticated(config, cancel, metrics, services);
+    let connect = connect_authenticated(config, signals.shutdown, metrics, services);
     tokio::pin!(connect);
     let result = tokio::select! {
+        biased;
+
+        () = signals.tun_fault.cancelled() => return ConnectOutcome::TunFault,
         result = &mut connect => result,
         command = recv_control(control_rx) => {
-            return handle_connect_command(command, cancel, services.observer());
+            return handle_connect_command(command, signals.shutdown, services.observer());
         }
     };
 
@@ -268,7 +370,10 @@ where
         Err(err) => {
             // err: ConnectError — a typed failure whose variant carries the
             // site and detail. The runtime reads the variant's policy directly.
-            if cancel.is_cancelled() {
+            if signals.tun_fault.is_cancelled() {
+                return ConnectOutcome::TunFault;
+            }
+            if signals.shutdown.is_cancelled() {
                 return ConnectOutcome::Shutdown;
             }
             if !err.is_retriable() {
@@ -292,7 +397,7 @@ where
                 detail: err.to_string(),
             });
             schedule_reconnect(
-                cancel,
+                signals,
                 backoff,
                 services.observer(),
                 *attempt + 1,
@@ -329,9 +434,9 @@ where
 /// Determine what action to take based on a session outcome.
 ///
 /// Reads the [`SessionOutcome::exit`] control-flow reason to decide reconnect
-/// policy. For the fatal exits, the preserved [`SessionError`] is carried
-/// through `SessionAction::Fatal`, so the source chain survives to the
-/// terminal `{:#}` rendering.
+/// policy. Typed session failures are carried through `SessionAction::Fatal`,
+/// while TUN channel closure and supervisor-triggered cleanup retain distinct
+/// actions for runtime-level task supervision.
 fn handle_session_exit(outcome: SessionOutcome, cancel: &CancellationToken) -> SessionAction {
     if cancel.is_cancelled() {
         return SessionAction::Break;
@@ -340,10 +445,11 @@ fn handle_session_exit(outcome: SessionOutcome, cancel: &CancellationToken) -> S
     let SessionOutcome { exit, error } = outcome;
     match exit {
         session::SessionExit::Shutdown => SessionAction::Break,
-        session::SessionExit::TunClosed => {
-            warn!("tun tasks stopped; shutting down");
-            SessionAction::Break
+        session::SessionExit::TunClosed(task) => {
+            warn!("tun packet channel closed unexpectedly; shutting down");
+            SessionAction::TunChannelClosed(task)
         }
+        session::SessionExit::TunFault => SessionAction::TunFault,
         // Fatal exits. `error` is `Some` only for exits produced via
         // `SessionOutcome::from_error` (i.e. `SessionError::exit()`):
         // `ProtocolError` (proto decode failure / protocol violation) and
@@ -435,7 +541,7 @@ fn spawn_metrics_task(
 }
 
 async fn schedule_reconnect<O>(
-    cancel: &CancellationToken,
+    signals: RuntimeSignals<'_>,
     backoff: &mut ReconnectBackoff,
     observer: &ObserverSink<O>,
     next_attempt: u64,
@@ -449,7 +555,10 @@ async fn schedule_reconnect<O>(
         delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
     });
     tokio::select! {
-        () = cancel.cancelled() => {}
+        biased;
+
+        () = signals.tun_fault.cancelled() => {}
+        () = signals.shutdown.cancelled() => {}
         () = time::sleep(delay) => {}
         command = recv_control(control_rx) => {
             match command {
@@ -459,7 +568,7 @@ async fn schedule_reconnect<O>(
                     });
                 }
                 Some(ClientCommand::Stop) | None => {
-                    cancel.cancel();
+                    signals.shutdown.cancel();
                 }
             }
         }

@@ -87,7 +87,7 @@ fn spawn_tasks(
     let writer = spawn_tun_writer(tun, to_tun_rx, cancel);
 
     Ok((
-        TunHandles { reader, writer },
+        TunHandles::new(reader, writer),
         TunChannels {
             to_session_rx,
             to_tun_tx,

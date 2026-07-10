@@ -13,6 +13,7 @@ use super::{ClientSession, ClientTcpIo, SessionControl, SessionExit};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 use crate::transport::tcp::write_message_with_timeout;
+use crate::tun::TunTask;
 
 const BEST_EFFORT_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -28,8 +29,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             }
             result = self.tun_channels.to_tun_tx.send(msg_buf) => {
                 if result.is_err() {
-                    self.metrics.inc_disconnect_close();
-                    SessionControl::Close(SessionExit::TunClosed)
+                    SessionControl::Close(SessionExit::TunClosed(TunTask::Writer))
                 } else {
                     SessionControl::Continue
                 }

@@ -57,7 +57,8 @@ pub enum ClientEventKind {
     Error {
         /// Human-readable error detail.
         detail: String,
-        /// Whether Android should keep the VPN up and restart native runtime.
+        /// Whether a supervising host may restart the runtime after this
+        /// terminal error.
         retryable: bool,
     },
 

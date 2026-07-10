@@ -5,6 +5,7 @@ use slt_core::proto::{CloseCode, OwnedMessageBuf};
 use super::quic;
 use crate::runtime::control::ClientCommand;
 use crate::transport::udp_qsp::UdpQspError;
+use crate::tun::TunTask;
 
 /// Session termination reason used by the runtime to decide reconnect behavior.
 ///
@@ -23,10 +24,16 @@ pub enum SessionExit {
     /// Runtime action: reconnect.
     TcpClosed,
 
-    /// TUN interface closed (channel sender dropped).
+    /// A TUN task-owned packet channel closed unexpectedly.
     ///
-    /// Runtime action: exit cleanly without reconnect (VPN interface gone).
-    TunClosed,
+    /// Runtime action: terminal TUN runtime error.
+    TunClosed(TunTask),
+
+    /// Runtime supervision observed a TUN task failure and requested cleanup.
+    ///
+    /// Runtime action: terminal TUN runtime error already owned by the
+    /// supervisor.
+    TunFault,
 
     /// No activity received within the configured idle timeout.
     ///
@@ -136,7 +143,10 @@ mod tests {
 
         #[test]
         fn tun_closed_is_tun_closed() {
-            assert_eq!(SessionExit::TunClosed, SessionExit::TunClosed);
+            assert_eq!(
+                SessionExit::TunClosed(TunTask::Reader),
+                SessionExit::TunClosed(TunTask::Reader)
+            );
         }
 
         #[test]
@@ -179,7 +189,10 @@ mod tests {
         #[test]
         fn different_variants_are_not_equal() {
             assert_ne!(SessionExit::Shutdown, SessionExit::TcpClosed);
-            assert_ne!(SessionExit::TcpClosed, SessionExit::TunClosed);
+            assert_ne!(
+                SessionExit::TcpClosed,
+                SessionExit::TunClosed(TunTask::Reader)
+            );
             assert_ne!(SessionExit::IdleTimeout, SessionExit::ProtocolError);
         }
     }

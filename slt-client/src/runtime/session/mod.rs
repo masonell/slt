@@ -42,7 +42,7 @@ use crate::metrics::Metrics;
 use crate::transport::quic_discovery as quic;
 use crate::transport::tcp::{TcpSession, TcpTransport};
 use crate::transport::udp_qsp::{ClientTransport, UdpQspError};
-use crate::tun::TunChannels;
+use crate::tun::{TunChannels, TunTask};
 
 /// Session managing a single VPN connection.
 ///
@@ -101,8 +101,9 @@ pub(super) struct SessionOutcome {
     /// Typed source-preserving failure. `Some` for outcomes built via
     /// `from_error` (the exit is derived from a `SessionError`, which is carried
     /// here as the source); `None` for outcomes built via `from_exit` and for
-    /// clean exits (`Shutdown`, `TcpClosed`, `TunClosed`, `IdleTimeout`,
-    /// `RemoteClose`, `NetworkChanged`).
+    /// exits without a typed session error (`Shutdown`, `TcpClosed`,
+    /// `TunClosed`, `TunFault`, `IdleTimeout`, `RemoteClose`,
+    /// `NetworkChanged`).
     pub(super) error: Option<SessionError>,
 }
 
@@ -143,7 +144,7 @@ impl SessionOutcome {
         }
     }
 
-    /// Builds a clean (no-source) outcome from a control-flow exit reason.
+    /// Builds a source-less outcome from a control-flow exit reason.
     const fn from_exit(exit: SessionExit) -> Self {
         Self { exit, error: None }
     }
@@ -230,23 +231,33 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
     /// Polls for events from TCP, UDP, TUN, timers, and the cancellation token.
     /// Dispatches each event to the appropriate handler and continues until
     /// the session exits for any reason.
-    pub(super) async fn run(&mut self) -> SessionOutcome {
+    pub(super) async fn run(&mut self, tun_fault: &CancellationToken) -> SessionOutcome {
         let cancel = self.cancel.clone();
         let outcome = tokio::select! {
             biased;
 
-            () = cancel.cancelled() => None,
-            outcome = self.run_inner() => Some(outcome),
+            () = tun_fault.cancelled() => {
+                warn!("tun task failure requested session cleanup");
+                SessionOutcome::from_exit(SessionExit::TunFault)
+            }
+            () = cancel.cancelled() => {
+                info!("shutdown requested");
+                self.metrics.inc_disconnect_shutdown();
+                SessionOutcome::from_exit(SessionExit::Shutdown)
+            }
+            outcome = self.run_inner() => outcome,
         };
-        let outcome = outcome.unwrap_or_else(|| {
-            info!("shutdown requested");
-            self.metrics.inc_disconnect_shutdown();
-            SessionOutcome::from_exit(SessionExit::Shutdown)
-        });
 
-        if outcome.exit == SessionExit::Shutdown {
-            self.send_close_best_effort(CloseCode::Normal, "shutdown")
-                .await;
+        match outcome.exit {
+            SessionExit::Shutdown => {
+                self.send_close_best_effort(CloseCode::Normal, "shutdown")
+                    .await;
+            }
+            SessionExit::TunClosed(_) | SessionExit::TunFault => {
+                self.send_close_best_effort(CloseCode::Normal, "tun_failure")
+                    .await;
+            }
+            _ => {}
         }
         self.flush_pending_udp_transport_best_effort().await;
         self.shutdown_background_tasks().await;
@@ -447,11 +458,10 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             }
             SessionEvent::TunPacket(maybe) => {
                 let Some(packet) = maybe else {
-                    info!("tun channel closed");
-                    self.metrics.inc_disconnect_close();
-                    self.send_close_best_effort(CloseCode::Normal, "tun_shutdown")
-                        .await;
-                    return Ok(SessionControl::Close(SessionExit::TunClosed));
+                    warn!("tun channel closed unexpectedly");
+                    return Ok(SessionControl::Close(SessionExit::TunClosed(
+                        TunTask::Reader,
+                    )));
                 };
                 self.handle_tun_packet(packet).await
             }
@@ -1191,7 +1201,8 @@ mod tests {
             parkable_test_session(&config, &mut tun, &services, CancellationToken::new()).await;
         write_gate.park();
 
-        let outcome = time::timeout(Duration::from_secs(1), session.run())
+        let tun_fault = CancellationToken::new();
+        let outcome = time::timeout(Duration::from_secs(1), session.run(&tun_fault))
             .await
             .expect("parked DATA write must observe its deadline");
 
@@ -1210,6 +1221,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn internal_tun_fault_cleanup_does_not_count_shutdown() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let metrics = Arc::new(Metrics::default());
+        let updater = ClientKeyUpdater::new(metrics.clone());
+        let (client_stream, _server_stream) = tls_tcp_stream_pair().await;
+        let tcp_session = TcpSession {
+            transport: TcpChannel::with_key_updater(client_stream, updater),
+            peer: None,
+            sni: None,
+        };
+        let mut session = ClientSession::new(
+            &config,
+            tcp_session,
+            &mut tun,
+            CancellationToken::new(),
+            metrics.clone(),
+            &services,
+            None,
+        );
+        let tun_fault = CancellationToken::new();
+        tun_fault.cancel();
+
+        let outcome = session.run(&tun_fault).await;
+
+        assert_eq!(outcome.exit, SessionExit::TunFault);
+        assert!(outcome.error.is_none());
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.disconnect_error, 0);
+        assert_eq!(snapshot.disconnect_shutdown, 0);
+    }
+
+    #[tokio::test]
     async fn shutdown_cancels_blocked_established_tcp_write() {
         let mut config = test_config();
         config.timing.tcp_write_timeout = Duration::from_secs(60);
@@ -1225,7 +1275,8 @@ mod tests {
         let (mut session, _server_stream, write_gate) =
             parkable_test_session(&config, &mut tun, &services, cancel.clone()).await;
         write_gate.park();
-        let run = session.run();
+        let tun_fault = CancellationToken::new();
+        let run = session.run(&tun_fault);
         tokio::pin!(run);
 
         time::timeout(Duration::from_secs(1), async {
