@@ -397,8 +397,7 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
     // CID should be removed and session should fall back to TCP
     assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 
-    // The fallback sends an immediate TCP ping so a peer still on UDP-QSP flips
-    // to TCP within ~RTT, rather than waiting for the next scheduled ping.
+    // The fallback request precedes subsequent TCP DATA on the stream.
     let buf = timeout(
         Duration::from_secs(1),
         read_message_bytes(&mut client, limits),
@@ -408,7 +407,7 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
     .unwrap();
     assert!(matches!(
         decode_message(&buf, limits).unwrap().unwrap().0,
-        Message::Ping { .. }
+        Message::FallbackToTcp { .. }
     ));
 
     // Session should still accept TCP data
@@ -494,7 +493,7 @@ async fn session_retries_downlink_over_tcp_after_udp_send_failure() {
                 saw_data = true;
                 break;
             }
-            Message::Ping { .. } => {}
+            Message::FallbackToTcp { .. } => {}
             other => panic!("expected tcp data after udp send failure, got {other:?}"),
         }
     }

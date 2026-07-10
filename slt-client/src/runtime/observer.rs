@@ -31,9 +31,9 @@ pub enum TransportChangeReason {
     IdleTimeout,
     /// UDP-QSP I/O error; fell back to TCP.
     UdpError,
-    /// Server sent traffic on TCP while UDP-QSP was active.
+    /// Server explicitly requested TCP fallback.
     ServerInitiated,
-    /// TCP-to-UDP upgrade commit barrier completed.
+    /// TCP-to-UDP upgrade commit completed.
     UpgradeCommitted,
 }
 
@@ -122,7 +122,7 @@ pub enum ClientEventKind {
         /// Upgrade attempt identifier.
         upgrade_id: u64,
     },
-    /// Transport committed to UDP-QSP after the switch barrier.
+    /// UDP-QSP became the preferred outbound transport.
     UdpSwitchCommitted {
         /// Upgrade attempt identifier.
         upgrade_id: u64,
@@ -168,12 +168,12 @@ pub struct ClientEvent {
     pub handle: u64,
     /// Monotonic per-session sequence number for ordering / stale rejection.
     pub seq: u64,
-    /// Active data-path transport carrying user packets when the event fired.
+    /// Preferred outbound data-path transport when the event fired.
     ///
-    /// This reflects where packets actually travel, not UDP-QSP *availability*:
+    /// This reflects where new outbound packets travel, not UDP-QSP *availability*:
     /// it stays `Tcp` during the upgrade handshake (`UdpRegistered`,
     /// `UdpUpgradeStarted`, `UdpPathValidated`) because data still flows over
-    /// TCP until the switch barrier commits, then flips to `UdpQsp` via
+    /// TCP until the switch commit, then flips to `UdpQsp` via
     /// [`ClientEventKind::TransportChanged`].
     pub transport: Option<Transport>,
     /// Typed event payload.

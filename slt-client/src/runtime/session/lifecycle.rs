@@ -50,10 +50,10 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         }
     }
 
-    /// Sends a ping on the active transport.
+    /// Sends a ping on the preferred transport.
     ///
     /// Generates a random nonce, encodes a `PING` message, and writes it
-    /// to the active transport. If the active transport is UDP-QSP and the
+    /// to the preferred transport. If the preferred transport is UDP-QSP and the
     /// write fails, attempts TCP fallback if available.
     ///
     /// # Errors
@@ -85,7 +85,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 // socket I/O error from flush): hand it to `handle_udp_error`,
                 // which drops recoverable failures and falls back to TCP (or
                 // closes if TCP is also dead) for the rest.
-                if !self.handle_udp_error(&err) {
+                if !self.handle_udp_error(&err).await? {
                     return Err(SessionError::Connection {
                         source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
                     });
@@ -101,10 +101,10 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         Ok(())
     }
 
-    /// Sends a close frame on the active transport.
+    /// Sends a close frame on the preferred transport.
     ///
     /// Encodes a `CLOSE` message with the given code and writes it to the
-    /// active transport. If the active transport is UDP-QSP and the write
+    /// preferred transport. If the preferred transport is UDP-QSP and the write
     /// fails, attempts TCP fallback if available.
     ///
     /// # Errors
@@ -130,7 +130,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 return Err(err);
             }
             if err.is_udp_path_transport_error() {
-                if !self.handle_udp_error(&err) {
+                if !self.handle_udp_error(&err).await? {
                     return Err(SessionError::Connection {
                         source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
                     });
@@ -144,9 +144,9 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         Ok(())
     }
 
-    /// Writes a message on the active transport.
+    /// Writes a message on the preferred transport.
     ///
-    /// Dispatches to TCP or UDP-QSP based on the current active transport.
+    /// Dispatches to TCP or UDP-QSP based on the preferred transport.
     ///
     /// # Errors
     ///
@@ -223,8 +223,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         message: Message<'_>,
     ) -> Result<(), SessionError> {
         let udp =
-            self.udp_state
-                .as_active_mut()
+            self.udp_receive_transport_mut()
                 .ok_or_else(|| SessionError::ProtocolViolation {
                     detail: "udp-qsp transport missing".into(),
                 })?;

@@ -4,8 +4,8 @@ use std::io;
 use std::time::Instant;
 
 use slt_core::proto::{
-    Message, PingPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload,
-    SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
+    Message, RegisterFailCode, RegisterFailPayload, RegisterOkPayload, SwitchAckPayload,
+    SwitchOkPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
     UpgradeProbePayload,
 };
 use slt_core::types::ClientUdpQspCipher;
@@ -27,21 +27,10 @@ const MAX_UPGRADE_PROBES: u32 = 8;
 const fn upgrade_id_from_active_upgrade_state(state: &UdpUpgradeState) -> Option<u64> {
     match state {
         UdpUpgradeState::Upgrading { upgrade_id, .. }
-        | UdpUpgradeState::AwaitingSwitchCommit { upgrade_id, .. } => Some(*upgrade_id),
+        | UdpUpgradeState::AwaitingSwitchOk { upgrade_id, .. } => Some(*upgrade_id),
         UdpUpgradeState::Disabled
         | UdpUpgradeState::Idle
         | UdpUpgradeState::TcpOnlyBlockedUdp { .. } => None,
-    }
-}
-
-const fn barrier_upgrade_id_for_nonce(state: &UdpUpgradeState, nonce: u64) -> Option<u64> {
-    match state {
-        UdpUpgradeState::AwaitingSwitchCommit {
-            upgrade_id,
-            barrier_nonce,
-            ..
-        } if *barrier_nonce == nonce => Some(*upgrade_id),
-        _ => None,
     }
 }
 
@@ -161,14 +150,37 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
 
     /// Schedules a QUIC discovery retry with backoff.
     ///
-    /// Transitions to `NeedDiscovery` state (if not already) and sets the
-    /// reconnect deadline using exponential backoff with jitter.
+    /// Transitions to `NeedDiscovery` state (if not already), preserves a live
+    /// UDP transport for receive traffic, and sets the reconnect deadline using
+    /// exponential backoff with jitter.
     pub(super) fn schedule_discovery_retry(&mut self) {
-        self.udp_upgrade = if self.config.enable_upgrade || self.config.require_udp {
-            UdpUpgradeState::Idle
-        } else {
-            UdpUpgradeState::Disabled
-        };
+        self.schedule_discovery_retry_with_receive_path(true);
+    }
+
+    /// Retires the failed UDP transport and schedules discovery with backoff.
+    pub(super) fn schedule_discovery_retry_after_udp_failure(&mut self) {
+        self.schedule_discovery_retry_with_receive_path(false);
+    }
+
+    fn schedule_discovery_retry_with_receive_path(&mut self, preserve_receive_path: bool) {
+        if !(self.config.enable_upgrade || self.config.require_udp) {
+            self.retained_udp_transport = None;
+            self.udp_state = UdpState::Disabled;
+            self.udp_upgrade = UdpUpgradeState::Disabled;
+            return;
+        }
+
+        self.udp_upgrade = UdpUpgradeState::Idle;
+        if preserve_receive_path && self.retained_udp_transport.is_none() {
+            let state = std::mem::replace(&mut self.udp_state, UdpState::Disabled);
+            match state {
+                UdpState::Active(transport) => self.retained_udp_transport = Some(transport),
+                state => self.udp_state = state,
+            }
+        } else if !preserve_receive_path {
+            self.retained_udp_transport = None;
+        }
+
         let UdpState::NeedDiscovery {
             backoff,
             reconnect_at,
@@ -198,11 +210,13 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     /// cannot be refreshed but the TCP control channel is still alive.
     pub(super) fn schedule_discovery_now(&mut self) {
         if !(self.config.enable_upgrade || self.config.require_udp) {
+            self.retained_udp_transport = None;
             self.udp_state = UdpState::Disabled;
             self.udp_upgrade = UdpUpgradeState::Disabled;
             return;
         }
 
+        self.retained_udp_transport = None;
         self.udp_upgrade = UdpUpgradeState::Idle;
         self.udp_state = UdpState::NeedDiscovery {
             backoff: ReconnectBackoff::new(
@@ -332,6 +346,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             session,
             self.metrics.clone(),
         )));
+        self.retained_udp_transport = None;
         self.last_udp_rx = Instant::now();
         self.services
             .observer()
@@ -465,6 +480,16 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         let now = Instant::now();
         match &self.udp_upgrade {
             UdpUpgradeState::Disabled | UdpUpgradeState::Idle => Ok(SessionControl::Continue),
+            UdpUpgradeState::AwaitingSwitchOk { deadline, .. } => {
+                if now < *deadline {
+                    return Ok(SessionControl::Continue);
+                }
+                if !self.config.require_udp {
+                    self.request_tcp_fallback(TransportChangeReason::UdpError)
+                        .await?;
+                }
+                Ok(self.handle_udp_upgrade_timeout("switch_ok_timeout"))
+            }
             UdpUpgradeState::TcpOnlyBlockedUdp { retry_at } => {
                 if now < *retry_at {
                     return Ok(SessionControl::Continue);
@@ -498,14 +523,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 }
 
                 self.send_upgrade_probe(now).await?;
-                Ok(SessionControl::Continue)
-            }
-            UdpUpgradeState::AwaitingSwitchCommit { deadline, .. } => {
-                // `timer_at` keeps this deadline armed, so a lost barrier pong
-                // recovers here as `switch_commit_timeout` instead of stalling.
-                if now >= *deadline {
-                    return Ok(self.handle_udp_upgrade_timeout("switch_commit_timeout"));
-                }
                 Ok(SessionControl::Continue)
             }
         }
@@ -549,7 +566,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             }
             Err(err) => {
                 if err.is_udp_path_transport_error() {
-                    if !self.handle_udp_error(&err) {
+                    if !self.handle_udp_error(&err).await? {
                         return Err(SessionError::Connection {
                             source: io::Error::new(
                                 io::ErrorKind::NotConnected,
@@ -567,9 +584,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         }
     }
 
-    /// Single recovery path for every upgrade deadline — a timed-out probe
-    /// phase, an unacked `switch_to_udp`, or a lost barrier pong
-    /// (`switch_commit_timeout`).
+    /// Single recovery path for a timed-out probe or switch phase.
     ///
     /// Under `require_udp` a timeout is fatal (`UdpUpgradeRequired`); otherwise
     /// the attempt backs off to `TcpOnlyBlockedUdp` so traffic keeps flowing on
@@ -673,11 +688,10 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     ) -> Result<SessionControl, SessionError> {
         let switch = SwitchToUdpPayload::decode(payload)?;
 
-        let deadline = if let UdpUpgradeState::Upgrading {
+        if let UdpUpgradeState::Upgrading {
             upgrade_id,
             probe_acked,
             ready_sent,
-            deadline,
             ..
         } = &self.udp_upgrade
         {
@@ -698,14 +712,13 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 );
                 return Ok(SessionControl::Continue);
             }
-            *deadline
         } else {
             trace!(
                 upgrade_id = switch.upgrade_id,
                 "ignoring switch_to_udp without active upgrade"
             );
             return Ok(SessionControl::Continue);
-        };
+        }
 
         let ack = SwitchAckPayload {
             upgrade_id: switch.upgrade_id,
@@ -716,34 +729,37 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             payload: &switch_ack_buf,
         })
         .await?;
-
-        let barrier_nonce = fastrand::u64(..);
-        let barrier_ping = PingPayload {
-            nonce: barrier_nonce,
-        };
-        let mut barrier_ping_buf = Vec::with_capacity(8);
-        barrier_ping.encode(&mut barrier_ping_buf);
-        self.write_tcp_message(Message::Ping {
-            payload: &barrier_ping_buf,
-        })
-        .await?;
-
-        self.udp_upgrade = UdpUpgradeState::AwaitingSwitchCommit {
+        self.udp_upgrade = UdpUpgradeState::AwaitingSwitchOk {
             upgrade_id: switch.upgrade_id,
-            barrier_nonce,
-            deadline,
+            deadline: Instant::now() + self.config.timing.register_timeout,
         };
         info!(
             upgrade_id = switch.upgrade_id,
-            barrier_nonce, "sent switch_ack; awaiting tcp barrier pong before udp commit"
+            "sent switch_ack; awaiting switch_ok"
         );
         Ok(SessionControl::Continue)
     }
 
-    pub(super) fn maybe_commit_udp_upgrade_on_barrier_pong(&mut self, nonce: u64) -> bool {
-        let Some(upgrade_id) = barrier_upgrade_id_for_nonce(&self.udp_upgrade, nonce) else {
-            return false;
+    pub(super) fn handle_switch_ok(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<SessionControl, SessionError> {
+        let ok = SwitchOkPayload::decode(payload)?;
+        let UdpUpgradeState::AwaitingSwitchOk { upgrade_id, .. } = &self.udp_upgrade else {
+            trace!(
+                upgrade_id = ok.upgrade_id,
+                "ignoring switch_ok without pending switch acknowledgement"
+            );
+            return Ok(SessionControl::Continue);
         };
+        if ok.upgrade_id != *upgrade_id {
+            debug!(
+                expected_upgrade_id = *upgrade_id,
+                received_upgrade_id = ok.upgrade_id,
+                "ignoring switch_ok with mismatched upgrade_id"
+            );
+            return Ok(SessionControl::Continue);
+        }
 
         if self.active_transport != ActiveTransport::UdpQsp {
             self.metrics.inc_transport_tcp_to_udp();
@@ -757,11 +773,14 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         self.last_udp_rx = Instant::now();
         self.udp_upgrade = UdpUpgradeState::Idle;
         self.udp_upgrade_backoff.reset();
+        self.pending_tcp_fallback = None;
         self.services
             .observer()
-            .emit(ClientEventKind::UdpSwitchCommitted { upgrade_id });
-        info!(upgrade_id, "udp upgrade committed");
-        true
+            .emit(ClientEventKind::UdpSwitchCommitted {
+                upgrade_id: ok.upgrade_id,
+            });
+        info!(upgrade_id = ok.upgrade_id, "udp upgrade committed");
+        Ok(SessionControl::Continue)
     }
 }
 
@@ -770,33 +789,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-
-    mod upgrade_state_helpers {
-        use std::time::Instant;
-
-        use super::*;
-
-        #[test]
-        fn active_upgrade_id_includes_waiting_commit_state() {
-            let waiting = UdpUpgradeState::AwaitingSwitchCommit {
-                upgrade_id: 0xAA,
-                barrier_nonce: 0xBB,
-                deadline: Instant::now(),
-            };
-            assert_eq!(upgrade_id_from_active_upgrade_state(&waiting), Some(0xAA));
-        }
-
-        #[test]
-        fn barrier_nonce_must_match_to_commit() {
-            let waiting = UdpUpgradeState::AwaitingSwitchCommit {
-                upgrade_id: 11,
-                barrier_nonce: 22,
-                deadline: Instant::now(),
-            };
-            assert_eq!(barrier_upgrade_id_for_nonce(&waiting, 22), Some(11));
-            assert_eq!(barrier_upgrade_id_for_nonce(&waiting, 23), None);
-        }
-    }
 
     mod register_fail_payload_decode {
         use slt_core::proto::{RegisterFailCode, RegisterFailPayload};
@@ -1422,128 +1414,6 @@ mod tests {
                 "delayed superseded ack must not send udp_ready"
             );
             assert_eq!(stored_nonce, last_probe_nonce);
-        }
-    }
-
-    /// Recovery from a lost commit-barrier pong.
-    ///
-    /// `AwaitingSwitchCommit` carries the attempt's hard `deadline`; the
-    /// keepalive ping tick does not retransmit the barrier ping and cannot
-    /// commit (its pong nonce never matches `barrier_nonce`). The deadline —
-    /// kept armed by `timer_at` — is the only recovery, firing
-    /// `switch_commit_timeout`.
-    mod awaiting_switch_commit_recovery {
-        use std::sync::Arc;
-        use std::time::{Duration, Instant};
-
-        use slt_core::proto::OwnedMessageBuf;
-        use slt_core::transport::tcp::TcpChannel;
-        use tokio::sync::mpsc;
-        use tokio_util::sync::CancellationToken;
-
-        use super::*;
-        use crate::metrics::Metrics;
-        use crate::runtime::services::DesktopServices;
-        use crate::test_support::{test_config, tls_tcp_stream_pair};
-        use crate::transport::tcp::{ClientKeyUpdater, TcpSession, TcpTransport};
-        use crate::tun::TunChannels;
-
-        /// A real `TcpStream`-backed TLS channel, so the session's `TcpTransport`
-        /// field is well-formed. Unused by the `AwaitingSwitchCommit` tick arm.
-        async fn loopback_tcp_transport() -> TcpTransport {
-            let metrics = Arc::new(Metrics::default());
-            let updater = ClientKeyUpdater::new(metrics);
-            let (client_stream, _server_stream) = tls_tcp_stream_pair().await;
-            TcpChannel::with_key_updater(client_stream, updater)
-        }
-
-        fn tun_channels() -> TunChannels {
-            let (_to_session_tx, to_session_rx) = mpsc::channel::<Vec<u8>>(8);
-            let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(8);
-            TunChannels {
-                to_session_rx,
-                to_tun_tx,
-            }
-        }
-
-        /// An `AwaitingSwitchCommit` whose hard deadline has already elapsed —
-        /// the residual `register_timeout` consumed by the probe phase, so the
-        /// barrier pong gets no window (the lost-pong worst case).
-        fn elapsed_barrier_commit() -> UdpUpgradeState {
-            UdpUpgradeState::AwaitingSwitchCommit {
-                upgrade_id: 0xAA,
-                barrier_nonce: 0xBB,
-                deadline: Instant::now() - Duration::from_secs(1),
-            }
-        }
-
-        #[tokio::test]
-        async fn lost_barrier_pong_recovers_via_deadline_when_udp_optional() {
-            let config = test_config();
-            let services = DesktopServices::new();
-            let mut tun = tun_channels();
-            let metrics = Arc::new(Metrics::default());
-            let tcp_session = TcpSession {
-                transport: loopback_tcp_transport().await,
-                peer: None,
-                sni: None,
-            };
-            let mut session = ClientSession::new(
-                &config,
-                tcp_session,
-                &mut tun,
-                CancellationToken::new(),
-                metrics,
-                &services,
-                None,
-            );
-            session.udp_upgrade = elapsed_barrier_commit();
-
-            let control = session.handle_udp_upgrade_tick().await.unwrap();
-            assert!(
-                matches!(control, SessionControl::Continue),
-                "expected backoff, got {control:?}",
-            );
-            assert!(
-                matches!(
-                    session.udp_upgrade,
-                    UdpUpgradeState::TcpOnlyBlockedUdp { .. }
-                ),
-                "lost barrier pong must recover via deadline backoff, not stall",
-            );
-        }
-
-        #[tokio::test]
-        async fn lost_barrier_pong_closes_when_require_udp() {
-            let mut config = test_config();
-            config.require_udp = true;
-            let services = DesktopServices::new();
-            let mut tun = tun_channels();
-            let metrics = Arc::new(Metrics::default());
-            let tcp_session = TcpSession {
-                transport: loopback_tcp_transport().await,
-                peer: None,
-                sni: None,
-            };
-            let mut session = ClientSession::new(
-                &config,
-                tcp_session,
-                &mut tun,
-                CancellationToken::new(),
-                metrics,
-                &services,
-                None,
-            );
-            session.udp_upgrade = elapsed_barrier_commit();
-
-            let control = session.handle_udp_upgrade_tick().await.unwrap();
-            assert!(
-                matches!(
-                    control,
-                    SessionControl::Close(SessionExit::UdpUpgradeRequired),
-                ),
-                "require_udp must make a lost barrier pong fatal; got {control:?}",
-            );
         }
     }
 }

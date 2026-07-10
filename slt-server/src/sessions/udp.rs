@@ -182,11 +182,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
 
     /// Land the session after [`open_udp_packet`] reported the UDP-QSP channel dead.
     ///
-    /// With a live TCP path this switches to TCP and sends an immediate ping. A TCP
-    /// ping arriving while the peer is still on UDP-QSP flips it to TCP
-    /// (`switch_to_tcp_on_server_traffic`, reason `ServerInitiated`) within ~RTT,
-    /// rather than waiting up to one ping interval for the next scheduled ping to
-    /// carry the implicit signal.
+    /// With a live TCP path this switches outbound traffic to TCP and sends an
+    /// explicit fallback request before subsequent TCP DATA.
     ///
     /// With TCP already closed there is no fallback path and no way to notify the
     /// peer — a `Close` over the dead UDP-QSP channel would not decrypt, and TCP is
@@ -195,7 +192,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     async fn complete_dead_channel_fallback(&mut self) -> Result<SessionControl, SessionError> {
         if self.tcp_alive {
             self.set_active_transport(ActiveTransport::Tcp);
-            self.send_tcp_ping_after_udp_fallback().await?;
+            self.send_tcp_fallback_request().await?;
             return Ok(SessionControl::Continue);
         }
         self.metrics.inc_disconnect_close();
@@ -242,7 +239,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     /// - Ping: Responds with Pong
     /// - Pong: Logs and continues
     /// - Data: Forwards to TUN device if valid
-    /// - `UpgradeProbe`: Sends UDP probe ack and may trigger TCP switch commit
+    /// - `UpgradeProbe`: Sends UDP probe ack and may trigger a TCP switch request
     /// - Close: Initiates session shutdown
     /// - `RegisterCid`: Fails as a protocol violation
     /// - Other control messages: Silently ignored
@@ -265,7 +262,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 let payload = Self::pong_payload_for_ping(payload)?;
                 self.send_udp_message_and_flush(
                     Message::Pong { payload: &payload },
-                    UdpFailureRecovery::SignalTcpWithPing,
+                    UdpFailureRecovery::SignalTcpFallback,
                 )
                 .await?;
                 Ok(SessionControl::Continue)
@@ -281,14 +278,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 Ok(SessionControl::Continue)
             }
             Message::Data { packet } => {
-                if self.active_transport != ActiveTransport::UdpQsp {
-                    trace!(
-                        session_id = self.session_id,
-                        client_id = %self.client_id,
-                        "UDP data dropped: not active transport"
-                    );
-                    return Ok(SessionControl::Continue);
-                }
                 if self.should_forward_packet_to_tun(packet) {
                     let outcome = self.tun.accept_packet(packet).await?;
                     self.handle_tun_packet_send_outcome(outcome)?;
@@ -306,7 +295,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             | Message::UpgradeProbeAck { .. }
             | Message::UdpReady { .. }
             | Message::SwitchToUdp { .. }
-            | Message::SwitchAck { .. } => Ok(SessionControl::Continue),
+            | Message::SwitchAck { .. }
+            | Message::SwitchOk { .. }
+            | Message::FallbackToTcp { .. }
+            | Message::FallbackOk { .. } => Ok(SessionControl::Continue),
         }
     }
 }

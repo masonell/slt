@@ -734,14 +734,11 @@ mod tests {
     mod transport_switch {
         use super::*;
 
-        /// Test that TCP data after UDP-QSP registration triggers switch back.
+        /// TCP DATA remains decodable while UDP-QSP is the preferred path.
         #[tokio::test]
-        async fn tcp_data_switches_from_udp() {
+        async fn tcp_data_remains_valid_with_udp_available() {
             let (mut client, server) = mock_transport_pair().await;
             let mut server = MockTlsServer::new(server);
-
-            // Simulate UDP-QSP being active, then TCP data arrives
-            // (In real implementation, this would trigger transport switch)
 
             // Server sends DATA over TCP
             server
@@ -760,9 +757,9 @@ mod tests {
             assert!(matches!(msg.message(), Message::Data { .. }));
         }
 
-        /// Test that TCP PING after UDP-QSP registration triggers switch back.
+        /// TCP PING remains decodable while UDP-QSP is the preferred path.
         #[tokio::test]
-        async fn tcp_ping_switches_from_udp() {
+        async fn tcp_ping_remains_valid_with_udp_available() {
             let (mut client, server) = mock_transport_pair().await;
             let mut server = MockTlsServer::new(server);
 

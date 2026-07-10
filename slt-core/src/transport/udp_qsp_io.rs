@@ -238,6 +238,12 @@ impl SessionIo for UdpQspIo {
     fn has_pending_flush(&self) -> bool {
         self.send_segments != 0
     }
+
+    fn discard_pending_send(&mut self) -> usize {
+        let discarded = self.send_segments;
+        self.clear_send_slab();
+        discarded
+    }
 }
 
 impl PeerUpdate for UdpQspIo {
@@ -436,6 +442,26 @@ mod tests {
         let mut buf = [0u8; 64];
         let len = timeout(Duration::from_secs(1), rx.recv(&mut buf)).await??;
         assert_eq!(&buf[..len], b"packet");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discard_pending_send_clears_slab_without_transmitting() -> io::Result<()> {
+        let (a, b) = socket_pair()?;
+        let b_addr = b.local_addr()?;
+        let mut tx = UdpQspIo::new(a, b_addr)?;
+
+        tx.send(b"one").await?;
+        tx.send(b"two").await?;
+        assert!(tx.has_pending_flush());
+        assert_eq!(tx.discard_pending_send(), 2);
+        assert!(!tx.has_pending_flush());
+
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            b.recv(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         Ok(())
     }
 

@@ -64,6 +64,9 @@ pub(super) struct ClientSession<
     last_tcp_rx: Instant,
     last_udp_rx: Instant,
     udp_state: UdpState,
+    /// Superseded UDP transport kept alive for authenticated receive traffic
+    /// until replacement registration completes.
+    retained_udp_transport: Option<Box<ClientTransport>>,
     udp_upgrade: UdpUpgradeState,
     udp_upgrade_backoff: ReconnectBackoff,
     /// Effective UDP-QSP cipher policy for the current connection. Starts as a
@@ -76,6 +79,8 @@ pub(super) struct ClientSession<
     /// Whether the TCP connection is still usable. Set to false when TCP closes
     /// while UDP-QSP is active, allowing the session to continue on UDP alone.
     tcp_alive: bool,
+    /// Locally initiated TCP fallback awaiting its peer acknowledgement.
+    pending_tcp_fallback: Option<u64>,
     control_rx: Option<&'a mut ClientCommandReceiver>,
 }
 
@@ -192,6 +197,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             last_tcp_rx: now,
             last_udp_rx: now,
             udp_state,
+            retained_udp_transport: None,
             udp_upgrade,
             udp_upgrade_backoff: ReconnectBackoff::new(
                 config.timing.reconnect_min,
@@ -202,8 +208,21 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             metrics,
             services,
             tcp_alive: true,
+            pending_tcp_fallback: None,
             control_rx,
         }
+    }
+
+    fn udp_receive_transport(&self) -> Option<&ClientTransport> {
+        self.udp_state
+            .as_active()
+            .or(self.retained_udp_transport.as_deref())
+    }
+
+    fn udp_receive_transport_mut(&mut self) -> Option<&mut ClientTransport> {
+        self.udp_state
+            .as_active_mut()
+            .or(self.retained_udp_transport.as_deref_mut())
     }
 
     /// Runs the session event loop until shutdown or error.
@@ -287,13 +306,14 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
     /// - Registration timeout (if in-flight registration)
     /// - Discovery task completion (if discovery is running)
     async fn poll_event(&mut self, next_ping_at: Instant) -> Result<SessionEvent, SessionError> {
+        let limits = self.limits;
         let idle_deadline = match self.active_transport {
             ActiveTransport::Tcp => self.last_tcp_rx + self.config.timing.idle_timeout,
             ActiveTransport::UdpQsp => self.last_udp_rx + self.config.timing.idle_timeout,
         };
         let udp_reconnect_at = self.udp_state.reconnect_at();
         let register_deadline = self.udp_state.register_deadline();
-        let udp_enabled = self.udp_state.as_active().is_some();
+        let udp_enabled = self.udp_receive_transport().is_some();
         let has_discovery_task = self.discovery_task.is_some();
         let udp_upgrade_timer_at = self.udp_upgrade.timer_at();
         let udp_pending_flush = self.active_transport == ActiveTransport::UdpQsp
@@ -355,7 +375,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             maybe = self.tun_channels.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
             udp_res = async {
                 // Defensive: this arm is gated by `udp_enabled` (which checks
-                // `as_active().is_some()`), so `as_active_mut()` being `None`
+                // `udp_receive_transport().is_some()`), so the mutable lookup failing
                 // here would be a client-state inconsistency that should never
                 // happen. Unlike the 6 other "transport missing" sites (which
                 // return `SessionError::ProtocolViolation`), this arm's type is
@@ -368,13 +388,17 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                 // `UdpResult(Err)` handler propagates it to TCP fallback (or
                 // close if TCP is dead) — the same routing a real `BrokenPipe`
                 // gets. Moot either way: the branch never fires.
-                let udp = self.udp_state.as_active_mut().ok_or_else(|| {
+                let udp = self
+                    .udp_state
+                    .as_active_mut()
+                    .or(self.retained_udp_transport.as_deref_mut())
+                    .ok_or_else(|| {
                     UdpQspError::from(io::Error::new(
                         io::ErrorKind::BrokenPipe,
                         "udp-qsp transport missing",
                     ))
                 })?;
-                udp.read_next_message(self.limits).await
+                udp.read_next_message(limits).await
             }, if udp_enabled => Ok(SessionEvent::UdpResult(udp_res)),
             () = time::sleep_until(timer_at.into()), if !timer_due => Ok(timer.into_event()),
             () = std::future::ready(()), if udp_pending_flush => Ok(SessionEvent::UdpFlushReady),
@@ -437,18 +461,8 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                     let control = match result {
                         Ok(control) => control,
                         Err(err) => {
-                            // UDP-QSP transport dead-channel signal (the one
-                            // fatal non-I/O condition on the UDP path):
-                            // propagate so the session exits / reconnects.
-                            if err.is_udp_qsp_dead_channel() {
-                                return Err(err);
-                            }
                             if err.is_udp_path_transport_error() {
-                                if !self.handle_udp_error(&err) {
-                                    self.metrics.inc_disconnect_error();
-                                    return Ok(SessionControl::Close(SessionExit::ConnectionError));
-                                }
-                                return Ok(SessionControl::Continue);
+                                return self.handle_udp_event_error(&err).await;
                             }
                             // Typed (non-I/O) session error from the UDP
                             // message handler: a proto decode failure or
@@ -466,19 +480,11 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                     // `UdpQspError` (the sole error type `read_next_message`
                     // returns), so `SessionError::from(err)` is always
                     // `SessionError::UdpQsp(_)`, which `is_udp_path_transport_error()`
-                    // always returns true for. The dead-channel check above
-                    // handles the fatal shape; everything else is recoverable or
-                    // fallback, handled by `handle_udp_error`.
+                    // always returns true for. Recoverable packet failures are
+                    // dropped; fatal path failures use authenticated TCP fallback.
                     let err = SessionError::from(err);
-                    if err.is_udp_qsp_dead_channel() {
-                        return Err(err);
-                    }
                     if err.is_udp_path_transport_error() {
-                        if !self.handle_udp_error(&err) {
-                            self.metrics.inc_disconnect_error();
-                            return Ok(SessionControl::Close(SessionExit::ConnectionError));
-                        }
-                        return Ok(SessionControl::Continue);
+                        return self.handle_udp_event_error(&err).await;
                     }
                     // Unreachable: `UdpResult`'s error is always a `UdpQspError`,
                     // which maps to `SessionError::UdpQsp(_)` (a UDP-path
@@ -510,15 +516,8 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                         return Ok(SessionControl::Close(SessionExit::IdleTimeout));
                     }
                     warn!("udp-qsp idle timeout; switching to tcp");
-                    self.metrics.inc_transport_udp_to_tcp();
-                    self.flush_pending_udp_transport_best_effort().await;
-                    self.active_transport = ActiveTransport::Tcp;
-                    self.note_transport_change(
-                        Transport::UdpQsp,
-                        Transport::Tcp,
-                        TransportChangeReason::IdleTimeout,
-                    );
-                    self.note_tcp_activity();
+                    self.request_tcp_fallback(TransportChangeReason::IdleTimeout)
+                        .await?;
                     self.schedule_discovery_retry();
                     Ok(SessionControl::Continue)
                 }
@@ -547,23 +546,19 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             }
             SessionEvent::UdpUpgradeTick => self.handle_udp_upgrade_tick().await,
             SessionEvent::UdpFlushReady => {
-                if let Err(err) = self.flush_udp_transport().await {
-                    if err.is_udp_qsp_dead_channel() {
-                        return Err(err);
-                    }
-                    if err.is_udp_path_transport_error() && !self.handle_udp_error(&err) {
-                        self.metrics.inc_disconnect_error();
-                        return Ok(SessionControl::Close(SessionExit::ConnectionError));
-                    }
+                if let Err(err) = self.flush_udp_transport().await
+                    && err.is_udp_path_transport_error()
+                {
+                    return self.handle_udp_event_error(&err).await;
                 }
                 Ok(SessionControl::Continue)
             }
         }
     }
 
-    /// Forwards a TUN packet to the active transport.
+    /// Forwards a TUN packet to the preferred transport.
     ///
-    /// Writes the packet as a `DATA` message on the active transport.
+    /// Writes the packet as a `DATA` message on the preferred outbound transport.
     /// If UDP-QSP write/enqueue fails, attempts TCP fallback if available.
     /// Later UDP flush failures are handled as transport loss; individual TUN
     /// packets already accepted by the UDP batching layer are not replayed.
@@ -593,7 +588,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                 return Err(err);
             }
             if err.is_udp_path_transport_error() {
-                if !self.handle_udp_error(&err) {
+                if !self.handle_udp_error(&err).await? {
                     return Err(SessionError::Connection {
                         source: io::Error::new(io::ErrorKind::NotConnected, "both transports dead"),
                     });
@@ -646,22 +641,34 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use slt_core::config::ClientConfig;
-    use slt_core::proto::OwnedMessageBuf;
+    use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, UdpQspKeys};
+    use slt_core::proto::{
+        CipherSuite, FallbackOkPayload, FallbackToTcpPayload, Message, MessageType,
+        OwnedMessageBuf, SwitchAckPayload, SwitchOkPayload, SwitchToUdpPayload, encode_message,
+    };
     use slt_core::transport::tcp::TcpChannel;
-    use tokio::io::DuplexStream;
+    use slt_core::types::{Cid, MAX_DCID_LEN};
+    use tokio::io::{AsyncWriteExt, DuplexStream};
+    use tokio::net::UdpSocket;
     use tokio::sync::mpsc;
     use tokio::time;
     use tokio_boring::SslStream;
     use tokio_util::sync::CancellationToken;
 
-    use super::{ClientSession, SessionError, SessionEvent, SessionExit};
+    use super::{
+        ActiveTransport, ClientSession, SessionControl, SessionError, SessionEvent, SessionExit,
+        UdpState, UdpUpgradeState,
+    };
     use crate::metrics::Metrics;
+    use crate::runtime::ReconnectBackoff;
+    use crate::runtime::observer::TransportChangeReason;
     use crate::runtime::services::DesktopServices;
     use crate::test_support::{
-        ParkableWriteStream, WriteGate, test_config, tls_pair_with_parkable_client_writes,
-        tls_tcp_stream_pair,
+        ParkableWriteStream, WriteGate, mock_quic_ids, test_config,
+        tls_pair_with_parkable_client_writes, tls_tcp_stream_pair,
     };
     use crate::transport::tcp::{ClientKeyUpdater, TcpSession};
+    use crate::transport::udp_qsp::{ClientTransport, UdpQspError, client_udp_qsp_io};
     use crate::tun::TunChannels;
 
     async fn test_session<'a>(
@@ -718,6 +725,410 @@ mod tests {
             server_stream,
             write_gate,
         )
+    }
+
+    fn data_message(packet: &[u8]) -> OwnedMessageBuf {
+        let mut frame = Vec::new();
+        encode_message(Message::Data { packet }, &mut frame).unwrap();
+        OwnedMessageBuf::new(MessageType::Data, frame)
+    }
+
+    async fn test_udp_transport() -> ClientTransport {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let peer = "127.0.0.1:443".parse().unwrap();
+        let io = client_udp_qsp_io(&socket, peer).unwrap();
+        let keys = UdpQspKeys::from_packet_material(
+            CipherSuite::Aes128Gcm,
+            [0; 16],
+            [0; 16],
+            [0; 16],
+            [0; 16],
+            [0; 12],
+            [0; 12],
+        )
+        .unwrap();
+        let session = QuicQspSession::new(
+            io,
+            Cid::from([0xBB; MAX_DCID_LEN]),
+            Cid::from([0xAA; MAX_DCID_LEN]),
+            keys,
+            0,
+            0,
+            false,
+        );
+        ClientTransport::new(session, Arc::new(Metrics::default()))
+    }
+
+    #[tokio::test]
+    async fn udp_data_is_accepted_while_tcp_is_preferred() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, mut to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+        let packet = b"authenticated udp data";
+
+        assert_eq!(
+            session
+                .handle_udp_message(data_message(packet))
+                .await
+                .unwrap(),
+            SessionControl::Continue
+        );
+        assert_eq!(session.active_transport, ActiveTransport::Tcp);
+        let delivered = to_tun_rx.try_recv().unwrap();
+        assert!(matches!(
+            delivered.message(),
+            Message::Data { packet: delivered_packet } if delivered_packet == packet
+        ));
+    }
+
+    #[tokio::test]
+    async fn tcp_data_is_accepted_while_udp_is_preferred() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, mut to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
+        session.active_transport = ActiveTransport::UdpQsp;
+        let packet = b"late tcp data";
+        let mut frame = Vec::new();
+        encode_message(Message::Data { packet }, &mut frame).unwrap();
+        server_stream.write_all(&frame).await.unwrap();
+
+        assert_ne!(session.tcp.read_more().await.unwrap(), 0);
+        assert_eq!(
+            session.handle_tcp_read().await.unwrap(),
+            SessionControl::Continue
+        );
+        assert_eq!(session.active_transport, ActiveTransport::UdpQsp);
+        let delivered = to_tun_rx.try_recv().unwrap();
+        assert!(matches!(
+            delivered.message(),
+            Message::Data { packet: delivered_packet } if delivered_packet == packet
+        ));
+    }
+
+    #[tokio::test]
+    async fn fallback_request_precedes_retried_tcp_data() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, server_stream) = test_session(&config, &mut tun, &services).await;
+        let mut server = TcpChannel::new(server_stream);
+        session.active_transport = ActiveTransport::UdpQsp;
+        session
+            .request_tcp_fallback(TransportChangeReason::UdpError)
+            .await
+            .unwrap();
+        let packet = vec![0x45; 20];
+        assert_eq!(
+            session.handle_tun_packet(packet.clone()).await.unwrap(),
+            SessionControl::Continue
+        );
+
+        assert_ne!(server.read_more().await.unwrap(), 0);
+        let request = server.try_pop_message(session.limits).unwrap().unwrap();
+        let Message::FallbackToTcp { payload } = request.message() else {
+            panic!("expected fallback request before tcp data");
+        };
+        let fallback_id = FallbackToTcpPayload::decode(payload).unwrap().fallback_id;
+        assert_eq!(session.pending_tcp_fallback, Some(fallback_id));
+
+        let data = loop {
+            if let Some(message) = server.try_pop_message(session.limits).unwrap() {
+                break message;
+            }
+            assert_ne!(server.read_more().await.unwrap(), 0);
+        };
+        assert!(matches!(
+            data.message(),
+            Message::Data { packet: delivered_packet } if delivered_packet == packet
+        ));
+        assert_eq!(session.active_transport, ActiveTransport::Tcp);
+    }
+
+    #[tokio::test]
+    async fn server_fallback_request_switches_client_and_is_acknowledged() {
+        let mut config = test_config();
+        config.enable_upgrade = true;
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
+        session.active_transport = ActiveTransport::UdpQsp;
+        session.udp_state = UdpState::Active(Box::new(test_udp_transport().await));
+        session
+            .write_active_message(Message::Data {
+                packet: b"queued udp uplink",
+            })
+            .await
+            .unwrap();
+        assert!(session.udp_state.as_active().unwrap().has_pending_flush());
+        let fallback_id = 0xFA11_BACC;
+        let request = FallbackToTcpPayload { fallback_id };
+        let mut payload = Vec::new();
+        request.encode(&mut payload);
+        let mut frame = Vec::new();
+        encode_message(Message::FallbackToTcp { payload: &payload }, &mut frame).unwrap();
+        server_stream.write_all(&frame).await.unwrap();
+
+        assert_ne!(session.tcp.read_more().await.unwrap(), 0);
+        assert_eq!(
+            session.handle_tcp_read().await.unwrap(),
+            SessionControl::Continue
+        );
+        assert_eq!(session.active_transport, ActiveTransport::Tcp);
+        assert!(matches!(session.udp_state, UdpState::NeedDiscovery { .. }));
+        assert!(session.retained_udp_transport.is_some());
+        assert!(session.udp_receive_transport().is_some());
+        assert!(
+            !session
+                .retained_udp_transport
+                .as_ref()
+                .unwrap()
+                .has_pending_flush()
+        );
+
+        let mut server = TcpChannel::new(server_stream);
+        assert_ne!(server.read_more().await.unwrap(), 0);
+        let ack = server.try_pop_message(session.limits).unwrap().unwrap();
+        let Message::FallbackOk { payload } = ack.message() else {
+            panic!("expected fallback acknowledgement");
+        };
+        assert_eq!(
+            FallbackOkPayload::decode(payload).unwrap().fallback_id,
+            fallback_id
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_client_does_not_start_udp_discovery_after_fallback() {
+        let mut config = test_config();
+        config.enable_upgrade = false;
+        config.require_udp = false;
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
+        let request = FallbackToTcpPayload { fallback_id: 42 };
+        let mut payload = Vec::new();
+        request.encode(&mut payload);
+        let mut frame = Vec::new();
+        encode_message(Message::FallbackToTcp { payload: &payload }, &mut frame).unwrap();
+        server_stream.write_all(&frame).await.unwrap();
+
+        assert_ne!(session.tcp.read_more().await.unwrap(), 0);
+        assert_eq!(
+            session.handle_tcp_read().await.unwrap(),
+            SessionControl::Continue
+        );
+        assert!(matches!(session.udp_state, UdpState::Disabled));
+        assert!(matches!(session.udp_upgrade, UdpUpgradeState::Disabled));
+        assert!(session.retained_udp_transport.is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_udp_failure_preserves_in_flight_registration() {
+        let mut config = test_config();
+        config.enable_upgrade = true;
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+        let quic_ids = mock_quic_ids().await;
+        let expected_dcid = quic_ids.dcid;
+        session.udp_state = UdpState::Pending {
+            quic_ids,
+            backoff: ReconnectBackoff::new(
+                config.timing.reconnect_min,
+                config.timing.reconnect_max,
+            ),
+            reconnect_at: Instant::now(),
+            registration: None,
+        };
+        assert_eq!(
+            session.attempt_udp_registration().await.unwrap(),
+            SessionControl::Continue
+        );
+        session.retained_udp_transport = Some(Box::new(test_udp_transport().await));
+
+        let error = SessionError::from(UdpQspError::from(QspSessionError::DeadChannel));
+        assert!(session.handle_udp_error(&error).await.unwrap());
+
+        assert!(session.retained_udp_transport.is_none());
+        assert!(session.pending_tcp_fallback.is_none());
+        let UdpState::Pending {
+            quic_ids,
+            registration,
+            ..
+        } = &session.udp_state
+        else {
+            panic!("retained path failure replaced pending registration state");
+        };
+        assert_eq!(quic_ids.dcid, expected_dcid);
+        assert!(registration.is_some());
+    }
+
+    #[tokio::test]
+    async fn switch_to_udp_waits_for_switch_ok_before_committing() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, server_stream) = test_session(&config, &mut tun, &services).await;
+        let mut server = TcpChannel::new(server_stream);
+        let upgrade_id = 0x5A17_CAFE;
+        session.udp_upgrade = UdpUpgradeState::Upgrading {
+            upgrade_id,
+            deadline: Instant::now() + config.timing.register_timeout,
+            attempts: 1,
+            next_probe_at: Instant::now() + config.timing.reconnect_min,
+            last_probe_nonce: 7,
+            probe_acked: true,
+            ready_sent: true,
+            probe_backoff: ReconnectBackoff::new(
+                config.timing.reconnect_min,
+                config.timing.reconnect_max,
+            ),
+        };
+        let switch = SwitchToUdpPayload { upgrade_id };
+        let mut payload = Vec::new();
+        switch.encode(&mut payload);
+
+        assert_eq!(
+            session.handle_switch_to_udp(&payload).await.unwrap(),
+            SessionControl::Continue
+        );
+        assert_eq!(session.active_transport, ActiveTransport::Tcp);
+        assert!(matches!(
+            session.udp_upgrade,
+            UdpUpgradeState::AwaitingSwitchOk {
+                upgrade_id: pending_id,
+                ..
+            } if pending_id == upgrade_id
+        ));
+
+        assert_ne!(server.read_more().await.unwrap(), 0);
+        let ack = server.try_pop_message(session.limits).unwrap().unwrap();
+        let Message::SwitchAck {
+            payload: ack_payload,
+        } = ack.message()
+        else {
+            panic!("expected switch_ack");
+        };
+        assert_eq!(
+            SwitchAckPayload::decode(ack_payload).unwrap().upgrade_id,
+            upgrade_id
+        );
+        assert!(
+            time::timeout(Duration::from_millis(25), server.read_more())
+                .await
+                .is_err(),
+            "client emitted a post-ack barrier frame"
+        );
+
+        let confirmation = SwitchOkPayload { upgrade_id };
+        payload.clear();
+        confirmation.encode(&mut payload);
+        server
+            .write_message(Message::SwitchOk { payload: &payload })
+            .await
+            .unwrap();
+        assert_ne!(session.tcp.read_more().await.unwrap(), 0);
+        assert_eq!(
+            session.handle_tcp_read().await.unwrap(),
+            SessionControl::Continue
+        );
+        assert_eq!(session.active_transport, ActiveTransport::UdpQsp);
+        assert!(matches!(session.udp_upgrade, UdpUpgradeState::Idle));
+    }
+
+    #[tokio::test]
+    async fn tcp_eof_before_switch_ok_reconnects_without_preferring_udp() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+        session.udp_upgrade = UdpUpgradeState::AwaitingSwitchOk {
+            upgrade_id: 17,
+            deadline: Instant::now() + config.timing.register_timeout,
+        };
+
+        let mut next_ping_at = session.schedule_next_ping();
+        assert_eq!(
+            session
+                .handle_event(SessionEvent::TcpRead(0), &mut next_ping_at)
+                .await
+                .unwrap(),
+            SessionControl::Close(SessionExit::TcpClosed)
+        );
+        assert_eq!(session.active_transport, ActiveTransport::Tcp);
+    }
+
+    #[tokio::test]
+    async fn switch_ok_timeout_synchronizes_tcp_fallback() {
+        let mut config = test_config();
+        config.enable_upgrade = true;
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, server_stream) = test_session(&config, &mut tun, &services).await;
+        let mut server = TcpChannel::new(server_stream);
+        session.udp_upgrade = UdpUpgradeState::AwaitingSwitchOk {
+            upgrade_id: 23,
+            deadline: Instant::now() - Duration::from_millis(1),
+        };
+
+        assert_eq!(
+            session.handle_udp_upgrade_tick().await.unwrap(),
+            SessionControl::Continue
+        );
+        assert!(matches!(
+            session.udp_upgrade,
+            UdpUpgradeState::TcpOnlyBlockedUdp { .. }
+        ));
+        assert_ne!(server.read_more().await.unwrap(), 0);
+        let request = server.try_pop_message(session.limits).unwrap().unwrap();
+        assert!(matches!(request.message(), Message::FallbackToTcp { .. }));
     }
 
     #[tokio::test]

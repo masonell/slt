@@ -15,11 +15,12 @@ use tracing::trace;
 use crate::metrics::Metrics;
 use crate::quic::UdpClaim;
 
-/// Indicates which transport is currently active for a client session.
+/// Indicates which transport is preferred for a client session's outbound data.
 ///
 /// The session can send data over either TLS-over-TCP or UDP-QSP at any given time.
-/// The active transport determines which underlying network connection is used
-/// for outgoing messages.
+/// The preferred transport determines which underlying network connection is
+/// used for outgoing messages. Authenticated inbound DATA remains valid on
+/// either live transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTransport {
     /// TLS-over-TCP transport.

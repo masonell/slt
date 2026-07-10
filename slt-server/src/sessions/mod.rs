@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession};
 use slt_core::proto::{
-    CloseCode, ClosePayload, Message, MessageLimits, PingPayload, encode_message,
+    CloseCode, ClosePayload, FallbackToTcpPayload, Message, MessageLimits, PingPayload,
+    encode_message,
 };
 use slt_core::transport::UdpQspIo;
 use slt_core::types::ServerUdpQspConfig;
@@ -51,7 +52,7 @@ const BEST_EFFORT_IO_TIMEOUT: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone, Copy)]
 enum UdpFailureRecovery {
     RetryMessageOnTcp,
-    SignalTcpWithPing,
+    SignalTcpFallback,
     RetireOnly,
 }
 
@@ -66,7 +67,7 @@ struct UdpUpgradeState {
 
 /// Core session structure for an authenticated VPN client.
 ///
-/// Manages the client's connection state, active transport (TCP or UDP-QSP),
+/// Manages the client's connection state, preferred transport (TCP or UDP-QSP),
 /// message routing between TUN device and network transports, and session lifecycle.
 /// The session is generic over the TUN device implementation, TCP stream type,
 /// and UDP-QSP I/O backend to support testing and flexibility.
@@ -89,7 +90,7 @@ pub struct ClientSessionBase<
     pub created_at: Instant,
     /// Last activity timestamp.
     pub last_activity: Instant,
-    /// Active data transport.
+    /// Preferred outbound data transport.
     pub active_transport: ActiveTransport,
     session_id: u64,
     registry: Arc<SessionRegistry>,
@@ -117,6 +118,8 @@ pub struct ClientSessionBase<
     /// Whether the TCP connection is still usable. Set to false when TCP closes
     /// while UDP-QSP is active, allowing the session to continue on UDP alone.
     tcp_alive: bool,
+    /// Locally initiated TCP fallback awaiting its peer acknowledgement.
+    pending_tcp_fallback: Option<u64>,
 }
 
 /// Default client session type using the async TUN device.
@@ -173,6 +176,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             udp_write_buf: Vec::new(),
             udp_opened_payload_buf: Vec::new(),
             tcp_alive: true,
+            pending_tcp_fallback: None,
         }
     }
 
@@ -268,12 +272,20 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 );
             }
             (ActiveTransport::UdpQsp, ActiveTransport::Tcp) => {
+                // TCP fallback is a hard egress cutover. Discard only protected
+                // packets still buffered for UDP send; keep the session's socket,
+                // receive queue, crypto, and replay state for in-flight ingress.
+                let discarded_packets = self
+                    .udp_session
+                    .as_mut()
+                    .map_or(0, QuicQspSession::discard_pending_send);
                 self.metrics.inc_transport_udp_to_tcp();
                 debug!(
                     session_id = self.session_id,
                     client_id = %self.client_id,
                     from = "udp",
                     to = "tcp",
+                    discarded_packets,
                     "transport switched"
                 );
             }
@@ -457,27 +469,36 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         self.set_active_transport(ActiveTransport::Tcp);
         match recovery {
             UdpFailureRecovery::RetryMessageOnTcp => {
+                self.send_tcp_fallback_request().await?;
                 let Some(message) = message else {
-                    return self.send_tcp_ping_after_udp_fallback().await;
+                    return Ok(());
                 };
                 self.send_tcp_message(message).await
             }
-            UdpFailureRecovery::SignalTcpWithPing => self.send_tcp_ping_after_udp_fallback().await,
+            UdpFailureRecovery::SignalTcpFallback => self.send_tcp_fallback_request().await,
             UdpFailureRecovery::RetireOnly => Ok(()),
         }
     }
 
-    async fn send_tcp_ping_after_udp_fallback(&mut self) -> Result<(), SessionError> {
-        let nonce = fastrand::u64(..);
-        let ping = PingPayload { nonce };
+    async fn send_tcp_fallback_request(&mut self) -> Result<(), SessionError> {
+        if self.pending_tcp_fallback.is_some() {
+            return Ok(());
+        }
+
+        let fallback_id = fastrand::u64(..);
+        let fallback = FallbackToTcpPayload { fallback_id };
         let mut buf = Vec::with_capacity(8);
-        ping.encode(&mut buf);
+        fallback.encode(&mut buf);
+        self.send_tcp_message(Message::FallbackToTcp { payload: &buf })
+            .await?;
+        self.pending_tcp_fallback = Some(fallback_id);
         debug!(
             session_id = self.session_id,
             client_id = %self.client_id,
-            "sent immediate tcp ping after udp-qsp fallback"
+            fallback_id,
+            "requested tcp fallback"
         );
-        self.send_tcp_message(Message::Ping { payload: &buf }).await
+        Ok(())
     }
 
     fn retire_udp_transport(&mut self) {

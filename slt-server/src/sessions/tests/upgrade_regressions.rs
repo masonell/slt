@@ -2,9 +2,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    CipherSuite, Message, MessageLimits, PingPayload, PongPayload, RegisterCidPayload,
-    SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
-    UpgradeProbePayload, decode_message, encode_message,
+    CipherSuite, Message, MessageLimits, RegisterCidPayload, SwitchAckPayload, SwitchOkPayload,
+    SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
+    decode_message, encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -53,17 +53,12 @@ async fn send_udp_message(
     .unwrap();
 }
 
-async fn wait_for_switch_commit_barrier(
+async fn wait_for_switch_ack_processing(
     client: &mut crate::test_support::TlsDuplexStream,
     limits: MessageLimits,
+    upgrade_id: u64,
 ) {
-    let nonce = 0xA11C_E000_0000_0002u64;
-    let ping = PingPayload { nonce };
-    let mut payload = Vec::with_capacity(8);
-    ping.encode(&mut payload);
-    write_tcp_message(client, Message::Ping { payload: &payload }).await;
-
-    let mut pong_received = false;
+    let mut switch_ok_received = false;
     for _ in 0..8 {
         let buf = timeout(Duration::from_secs(1), read_message_bytes(client, limits))
             .await
@@ -71,18 +66,17 @@ async fn wait_for_switch_commit_barrier(
             .unwrap();
         let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
         match message {
-            Message::Pong { payload } => {
-                let pong = PongPayload::decode(payload).unwrap();
-                if pong.nonce == nonce {
-                    pong_received = true;
-                    break;
-                }
+            Message::SwitchOk { payload } => {
+                let confirmation = SwitchOkPayload::decode(payload).unwrap();
+                assert_eq!(confirmation.upgrade_id, upgrade_id);
+                switch_ok_received = true;
+                break;
             }
             Message::Ping { .. } | Message::SwitchToUdp { .. } => {}
-            _ => {}
+            _ => panic!("expected switch_ok"),
         }
     }
-    assert!(pong_received, "did not observe switch-commit barrier pong");
+    assert!(switch_ok_received, "did not receive switch_ok");
 }
 
 #[tokio::test]
@@ -139,7 +133,7 @@ async fn session_keeps_tcp_when_udp_blackholed() {
 }
 
 #[tokio::test]
-async fn session_drops_udp_data_before_switch_commit() {
+async fn session_accepts_udp_data_before_switch_commit() {
     let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
@@ -162,7 +156,8 @@ async fn session_drops_udp_data_before_switch_commit() {
         Message::RegisterOk { .. }
     ));
 
-    // UDP data before switch commit must not be treated as active transport.
+    // Registered UDP is a valid authenticated ingress path before it becomes
+    // the preferred egress path.
     let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 56321));
     let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 250), 12);
@@ -178,12 +173,11 @@ async fn session_drops_udp_data_before_switch_commit() {
     )
     .await;
 
-    assert!(
-        timeout(Duration::from_millis(250), tun_rx.recv())
-            .await
-            .is_err(),
-        "udp data should be dropped before switch commit"
-    );
+    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, uplink_packet);
 
     // TCP remains the stable active path.
     let tcp_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 251), 12);
@@ -327,7 +321,7 @@ async fn session_handles_udp_probe_reordering_before_ready() {
         },
     )
     .await;
-    wait_for_switch_commit_barrier(&mut client, limits).await;
+    wait_for_switch_ack_processing(&mut client, limits, upgrade_id).await;
 
     // After commit, downlink traffic must go over UDP.
     let udp_expected_pn = ack_opened.pn + 1;
@@ -525,7 +519,7 @@ async fn session_is_idempotent_for_duplicate_upgrade_controls() {
         },
     )
     .await;
-    wait_for_switch_commit_barrier(&mut client, limits).await;
+    wait_for_switch_ack_processing(&mut client, limits, upgrade_id).await;
 
     // After duplicate controls, session should still emit UDP data.
     let udp_expected_pn = ack_opened_2.pn + 1;
@@ -729,7 +723,7 @@ async fn session_allows_new_upgrade_id_after_uncommitted_switch() {
         },
     )
     .await;
-    wait_for_switch_commit_barrier(&mut client, limits).await;
+    wait_for_switch_ack_processing(&mut client, limits, second_upgrade_id).await;
 
     let udp_expected_pn = ack_opened_2.pn + 1;
     let downlink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 204), 12);
@@ -957,7 +951,7 @@ async fn session_ignores_delayed_probe_for_superseded_upgrade_id() {
         },
     )
     .await;
-    wait_for_switch_commit_barrier(&mut client, limits).await;
+    wait_for_switch_ack_processing(&mut client, limits, second_upgrade_id).await;
 
     let udp_expected_pn = ack_opened_2.pn + 1;
     let downlink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 205), 12);

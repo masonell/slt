@@ -27,6 +27,8 @@ pub const AUTH_PAYLOAD_LEN: usize = 16 + 4 + AUTH_CHALLENGE_LEN + AUTH_SIGNATURE
 pub const PING_PAYLOAD_LEN: usize = 8;
 /// Length of upgrade identifier payloads in bytes.
 pub const UPGRADE_ID_PAYLOAD_LEN: usize = 8;
+/// Length of TCP fallback identifier payloads in bytes.
+pub const FALLBACK_ID_PAYLOAD_LEN: usize = 8;
 /// Length of UDP upgrade probe/ack payloads in bytes.
 pub const UPGRADE_PROBE_PAYLOAD_LEN: usize = 16;
 /// Length of the CLOSE payload in bytes.
@@ -648,10 +650,10 @@ impl UdpReadyPayload {
     }
 }
 
-/// Server switch commit payload for UDP upgrade.
+/// Server switch request payload for UDP upgrade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwitchToUdpPayload {
-    /// Identifier of the upgrade attempt being committed.
+    /// Identifier of the upgrade attempt being switched.
     pub upgrade_id: u64,
 }
 
@@ -689,7 +691,7 @@ impl SwitchToUdpPayload {
     }
 }
 
-/// Client acknowledgement payload for UDP switch commit.
+/// Client acceptance payload for a UDP switch request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwitchAckPayload {
     /// Identifier of the acknowledged upgrade attempt.
@@ -727,6 +729,108 @@ impl SwitchAckPayload {
     /// Encode a `SWITCH_ACK` payload.
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.upgrade_id.to_be_bytes());
+    }
+}
+
+/// Server confirmation payload for a completed UDP switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchOkPayload {
+    /// Identifier of the committed upgrade attempt.
+    pub upgrade_id: u64,
+}
+
+impl SwitchOkPayload {
+    /// Decode a `SWITCH_OK` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::LengthMismatch` unless the payload is exactly
+    /// [`UPGRADE_ID_PAYLOAD_LEN`] bytes.
+    pub const fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
+        if payload.len() != UPGRADE_ID_PAYLOAD_LEN {
+            return Err(PayloadError::LengthMismatch {
+                expected: UPGRADE_ID_PAYLOAD_LEN,
+                actual: payload.len(),
+            });
+        }
+        let mut bytes = [0; UPGRADE_ID_PAYLOAD_LEN];
+        bytes.copy_from_slice(payload);
+        Ok(Self {
+            upgrade_id: u64::from_be_bytes(bytes),
+        })
+    }
+
+    /// Encode a `SWITCH_OK` payload.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.upgrade_id.to_be_bytes());
+    }
+}
+
+/// Request payload for switching outbound traffic back to TCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FallbackToTcpPayload {
+    /// Identifier echoed by the peer in `FALLBACK_OK`.
+    pub fallback_id: u64,
+}
+
+impl FallbackToTcpPayload {
+    /// Decode a `FALLBACK_TO_TCP` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::LengthMismatch` unless the payload is exactly
+    /// [`FALLBACK_ID_PAYLOAD_LEN`] bytes.
+    pub const fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
+        if payload.len() != FALLBACK_ID_PAYLOAD_LEN {
+            return Err(PayloadError::LengthMismatch {
+                expected: FALLBACK_ID_PAYLOAD_LEN,
+                actual: payload.len(),
+            });
+        }
+        let mut bytes = [0; FALLBACK_ID_PAYLOAD_LEN];
+        bytes.copy_from_slice(payload);
+        Ok(Self {
+            fallback_id: u64::from_be_bytes(bytes),
+        })
+    }
+
+    /// Encode a `FALLBACK_TO_TCP` payload.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.fallback_id.to_be_bytes());
+    }
+}
+
+/// Acknowledgement payload for a TCP fallback request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FallbackOkPayload {
+    /// Identifier copied from the corresponding `FALLBACK_TO_TCP`.
+    pub fallback_id: u64,
+}
+
+impl FallbackOkPayload {
+    /// Decode a `FALLBACK_OK` payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PayloadError::LengthMismatch` unless the payload is exactly
+    /// [`FALLBACK_ID_PAYLOAD_LEN`] bytes.
+    pub const fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
+        if payload.len() != FALLBACK_ID_PAYLOAD_LEN {
+            return Err(PayloadError::LengthMismatch {
+                expected: FALLBACK_ID_PAYLOAD_LEN,
+                actual: payload.len(),
+            });
+        }
+        let mut bytes = [0; FALLBACK_ID_PAYLOAD_LEN];
+        bytes.copy_from_slice(payload);
+        Ok(Self {
+            fallback_id: u64::from_be_bytes(bytes),
+        })
+    }
+
+    /// Encode a `FALLBACK_OK` payload.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.fallback_id.to_be_bytes());
     }
 }
 
@@ -1133,6 +1237,33 @@ mod tests {
     }
 
     #[test]
+    fn switch_ok_roundtrip() {
+        let payload = SwitchOkPayload {
+            upgrade_id: 0x0fed_cba9_8765_4321,
+        };
+        let mut buf = Vec::new();
+        payload.encode(&mut buf);
+        assert_eq!(SwitchOkPayload::decode(&buf).unwrap(), payload);
+    }
+
+    #[test]
+    fn fallback_payloads_roundtrip() {
+        let request = FallbackToTcpPayload {
+            fallback_id: 0xf011_bacc_1234_5678,
+        };
+        let mut buf = Vec::new();
+        request.encode(&mut buf);
+        assert_eq!(FallbackToTcpPayload::decode(&buf).unwrap(), request);
+
+        let ok = FallbackOkPayload {
+            fallback_id: request.fallback_id,
+        };
+        buf.clear();
+        ok.encode(&mut buf);
+        assert_eq!(FallbackOkPayload::decode(&buf).unwrap(), ok);
+    }
+
+    #[test]
     fn ping_pong_roundtrip() {
         let ping = PingPayload {
             nonce: 0x1122_3344_5566_7788,
@@ -1377,6 +1508,29 @@ mod tests {
                 actual: UPGRADE_ID_PAYLOAD_LEN - 1
             })
         );
+    }
+
+    #[test]
+    fn switch_ok_payload_length_mismatch() {
+        let short = [0u8; UPGRADE_ID_PAYLOAD_LEN - 1];
+        assert_eq!(
+            SwitchOkPayload::decode(&short),
+            Err(PayloadError::LengthMismatch {
+                expected: UPGRADE_ID_PAYLOAD_LEN,
+                actual: UPGRADE_ID_PAYLOAD_LEN - 1
+            })
+        );
+    }
+
+    #[test]
+    fn fallback_payload_length_mismatch() {
+        let short = [0u8; FALLBACK_ID_PAYLOAD_LEN - 1];
+        let expected = PayloadError::LengthMismatch {
+            expected: FALLBACK_ID_PAYLOAD_LEN,
+            actual: FALLBACK_ID_PAYLOAD_LEN - 1,
+        };
+        assert_eq!(FallbackToTcpPayload::decode(&short), Err(expected));
+        assert_eq!(FallbackOkPayload::decode(&short), Err(expected));
     }
 
     #[test]

@@ -23,10 +23,11 @@ pub use message::{
 pub use payloads::{
     AEAD_IV_LEN, AEAD_KEY_LEN, AUTH_CHALLENGE_LEN, AUTH_PAYLOAD_LEN, AUTH_SIGNATURE_LEN,
     AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, CHACHA20_POLY1305_KEY_LEN,
-    CLOSE_PAYLOAD_LEN, CipherSuite, CloseCode, ClosePayload, HP_KEY_LEN, MAX_AEAD_KEY_LEN,
-    MAX_CONTROL_FRAME_LEN, MAX_HP_KEY_LEN, PING_PAYLOAD_LEN, PayloadError, PingPayload,
-    PongPayload, RegisterCidPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload,
-    SwitchAckPayload, SwitchToUdpPayload, UDP_QSP_TRAFFIC_SECRET_LEN, UPGRADE_ID_PAYLOAD_LEN,
+    CLOSE_PAYLOAD_LEN, CipherSuite, CloseCode, ClosePayload, FALLBACK_ID_PAYLOAD_LEN,
+    FallbackOkPayload, FallbackToTcpPayload, HP_KEY_LEN, MAX_AEAD_KEY_LEN, MAX_CONTROL_FRAME_LEN,
+    MAX_HP_KEY_LEN, PING_PAYLOAD_LEN, PayloadError, PingPayload, PongPayload, RegisterCidPayload,
+    RegisterFailCode, RegisterFailPayload, RegisterOkPayload, SwitchAckPayload, SwitchOkPayload,
+    SwitchToUdpPayload, UDP_QSP_TRAFFIC_SECRET_LEN, UPGRADE_ID_PAYLOAD_LEN,
     UPGRADE_PROBE_PAYLOAD_LEN, UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload,
 };
 /// Message type identifiers.

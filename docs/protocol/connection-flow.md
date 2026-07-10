@@ -142,106 +142,63 @@ Client                                    Server
   |    - upgrade_id                         |
   |---------------------------------------->|
   |                                         |
-  |  10. PING barrier (TCP)                 |
-  |    - barrier_nonce                      |
-  |---------------------------------------->|
+  |  [Server prefers UDP-QSP]               |
   |                                         |
-  |  11. PONG barrier (TCP)                 |
-  |    - barrier_nonce                      |
+  |  10. SWITCH_OK (TCP)                    |
+  |    - upgrade_id                         |
   |<----------------------------------------|
   |                                         |
-  |  [UDP-QSP now ACTIVE transport]         |
+  |  [UDP-QSP is now preferred for DATA]    |
+  |  [Both live ingress paths remain valid] |
   |                                         |
 ```
 
 ### 2.3 Upgrade State Machine (Client Side)
 
 ```
-                    +------------------+
-                    |     Disabled     |  (config.disable_udp = true)
-                    +------------------+
-                             |
-                             | enable_udp
-                             v
-+-------------------+  discovery  +-------------------+
-|      Idle         |<------------|  NeedDiscovery    |
-+-------------------+             +-------------------+
-        |                                ^
-        | register_ok                    | discovery_fail
-        v                                |
-+-------------------+  register_fail  +-------------------+
-|  Active (UDP-QSP) |---------------->|     Pending       |
-+-------------------+                 +-------------------+
-        |                                ^
-        | upgrade_start                  | register_retry
-        v                                |
-+-------------------+             +-------------+
-|    Upgrading      |             |             |
-+-------------------+             |             |
-        |                         |             |
-        | probe_acked + ready     |             |
-        | + switch_to_udp         |             |
-        v                         |             |
-+-------------------+             |             |
-| AwaitingSwitch    |             |             |
-| Commit            |             |             |
-+-------------------+             |             |
-        |                         |             |
-        | barrier_pong            |             |
-        v                         |             |
-+-------------------+             |             |
-|  Active (UDP-QSP) |<------------+-------------+
-+-------------------+
-        |
-        | upgrade_timeout / failure
-        v
-+-------------------+
-| TcpOnlyBlockedUdp |  (cooldown before retry)
-+-------------------+
+Idle -> Upgrading -> SWITCH_TO_UDP received -> AwaitingSwitchOk
+                                                |
+                                                | SWITCH_OK received
+                                                v
+                                          UDP-QSP preferred
+
+Upgrading -- timeout/failure --> TcpOnlyBlockedUdp --> retry
 ```
+
+The client installs the UDP-QSP receive state before it reports `UDP_READY`.
+After receiving a matching `SWITCH_TO_UDP`, it sends `SWITCH_ACK` but keeps TCP
+as its preferred outbound transport. A matching `SWITCH_OK` confirms that the
+server processed the acknowledgement, after which the client prefers UDP-QSP.
+TCP loss before confirmation ends the client session so reconnection can
+establish unambiguous transport state.
 
 ### 2.4 Upgrade State Machine (Server Side)
 
 ```
-                    +------------------+
-                    |      Idle        |
-                    +------------------+
-                             |
-                             | upgrade_probe received
-                             v
-                    +------------------+
-                    |  probe_seen=true |
-                    +------------------+
-                             |
-                             | udp_ready received
-                             v
-                    +------------------+
-                    | ready_seen=true  |
-                    +------------------+
-                             |
-                             | both conditions met
-                             v
-                    +------------------+
-                    | switch_to_udp    |
-                    | sent             |
-                    +------------------+
-                             |
-                             | switch_ack received
-                             v
-                    +------------------+
-                    | ActiveTransport  |
-                    | = UdpQsp         |
-                    +------------------+
+Idle -> probe_seen + ready_seen -> SWITCH_TO_UDP sent
+                                      |
+                                      | SWITCH_ACK received
+                                      v
+                                UDP-QSP preferred
+                                      |
+                                      | send SWITCH_OK
+                                      v
+                              client may prefer UDP
 ```
 
-### 2.5 Barrier PING/PONG Purpose
+The server has already installed the UDP-QSP receive state when it sends
+`SWITCH_TO_UDP`. It makes UDP-QSP its preferred outbound transport after a
+matching `SWITCH_ACK`, then confirms that commit with `SWITCH_OK` on TCP.
 
-The barrier PING/PONG exchange after `SWITCH_ACK` ensures:
-- All in-flight TCP DATA messages have been processed by the server
-- No data loss during the transport switch window
-- Client only commits to UDP after confirming TCP is fully drained
+### 2.5 Transport Switching Invariant
 
-The client MUST validate the barrier nonce matches before switching `active_transport` to UDP-QSP.
+`active_transport` selects the preferred transport for new outbound DATA; it
+is not an ingress allowlist. Authenticated DATA is accepted on TCP and UDP-QSP
+while those transports remain live. This make-before-break rule preserves
+frames already in flight on the prior path without DATA transition buffers or
+a cross-transport barrier. The `SWITCH_OK` control acknowledgement establishes
+that both peers observed the commit. Packets may be reordered across the
+switch, as on an ordinary IP network.
 
 ### 2.6 Upgrade Probing Details
 
@@ -264,77 +221,41 @@ The client MUST validate the barrier nonce matches before switching `active_tran
 | UDP_REGISTERING | REGISTER_CID sent, awaiting REGISTER_OK | TCP |
 | UDP_PROBING | UPGRADE_PROBE sent, awaiting ACK | TCP |
 | UDP_READY | UDP_READY sent, awaiting SWITCH_TO_UDP | TCP |
-| UDP_COMMITTING | SWITCH_ACK sent, awaiting barrier PONG | TCP |
-| UDP_ACTIVE | UDP-QSP fully committed | UDP-QSP |
+| UDP_SWITCH_PENDING | SWITCH_ACK sent, awaiting SWITCH_OK | TCP |
+| UDP_ACTIVE | SWITCH_OK received; UDP-QSP preferred | UDP-QSP |
 | TCP_ONLY_BLOCKED | UDP upgrade failed, cooldown active | TCP |
 
 ### 3.2 State Diagram
 
 ```
-                              +-----------------+
-                              |   CONNECTING    |
-                              +-----------------+
-                                       |
-                                       | TCP connected + TLS handshake
-                                       v
-                              +-----------------+
-                              | AUTHENTICATING  |
-                              +-----------------+
-                                       |
-                         +-------------+-------------+
-                         |                           |
-                    AUTH_OK                     AUTH_FAIL
-                         |                           |
-                         v                           v
-                +-----------------+          +-----------------+
-                |  AUTHENTICATED  |          |   TERMINATED    |
-                |  (TCP active)   |          +-----------------+
-                +-----------------+
-                         |
-            +------------+------------+
-            |                         |
-      UDP disabled           UDP upgrade enabled
-            |                         |
-            |                         v
-            |               +-----------------+
-            |               | UDP_REGISTERING |
-            |               +-----------------+
-            |                         |
-            |              +----------+----------+
-            |              |                     |
-            |         REGISTER_OK          REGISTER_FAIL
-            |              |                     |
-            |              v                     v
-            |      +-----------------+   (retry or TCP-only)
-            |      |   UDP_PROBING   |
-            |      +-----------------+
-            |              |
-            |       +------+------+
-            |       |             |
-            |  probe_acked   probe_timeout
-            |       |             |
-            |       v             v
-            | +-----------------+  +-------------------+
-            | |   UDP_READY     |  | TCP_ONLY_BLOCKED  |
-            | +-----------------+  +-------------------+
-            |       |                      |
-            |       v                      | cooldown
-            | +-----------------+          |
-            | | UDP_COMMITTING  |<---------+
-            | +-----------------+
-            |       |
-            |       | barrier_pong
-            |       v
-            | +-----------------+
-            +>|   UDP_ACTIVE    |
-              +-----------------+
-                       |
-                       | UDP failure / timeout
-                       v
-              +-----------------+
-              | TCP fallback    |
-              | (if TCP alive)  |
-              +-----------------+
+CONNECTING -> AUTHENTICATING -> AUTHENTICATED (TCP preferred)
+                                      |
+                                      v
+                               UDP_REGISTERING
+                                      |
+                    +-----------------+----------------+
+                    |                                  |
+               REGISTER_FAIL                       REGISTER_OK
+                    |                                  |
+                    v                                  v
+            retry or TCP-only                     UDP_PROBING
+                                                  /          \
+                                           timeout            probe acknowledged
+                                             |                       |
+                                             v                       v
+                                    TCP_ONLY_BLOCKED             UDP_READY
+                                             |                       |
+                                          cooldown               SWITCH_TO_UDP
+                                             |                       |
+                                             +-> UDP_PROBING         v
+                                                              UDP_SWITCH_PENDING
+                                                                      |
+                                                                  SWITCH_OK
+                                                                      |
+                                                                      v
+                                                                 UDP_ACTIVE
+
+UDP_ACTIVE -- FALLBACK_TO_TCP --> TCP preferred + UDP rediscovery
 ```
 
 ### 3.3 Valid Messages by State
@@ -346,23 +267,30 @@ The client MUST validate the barrier nonce matches before switching `active_tran
 | UDP_REGISTERING | (waiting for response) | REGISTER_OK, REGISTER_FAIL |
 | UDP_PROBING | UPGRADE_PROBE, DATA, PING, PONG | UPGRADE_PROBE_ACK, DATA, PING, PONG |
 | UDP_READY | (waiting for response) | SWITCH_TO_UDP |
-| UDP_COMMITTING | SWITCH_ACK, PING | PONG |
-| UDP_ACTIVE | DATA, PING, PONG, CLOSE | DATA, PING, PONG, CLOSE |
+| UDP_SWITCH_PENDING | DATA, PING, PONG, FALLBACK_TO_TCP, FALLBACK_OK | SWITCH_OK, DATA, PING, PONG, FALLBACK_TO_TCP, FALLBACK_OK |
+| UDP_ACTIVE | DATA, PING, PONG, CLOSE, FALLBACK_TO_TCP, FALLBACK_OK | DATA, PING, PONG, CLOSE, FALLBACK_TO_TCP, FALLBACK_OK |
+
+`FALLBACK_TO_TCP` and `FALLBACK_OK` are valid on TCP in every authenticated
+state; a fallback request cancels any in-progress UDP switch.
 
 ---
 
-## 4. Active Transport Rules
+## 4. Preferred Transport Rules
 
-### 4.1 Single Active Transport
+### 4.1 Single Preferred Transport
 
-Only one transport may be active for data at any time:
+Only one transport is preferred for new outbound data at a time:
 
 ```
 active_transport in { TCP, UDP_QSP }
 ```
 
-- `TCP`: Initial state after authentication
-- `UDP_QSP`: After successful UDP upgrade commit
+- `TCP`: Initial state after authentication and the fallback target
+- `UDP_QSP`: Preferred after successful UDP upgrade commit
+
+The preferred transport does not restrict ingress. DATA authenticated by the
+current TLS session or registered UDP-QSP keys is accepted from either live
+path.
 
 ### 4.2 Transport Selection
 
@@ -377,18 +305,33 @@ func send_data(packet):
 
 ### 4.3 TCP Fallback
 
-If UDP-QSP fails (idle timeout, AEAD errors, packet loss), the client may fall back to TCP:
+Either peer can initiate fallback on the authenticated TCP control channel:
 
 ```
-on udp_failure:
-    if tcp_alive:
-        active_transport = TCP
-        // Attempt UDP upgrade again after cooldown
-        udp_upgrade_state = TcpOnlyBlockedUdp
-    else:
-        // Session terminates
-        send_close(ProtocolError)
+Requester                                Receiver
+   |                                        |
+   | FALLBACK_TO_TCP(fallback_id)           |
+   |--------------------------------------->|
+   |                                        | prefer TCP for outbound DATA
+   | DATA (optional, ordered after request) |
+   |--------------------------------------->|
+   |                                        |
+   | FALLBACK_OK(fallback_id)               |
+   |<---------------------------------------|
 ```
+
+The receiver changes its preferred egress before acknowledging the request.
+TCP framing guarantees that DATA following `FALLBACK_TO_TCP` cannot overtake
+it. Requests are idempotent, and a stale `FALLBACK_OK` does not change state.
+Fallback is a hard egress cutover: protected UDP packets still buffered for
+send are discarded rather than flushed or replayed over TCP. UDP receive state
+is independent of that send queue.
+The client keeps an existing authenticated UDP transport receive-capable while
+it discovers and registers a replacement, then retires it after `REGISTER_OK`.
+Clients with UDP upgrade disabled acknowledge fallback without starting
+discovery.
+When TCP is unavailable, the session reconnects instead of attempting an
+uncoordinated fallback.
 
 ### 4.4 Session Takeover
 
@@ -442,7 +385,7 @@ Close is best-effort on UDP-QSP (may be dropped). TCP fallback is used if UDP fa
 
 ### 5.3 Idle Timeout
 
-Sessions terminate if no inbound traffic is received on the active transport:
+Sessions terminate if no inbound traffic is received on the preferred transport:
 
 ```
 idle_deadline = last_activity + idle_timeout
@@ -567,11 +510,13 @@ CONNECT -> TLS -> AUTH -> AUTH_OK -> [DATA, PING, PONG]* -> CLOSE
 CONNECT -> TLS -> AUTH -> AUTH_OK ->
 REGISTER_CID -> REGISTER_OK ->
 UPGRADE_PROBE -> UPGRADE_PROBE_ACK ->
-UDP_READY -> SWITCH_TO_UDP -> SWITCH_ACK ->
-PING(barrier) -> PONG(barrier) ->
+UDP_READY -> SWITCH_TO_UDP -> SWITCH_ACK -> SWITCH_OK ->
 [DATA, PING, PONG]* on UDP-QSP ->
 CLOSE
 ```
+
+At any point after authentication, either peer may exchange
+`FALLBACK_TO_TCP -> FALLBACK_OK` on TCP and make TCP the preferred data path.
 
 ### 8.3 Message Types by Transport
 
@@ -586,6 +531,9 @@ CLOSE
 | UDP_READY | Client -> Server | Never |
 | SWITCH_TO_UDP | Server -> Client | Never |
 | SWITCH_ACK | Client -> Server | Never |
+| SWITCH_OK | Server -> Client | Never |
+| FALLBACK_TO_TCP | Both | Never |
+| FALLBACK_OK | Both | Never |
 | UPGRADE_PROBE | Never | Client -> Server |
 | UPGRADE_PROBE_ACK | Never | Server -> Client |
 | DATA | Both | Both |

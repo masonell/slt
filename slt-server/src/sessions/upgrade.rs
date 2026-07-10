@@ -1,8 +1,8 @@
 //! UDP upgrade control-message handlers.
 
 use slt_core::proto::{
-    Message, SwitchAckPayload, SwitchToUdpPayload, UdpReadyPayload, UpgradeProbeAckPayload,
-    UpgradeProbePayload,
+    Message, SwitchAckPayload, SwitchOkPayload, SwitchToUdpPayload, UdpReadyPayload,
+    UpgradeProbeAckPayload, UpgradeProbePayload,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
@@ -124,7 +124,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         Ok(SessionControl::Continue)
     }
 
-    pub(super) fn handle_switch_ack(
+    pub(super) async fn handle_switch_ack(
         &mut self,
         payload: &[u8],
     ) -> Result<SessionControl, SessionError> {
@@ -153,17 +153,26 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 session_id = self.session_id,
                 client_id = %self.client_id,
                 upgrade_id = ack.upgrade_id,
-                "ignoring switch ack before switch commit"
+                "ignoring switch ack before switch request"
             );
             return Ok(SessionControl::Continue);
         }
 
         self.set_active_transport(super::ActiveTransport::UdpQsp);
+        let confirmation = SwitchOkPayload {
+            upgrade_id: ack.upgrade_id,
+        };
+        let mut confirmation_buf = Vec::with_capacity(8);
+        confirmation.encode(&mut confirmation_buf);
+        self.send_tcp_message(Message::SwitchOk {
+            payload: &confirmation_buf,
+        })
+        .await?;
         info!(
             session_id = self.session_id,
             client_id = %self.client_id,
             upgrade_id = ack.upgrade_id,
-            "udp upgrade committed"
+            "udp upgrade committed and confirmed"
         );
         self.remember_stale_upgrade_id(ack.upgrade_id);
         self.reset_udp_upgrade_attempt_preserving_history();
@@ -191,7 +200,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             session_id = self.session_id,
             client_id = %self.client_id,
             upgrade_id,
-            "sent switch_to_udp commit"
+            "sent switch_to_udp request"
         );
         Ok(())
     }

@@ -35,8 +35,11 @@ All VPN messages are framed as:
 | UPGRADE_PROBE     | 0x0b  | Client -> Server| 16 bytes     | UDP path validation probe             |
 | UPGRADE_PROBE_ACK | 0x0c  | Server -> Client| 16 bytes     | UDP path validation acknowledgment    |
 | UDP_READY         | 0x0d  | Client -> Server| 8 bytes      | Client signals UDP path validated     |
-| SWITCH_TO_UDP     | 0x0e  | Server -> Client| 8 bytes      | Server commits transport switch       |
-| SWITCH_ACK        | 0x0f  | Client -> Server| 8 bytes      | Client acknowledges switch commit     |
+| SWITCH_TO_UDP     | 0x0e  | Server -> Client| 8 bytes      | Server requests transport switch      |
+| SWITCH_ACK        | 0x0f  | Client -> Server| 8 bytes      | Client accepts the switch request     |
+| FALLBACK_TO_TCP   | 0x10  | Bidirectional   | 8 bytes      | Request TCP as the preferred transport |
+| FALLBACK_OK       | 0x11  | Bidirectional   | 8 bytes      | Acknowledge TCP fallback               |
+| SWITCH_OK         | 0x12  | Server -> Client| 8 bytes      | Confirm UDP switch acknowledgement    |
 
 ---
 
@@ -262,7 +265,7 @@ Indicates CID registration failure.
 **Direction:** Bidirectional
 **Payload Size:** 8 bytes
 
-Keepalive ping. Sent only on the active transport.
+Keepalive ping. Sent on the preferred transport.
 
 #### Binary Layout
 
@@ -272,8 +275,7 @@ Keepalive ping. Sent only on the active transport.
 
 #### Semantics
 
-- The nonce need not be validated for ordinary keepalive traffic
-- When used as a switch-commit barrier, the receiver MUST validate the nonce before committing to UDP-QSP
+- The responder echoes the nonce in PONG
 
 ---
 
@@ -430,7 +432,7 @@ Client signals that the UDP path has been validated and is ready for use.
 **Direction:** Server -> Client (TCP)
 **Payload Size:** 8 bytes
 
-Server commits to switching the active transport to UDP-QSP.
+Server asks the client to begin the UDP-QSP switch commit.
 
 #### Binary Layout
 
@@ -451,7 +453,7 @@ Server commits to switching the active transport to UDP-QSP.
 **Direction:** Client -> Server (TCP)
 **Payload Size:** 8 bytes
 
-Client acknowledges the server's switch commit.
+Client accepts the server's switch request.
 
 #### Binary Layout
 
@@ -461,9 +463,74 @@ Client acknowledges the server's switch commit.
 
 #### Semantics
 
-- After sending SWITCH_ACK, client sends a TCP PING with a barrier nonce
-- Client commits to UDP-QSP only after receiving the matching barrier PONG
-- During the transition window, either side MAY drop DATA on the inactive transport
+- Client keeps TCP as its preferred outbound transport after sending SWITCH_ACK
+- Server makes UDP-QSP its preferred outbound transport after receiving SWITCH_ACK
+- Server sends SWITCH_OK after processing the matching SWITCH_ACK
+- Authenticated DATA remains valid on TCP and UDP-QSP while both transports are live
+
+---
+
+### SWITCH_OK (0x12)
+
+**Direction:** Server -> Client (TCP)
+**Payload Size:** 8 bytes
+
+Confirms that the server processed the client's UDP switch acknowledgement.
+
+#### Binary Layout
+
+| Offset | Size | Field       | Description                         |
+|--------|------|-------------|-------------------------------------|
+| 0      | 8    | upgrade_id  | ID of the committed upgrade         |
+
+#### Semantics
+
+- Sent after the server commits UDP-QSP as its preferred outbound transport
+- Client makes UDP-QSP its preferred outbound transport only after receiving a matching SWITCH_OK
+- If TCP closes before SWITCH_OK, the client reconnects instead of assuming the server committed
+
+---
+
+### FALLBACK_TO_TCP (0x10)
+
+**Direction:** Bidirectional (TCP)
+**Payload Size:** 8 bytes
+
+Requests that the peer use TCP as its preferred outbound transport.
+
+#### Binary Layout
+
+| Offset | Size | Field        | Description                         |
+|--------|------|--------------|-------------------------------------|
+| 0      | 8    | fallback_id  | Identifier echoed in FALLBACK_OK    |
+
+#### Semantics
+
+- The receiver switches its preferred outbound transport to TCP before processing later frames
+- The request is idempotent; duplicate requests receive another FALLBACK_OK
+- The sender may place DATA after the request on the same TCP stream because stream ordering guarantees the receiver processes the fallback first
+- Protected UDP packets still buffered for send are discarded rather than flushed or replayed on TCP
+- A live prior UDP transport remains receive-capable until replacement UDP registration completes
+
+---
+
+### FALLBACK_OK (0x11)
+
+**Direction:** Bidirectional (TCP)
+**Payload Size:** 8 bytes
+
+Acknowledges a TCP fallback request.
+
+#### Binary Layout
+
+| Offset | Size | Field        | Description                              |
+|--------|------|--------------|------------------------------------------|
+| 0      | 8    | fallback_id  | Identifier copied from FALLBACK_TO_TCP   |
+
+#### Semantics
+
+- Confirms that the peer now prefers TCP for outbound traffic
+- Stale or duplicate acknowledgements do not change transport state
 
 ---
 
@@ -479,6 +546,7 @@ Client acknowledges the server's switch commit.
 | CHACHA20_POLY1305_KEY_LEN | 32 | HP/AEAD key length (ChaCha20-Poly1305)  |
 | AEAD_KEY_LEN           | 16    | AEAD key length (AES-128-GCM)           |
 | AEAD_IV_LEN            | 12    | Length of AEAD IV (both suites)         |
+| FALLBACK_ID_PAYLOAD_LEN | 8   | TCP fallback identifier length           |
 | MAX_TUN_MTU            | 1406  | Maximum TUN MTU                          |
 | PN_REPLAY_WINDOW       | 1024  | Replay protection window size (packets)  |
 
@@ -503,3 +571,6 @@ Client acknowledges the server's switch commit.
 | UDP_READY           | Yes | No      |
 | SWITCH_TO_UDP       | Yes | No      |
 | SWITCH_ACK          | Yes | No      |
+| SWITCH_OK           | Yes | No      |
+| FALLBACK_TO_TCP     | Yes | No      |
+| FALLBACK_OK         | Yes | No      |

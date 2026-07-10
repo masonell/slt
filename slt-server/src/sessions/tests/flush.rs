@@ -12,7 +12,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use slt_core::crypto::udp_qsp::{PeerUpdate, SessionIo, UdpQspKeys};
+use slt_core::crypto::udp_qsp::{PeerUpdate, QuicQspSession, SessionIo, UdpQspKeys};
 use slt_core::proto::{
     CipherSuite, Message, MessageLimits, PingPayload, PongPayload, RegisterCidPayload,
     decode_message, encode_message,
@@ -88,6 +88,12 @@ impl SessionIo for BufferingUdpIo {
 
     fn has_pending_flush(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    fn discard_pending_send(&mut self) -> usize {
+        let discarded = self.pending.len();
+        self.pending.clear();
+        discarded
     }
 }
 
@@ -266,6 +272,82 @@ async fn wait_for_flushed_data_peer(
 }
 
 #[tokio::test]
+async fn tcp_cutover_discards_pending_udp_without_retiring_receive_state() {
+    let (server_tls, _client_tls) = tls_pair().await;
+    let (tun, _tun_rx) = TestTun::new(8);
+    let (bytes_tx, _bytes_rx) = mpsc::channel(8);
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let flush_failures = Arc::new(AtomicUsize::new(0));
+    let factory = Arc::new(BufferingUdpIoFactory {
+        bytes_tx: bytes_tx.clone(),
+        sent: sent.clone(),
+        flush_failures: flush_failures.clone(),
+    });
+    let registry = Arc::new(SessionRegistry::new());
+    let metrics = Arc::new(Metrics::default());
+    let (tx, rx) = mpsc::channel(8);
+    let client_id = ClientId([0xA5; 16]);
+    let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
+    let handle = registry.register_session(client_id, assigned, tx.clone());
+    let mut session = ClientSessionBase::new(
+        handle.session_id,
+        client_id,
+        assigned,
+        TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
+        tun,
+        factory,
+        registry,
+        metrics,
+        tx,
+        rx,
+        CancellationToken::new(),
+        MessageLimits::from_mtu(1500),
+        default_session_timeouts(),
+        ServerUdpQspConfig::default(),
+    );
+    let register = make_register_payload(
+        Cid::from([0xC8; MAX_DCID_LEN]),
+        Cid::from([0xD8; MAX_DCID_LEN]),
+        CipherSuite::Aes128Gcm,
+    );
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
+    let io = BufferingUdpIo {
+        peer: (Ipv4Addr::LOCALHOST, 18111).into(),
+        pending: Vec::new(),
+        bytes_tx,
+        sent: sent.clone(),
+        flush_failures,
+    };
+    session.udp_session = Some(QuicQspSession::new(
+        io,
+        register.client_to_server_cid,
+        register.server_to_client_cid,
+        keys,
+        register.pn_start,
+        register.pn_start_rx,
+        register.key_phase,
+    ));
+    session.active_transport = ActiveTransport::UdpQsp;
+    session
+        .udp_session
+        .as_mut()
+        .unwrap()
+        .send(b"queued downlink")
+        .await
+        .unwrap();
+    assert!(session.udp_session.as_ref().unwrap().has_pending_flush());
+
+    session.set_active_transport(ActiveTransport::Tcp);
+
+    let udp = session
+        .udp_session
+        .as_ref()
+        .expect("tcp fallback must retain udp receive state");
+    assert!(!udp.has_pending_flush());
+    assert!(sent.lock().expect("sent lock").is_empty());
+}
+
+#[tokio::test]
 async fn lifecycle_idle_flush_drains_buffered_data() {
     let (join, mut client, tx, mut udp_rx, sent, limits, assigned, _registry, _flush_failures) =
         spawn_session_buffering().await;
@@ -336,11 +418,11 @@ async fn lifecycle_flush_failure_falls_back_to_tcp() {
         super::common::read_message_bytes(&mut client, limits),
     )
     .await
-    .expect("fallback tcp ping within timeout")
+    .expect("tcp fallback request within timeout")
     .expect("read ok");
     assert!(matches!(
         decode_message(&buf, limits).unwrap().unwrap().0,
-        Message::Ping { .. }
+        Message::FallbackToTcp { .. }
     ));
     assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 
@@ -372,7 +454,7 @@ async fn lifecycle_flush_failure_falls_back_to_tcp() {
                 saw_pong = true;
                 break;
             }
-            Message::Ping { .. } => {}
+            Message::FallbackToTcp { .. } => {}
             other => panic!("expected tcp pong after udp flush failure, got {other:?}"),
         }
     }

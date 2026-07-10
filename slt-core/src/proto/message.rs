@@ -31,10 +31,16 @@ pub enum Message<'a> {
     UpgradeProbeAck { payload: &'a [u8] },
     /// Client indicates UDP path is validated.
     UdpReady { payload: &'a [u8] },
-    /// Server commits transport switch to UDP.
+    /// Server requests transport switch to UDP.
     SwitchToUdp { payload: &'a [u8] },
-    /// Client acknowledges server's switch commit.
+    /// Client accepts the server's UDP switch request.
     SwitchAck { payload: &'a [u8] },
+    /// Request that both peers prefer TCP for outbound traffic.
+    FallbackToTcp { payload: &'a [u8] },
+    /// Acknowledge a TCP fallback request.
+    FallbackOk { payload: &'a [u8] },
+    /// Server confirms the UDP switch acknowledgement was processed.
+    SwitchOk { payload: &'a [u8] },
 }
 
 impl<'a> Message<'a> {
@@ -57,6 +63,9 @@ impl<'a> Message<'a> {
             Message::UdpReady { .. } => MessageType::UdpReady,
             Message::SwitchToUdp { .. } => MessageType::SwitchToUdp,
             Message::SwitchAck { .. } => MessageType::SwitchAck,
+            Message::FallbackToTcp { .. } => MessageType::FallbackToTcp,
+            Message::FallbackOk { .. } => MessageType::FallbackOk,
+            Message::SwitchOk { .. } => MessageType::SwitchOk,
         }
     }
 
@@ -78,7 +87,10 @@ impl<'a> Message<'a> {
             | Message::UpgradeProbeAck { payload }
             | Message::UdpReady { payload }
             | Message::SwitchToUdp { payload }
-            | Message::SwitchAck { payload } => payload,
+            | Message::SwitchAck { payload }
+            | Message::FallbackToTcp { payload }
+            | Message::FallbackOk { payload }
+            | Message::SwitchOk { payload } => payload,
         }
     }
 }
@@ -129,6 +141,15 @@ impl<'a> From<Frame<'a>> for Message<'a> {
                 payload: frame.payload,
             },
             MessageType::SwitchAck => Message::SwitchAck {
+                payload: frame.payload,
+            },
+            MessageType::FallbackToTcp => Message::FallbackToTcp {
+                payload: frame.payload,
+            },
+            MessageType::FallbackOk => Message::FallbackOk {
+                payload: frame.payload,
+            },
+            MessageType::SwitchOk => Message::SwitchOk {
                 payload: frame.payload,
             },
         }
@@ -361,6 +382,27 @@ mod tests {
     fn switch_ack_roundtrip() {
         roundtrip(Message::SwitchAck {
             payload: b"switch_ack_payload",
+        });
+    }
+
+    #[test]
+    fn switch_ok_roundtrip() {
+        roundtrip(Message::SwitchOk {
+            payload: b"switch_ok_payload",
+        });
+    }
+
+    #[test]
+    fn fallback_to_tcp_roundtrip() {
+        roundtrip(Message::FallbackToTcp {
+            payload: b"fallback_to_tcp_payload",
+        });
+    }
+
+    #[test]
+    fn fallback_ok_roundtrip() {
+        roundtrip(Message::FallbackOk {
+            payload: b"fallback_ok_payload",
         });
     }
 

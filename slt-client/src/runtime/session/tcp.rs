@@ -1,36 +1,119 @@
 //! TCP message handling for `ClientSession`.
 
+use std::io;
+
 use slt_core::proto::{
-    ClosePayload, Message, MessageType, OwnedMessageBuf, PingPayload, PongPayload,
+    ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message, MessageType, OwnedMessageBuf,
+    PingPayload, PongPayload,
 };
 use tracing::{debug, info, trace};
 
 use super::error::SessionError;
 use super::{ClientSession, ClientTcpIo, SessionControl, SessionExit};
-use crate::metrics::Metrics;
 use crate::runtime::observer::{Transport, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
 use crate::runtime::session::state::ActiveTransport;
 
-fn switch_to_tcp_on_server_traffic(
-    active_transport: &mut ActiveTransport,
-    metrics: &Metrics,
-    signal: &'static str,
-) -> bool {
-    if *active_transport != ActiveTransport::UdpQsp {
-        return false;
+impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
+    /// Drop UDP packets that have not reached the socket at a TCP fallback.
+    ///
+    /// Fallback is a hard egress cutover: queued UDP sends are not flushed or
+    /// replayed on TCP. This discard leaves receive state untouched; the caller
+    /// separately decides whether the old path remains receive-capable.
+    fn discard_pending_udp_send_for_fallback(&mut self, initiator: &'static str) {
+        let Some(udp) = self.udp_receive_transport_mut() else {
+            return;
+        };
+        let discarded_packets = udp.discard_pending_send();
+        if discarded_packets != 0 {
+            debug!(
+                discarded_packets,
+                initiator, "discarded pending udp packets at tcp fallback"
+            );
+        }
     }
 
-    debug!(
-        signal,
-        "received tcp traffic while udp-qsp is active; switching to tcp"
-    );
-    metrics.inc_transport_udp_to_tcp_server();
-    *active_transport = ActiveTransport::Tcp;
-    true
-}
+    /// Send an idempotent TCP fallback request before any DATA retried on TCP.
+    pub(super) async fn request_tcp_fallback(
+        &mut self,
+        reason: TransportChangeReason,
+    ) -> Result<(), SessionError> {
+        if !self.tcp_alive {
+            return Err(SessionError::Connection {
+                source: io::Error::new(io::ErrorKind::NotConnected, "tcp fallback unavailable"),
+            });
+        }
 
-impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
+        if self.pending_tcp_fallback.is_none() {
+            let fallback_id = fastrand::u64(..);
+            let payload = FallbackToTcpPayload { fallback_id };
+            let mut buf = Vec::with_capacity(8);
+            payload.encode(&mut buf);
+            self.write_tcp_message(Message::FallbackToTcp { payload: &buf })
+                .await?;
+            self.pending_tcp_fallback = Some(fallback_id);
+            debug!(fallback_id, "requested tcp fallback");
+        }
+
+        self.discard_pending_udp_send_for_fallback("client");
+        if self.active_transport == ActiveTransport::UdpQsp {
+            self.metrics.inc_transport_udp_to_tcp();
+            self.active_transport = ActiveTransport::Tcp;
+            self.note_transport_change(Transport::UdpQsp, Transport::Tcp, reason);
+        }
+        self.note_tcp_activity();
+        Ok(())
+    }
+
+    async fn handle_fallback_to_tcp(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<SessionControl, SessionError> {
+        let request = FallbackToTcpPayload::decode(payload)?;
+        self.discard_pending_udp_send_for_fallback("server");
+        if self.active_transport == ActiveTransport::UdpQsp {
+            self.metrics.inc_transport_udp_to_tcp_server();
+            self.active_transport = ActiveTransport::Tcp;
+            self.note_transport_change(
+                Transport::UdpQsp,
+                Transport::Tcp,
+                TransportChangeReason::ServerInitiated,
+            );
+        }
+        self.note_tcp_activity();
+        // The client owns CID discovery, so peer fallback resets the handshake
+        // and starts make-before-break rediscovery while the old UDP transport
+        // remains available for authenticated receive traffic.
+        self.schedule_discovery_retry();
+
+        let ok = FallbackOkPayload {
+            fallback_id: request.fallback_id,
+        };
+        let mut buf = Vec::with_capacity(8);
+        ok.encode(&mut buf);
+        self.write_tcp_message(Message::FallbackOk { payload: &buf })
+            .await?;
+        info!(
+            fallback_id = request.fallback_id,
+            "accepted server tcp fallback"
+        );
+        Ok(SessionControl::Continue)
+    }
+
+    fn handle_fallback_ok(&mut self, payload: &[u8]) -> Result<SessionControl, SessionError> {
+        let ok = FallbackOkPayload::decode(payload)?;
+        if self.pending_tcp_fallback == Some(ok.fallback_id) {
+            self.pending_tcp_fallback = None;
+            info!(fallback_id = ok.fallback_id, "tcp fallback acknowledged");
+        } else {
+            trace!(
+                fallback_id = ok.fallback_id,
+                "ignoring stale tcp fallback acknowledgement"
+            );
+        }
+        Ok(SessionControl::Continue)
+    }
+
     /// Processes buffered TCP data and dispatches messages.
     ///
     /// Repeatedly pops messages from the TCP transport buffer and handles
@@ -72,19 +155,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         msg_buf: OwnedMessageBuf,
     ) -> Result<SessionControl, SessionError> {
         if msg_buf.message().ty() == MessageType::Data {
-            if switch_to_tcp_on_server_traffic(
-                &mut self.active_transport,
-                self.metrics.as_ref(),
-                "data",
-            ) {
-                self.note_transport_change(
-                    Transport::UdpQsp,
-                    Transport::Tcp,
-                    TransportChangeReason::ServerInitiated,
-                );
-                self.note_tcp_activity();
-                self.schedule_discovery_retry();
-            }
             return Ok(self.send_to_tun_or_shutdown(msg_buf).await);
         }
 
@@ -94,19 +164,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             Message::Data { .. } => unreachable!("data handled by fast-path above"),
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload)?;
-                if switch_to_tcp_on_server_traffic(
-                    &mut self.active_transport,
-                    self.metrics.as_ref(),
-                    "ping",
-                ) {
-                    self.note_transport_change(
-                        Transport::UdpQsp,
-                        Transport::Tcp,
-                        TransportChangeReason::ServerInitiated,
-                    );
-                    self.note_tcp_activity();
-                    self.schedule_discovery_retry();
-                }
                 let pong_out = PongPayload {
                     nonce: ping_in.nonce,
                 };
@@ -118,9 +175,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             }
             Message::Pong { payload } => {
                 let pong_in = PongPayload::decode(payload)?;
-                if self.maybe_commit_udp_upgrade_on_barrier_pong(pong_in.nonce) {
-                    return Ok(SessionControl::Continue);
-                }
                 trace!(nonce = pong_in.nonce, "received pong");
                 Ok(SessionControl::Continue)
             }
@@ -131,6 +185,9 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
             }
             Message::SwitchToUdp { payload } => self.handle_switch_to_udp(payload).await,
+            Message::SwitchOk { payload } => self.handle_switch_ok(payload),
+            Message::FallbackToTcp { payload } => self.handle_fallback_to_tcp(payload).await,
+            Message::FallbackOk { payload } => self.handle_fallback_ok(payload),
             Message::RegisterCid { .. }
             | Message::Auth { .. }
             | Message::AuthOk { .. }
@@ -240,48 +297,6 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("session protocol violation"));
         assert!(rendered.contains("unexpected control message"));
-    }
-
-    mod server_initiated_fallback {
-        use super::*;
-
-        #[test]
-        fn tcp_server_traffic_switches_udp_to_tcp_once() {
-            let metrics = Metrics::default();
-            let mut active_transport = ActiveTransport::UdpQsp;
-
-            assert!(switch_to_tcp_on_server_traffic(
-                &mut active_transport,
-                &metrics,
-                "data"
-            ));
-            assert!(!switch_to_tcp_on_server_traffic(
-                &mut active_transport,
-                &metrics,
-                "data"
-            ));
-
-            assert_eq!(active_transport, ActiveTransport::Tcp);
-            let snapshot = metrics.snapshot();
-            assert_eq!(snapshot.transport_udp_to_tcp_server, 1);
-            assert_eq!(snapshot.transport_udp_to_tcp, 0);
-        }
-
-        #[test]
-        fn tcp_server_traffic_does_not_increment_when_already_on_tcp() {
-            let metrics = Metrics::default();
-            let mut active_transport = ActiveTransport::Tcp;
-
-            assert!(!switch_to_tcp_on_server_traffic(
-                &mut active_transport,
-                &metrics,
-                "ping"
-            ));
-
-            assert_eq!(active_transport, ActiveTransport::Tcp);
-            let snapshot = metrics.snapshot();
-            assert_eq!(snapshot.transport_udp_to_tcp_server, 0);
-        }
     }
 
     /// A TCP-path `SessionError::Io` wrapping an `io::Error` preserves the

@@ -54,8 +54,11 @@ Maximum `tun_mtu` of 1406 is derived from:
 | UPGRADE_PROBE    | 0x0b  | Client -> Server  | UDP path validation probe during upgrade       |
 | UPGRADE_PROBE_ACK| 0x0c  | Server -> Client  | UDP path validation probe acknowledgement      |
 | UDP_READY        | 0x0d  | Client -> Server  | Client indicates UDP path is validated         |
-| SWITCH_TO_UDP    | 0x0e  | Server -> Client  | Server commits transport switch to UDP         |
-| SWITCH_ACK       | 0x0f  | Client -> Server  | Client acknowledges server's switch commit     |
+| SWITCH_TO_UDP    | 0x0e  | Server -> Client  | Server requests transport switch to UDP         |
+| SWITCH_ACK       | 0x0f  | Client -> Server  | Client accepts the UDP switch request           |
+| FALLBACK_TO_TCP  | 0x10  | Both              | Request TCP as the preferred transport          |
+| FALLBACK_OK      | 0x11  | Both              | Acknowledge TCP fallback                        |
+| SWITCH_OK        | 0x12  | Server -> Client  | Confirm the UDP switch acknowledgement          |
 
 ## 3. State Rules
 
@@ -71,12 +74,14 @@ Before `AUTH_OK` is received:
 
 After `AUTH_OK`:
 
-- `DATA` may be sent on TCP (until UDP-QSP becomes active)
+- Authenticated `DATA` is accepted on either live transport
 - `REGISTER_CID` may be sent to enable UDP-QSP
 - UDP upgrade commit control messages become valid:
   - `UDP_READY` (client -> server)
   - `SWITCH_TO_UDP` (server -> client)
   - `SWITCH_ACK` (client -> server)
+  - `SWITCH_OK` (server -> client)
+- `FALLBACK_TO_TCP` and `FALLBACK_OK` are valid bidirectional TCP control messages
 
 ### Session Lifecycle
 
@@ -85,7 +90,7 @@ After `AUTH_OK`:
 3. Server replies `AUTH_OK` or `AUTH_FAIL`
 4. On success, TCP data transfer is permitted
 5. Client may register UDP-QSP CID for data plane upgrade
-6. Active transport switches from TCP to UDP-QSP after switch commit
+6. Preferred transport switches from TCP to UDP-QSP after switch commit
 
 ## 4. Transport Mapping
 
@@ -104,6 +109,9 @@ These messages are only sent on the TCP control channel:
 | UDP_READY        | UDP upgrade commit (control plane)              |
 | SWITCH_TO_UDP    | UDP upgrade commit (control plane)              |
 | SWITCH_ACK       | UDP upgrade commit (control plane)              |
+| SWITCH_OK        | UDP upgrade commit confirmation (control plane) |
+| FALLBACK_TO_TCP  | Requests TCP as the preferred data path         |
+| FALLBACK_OK      | Confirms TCP fallback                           |
 
 ### UDP-QSP-Only Messages
 
@@ -121,17 +129,18 @@ These messages can be sent on either transport:
 | Message | TCP | UDP-QSP | Notes                                |
 |---------|-----|---------|--------------------------------------|
 | DATA    | Yes | Yes     | Raw IP packet tunneling              |
-| PING    | Yes | Yes     | Keepalive (sent on active transport) |
+| PING    | Yes | Yes     | Keepalive (sent on preferred transport) |
 | PONG    | Yes | Yes     | Keepalive response                   |
 | CLOSE   | Yes | Yes     | Session termination                  |
 
-### Active Transport Rules
+### Preferred Transport Rules
 
-- PINGs are sent only on the **active transport**
-- Only one active data path per `client_id` at a time
-- Registration and switch-commit control remain on TCP
+- New DATA and PING messages are sent on the preferred transport
+- Authenticated DATA received on either live transport is accepted
+- Registration, switch-commit, and fallback control remain on TCP
+- Cross-transport packet reordering is permitted
 - `CLOSE` on UDP-QSP is best-effort; if dropped, idle timeout closes the session
-- If UDP-QSP fails (idle timeout), the server MAY fall back to TCP
+- Either peer may request TCP fallback with `FALLBACK_TO_TCP`
 
 ## 5. Implementation Notes
 

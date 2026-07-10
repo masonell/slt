@@ -1,8 +1,8 @@
 //! TCP message handling for client sessions.
 
-use slt_core::proto::Message;
+use slt_core::proto::{FallbackOkPayload, FallbackToTcpPayload, Message};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::trace;
+use tracing::{info, trace};
 
 use super::error::SessionError;
 use super::types::SessionControl;
@@ -63,18 +63,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             | Message::RegisterFail { .. }
             | Message::UpgradeProbe { .. }
             | Message::UpgradeProbeAck { .. }
-            | Message::SwitchToUdp { .. } => Err(SessionError::ProtocolViolation),
+            | Message::SwitchToUdp { .. }
+            | Message::SwitchOk { .. } => Err(SessionError::ProtocolViolation),
             Message::UdpReady { payload } => self.handle_udp_ready(payload).await,
-            Message::SwitchAck { payload } => self.handle_switch_ack(payload),
+            Message::SwitchAck { payload } => self.handle_switch_ack(payload).await,
             Message::Data { packet } => {
-                if self.active_transport != ActiveTransport::Tcp {
-                    trace!(
-                        session_id = self.session_id,
-                        client_id = %self.client_id,
-                        "TCP data dropped: not active transport"
-                    );
-                    return Ok(SessionControl::Continue);
-                }
                 if self.should_forward_packet_to_tun(packet) {
                     let outcome = self.tun.accept_packet(packet).await?;
                     self.handle_tun_packet_send_outcome(outcome)?;
@@ -90,6 +83,53 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             Message::Pong { .. } => Ok(SessionControl::Continue),
             Message::Close { .. } => Ok(self.peer_close_control(true)),
             Message::RegisterCid { payload } => self.handle_register_cid(payload).await,
+            Message::FallbackToTcp { payload } => self.handle_fallback_to_tcp(payload).await,
+            Message::FallbackOk { payload } => self.handle_fallback_ok(payload),
         }
+    }
+
+    async fn handle_fallback_to_tcp(
+        &mut self,
+        payload: &[u8],
+    ) -> Result<SessionControl, SessionError> {
+        let request = FallbackToTcpPayload::decode(payload)?;
+        self.set_active_transport(ActiveTransport::Tcp);
+        self.reset_udp_upgrade_state();
+
+        let ok = FallbackOkPayload {
+            fallback_id: request.fallback_id,
+        };
+        let mut buf = Vec::with_capacity(8);
+        ok.encode(&mut buf);
+        self.send_tcp_message(Message::FallbackOk { payload: &buf })
+            .await?;
+        info!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            fallback_id = request.fallback_id,
+            "accepted tcp fallback"
+        );
+        Ok(SessionControl::Continue)
+    }
+
+    fn handle_fallback_ok(&mut self, payload: &[u8]) -> Result<SessionControl, SessionError> {
+        let ok = FallbackOkPayload::decode(payload)?;
+        if self.pending_tcp_fallback == Some(ok.fallback_id) {
+            self.pending_tcp_fallback = None;
+            info!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                fallback_id = ok.fallback_id,
+                "tcp fallback acknowledged"
+            );
+        } else {
+            trace!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                fallback_id = ok.fallback_id,
+                "ignoring stale tcp fallback acknowledgement"
+            );
+        }
+        Ok(SessionControl::Continue)
     }
 }

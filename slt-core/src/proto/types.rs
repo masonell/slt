@@ -30,8 +30,14 @@ pub enum MessageType {
     UpgradeProbeAck = 0x0c,
     /// Client indicates UDP path is validated.
     UdpReady = 0x0d,
-    /// Server commits transport switch to UDP.
+    /// Server requests transport switch to UDP.
     SwitchToUdp = 0x0e,
-    /// Client acknowledges server's switch commit.
+    /// Client accepts the server's UDP switch request.
     SwitchAck = 0x0f,
+    /// Request that both peers prefer TCP for outbound traffic.
+    FallbackToTcp = 0x10,
+    /// Acknowledge a TCP fallback request.
+    FallbackOk = 0x11,
+    /// Server confirms the UDP switch acknowledgement was processed.
+    SwitchOk = 0x12,
 }

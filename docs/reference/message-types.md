@@ -17,8 +17,11 @@
 | `0x0b`  | UPGRADE_PROBE   | C->S      | 16 bytes     | UDP path validation probe                |
 | `0x0c`  | UPGRADE_PROBE_ACK | S->C    | 16 bytes     | UDP path validation acknowledgement      |
 | `0x0d`  | UDP_READY       | C->S      | 8 bytes      | Client signals UDP path validated        |
-| `0x0e`  | SWITCH_TO_UDP   | S->C      | 8 bytes      | Server commits transport switch to UDP   |
-| `0x0f`  | SWITCH_ACK      | C->S      | 8 bytes      | Client acknowledges switch commit        |
+| `0x0e`  | SWITCH_TO_UDP   | S->C      | 8 bytes      | Server requests transport switch to UDP  |
+| `0x0f`  | SWITCH_ACK      | C->S      | 8 bytes      | Client accepts UDP switch request        |
+| `0x10`  | FALLBACK_TO_TCP | Both      | 8 bytes      | Request TCP as preferred transport       |
+| `0x11`  | FALLBACK_OK     | Both      | 8 bytes      | Acknowledge TCP fallback                  |
+| `0x12`  | SWITCH_OK       | S->C      | 8 bytes      | Confirm UDP switch acknowledgement       |
 
 ## Error Codes
 

@@ -180,7 +180,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
 
         self.udp_session = Some(udp);
         self.reset_udp_upgrade_state();
-        // Keep TCP as the active transport until explicit switch commit.
+        // Keep TCP preferred until explicit switch commit.
 
         debug!(
             session_id = self.session_id,
@@ -206,7 +206,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     /// Sends a `RegisterFail` message to the client.
     ///
     /// Encodes the failure code into a payload and sends it via the currently
-    /// active transport (TCP or UDP-QSP).
+    /// preferred transport (TCP or UDP-QSP).
     ///
     /// # Parameters
     ///

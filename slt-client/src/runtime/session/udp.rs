@@ -12,16 +12,16 @@ use tracing::{info, trace, warn};
 
 use super::error::SessionError;
 use super::{ClientSession, ClientTcpIo, SessionControl, SessionExit};
-use crate::runtime::observer::{ClientEventKind, Transport, TransportChangeReason};
+use crate::runtime::observer::{ClientEventKind, TransportChangeReason};
 use crate::runtime::services::ClientRuntimeServices;
-use crate::runtime::session::state::ActiveTransport;
+use crate::runtime::session::state::{ActiveTransport, UdpState};
 use crate::transport::quic_discovery;
 use crate::transport::udp_qsp::client_udp_qsp_io;
 
 impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     /// Handles a host-reported network change.
     ///
-    /// If UDP-QSP is the active data path, first tries to validate the existing
+    /// If UDP-QSP is the preferred data path, first tries to validate the existing
     /// UDP socket by sending an authenticated ping and waiting for the matching
     /// pong. A successful round trip proves the server accepted the client's
     /// current source address and updated its peer. On refresh failure, a live
@@ -54,14 +54,8 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                     return Ok(SessionControl::Close(SessionExit::NetworkChanged));
                 }
 
-                self.active_transport = ActiveTransport::Tcp;
-                self.metrics.inc_transport_udp_to_tcp();
-                self.note_transport_change(
-                    Transport::UdpQsp,
-                    Transport::Tcp,
-                    TransportChangeReason::UdpError,
-                );
-                self.note_tcp_activity();
+                self.request_tcp_fallback(TransportChangeReason::UdpError)
+                    .await?;
                 self.schedule_discovery_now();
                 Ok(SessionControl::Continue)
             }
@@ -140,10 +134,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         msg_buf: OwnedMessageBuf,
     ) -> Result<SessionControl, SessionError> {
         if msg_buf.message().ty() == MessageType::Data {
-            if self.active_transport != ActiveTransport::UdpQsp {
-                trace!("dropping udp data while tcp is active");
-                return Ok(SessionControl::Continue);
-            }
             return Ok(self.send_to_tun_or_shutdown(msg_buf).await);
         }
 
@@ -184,7 +174,10 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             | Message::UpgradeProbe { .. }
             | Message::UdpReady { .. }
             | Message::SwitchToUdp { .. }
-            | Message::SwitchAck { .. } => Err(SessionError::ProtocolViolation {
+            | Message::SwitchAck { .. }
+            | Message::SwitchOk { .. }
+            | Message::FallbackToTcp { .. }
+            | Message::FallbackOk { .. } => Err(SessionError::ProtocolViolation {
                 detail: "unexpected control message on udp-qsp transport".into(),
             }),
         }
@@ -259,20 +252,49 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     }
 
     /// Handle a UDP-QSP transport failure from the session event loop.
+    pub(super) async fn handle_udp_event_error(
+        &mut self,
+        err: &SessionError,
+    ) -> Result<SessionControl, SessionError> {
+        if !self.handle_udp_error(err).await? {
+            self.metrics.inc_disconnect_error();
+            return Ok(SessionControl::Close(SessionExit::ConnectionError));
+        }
+        Ok(SessionControl::Continue)
+    }
+
+    /// Handle a UDP-QSP transport failure from a session operation.
     ///
     /// Takes the typed [`SessionError`] (which wraps a `UdpQspError` on this
-    /// path) and applies the recoverable-vs-fatal policy: recoverable failures
-    /// drop & continue (the UDP path stays alive); fatal failures (the
-    /// dead-channel signal, packet-number overflow, or any failure when TCP is
-    /// also dead) fall back to TCP or close the session. Returns `true` if the
-    /// session can continue (TCP fallback available), or `false` if both
+    /// path) and applies the recoverable-vs-fatal policy. Recoverable failures
+    /// drop and continue. A fatal failure on a retained receive path retires
+    /// only that path so discovery or an in-flight replacement registration is
+    /// preserved. Other fatal failures fall back to TCP or close the session.
+    /// Returns `true` if the session can continue, or `false` if both preferred
     /// transports are dead and the session should close.
-    pub(super) fn handle_udp_error(&mut self, err: &SessionError) -> bool {
+    pub(super) async fn handle_udp_error(
+        &mut self,
+        err: &SessionError,
+    ) -> Result<bool, SessionError> {
         // Recoverable UDP-QSP transport failure (replay, too-old, single crypto
         // failure, partial packet, transient socket I/O): drop & continue.
         if err.is_udp_qsp_recoverable() {
             trace!(error = %err, "dropping udp-qsp packets");
-            return true;
+            return Ok(true);
+        }
+
+        if matches!(
+            &self.udp_state,
+            UdpState::NeedDiscovery { .. } | UdpState::Pending { .. }
+        ) && self.retained_udp_transport.is_some()
+        {
+            self.retained_udp_transport = None;
+            warn!(
+                error = %err,
+                dead_channel = err.is_udp_qsp_dead_channel(),
+                "retained udp receive path failed; preserving replacement attempt"
+            );
+            return Ok(true);
         }
 
         if !self.tcp_alive {
@@ -281,29 +303,19 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 dead_channel = err.is_udp_qsp_dead_channel(),
                 "udp-qsp io error and tcp dead; closing session"
             );
-            return false;
+            return Ok(false);
         }
 
-        let was_udp_active = self.active_transport == ActiveTransport::UdpQsp;
         warn!(
             error = %err,
             dead_channel = err.is_udp_qsp_dead_channel(),
             "udp-qsp io error; falling back to tcp and scheduling retry"
         );
-        self.active_transport = ActiveTransport::Tcp;
-        if was_udp_active {
-            self.metrics.inc_transport_udp_to_tcp();
-            self.note_transport_change(
-                Transport::UdpQsp,
-                Transport::Tcp,
-                TransportChangeReason::UdpError,
-            );
-        }
-        self.note_tcp_activity();
+        self.request_tcp_fallback(TransportChangeReason::UdpError)
+            .await?;
 
-        // Transition to NeedDiscovery state to re-discover quic_ids
-        self.schedule_discovery_retry();
-        true
+        self.schedule_discovery_retry_after_udp_failure();
+        Ok(true)
     }
 }
 

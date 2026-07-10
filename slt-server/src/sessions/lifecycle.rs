@@ -162,7 +162,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     if let Err(source) = res {
                         self.recover_from_udp_flush_error(
                             None,
-                            UdpFailureRecovery::SignalTcpWithPing,
+                            UdpFailureRecovery::SignalTcpFallback,
                             source,
                         )
                         .await?;

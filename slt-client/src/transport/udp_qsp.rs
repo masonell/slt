@@ -262,6 +262,12 @@ impl<I: SessionIo> UdpQspTransport<I> {
         self.session.has_pending_flush()
     }
 
+    /// Discard protected packets buffered for send while preserving receive and
+    /// UDP-QSP cryptographic state. Returns the number of packets discarded.
+    pub fn discard_pending_send(&mut self) -> usize {
+        self.session.discard_pending_send()
+    }
+
     /// Replace the underlying UDP-QSP I/O backend after a best-effort flush.
     ///
     /// Flush failures during network handoff are logged and ignored: any packet

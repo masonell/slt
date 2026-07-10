@@ -122,22 +122,11 @@ pub(super) enum UdpUpgradeState {
         /// Probe retransmit backoff.
         probe_backoff: ReconnectBackoff,
     },
-    /// Switch was acknowledged on TCP; wait for commit barrier pong.
-    ///
-    /// A lost barrier pong is not retransmitted. The carried `deadline` is the
-    /// attempt's single hard deadline (set in `start_udp_upgrade_attempt`),
-    /// kept armed by `timer_at`, so it fires `handle_udp_upgrade_tick` and
-    /// recovers via `TcpOnlyBlockedUdp` instead of stalling. That deadline is
-    /// shared with the probe phase, so the barrier-pong wait runs on the
-    /// residual `register_timeout`. The keepalive ping tick does not
-    /// participate: its pong nonce cannot match `barrier_nonce`, so only the
-    /// server's barrier pong commits.
-    AwaitingSwitchCommit {
-        /// Attempt identifier shared across probe/ack/ready/switch.
+    /// Client accepted the switch request and awaits server-side commit confirmation.
+    AwaitingSwitchOk {
+        /// Attempt identifier echoed in `SWITCH_OK`.
         upgrade_id: u64,
-        /// Nonce used for the TCP ping/pong commit barrier.
-        barrier_nonce: u64,
-        /// Hard deadline for this attempt.
+        /// Deadline for receiving the confirmation on TCP.
         deadline: Instant,
     },
     /// Upgrade is temporarily blocked after timeout/failure.
@@ -164,17 +153,16 @@ impl UdpUpgradeState {
                     Some((*next_probe_at).min(*deadline))
                 }
             }
-            Self::AwaitingSwitchCommit { deadline, .. } => Some(*deadline),
+            Self::AwaitingSwitchOk { deadline, .. } => Some(*deadline),
             Self::TcpOnlyBlockedUdp { retry_at } => Some(*retry_at),
         }
     }
 }
 
-/// Currently active transport for data flow.
+/// Preferred transport for outbound data flow.
 ///
-/// The session uses exactly one transport at a time for sending data.
-/// Transport switching can occur based on network conditions or server
-/// direction.
+/// The session uses one preferred transport for outbound data. Authenticated
+/// inbound data remains valid on either live transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ActiveTransport {
     /// TCP transport.
@@ -217,17 +205,6 @@ mod tests {
         use std::time::{Duration, Instant};
 
         use super::*;
-
-        #[test]
-        fn awaiting_switch_commit_timer_uses_deadline() {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let state = UdpUpgradeState::AwaitingSwitchCommit {
-                upgrade_id: 7,
-                barrier_nonce: 9,
-                deadline,
-            };
-            assert_eq!(state.timer_at(), Some(deadline));
-        }
 
         #[test]
         fn upgrading_with_probe_acked_uses_deadline() {

@@ -71,6 +71,13 @@ pub trait SessionIo {
     fn has_pending_flush(&self) -> bool {
         false
     }
+    /// Discard protected packets buffered for send and return their count.
+    ///
+    /// This is a hard egress cutover operation. It must not clear receive
+    /// queues, peer state, or UDP-QSP cryptographic and replay state.
+    fn discard_pending_send(&mut self) -> usize {
+        0
+    }
 }
 
 /// I/O backends that can update their UDP peer address.
@@ -384,6 +391,17 @@ impl<I: SessionIo> QuicQspSession<I> {
         self.io.has_pending_flush()
     }
 
+    /// Discard protected packets buffered by the I/O layer for send.
+    ///
+    /// Packet numbers assigned to discarded packets remain consumed. Receive
+    /// queues and all UDP-QSP cryptographic, replay, and key-update state remain
+    /// intact so the transport can continue as a receive-only path.
+    ///
+    /// Returns the number of protected packets discarded.
+    pub fn discard_pending_send(&mut self) -> usize {
+        self.io.discard_pending_send()
+    }
+
     /// Replace the underlying packet I/O backend, preserving all UDP-QSP
     /// cryptographic, packet-number, rekey, and replay state.
     ///
@@ -672,6 +690,13 @@ mod tests {
                 .expect("BufferingIo lock")
                 .pending
                 .is_empty()
+        }
+
+        fn discard_pending_send(&mut self) -> usize {
+            let mut state = self.state.lock().expect("BufferingIo lock");
+            let discarded = state.pending.len();
+            state.pending.clear();
+            discarded
         }
     }
 
@@ -2025,6 +2050,28 @@ mod tests {
         assert!(!session.has_pending_flush());
         assert!(state.lock().expect("state lock").pending.is_empty());
         assert_eq!(state.lock().expect("state lock").flushed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_discards_pending_send_without_flushing() {
+        let (io, state) = BufferingIo::pair();
+        let mut session = QuicQspSession::new(
+            io,
+            Cid::from([0xCD; 20]),
+            Cid::from([0xAB; 20]),
+            buffering_keys(),
+            0,
+            0,
+            false,
+        );
+        session.send(b"one").await.unwrap();
+        session.send(b"two").await.unwrap();
+
+        assert_eq!(session.discard_pending_send(), 2);
+        assert!(!session.has_pending_flush());
+        let state = state.lock().expect("state lock");
+        assert!(state.pending.is_empty());
+        assert!(state.flushed.is_empty());
     }
 
     #[tokio::test]

@@ -173,10 +173,11 @@ VPN Client                                    Server
    |  9. UDP probing (UPGRADE_PROBE/ACK)        |
    |<------------------------------------------>|
    |                                            |
-   |  10. UDP_READY / SWITCH_TO_UDP / SWITCH_ACK|
+   |  10. UDP_READY / SWITCH_TO_UDP /           |
+   |      SWITCH_ACK / SWITCH_OK                |
    |<------------------------------------------>|
    |                                            |
-   |  11. DATA over UDP-QSP (active transport)  |
+   |  11. DATA over UDP-QSP(preferred transport)|
    |<------------------------------------------>|
    |                                            |
 ```

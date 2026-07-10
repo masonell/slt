@@ -1,8 +1,8 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::proto::{
-    CipherSuite, CloseCode, ClosePayload, Message, PingPayload, PongPayload, decode_message,
-    encode_message,
+    CipherSuite, CloseCode, ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message,
+    PingPayload, PongPayload, decode_message, encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
@@ -159,7 +159,7 @@ async fn session_drops_oversized_tun_packet() {
 }
 
 #[tokio::test]
-async fn session_drops_tcp_data_when_udp_active() {
+async fn session_accepts_tcp_data_when_udp_is_preferred() {
     let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
         spawn_session().await;
 
@@ -197,16 +197,124 @@ async fn session_drops_tcp_data_when_udp_active() {
     )
     .await;
 
-    // Now send data via TCP - should be dropped since UDP is active
+    // TCP remains a valid authenticated ingress path while UDP is preferred.
     let tcp_data = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 21), 8);
     let mut tcp_frame = Vec::new();
     encode_message(Message::Data { packet: &tcp_data }, &mut tcp_frame).unwrap();
     client.write_all(&tcp_frame).await.unwrap();
 
-    // Should NOT appear on TUN (dropped because TCP is not active transport)
-    if let Ok(Some(_)) = timeout(Duration::from_millis(200), tun_rx.recv()).await {
-        panic!("TCP data should be dropped when UDP is active")
+    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, tcp_data);
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    let _ = join.await.unwrap();
+}
+
+#[tokio::test]
+async fn tcp_fallback_precedes_data_and_changes_server_egress() {
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
+        spawn_session().await;
+
+    let dcid = Cid::from([0x73; MAX_DCID_LEN]);
+    let scid = Cid::from([0x74; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut register_payload = Vec::new();
+    register.encode(&mut register_payload).unwrap();
+    let mut frame = Vec::new();
+    encode_message(
+        Message::RegisterCid {
+            payload: &register_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    client.write_all(&frame).await.unwrap();
+    let response = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&response, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let peer = SocketAddr::from(([127, 0, 0, 1], 33334));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1400,
+    )
+    .await;
+
+    let fallback_id = 0xFA11_BACC;
+    let fallback = FallbackToTcpPayload { fallback_id };
+    let mut fallback_payload = Vec::new();
+    fallback.encode(&mut fallback_payload);
+    frame.clear();
+    encode_message(
+        Message::FallbackToTcp {
+            payload: &fallback_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    let uplink = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 22), 8);
+    encode_message(Message::Data { packet: &uplink }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let ack_frame = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Message::FallbackOk { payload } = decode_message(&ack_frame, limits).unwrap().unwrap().0
+    else {
+        panic!("expected fallback_ok");
+    };
+    assert_eq!(
+        FallbackOkPayload::decode(payload).unwrap().fallback_id,
+        fallback_id
+    );
+
+    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, uplink);
+
+    let downlink = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 23), 8);
+    tx.send(SessionEvent::TunPacket(downlink.clone()))
+        .await
+        .unwrap();
+    let data_frame = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    match decode_message(&data_frame, limits).unwrap().unwrap().0 {
+        Message::Data { packet } => assert_eq!(packet, downlink),
+        other => panic!("expected tcp data after fallback, got {other:?}"),
     }
+    assert!(
+        timeout(Duration::from_millis(100), udp_rx.recv())
+            .await
+            .is_err(),
+        "server kept using udp after acknowledged tcp fallback"
+    );
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
