@@ -81,7 +81,10 @@ release artifact is dynamically linked GNU/Linux and should be patched for NixOS
       prefix = 24;
     };
 
-    timing.tcpWriteTimeout = "10s";
+    timing = {
+      tcpWriteTimeout = "10s";
+      udpLivenessTimeout = "90s";
+    };
 
     clients.laptop = {
       clientId = "0102030405060708090a0b0c0d0e0f10";

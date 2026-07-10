@@ -46,6 +46,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 tcp_write_timeout = "10s"
+udp_liveness_timeout = "90s"
 idle_timeout = "5m"
 metrics_interval = "5m"
 tcp_classification_timeout = "60s"
@@ -113,6 +114,7 @@ front-door cap until nginx closes them through settings such as
 | `ping_max` | duration | No | `30s` | Maximum ping interval. |
 | `auth_timeout` | duration | No | `10s` | End-to-end server TLS and authentication deadline. Must be > 0 and <= 1 hour. |
 | `tcp_write_timeout` | duration | No | `10s` | Maximum time for one established-session TCP message write. Must be > 0 and <= 1 hour. |
+| `udp_liveness_timeout` | duration | No | `90s` | Maximum time without authenticated UDP-QSP ingress before the server falls back to live TCP. Must be > 0 and <= 1 hour. |
 | `idle_timeout` | duration | No | `5m` | Idle connection timeout. Must be > 0 and <= 1 hour. |
 | `metrics_interval` | duration | No | `5m` | Metrics snapshot logging interval. Must be > 0 and <= 1 hour. |
 | `tcp_classification_timeout` | duration | No | `60s` | Maximum time to wait for enough TCP `ClientHello` bytes to classify. Must be > 0 and <= 1 hour. |
@@ -159,6 +161,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 tcp_write_timeout = "10s"
+udp_liveness_timeout = "90s"
 idle_timeout = "5m"
 metrics_interval = "5m"
 tcp_classification_timeout = "60s"

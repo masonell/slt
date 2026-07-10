@@ -25,8 +25,8 @@ use slt_core::proto::{FrameError, MessageError, PayloadError};
 ///
 /// - The **recv path** (`open_udp_packet` in `sessions/udp.rs`) matches every
 ///   `QspSessionError` variant at the source, drops the recoverable packet
-///   errors (`Replay`/`TooOld`/`Crypto`/garbage) with metrics, and falls back
-///   to TCP on `DeadChannel`. Those conditions never produce a `UdpQspError`.
+///   errors (`Replay`/`TooOld`/`Crypto`/garbage) with metrics. Those conditions
+///   never produce a `UdpQspError`.
 /// - The **send/flush path** (`send_udp_message` and
 ///   `recover_from_udp_flush_error` in `sessions/mod.rs`) retires UDP state and
 ///   uses TCP for UDP transport failures when the TCP channel is alive.
@@ -36,8 +36,7 @@ use slt_core::proto::{FrameError, MessageError, PayloadError};
 #[derive(Debug, thiserror::Error)]
 pub enum UdpQspError {
     /// UDP-QSP session failure: a replayed/too-old packet number, a packet
-    /// number overflow, a crypto (header-protection/AEAD) failure, or the
-    /// dead-channel signal after too many consecutive decrypt failures.
+    /// number overflow, or a crypto (header-protection/AEAD) failure.
     ///
     /// Send-side QSP failures are candidates for TCP fallback; receive-side
     /// packet failures are handled before this wrapper is constructed.
@@ -118,10 +117,7 @@ mod tests {
     /// miss a variant. Adding a variant without a representative case fails the
     /// distinct-discriminant check below.
     ///
-    /// Covers all 7 distinct `SessionError` variants, with a second `UdpQsp`
-    /// entry so both inner shapes that the send path produces (`Replay` from a
-    /// send-side QSP failure and `DeadChannel` from the dead-channel signal)
-    /// are represented.
+    /// Covers all 7 distinct `SessionError` variants.
     #[test]
     fn representative_cases_cover_every_variant() {
         let cases: Vec<SessionError> = vec![
@@ -130,20 +126,12 @@ mod tests {
                 source: io::Error::from(io::ErrorKind::ConnectionReset),
             },
             SessionError::Io(io::Error::other("generic")),
-            // Two send-path UdpQsp inner shapes the server produces.
             SessionError::UdpQsp(UdpQspError::from(QspSessionError::Replay)),
-            SessionError::UdpQsp(UdpQspError::from(QspSessionError::DeadChannel)),
             SessionError::Frame(FrameError::UnknownType(0xFF)),
             SessionError::Message(MessageError::DataTooLarge { len: 10, max: 5 }),
             SessionError::Payload(PayloadError::InvalidCipher(0x99)),
         ];
-        // 8 cases covering all 7 distinct variants (UdpQsp appears twice for
-        // inner-shape coverage).
-        assert_eq!(
-            cases.len(),
-            8,
-            "expected 8 representative cases (7 variants + a second UdpQsp inner shape)"
-        );
+        assert_eq!(cases.len(), 7, "expected 7 representative cases");
         let distinct: std::collections::HashSet<_> =
             cases.iter().map(std::mem::discriminant).collect();
         assert_eq!(
@@ -151,16 +139,14 @@ mod tests {
             7,
             "representative_cases must cover all 7 distinct SessionError variants exactly once"
         );
-        // Pin the deliberate two-shape UdpQsp coverage (send-path replay +
-        // dead-channel), so a future edit can't silently drop one shape.
         let udp: Vec<&SessionError> = cases
             .iter()
             .filter(|e| matches!(e, SessionError::UdpQsp(_)))
             .collect();
         assert_eq!(
             udp.len(),
-            2,
-            "expected exactly two UdpQsp representative cases (replay + dead-channel shape)"
+            1,
+            "expected exactly one UdpQsp representative case"
         );
         assert!(
             udp.iter().any(|e| matches!(
@@ -168,13 +154,6 @@ mod tests {
                 SessionError::UdpQsp(UdpQspError::Qsp(QspSessionError::Replay))
             )),
             "one UdpQsp case must be the replay shape"
-        );
-        assert!(
-            udp.iter().any(|e| matches!(
-                e,
-                SessionError::UdpQsp(UdpQspError::Qsp(QspSessionError::DeadChannel))
-            )),
-            "one UdpQsp case must be the dead-channel shape"
         );
     }
 

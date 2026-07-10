@@ -324,6 +324,67 @@ async fn session_sends_udp_ping_on_schedule() {
 }
 
 #[tokio::test]
+async fn udp_authenticated_liveness_timeout_falls_back_to_tcp() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.ping_min = Duration::from_secs(5);
+    timeouts.ping_max = Duration::from_secs(5);
+    timeouts.udp_liveness_timeout = Duration::from_millis(80);
+    timeouts.idle_timeout = Duration::from_secs(5);
+
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, registry) =
+        spawn_session_with_timeouts(timeouts).await;
+
+    let dcid = Cid::from([0x43; MAX_DCID_LEN]);
+    let scid = Cid::from([0x44; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut reg_buf = Vec::new();
+    register.encode(&mut reg_buf).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &reg_buf }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let peer = SocketAddr::from(([127, 0, 0, 1], 33334));
+    let _ = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1401,
+    )
+    .await;
+
+    let buf = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&buf, limits).unwrap().unwrap().0,
+        Message::FallbackToTcp { .. }
+    ));
+    assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    assert!(join.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn session_cleans_registry_on_shutdown() {
     let (join, mut client, tx, _tun_rx, _udp_rx, limits, assigned, registry) =
         spawn_session().await;

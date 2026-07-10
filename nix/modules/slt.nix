@@ -273,6 +273,9 @@ let
               tcpWriteTimeout =
                 durationOption "10s" "10s"
                   "Maximum time for an established-session TCP message write.";
+              udpLivenessTimeout =
+                durationOption "90s" "90s"
+                  "Maximum time without authenticated UDP-QSP ingress before TCP fallback.";
               idleTimeout = durationOption "5m" "5m" "Idle session timeout.";
               metricsInterval = durationOption "5m" "5m" "Metrics logging interval.";
               tcpClassificationTimeout = durationOption "60s" "60s" "TCP ClientHello classification timeout.";
@@ -539,6 +542,7 @@ let
         ping_max = server.timing.pingMax;
         auth_timeout = server.timing.authTimeout;
         tcp_write_timeout = server.timing.tcpWriteTimeout;
+        udp_liveness_timeout = server.timing.udpLivenessTimeout;
         idle_timeout = server.timing.idleTimeout;
         metrics_interval = server.timing.metricsInterval;
         tcp_classification_timeout = server.timing.tcpClassificationTimeout;

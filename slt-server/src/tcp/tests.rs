@@ -51,6 +51,7 @@ fn test_config(upstream_addr: SocketAddr) -> ServerConfig {
             ping_max: Duration::from_secs(20),
             auth_timeout: Duration::from_secs(10),
             tcp_write_timeout: Duration::from_secs(10),
+            udp_liveness_timeout: Duration::from_secs(45),
             idle_timeout: Duration::from_mins(1),
             metrics_interval: Duration::from_mins(5),
             tcp_classification_timeout: Duration::from_secs(60),

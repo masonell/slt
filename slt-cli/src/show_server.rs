@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use slt_core::types::ServerTimingConfig;
 
 use crate::config_io::load_server_config;
 
@@ -79,18 +80,7 @@ pub fn show_server(config_path: &Path, reveal_secrets: bool) -> Result<()> {
     );
     println!();
 
-    // Timing settings
-    println!("Timing:");
-    println!("  Ping Min:       {:?}", config.timing.ping_min);
-    println!("  Ping Max:       {:?}", config.timing.ping_max);
-    println!("  Auth Timeout:   {:?}", config.timing.auth_timeout);
-    println!("  TCP Write:      {:?}", config.timing.tcp_write_timeout);
-    println!("  Idle Timeout:   {:?}", config.timing.idle_timeout);
-    println!("  Metrics Intvl:  {:?}", config.timing.metrics_interval);
-    println!(
-        "  TCP Classify:   {:?}",
-        config.timing.tcp_classification_timeout
-    );
+    print!("{}", timing_summary(&config.timing));
     println!();
 
     // Advanced settings
@@ -119,6 +109,30 @@ pub fn show_server(config_path: &Path, reveal_secrets: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn timing_summary(timing: &ServerTimingConfig) -> String {
+    format!(
+        concat!(
+            "Timing:\n",
+            "  Ping Min:       {:?}\n",
+            "  Ping Max:       {:?}\n",
+            "  Auth Timeout:   {:?}\n",
+            "  TCP Write:      {:?}\n",
+            "  UDP Liveness:   {:?}\n",
+            "  Idle Timeout:   {:?}\n",
+            "  Metrics Intvl:  {:?}\n",
+            "  TCP Classify:   {:?}\n",
+        ),
+        timing.ping_min,
+        timing.ping_max,
+        timing.auth_timeout,
+        timing.tcp_write_timeout,
+        timing.udp_liveness_timeout,
+        timing.idle_timeout,
+        timing.metrics_interval,
+        timing.tcp_classification_timeout,
+    )
 }
 
 #[cfg(test)]
@@ -158,6 +172,7 @@ tun_prefix = 24
 ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
+udp_liveness_timeout = "47s"
 idle_timeout = "60s"
 metrics_interval = "5m"
 
@@ -183,6 +198,17 @@ enabled = true
         let file = write_test_config();
         let result = show_server(file.path(), true);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn timing_summary_includes_udp_liveness_timeout() {
+        let file = write_test_config();
+        let config = load_server_config(file.path()).unwrap();
+
+        assert!(
+            timing_summary(&config.timing).contains("  UDP Liveness:   47s\n"),
+            "timing summary should show the effective UDP liveness timeout"
+        );
     }
 
     #[test]

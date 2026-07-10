@@ -16,6 +16,7 @@ use crate::tun::TunDeviceIo;
 #[derive(Clone, Copy)]
 enum SessionTimer {
     Ping,
+    UdpLiveness,
     Idle,
 }
 
@@ -84,14 +85,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 return Ok(());
             }
 
-            let idle_deadline = self.last_activity + self.timeouts.idle_timeout;
             let should_flush_udp = self.has_pending_udp_flush();
             let shutdown = self.shutdown.clone();
-            let (timer_at, timer) = if idle_deadline <= next_ping_at {
-                (idle_deadline, SessionTimer::Idle)
-            } else {
-                (next_ping_at, SessionTimer::Ping)
-            };
+            let (timer_at, timer) = self.next_session_timer(next_ping_at);
             let timer_due = time::Instant::from_std(timer_at) <= time::Instant::now();
 
             if timer_due {
@@ -172,6 +168,26 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         }
     }
 
+    fn next_session_timer(&self, next_ping_at: Instant) -> (Instant, SessionTimer) {
+        let idle_deadline = self.last_activity + self.timeouts.idle_timeout;
+        let (mut timer_at, mut timer) = if idle_deadline <= next_ping_at {
+            (idle_deadline, SessionTimer::Idle)
+        } else {
+            (next_ping_at, SessionTimer::Ping)
+        };
+        if self.active_transport == ActiveTransport::UdpQsp
+            && self.tcp_alive
+            && let Some(last_authenticated) = self.last_authenticated_udp_activity
+        {
+            let udp_liveness_deadline = last_authenticated + self.timeouts.udp_liveness_timeout;
+            if udp_liveness_deadline < timer_at {
+                timer_at = udp_liveness_deadline;
+                timer = SessionTimer::UdpLiveness;
+            }
+        }
+        (timer_at, timer)
+    }
+
     async fn handle_session_timer(
         &mut self,
         timer: SessionTimer,
@@ -183,6 +199,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 *next_ping_at = self.schedule_next_ping();
                 Ok(SessionControl::Continue)
             }
+            SessionTimer::UdpLiveness => self.handle_udp_liveness_timeout().await,
             SessionTimer::Idle => {
                 self.metrics.inc_disconnect_idle_timeout();
                 info!(
@@ -195,6 +212,24 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 Ok(SessionControl::Close)
             }
         }
+    }
+
+    async fn handle_udp_liveness_timeout(&mut self) -> Result<SessionControl, SessionError> {
+        if self.active_transport != ActiveTransport::UdpQsp || !self.tcp_alive {
+            return Ok(SessionControl::Continue);
+        }
+
+        self.metrics.inc_udp_qsp_liveness_timeout();
+        info!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            timeout_ms = self.timeouts.udp_liveness_timeout.as_millis(),
+            "UDP-QSP authenticated liveness timeout; falling back to tcp"
+        );
+        self.set_active_transport(ActiveTransport::Tcp);
+        self.retire_udp_transport();
+        self.send_tcp_fallback_request().await?;
+        Ok(SessionControl::Continue)
     }
 
     async fn handle_event(&mut self, event: SessionEvent) -> Result<SessionControl, SessionError> {

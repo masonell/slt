@@ -415,23 +415,13 @@ become unreachable once the largest accepted number passes
 dead keys with no effect. `KEY_UPDATE_LATE_MARGIN` bounds rotation *detection*
 (`should_try_candidate`), a separate concern.
 
-### Dead Channel Detection
+### Authentication Failure Handling
 
-When consecutive decryption failures exceed a threshold, the channel is
-declared dead:
-
-| Constant | Value | Source |
-|----------|-------|--------|
-| `DEAD_CHANNEL_FAILURE_THRESHOLD` | 64 | `slt-core/src/crypto/udp_qsp/session.rs` |
-
-```rust
-self.consecutive_decrypt_failures = self.consecutive_decrypt_failures.saturating_add(1);
-if self.consecutive_decrypt_failures >= self.rekey_policy.dead_failures {
-    return Err(QspSessionError::DeadChannel);
-}
-```
-
-The counter resets to 0 on any successful decryption.
+A packet that fails header protection or AEAD authentication is dropped without
+changing key, replay, peer-address, or channel-liveness state. Authentication
+failures cannot establish that the registered peer sent a packet, so their count
+is not evidence that the channel is unavailable. Liveness is determined from
+successfully authenticated traffic and timers in the transport runtime.
 
 ## 8. Key Update Invariants
 

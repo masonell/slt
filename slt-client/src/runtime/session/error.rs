@@ -26,7 +26,7 @@ use crate::transport::udp_qsp::UdpQspError;
 ///
 /// The UDP-QSP transport failure flows via [`Self::UdpQsp`]: the typed
 /// [`UdpQspError`] carries its own recoverable-vs-fatal classification via
-/// [`UdpQspError::is_recoverable`] / [`UdpQspError::is_dead_channel`].
+/// [`UdpQspError::is_recoverable`].
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     /// Client-detected protocol violation on the session path.
@@ -97,12 +97,10 @@ pub enum SessionError {
     ///
     /// The typed [`UdpQspError`] preserves the slt-core UDP-QSP session/crypto
     /// errors and the proto encode errors. The recoverable-vs-fatal decision
-    /// lives on the inner type ([`UdpQspError::is_recoverable`] /
-    /// [`UdpQspError::is_dead_channel`]): recoverable failures (replay,
-    /// too-old, single crypto failure, proto decode, partial packet, transient
-    /// socket I/O) are dropped by the session and keep the UDP path alive; the
-    /// dead-channel signal and packet-number overflow propagate (see
-    /// [`UdpQspError::is_recoverable`] for the policy).
+    /// lives on the inner type ([`UdpQspError::is_recoverable`]): recoverable
+    /// failures (replay, too-old, crypto failure, proto decode, partial packet,
+    /// transient socket I/O) are dropped by the session and keep the UDP path
+    /// alive; packet-number overflow propagates.
     #[error(transparent)]
     UdpQsp(#[from] UdpQspError),
 
@@ -171,9 +169,9 @@ impl SessionError {
     ///   `ConnectionError` (reconnect), except `PermissionDenied` wrapped by
     ///   `Connection`/`Io`, which projects to `PermissionDenied` (fatal).
     ///   [`Self::UdpQsp`] buckets here because the recoverable-vs-fatal
-    ///   *transport* decision (drop & continue vs. dead-channel) is made before
+    ///   *transport* decision (drop & continue vs. fallback) is made before
     ///   reaching `exit()`: a dropped recoverable failure never produces a
-    ///   `SessionError` at all, and the dead-channel signal routes through
+    ///   `SessionError` at all, and fatal transport failures route through
     ///   `exit()` as a reconnect.
     ///
     /// Proto decode failures all map to `ProtocolError` (fatal). Per-variant
@@ -197,20 +195,6 @@ impl SessionError {
             Self::Connection { .. } | Self::Io(_) | Self::UdpQsp(_) => {
                 super::SessionExit::ConnectionError
             }
-        }
-    }
-
-    /// Whether this is the UDP-QSP dead-channel signal — the one fatal
-    /// non-I/O condition on the UDP-QSP transport path.
-    ///
-    /// The typed [`UdpQspError`] carries the classification directly. Returns
-    /// `false` for every non-`UdpQsp` variant and for non-dead-channel `UdpQsp`
-    /// failures.
-    #[must_use]
-    pub const fn is_udp_qsp_dead_channel(&self) -> bool {
-        match self {
-            Self::UdpQsp(err) => err.is_dead_channel(),
-            _ => false,
         }
     }
 
@@ -294,12 +278,8 @@ mod tests {
                 source: io::Error::from(io::ErrorKind::ConnectionReset),
             },
             SessionError::Io(io::Error::other("generic")),
-            // Recoverable UDP-QSP shape (replay) and fatal shape (dead channel).
             SessionError::UdpQsp(UdpQspError::from(
                 slt_core::crypto::udp_qsp::QspSessionError::Replay,
-            )),
-            SessionError::UdpQsp(UdpQspError::from(
-                slt_core::crypto::udp_qsp::QspSessionError::DeadChannel,
             )),
             SessionError::Crypto(ErrorStack::internal_error(io::Error::other("rand"))),
             SessionError::UdpQspKeys(slt_core::crypto::udp_qsp::QspCryptoError::CryptoFail),
@@ -307,17 +287,10 @@ mod tests {
             SessionError::Message(MessageError::DataTooLarge { len: 10, max: 5 }),
             SessionError::Payload(PayloadError::InvalidCipher(0x99)),
         ];
-        // 12 cases covering all 11 distinct SessionError variants, with a
-        // second `UdpQsp` entry (the variant has two behaviorally-distinct
-        // inner shapes that `is_udp_qsp_recoverable()` / `is_udp_qsp_dead_channel()`
-        // distinguish): one recoverable shape (Replay) and one fatal shape
-        // (DeadChannel). Adding a variant without a representative case fails
-        // the distinct-discriminant check below.
         assert_eq!(
             cases.len(),
-            12,
-            "representative_cases must contain exactly 12 cases \
-             (11 variants + a second UdpQsp inner shape); update when adding a variant"
+            11,
+            "representative_cases must contain exactly 11 cases; update when adding a variant"
         );
         // Distinct variants via a HashSet of Discriminant values (a `Vec::dedup`
         // would only catch *adjacent* duplicates and so could miss a misplaced
@@ -329,25 +302,18 @@ mod tests {
             11,
             "representative_cases must cover all 11 distinct SessionError variants exactly once"
         );
-        // Pin the deliberate second `UdpQsp` case so the intent is explicit:
-        // the two entries must cover both the recoverable and the fatal
-        // transport shapes.
         let udp: Vec<&SessionError> = cases
             .iter()
             .filter(|e| matches!(e, SessionError::UdpQsp(_)))
             .collect();
         assert_eq!(
             udp.len(),
-            2,
-            "expected exactly two UdpQsp representative cases (recoverable + fatal shape)"
+            1,
+            "expected exactly one UdpQsp representative case"
         );
         assert!(
             udp.iter().any(|e| e.is_udp_qsp_recoverable()),
             "one UdpQsp case must be the recoverable shape"
-        );
-        assert!(
-            udp.iter().any(|e| e.is_udp_qsp_dead_channel()),
-            "one UdpQsp case must be the fatal (dead-channel) shape"
         );
         cases
     }
@@ -443,7 +409,7 @@ mod tests {
         // why the recoverable-vs-fatal transport decision is made earlier.
         assert_eq!(
             SessionError::UdpQsp(UdpQspError::from(
-                slt_core::crypto::udp_qsp::QspSessionError::DeadChannel
+                slt_core::crypto::udp_qsp::QspSessionError::PacketNumberOverflow
             ))
             .exit(),
             SessionExit::ConnectionError
@@ -463,8 +429,8 @@ mod tests {
         );
     }
 
-    /// The typed UDP-QSP recoverable/dead-channel projections must classify
-    /// each `UdpQspError` shape correctly. Also pins
+    /// The typed UDP-QSP recoverable projection must classify each
+    /// `UdpQspError` shape correctly. Also pins
     /// [`SessionError::is_udp_path_transport_error`] — the gate used at the
     /// UDP write / flush / tun-packet / upgrade-probe call sites to separate
     /// "UDP-path transport condition -> fall back" from "typed session error
@@ -476,25 +442,17 @@ mod tests {
         // Recoverable.
         let recoverable: SessionError = UdpQspError::from(QspSessionError::Replay).into();
         assert!(recoverable.is_udp_qsp_recoverable());
-        assert!(!recoverable.is_udp_qsp_dead_channel());
         let too_old: SessionError = UdpQspError::from(QspSessionError::TooOld).into();
         assert!(too_old.is_udp_qsp_recoverable());
         let crypto: SessionError =
             UdpQspError::from(QspSessionError::Crypto(QspCryptoError::CryptoFail)).into();
         assert!(crypto.is_udp_qsp_recoverable());
 
-        // Fatal (dead channel): peer keys diverged beyond recovery.
-        let dead: SessionError = UdpQspError::from(QspSessionError::DeadChannel).into();
-        assert!(!dead.is_udp_qsp_recoverable());
-        assert!(dead.is_udp_qsp_dead_channel());
-
         // Fatal (packet-number overflow): TX pn space exhausted, session cannot
         // send again on this UDP path — propagates to TCP fallback, not a drop.
-        // Not the dead-channel signal.
         let overflow: SessionError =
             UdpQspError::from(QspSessionError::PacketNumberOverflow).into();
         assert!(!overflow.is_udp_qsp_recoverable());
-        assert!(!overflow.is_udp_qsp_dead_channel());
 
         // Fatal (send-side I/O): a send failure is never droppable — it falls
         // back to TCP (or closes), not dropped like a recv-side transient.
@@ -503,20 +461,17 @@ mod tests {
         }
         .into();
         assert!(!send_io.is_udp_qsp_recoverable());
-        assert!(!send_io.is_udp_qsp_dead_channel());
         assert!(send_io.is_udp_path_transport_error());
 
         // Non-UdpQsp variants never report as UDP-QSP transport conditions.
         let proto = SessionError::Payload(PayloadError::InvalidCipher(0x99));
         assert!(!proto.is_udp_qsp_recoverable());
-        assert!(!proto.is_udp_qsp_dead_channel());
 
         // `is_udp_path_transport_error` is the gate for the UDP write /
         // flush / tun-packet / upgrade-probe fallback decision. True for the
         // UDP-QSP typed failure and for a raw socket `io::Error` (UDP flush);
         // false for typed proto/violation/crypto conditions, which propagate.
         assert!(recoverable.is_udp_path_transport_error());
-        assert!(dead.is_udp_path_transport_error());
         assert!(overflow.is_udp_path_transport_error());
         assert!(
             SessionError::from(io::Error::other("udp flush socket I/O"))
@@ -665,20 +620,17 @@ mod tests {
     }
 
     /// Composed routing for `UdpQsp(Qsp(PacketNumberOverflow))`, pinned
-    /// directly. `representative_cases()` covers only the `Replay` (recoverable)
-    /// and `DeadChannel` (fatal) `UdpQsp` shapes by design — overflow is a
-    /// distinct shape, so it gets a dedicated assertion here rather than
-    /// disturbing the `representative_cases` invariant.
+    /// directly because `representative_cases()` uses a recoverable `Replay`
+    /// value for its `UdpQsp` variant.
     ///
     /// Overflow is a UDP-path transport error that is fatal (non-recoverable)
-    /// and NOT the dead-channel signal — i.e. at the session layer it reaches
-    /// the `handle_udp_error` branch that does TCP fallback (when TCP is alive)
-    /// or session close (otherwise).
+    /// and reaches the `handle_udp_error` branch that does TCP fallback (when
+    /// TCP is alive) or session close (otherwise).
     /// The session-level exit (`ConnectionError`) reconnects only once the
     /// session re-establishes; the overflow itself is not an immediate
     /// reconnect trigger.
     #[test]
-    fn overflow_routes_to_non_dead_channel_fatal_transport_path() {
+    fn overflow_routes_to_fatal_transport_path() {
         use slt_core::crypto::udp_qsp::QspSessionError;
 
         let overflow: SessionError =
@@ -694,13 +646,6 @@ mod tests {
         assert!(
             !overflow.is_udp_qsp_recoverable(),
             "overflow must NOT be recoverable (would silently drop packets)"
-        );
-        // It is distinct from the dead-channel signal — the other fatal
-        // non-recoverable UDP-QSP shape — so the session's
-        // `is_udp_qsp_dead_channel()` short-circuit does not fire for it.
-        assert!(
-            !overflow.is_udp_qsp_dead_channel(),
-            "overflow must not look like the dead-channel signal"
         );
         // Composed exit: UdpQsp buckets under ConnectionError (reconnect),
         // consistent with the other UdpQsp shapes — see `exit()` docs.

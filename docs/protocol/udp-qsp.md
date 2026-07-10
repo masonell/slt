@@ -340,7 +340,7 @@ On packet receipt:
 2. If within grace window and key phase differs, try `previous` keys
 3. If near expected rekey threshold, derive and try `candidate` keys
 4. On `candidate` success: promote (`previous = current`, `current = candidate`)
-5. Track consecutive failures; declare **DeadChannel** after threshold (default: 64)
+5. Drop packets that fail authentication without changing channel-liveness state
 
 ### Key Derivation
 

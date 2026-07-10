@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession};
+use slt_core::crypto::udp_qsp::QuicQspSession;
 use slt_core::proto::{
     CloseCode, ClosePayload, FallbackToTcpPayload, Message, MessageLimits, PingPayload,
     encode_message,
@@ -101,13 +101,15 @@ pub struct ClientSessionBase<
     tun: Arc<T>,
     udp_io_factory: Arc<dyn UdpSessionIoFactory<I>>,
     /// UDP-QSP session for encrypted UDP traffic. The session's peer address is
-    /// updated on every incoming UDP packet from `handle_udp_claim`. This is
-    /// safe because `send_udp_message` is only called when either:
-    /// - `active_transport == UdpQsp` (meaning we've received at least one UDP packet)
+    /// updated only after packet authentication succeeds in `handle_udp_claim`.
+    /// This is safe because `send_udp_message` is only called when either:
+    /// - `active_transport == UdpQsp` (meaning we've authenticated UDP traffic)
     /// - We're inside `handle_udp_claim` processing an incoming UDP packet
     ///
     /// In both cases, the peer has already been set on the session.
     udp_session: Option<QuicQspSession<I>>,
+    /// Last packet that authenticated under this session's UDP-QSP receive keys.
+    last_authenticated_udp_activity: Option<Instant>,
     udp_upgrade: UdpUpgradeState,
     rx: SessionRx,
     limits: MessageLimits,
@@ -168,6 +170,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             tun,
             udp_io_factory,
             udp_session: None,
+            last_authenticated_udp_activity: None,
             udp_upgrade: UdpUpgradeState::default(),
             rx,
             limits,
@@ -249,11 +252,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         SessionControl::Close
     }
 
-    /// Update the UDP session's peer address.
-    fn update_udp_peer(&mut self, peer: SocketAddr) {
+    /// Record authenticated UDP ingress and adopt its source as the reply peer.
+    fn note_authenticated_udp_activity(&mut self, peer: SocketAddr) {
         if let Some(session) = self.udp_session.as_mut() {
             session.set_peer(peer);
         }
+        self.last_authenticated_udp_activity = Some(Instant::now());
     }
 
     fn set_active_transport(&mut self, transport: ActiveTransport) {
@@ -369,10 +373,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     );
                 }
                 Ok(())
-            }
-            Err(QspSessionError::DeadChannel) => {
-                self.metrics.inc_udp_qsp_dead_channel();
-                Err(UdpQspError::Qsp(QspSessionError::DeadChannel))
             }
             Err(err) => Err(UdpQspError::Qsp(err)),
         }
@@ -504,6 +504,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     fn retire_udp_transport(&mut self) {
         self.registry.remove_cids_for_session(self.session_id);
         self.udp_session = None;
+        self.last_authenticated_udp_activity = None;
         self.reset_udp_upgrade_state();
     }
 

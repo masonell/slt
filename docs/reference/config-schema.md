@@ -62,6 +62,7 @@ and refuses to start if any field mismatches.
 | `ping_max` | duration | No | `"30s"` | - |
 | `auth_timeout` | duration | No | `"10s"` | > 0, <= 1h |
 | `tcp_write_timeout` | duration | No | `"10s"` | > 0, <= 1h |
+| `udp_liveness_timeout` | duration | No | `"90s"` | > 0, <= 1h |
 | `idle_timeout` | duration | No | `"5m"` | > 0, <= 1h |
 | `metrics_interval` | duration | No | `"5m"` | > 0, <= 1h |
 | `tcp_classification_timeout` | duration | No | `"60s"` | > 0, <= 1h |
@@ -115,6 +116,7 @@ ping_min = "10s"
 ping_max = "30s"
 auth_timeout = "10s"
 tcp_write_timeout = "10s"
+udp_liveness_timeout = "90s"
 idle_timeout = "5m"
 metrics_interval = "5m"
 tcp_classification_timeout = "60s"

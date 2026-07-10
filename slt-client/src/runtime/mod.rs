@@ -426,7 +426,6 @@ fn spawn_metrics_task(
                         udp_qsp_decrypt_too_old = snap.udp_qsp_decrypt_fail_too_old,
                         udp_qsp_decrypt_crypto = snap.udp_qsp_decrypt_fail_crypto,
                         udp_qsp_decrypt_other = snap.udp_qsp_decrypt_fail_other,
-                        udp_qsp_dead_channel = snap.udp_qsp_dead_channel,
                         "metrics snapshot"
                     );
                 }

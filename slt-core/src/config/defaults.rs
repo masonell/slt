@@ -17,6 +17,9 @@ pub const DEFAULT_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default idle timeout.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 
+/// Default authenticated UDP-QSP liveness timeout.
+pub const DEFAULT_UDP_LIVENESS_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Default metrics reporting interval.
 pub const DEFAULT_METRICS_INTERVAL: Duration = Duration::from_mins(5);
 
@@ -63,6 +66,12 @@ pub const fn default_tcp_write_timeout() -> Duration {
 #[must_use]
 pub const fn default_idle_timeout() -> Duration {
     DEFAULT_IDLE_TIMEOUT
+}
+
+/// Returns the default authenticated UDP-QSP liveness timeout.
+#[must_use]
+pub const fn default_udp_liveness_timeout() -> Duration {
+    DEFAULT_UDP_LIVENESS_TIMEOUT
 }
 
 /// Returns the default metrics reporting interval.

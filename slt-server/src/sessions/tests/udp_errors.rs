@@ -308,7 +308,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
 }
 
 #[tokio::test]
-async fn session_falls_back_to_tcp_after_udp_dead_channel() {
+async fn decrypt_garbage_from_any_peer_does_not_retire_udp() {
     let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, registry) =
         spawn_session().await;
 
@@ -378,55 +378,52 @@ async fn session_falls_back_to_tcp_after_udp_dead_channel() {
         .unwrap()
         .unwrap();
 
-    // Send 64 garbage packets to trigger DeadChannel fallback
-    // (DEAD_CHANNEL_FAILURE_THRESHOLD = 64)
-    for _ in 0..64 {
-        let garbage = vec![0xBA; 32];
-        tx.send(SessionEvent::Udp(UdpClaim {
-            peer,
-            dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-            payload: garbage,
-        }))
-        .await
-        .unwrap();
+    let unvalidated_peer = SocketAddr::from(([127, 0, 0, 1], 56788));
+    for garbage_peer in [unvalidated_peer, peer] {
+        for _ in 0..128 {
+            tx.send(SessionEvent::Udp(UdpClaim {
+                peer: garbage_peer,
+                dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+                payload: vec![0xBA; 32],
+            }))
+            .await
+            .unwrap();
+        }
     }
 
-    // Give time for processing
     tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 
-    // CID should be removed and session should fall back to TCP
-    assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
-
-    // The fallback request precedes subsequent TCP DATA on the stream.
-    let buf = timeout(
-        Duration::from_secs(1),
-        read_message_bytes(&mut client, limits),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(matches!(
-        decode_message(&buf, limits).unwrap().unwrap().0,
-        Message::FallbackToTcp { .. }
-    ));
-
-    // Session should still accept TCP data
-    let tcp_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 81), 8);
-    let mut tcp_frame = Vec::new();
+    let later_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 81), 8);
+    let mut later_frame = Vec::new();
     encode_message(
         Message::Data {
-            packet: &tcp_packet,
+            packet: &later_packet,
         },
-        &mut tcp_frame,
+        &mut later_frame,
     )
     .unwrap();
-    client.write_all(&tcp_frame).await.unwrap();
+    let protected = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx + 2,
+            register.key_phase,
+            &later_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer,
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: protected,
+    }))
+    .await
+    .unwrap();
 
     let received = timeout(Duration::from_secs(1), tun_rx.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(received, tcp_packet);
+    assert_eq!(received, later_packet);
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
@@ -522,8 +519,8 @@ async fn session_retries_downlink_over_tcp_after_udp_send_failure() {
 }
 
 #[tokio::test]
-async fn session_closes_when_udp_dead_channel_and_tcp_already_closed() {
-    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
+async fn decrypt_garbage_does_not_close_udp_only_session() {
+    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, registry) =
         spawn_session().await;
 
     // Register and activate UDP-QSP.
@@ -548,6 +545,7 @@ async fn session_closes_when_udp_dead_channel_and_tcp_already_closed() {
         Message::RegisterOk { .. }
     ));
 
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 56790));
     let _ = complete_udp_upgrade_handshake(
         &mut client,
@@ -564,16 +562,13 @@ async fn session_closes_when_udp_dead_channel_and_tcp_already_closed() {
     // The server sets tcp_alive=false and continues on UDP-QSP alone.
     drop(client);
 
-    // Let the server observe the TCP EOF before provoking the dead channel.
+    // Let the server observe the TCP EOF before sending unauthenticated noise.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // 64 undecryptable packets trigger a dead channel. With TCP already gone
-    // there is no fallback path, so the session tears itself down instead of
-    // switching onto a dead transport. The client cannot be notified over
-    // either dead path and recovers via its own idle timeout / reconnect.
-    for _ in 0..64 {
+    let unvalidated_peer = SocketAddr::from(([127, 0, 0, 1], 56791));
+    for _ in 0..128 {
         tx.send(SessionEvent::Udp(UdpClaim {
-            peer,
+            peer: unvalidated_peer,
             dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
             payload: vec![0xBB; 32],
         }))
@@ -581,10 +576,41 @@ async fn session_closes_when_udp_dead_channel_and_tcp_already_closed() {
         .unwrap();
     }
 
-    // The session terminates on its own (no Shutdown sent).
-    let result = timeout(Duration::from_secs(2), join).await;
-    assert!(
-        matches!(result, Ok(Ok(Ok(())))),
-        "expected clean session close after dead channel with tcp dead, got {result:?}"
-    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!join.is_finished());
+    assert!(registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+
+    let uplink_packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 90), 8);
+    let mut data_frame = Vec::new();
+    encode_message(
+        Message::Data {
+            packet: &uplink_packet,
+        },
+        &mut data_frame,
+    )
+    .unwrap();
+    let protected = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx + 1,
+            register.key_phase,
+            &data_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer,
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: protected,
+    }))
+    .await
+    .unwrap();
+
+    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, uplink_packet);
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    assert!(join.await.unwrap().is_ok());
 }

@@ -3,11 +3,11 @@
 use slt_core::crypto::udp_qsp::QspSessionError;
 use slt_core::proto::{Message, PongPayload, decode_padded_message};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, trace, warn};
+use tracing::{info, trace};
 
 use super::error::SessionError;
 use super::types::SessionControl;
-use super::{ActiveTransport, ClientSessionBase, UdpFailureRecovery, UdpSessionIo};
+use super::{ClientSessionBase, UdpFailureRecovery, UdpSessionIo};
 use crate::quic::UdpClaim;
 use crate::tun::TunDeviceIo;
 
@@ -18,10 +18,6 @@ enum UdpOpenOutcome {
     Opened,
     /// Dropped (replay / too-old / crypto / other). Already counted and logged.
     Dropped,
-    /// Too many decrypt failures; the UDP-QSP channel is dead. CID routes, the
-    /// UDP session, and upgrade state have been cleared. The caller lands the
-    /// session on TCP (and signals the peer) or closes if TCP is also gone.
-    ChannelDead,
 }
 
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
@@ -60,7 +56,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         let mut opened = std::mem::take(&mut self.udp_opened_payload_buf);
         let control = match self.open_udp_packet(&claim.payload, &mut opened) {
             UdpOpenOutcome::Opened => {
-                self.update_udp_peer(peer);
+                self.note_authenticated_udp_activity(peer);
                 match self.decode_udp_message(&opened) {
                     Ok(Some(message)) => {
                         self.note_activity();
@@ -71,7 +67,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 }
             }
             UdpOpenOutcome::Dropped => Ok(SessionControl::Continue),
-            UdpOpenOutcome::ChannelDead => self.complete_dead_channel_fallback().await,
         };
         self.udp_opened_payload_buf = opened;
 
@@ -81,7 +76,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     /// Decrypts and validates a UDP-QSP packet.
     ///
     /// Opens the packet using the session's UDP-QSP crypto state, handling
-    /// various error conditions (replay, too old, dead channel, crypto failures).
+    /// various packet errors (replay, too old, crypto failures).
     /// Tracks key phase transitions for metrics.
     ///
     /// # Parameters
@@ -93,9 +88,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// * [`UdpOpenOutcome::Opened`] - The decrypted plaintext payload was written to `out`
     /// * [`UdpOpenOutcome::Dropped`] - The packet should be dropped (logged + counted)
-    /// * [`UdpOpenOutcome::ChannelDead`] - The channel is dead; CID routes, UDP session,
-    ///   and upgrade state have been cleared. The caller lands the session via
-    ///   [`complete_dead_channel_fallback`].
     ///
     /// On replay/old/crypto errors, logs and returns [`UdpOpenOutcome::Dropped`].
     /// Tracks RX key phase transitions for metrics.
@@ -129,16 +121,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     "UDP packet dropped: decrypt failure"
                 );
                 return UdpOpenOutcome::Dropped;
-            }
-            Err(QspSessionError::DeadChannel) => {
-                self.metrics.inc_udp_qsp_dead_channel();
-                warn!(
-                    session_id = self.session_id,
-                    client_id = %self.client_id,
-                    "UDP-QSP channel marked dead; clearing udp state"
-                );
-                self.retire_udp_transport();
-                return UdpOpenOutcome::ChannelDead;
             }
             Err(QspSessionError::Crypto(err)) => {
                 self.metrics.inc_udp_qsp_decrypt_fail_crypto();
@@ -178,31 +160,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         }
 
         UdpOpenOutcome::Opened
-    }
-
-    /// Land the session after [`open_udp_packet`] reported the UDP-QSP channel dead.
-    ///
-    /// With a live TCP path this switches outbound traffic to TCP and sends an
-    /// explicit fallback request before subsequent TCP DATA.
-    ///
-    /// With TCP already closed there is no fallback path and no way to notify the
-    /// peer — a `Close` over the dead UDP-QSP channel would not decrypt, and TCP is
-    /// gone — so the session tears itself down. The peer recovers via its own idle
-    /// timeout / reconnect.
-    async fn complete_dead_channel_fallback(&mut self) -> Result<SessionControl, SessionError> {
-        if self.tcp_alive {
-            self.set_active_transport(ActiveTransport::Tcp);
-            self.send_tcp_fallback_request().await?;
-            return Ok(SessionControl::Continue);
-        }
-        self.metrics.inc_disconnect_close();
-        info!(
-            session_id = self.session_id,
-            client_id = %self.client_id,
-            reason = "udp_dead_channel_no_tcp",
-            "session disconnect; udp-qsp channel dead and tcp closed"
-        );
-        Ok(SessionControl::Close)
     }
 
     /// Decodes a VPN message from the decrypted UDP payload.

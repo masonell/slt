@@ -29,7 +29,6 @@ pub struct Metrics {
     udp_qsp_decrypt_fail_too_old: AtomicU64,
     udp_qsp_decrypt_fail_crypto: AtomicU64,
     udp_qsp_decrypt_fail_other: AtomicU64,
-    udp_qsp_dead_channel: AtomicU64,
 }
 
 /// Snapshot of metric counters.
@@ -79,8 +78,6 @@ pub struct MetricsSnapshot {
     pub udp_qsp_decrypt_fail_crypto: u64,
     /// UDP-QSP decrypt failures for other reasons.
     pub udp_qsp_decrypt_fail_other: u64,
-    /// UDP-QSP channels marked dead.
-    pub udp_qsp_dead_channel: u64,
 }
 
 #[inline]
@@ -266,12 +263,6 @@ impl Metrics {
         );
     }
 
-    /// Increment UDP-QSP dead-channel counter.
-    pub fn inc_udp_qsp_dead_channel(&self) {
-        let count = inc(&self.udp_qsp_dead_channel);
-        trace!(udp_qsp_dead_channel = count, "UDP-QSP channel marked dead");
-    }
-
     /// Return a point-in-time snapshot of metrics.
     #[must_use]
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -304,7 +295,6 @@ impl Metrics {
             udp_qsp_decrypt_fail_too_old: self.udp_qsp_decrypt_fail_too_old.load(Ordering::Relaxed),
             udp_qsp_decrypt_fail_crypto: self.udp_qsp_decrypt_fail_crypto.load(Ordering::Relaxed),
             udp_qsp_decrypt_fail_other: self.udp_qsp_decrypt_fail_other.load(Ordering::Relaxed),
-            udp_qsp_dead_channel: self.udp_qsp_dead_channel.load(Ordering::Relaxed),
         }
     }
 }
@@ -440,9 +430,6 @@ mod tests {
             metrics.udp_qsp_decrypt_fail_other.load(Ordering::Relaxed),
             1
         );
-
-        metrics.inc_udp_qsp_dead_channel();
-        assert_eq!(metrics.udp_qsp_dead_channel.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -496,7 +483,6 @@ mod tests {
         metrics.inc_udp_qsp_decrypt_fail_too_old();
         metrics.inc_udp_qsp_decrypt_fail_crypto();
         metrics.inc_udp_qsp_decrypt_fail_other();
-        metrics.inc_udp_qsp_dead_channel();
 
         let snapshot = metrics.snapshot();
 
@@ -523,6 +509,5 @@ mod tests {
         assert_eq!(snapshot.udp_qsp_decrypt_fail_too_old, 1);
         assert_eq!(snapshot.udp_qsp_decrypt_fail_crypto, 1);
         assert_eq!(snapshot.udp_qsp_decrypt_fail_other, 1);
-        assert_eq!(snapshot.udp_qsp_dead_channel, 1);
     }
 }

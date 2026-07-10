@@ -97,6 +97,7 @@ async fn run_server(config: Arc<ServerConfig>) -> Result<(), Box<dyn std::error:
     let session_timeouts = SessionTimeouts {
         ping_min: config.timing.ping_min,
         ping_max: config.timing.ping_max,
+        udp_liveness_timeout: config.timing.udp_liveness_timeout,
         idle_timeout: config.timing.idle_timeout,
         tcp_write_timeout: config.timing.tcp_write_timeout,
     };
@@ -519,7 +520,7 @@ fn spawn_metrics_task(
                         udp_qsp_decrypt_too_old = snap.udp_qsp_decrypt_fail_too_old,
                         udp_qsp_decrypt_crypto = snap.udp_qsp_decrypt_fail_crypto,
                         udp_qsp_decrypt_other = snap.udp_qsp_decrypt_fail_other,
-                        udp_qsp_dead_channel = snap.udp_qsp_dead_channel,
+                        udp_qsp_liveness_timeouts = snap.udp_qsp_liveness_timeouts,
                         "metrics snapshot"
                     );
                 }

@@ -319,7 +319,7 @@ async fn session_handles_udp_pong() {
 }
 
 #[tokio::test]
-async fn valid_udp_packet_from_new_peer_updates_reply_peer() {
+async fn peer_changes_only_after_authenticated_udp_packet() {
     let (join, mut client, tx, _tun_rx, mut udp_rx, mut udp_peer_rx, limits, _assigned, _registry) =
         spawn_session_with_peer_capture().await;
 
@@ -364,6 +364,16 @@ async fn valid_udp_packet_from_new_peer_updates_reply_peer() {
         .unwrap();
     assert_eq!(first_reply_peer, old_peer);
 
+    for _ in 0..128 {
+        tx.send(SessionEvent::Udp(UdpClaim {
+            peer: new_peer,
+            dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+            payload: vec![0xA5; 32],
+        }))
+        .await
+        .unwrap();
+    }
+
     let ping = PingPayload {
         nonce: 0xCAFE_BABE_1234_5678,
     };
@@ -381,6 +391,49 @@ async fn valid_udp_packet_from_new_peer_updates_reply_peer() {
         .protect(
             register.client_to_server_cid.as_slice(),
             register.pn_start_rx + 1,
+            register.key_phase,
+            &ping_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer: old_peer,
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: ping_packet,
+    }))
+    .await
+    .unwrap();
+
+    let pong_packet = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let reply_peer = timeout(Duration::from_secs(1), udp_peer_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply_peer, old_peer);
+
+    let opened = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &pong_packet,
+            server_expected_pn,
+        )
+        .unwrap();
+    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+    assert_eq!(consumed, opened.payload.len());
+    match message {
+        Message::Pong { payload } => {
+            let pong = PongPayload::decode(payload).unwrap();
+            assert_eq!(pong.nonce, ping.nonce);
+        }
+        _ => panic!("expected pong from current peer"),
+    }
+
+    let ping_packet = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx + 2,
             register.key_phase,
             &ping_frame,
         )
@@ -407,18 +460,12 @@ async fn valid_udp_packet_from_new_peer_updates_reply_peer() {
         .open(
             register.client_to_server_cid.len(),
             &pong_packet,
-            server_expected_pn,
+            server_expected_pn + 1,
         )
         .unwrap();
     let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
     assert_eq!(consumed, opened.payload.len());
-    match message {
-        Message::Pong { payload } => {
-            let pong = PongPayload::decode(payload).unwrap();
-            assert_eq!(pong.nonce, ping.nonce);
-        }
-        _ => panic!("expected pong from migrated peer refresh"),
-    }
+    assert!(matches!(message, Message::Pong { .. }));
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();

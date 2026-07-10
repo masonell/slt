@@ -44,6 +44,7 @@ fn authenticator_from_config_tracks_enabled_clients() {
             ping_max: std::time::Duration::from_secs(2),
             auth_timeout: std::time::Duration::from_secs(3),
             tcp_write_timeout: std::time::Duration::from_secs(3),
+            udp_liveness_timeout: std::time::Duration::from_secs(3),
             idle_timeout: std::time::Duration::from_secs(4),
             metrics_interval: std::time::Duration::from_secs(5),
             tcp_classification_timeout: std::time::Duration::from_secs(6),

@@ -24,7 +24,7 @@ use crate::metrics::Metrics;
 ///
 /// Actual socket I/O on the UDP path keeps using raw `io::Error` (carried here
 /// via `Io`): this typed error is scoped to the *domain* failures —
-/// replay/crypto/dead-channel/proto — not to legitimate `send_to`/`recv_from`
+/// replay/crypto/proto — not to legitimate `send_to`/`recv_from`
 /// I/O, which stays `io::Error`.
 #[derive(Debug, thiserror::Error)]
 pub enum UdpQspError {
@@ -54,13 +54,11 @@ pub enum UdpQspError {
     },
 
     /// UDP-QSP session failure: a replayed/too-old packet number, a packet
-    /// number overflow, a crypto (header-protection/AEAD) failure, or the
-    /// dead-channel signal after too many consecutive decrypt failures.
+    /// number overflow, or a crypto (header-protection/AEAD) failure.
     ///
     /// [`Self::is_recoverable`] classifies the inner variant so the recoverable
-    /// packet-level failures (replay, too-old, single crypto failure) can be
-    /// dropped while the dead-channel signal and packet-number overflow
-    /// propagate.
+    /// packet-level failures (replay, too-old, crypto failure) can be dropped
+    /// while packet-number overflow propagates.
     #[error(transparent)]
     Qsp(#[from] QspSessionError),
 
@@ -111,9 +109,6 @@ impl UdpQspError {
     ///   continues.
     ///
     /// Fatal (propagate out of the UDP-QSP transport):
-    /// - [`Self::Qsp`] with inner `DeadChannel` — too many consecutive decrypt
-    ///   failures; the peer's keys have diverged beyond recovery. The session
-    ///   treats this as fatal.
     /// - [`Self::Qsp`] with inner `PacketNumberOverflow` — the TX packet-number
     ///   space is exhausted; the session cannot send again on this UDP path.
     ///   Dropping overflow would silently lose packets on a session that can no
@@ -124,7 +119,7 @@ impl UdpQspError {
     ///   overflow.
     ///
     /// Arms are grouped by policy for reviewability. Pinned by
-    /// `recoverable_policy_pins_each_shape` and `is_dead_channel_only_matches_dead_channel`.
+    /// `recoverable_policy_pins_each_shape`.
     #[allow(clippy::match_same_arms)]
     #[must_use]
     pub fn is_recoverable(&self) -> bool {
@@ -147,8 +142,6 @@ impl UdpQspError {
             Self::Qsp(QspSessionError::Crypto(_)) => true,
             Self::Qsp(QspSessionError::Replay) => true,
             Self::Qsp(QspSessionError::TooOld) => true,
-            // Fatal: dead channel (peer keys diverged beyond recovery).
-            Self::Qsp(QspSessionError::DeadChannel) => false,
             // Fatal: TX packet-number space exhausted — session cannot send
             // again on this UDP path. Propagate to TCP fallback (a recoverable
             // classification here would silently drop packets on a session that
@@ -157,17 +150,6 @@ impl UdpQspError {
             // Recoverable: malformed/garbage/partial packet from the peer.
             Self::Frame(_) | Self::Message(_) | Self::IncompleteMessage => true,
         }
-    }
-
-    /// Whether this is the UDP-QSP dead-channel signal — the signal that the
-    /// peer's keys have diverged beyond recovery (too many consecutive decrypt
-    /// failures), distinct from a single crypto failure on one packet.
-    ///
-    /// Convenience accessor for the session layer; the typed error carries the
-    /// classification directly. The session must fall back to TCP or reconnect.
-    #[must_use]
-    pub const fn is_dead_channel(&self) -> bool {
-        matches!(self, Self::Qsp(QspSessionError::DeadChannel))
     }
 }
 
@@ -293,8 +275,7 @@ impl<I: SessionIo> UdpQspTransport<I> {
     /// Returns a typed [`UdpQspError`] if:
     /// - Message encoding fails ([`UdpQspError::Frame`] / [`UdpQspError::Message`])
     /// - UDP-QSP session send fails: replay/too-old/overflow/crypto failure
-    ///   ([`UdpQspError::Qsp`]), dead-channel signal
-    ///   ([`UdpQspError::is_dead_channel`]), or socket I/O ([`UdpQspError::Io`]).
+    ///   ([`UdpQspError::Qsp`]) or socket I/O ([`UdpQspError::Io`]).
     ///   Use [`UdpQspError::is_recoverable`] to classify drop-vs-propagate.
     pub async fn write_message(
         &mut self,
@@ -314,11 +295,6 @@ impl<I: SessionIo> UdpQspTransport<I> {
                     );
                 }
                 Ok(())
-            }
-            Err(QspSessionError::DeadChannel) => {
-                self.metrics.inc_udp_qsp_dead_channel();
-                warn!("UDP-QSP channel marked dead");
-                Err(UdpQspError::Qsp(QspSessionError::DeadChannel))
             }
             // Send-side I/O is re-wrapped as `SendIo` (never recoverable) so a
             // send failure falls back to TCP rather than being dropped like a
@@ -340,14 +316,14 @@ impl<I: SessionIo> UdpQspTransport<I> {
     ///
     /// Returns a typed [`UdpQspError`] if:
     /// - Packet decryption fails (replay, too old, crypto, packet-number
-    ///   overflow) or the channel is marked dead ([`UdpQspError::Qsp`]).
+    ///   overflow) ([`UdpQspError::Qsp`]).
     /// - Socket recv fails ([`UdpQspError::Io`]).
     /// - Message decoding fails ([`UdpQspError::Message`]).
     /// - The decrypted payload does not contain a complete framed message
     ///   ([`UdpQspError::IncompleteMessage`]).
     ///
     /// Recoverable failures (see [`UdpQspError::is_recoverable`]) are typically
-    /// dropped by the caller; the dead-channel signal propagates.
+    /// dropped by the caller.
     pub async fn read_next_message(
         &mut self,
         limits: slt_core::proto::MessageLimits,
@@ -387,9 +363,7 @@ impl<I: SessionIo> UdpQspTransport<I> {
     /// Update metrics counters for a UDP-QSP receive failure.
     ///
     /// The error itself is returned typed to the caller; this method bumps the
-    /// per-variant metric. Each counter corresponds to a `QspSessionError`
-    /// variant; the dead-channel counter is also bumped here so callers that
-    /// drop a recoverable error still get the metric.
+    /// per-variant metric.
     fn note_recv_error(&self, err: &QspSessionError) {
         match err {
             QspSessionError::Replay => {
@@ -402,10 +376,6 @@ impl<I: SessionIo> UdpQspTransport<I> {
                     reason = "too_old",
                     "UDP-QSP packet dropped: decrypt failure"
                 );
-            }
-            QspSessionError::DeadChannel => {
-                self.metrics.inc_udp_qsp_dead_channel();
-                warn!("UDP-QSP channel marked dead");
             }
             QspSessionError::Crypto(crypto_err) => {
                 self.metrics.inc_udp_qsp_decrypt_fail_crypto();
@@ -625,20 +595,6 @@ mod tests {
     }
 
     #[test]
-    fn dead_channel_preserves_qsp_shape_and_is_fatal() {
-        // DeadChannel is the one fatal non-I/O UDP-QSP condition (peer keys
-        // diverged beyond recovery). The typed `is_dead_channel` /
-        // `is_recoverable` API carries the classification directly.
-        let err: UdpQspError = QspSessionError::DeadChannel.into();
-        assert!(matches!(
-            err,
-            UdpQspError::Qsp(QspSessionError::DeadChannel)
-        ));
-        assert!(err.is_dead_channel());
-        assert!(!err.is_recoverable());
-    }
-
-    #[test]
     fn qsp_io_preserves_shape_and_is_recoverable() {
         // Transient recv I/O is recoverable (see `is_recoverable` doc) — one
         // failed datagram does not kill the path.
@@ -646,7 +602,6 @@ mod tests {
         let err: UdpQspError = QspSessionError::Io(io_err).into();
         assert!(matches!(err, UdpQspError::Qsp(QspSessionError::Io(_))));
         assert!(err.is_recoverable());
-        assert!(!err.is_dead_channel());
     }
 
     #[test]
@@ -675,7 +630,6 @@ mod tests {
                 !wrapped.is_recoverable(),
                 "{kind:?}: Qsp(Io(_)) should propagate, not drop"
             );
-            assert!(!direct.is_dead_channel());
         }
     }
 
@@ -702,7 +656,6 @@ mod tests {
                 !err.is_recoverable(),
                 "{kind:?}: SendIo must propagate to TCP fallback, not drop"
             );
-            assert!(!err.is_dead_channel());
         }
     }
 
@@ -721,7 +674,6 @@ mod tests {
             UdpQspError::Qsp(QspSessionError::PacketNumberOverflow)
         ));
         assert!(!err.is_recoverable());
-        assert!(!err.is_dead_channel());
         let rendered = format!("{err:#}");
         assert!(rendered.contains("overflow"), "{rendered:?}");
     }
@@ -733,10 +685,8 @@ mod tests {
             err,
             UdpQspError::Qsp(QspSessionError::Crypto(QspCryptoError::CryptoFail))
         ));
-        // A single crypto (decrypt) failure is recoverable — distinct from the
-        // DeadChannel signal, which is many consecutive failures.
+        // Authentication failure is packet-local and cannot retire the path.
         assert!(err.is_recoverable());
-        assert!(!err.is_dead_channel());
     }
 
     #[test]
@@ -901,7 +851,6 @@ mod tests {
         // The typed UdpQspError classifies the recoverable decision.
         let err: UdpQspError = qsp_err.into();
         assert!(err.is_recoverable());
-        assert!(!err.is_dead_channel());
     }
 
     #[tokio::test]
@@ -922,27 +871,6 @@ mod tests {
 
         let err: UdpQspError = qsp_err.into();
         assert!(err.is_recoverable());
-    }
-
-    #[tokio::test]
-    async fn note_recv_error_dead_channel_increments_metric_and_is_fatal() {
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
-        let io = ChanIo {
-            tx,
-            rx: mpsc::channel(1).1,
-        };
-        let session = make_session(io);
-        let transport = make_transport(session);
-
-        assert_eq!(snapshot(&transport).udp_qsp_dead_channel, 0);
-
-        let qsp_err = QspSessionError::DeadChannel;
-        transport.note_recv_error(&qsp_err);
-        assert_eq!(snapshot(&transport).udp_qsp_dead_channel, 1);
-
-        let err: UdpQspError = qsp_err.into();
-        assert!(!err.is_recoverable());
-        assert!(err.is_dead_channel());
     }
 
     #[tokio::test]
@@ -1016,8 +944,6 @@ mod tests {
     fn recoverable_policy_pins_each_shape() {
         // === Fatal (propagate out of the UDP-QSP transport -> TCP fallback /
         // session close at the session layer) ===
-        // DeadChannel: fatal -> propagate.
-        assert!(!UdpQspError::from(QspSessionError::DeadChannel).is_recoverable());
         // PacketNumberOverflow: keeps the runtime routing. Dropping overflow
         // would silently lose packets on a session that can no longer send, so
         // classifying it fatal here keeps the TCP-fallback routing. See
@@ -1067,30 +993,7 @@ mod tests {
                 err.is_recoverable(),
                 "transient recv {kind:?} must be recoverable (dropped), got fatal"
             );
-            assert!(
-                !err.is_dead_channel(),
-                "transient recv {kind:?} must not look like the dead-channel signal"
-            );
         }
-    }
-
-    /// `is_dead_channel` is the typed signal the session uses to distinguish a
-    /// UDP key-divergence condition (too many consecutive decrypt failures)
-    /// from transient `io::ErrorKind::ConnectionAborted` socket I/O on the UDP
-    /// path.
-    #[test]
-    fn is_dead_channel_only_matches_dead_channel() {
-        assert!(UdpQspError::from(QspSessionError::DeadChannel).is_dead_channel());
-        // Every other variant — including a real ConnectionAborted io::Error —
-        // must NOT be reported as the dead-channel signal, since the session
-        // treats dead-channel as a UDP-key-divergence condition distinct from
-        // socket I/O.
-        assert!(!UdpQspError::from(QspSessionError::Replay).is_dead_channel());
-        assert!(
-            !UdpQspError::from(io::Error::new(io::ErrorKind::ConnectionAborted, "x"))
-                .is_dead_channel()
-        );
-        assert!(!UdpQspError::IncompleteMessage.is_dead_channel());
     }
 }
 

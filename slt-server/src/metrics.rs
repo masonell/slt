@@ -40,7 +40,7 @@ pub struct Metrics {
     udp_qsp_decrypt_fail_too_old: AtomicU64,
     udp_qsp_decrypt_fail_crypto: AtomicU64,
     udp_qsp_decrypt_fail_other: AtomicU64,
-    udp_qsp_dead_channel: AtomicU64,
+    udp_qsp_liveness_timeouts: AtomicU64,
 }
 
 /// Snapshot of metric counters.
@@ -106,8 +106,8 @@ pub struct MetricsSnapshot {
     pub udp_qsp_decrypt_fail_crypto: u64,
     /// UDP-QSP decrypt failures for other reasons.
     pub udp_qsp_decrypt_fail_other: u64,
-    /// UDP-QSP channels marked dead.
-    pub udp_qsp_dead_channel: u64,
+    /// UDP-QSP fallbacks caused by authenticated liveness timeout.
+    pub udp_qsp_liveness_timeouts: u64,
 }
 
 /// Atomically increments a counter and returns the new value.
@@ -353,10 +353,13 @@ impl Metrics {
         );
     }
 
-    /// Increment UDP-QSP dead-channel counter.
-    pub fn inc_udp_qsp_dead_channel(&self) {
-        let count = inc(&self.udp_qsp_dead_channel);
-        trace!(udp_qsp_dead_channel = count, "UDP-QSP channel marked dead");
+    /// Increment UDP-QSP authenticated liveness timeout counter.
+    pub fn inc_udp_qsp_liveness_timeout(&self) {
+        let count = inc(&self.udp_qsp_liveness_timeouts);
+        trace!(
+            udp_qsp_liveness_timeouts = count,
+            "UDP-QSP authenticated liveness timeout"
+        );
     }
 
     /// Return a point-in-time snapshot of metrics.
@@ -399,7 +402,7 @@ impl Metrics {
             udp_qsp_decrypt_fail_too_old: self.udp_qsp_decrypt_fail_too_old.load(Ordering::Relaxed),
             udp_qsp_decrypt_fail_crypto: self.udp_qsp_decrypt_fail_crypto.load(Ordering::Relaxed),
             udp_qsp_decrypt_fail_other: self.udp_qsp_decrypt_fail_other.load(Ordering::Relaxed),
-            udp_qsp_dead_channel: self.udp_qsp_dead_channel.load(Ordering::Relaxed),
+            udp_qsp_liveness_timeouts: self.udp_qsp_liveness_timeouts.load(Ordering::Relaxed),
         }
     }
 }

@@ -431,6 +431,7 @@ On session termination:
 |-----------|---------|-------------|
 | auth_timeout | 10s | End-to-end server TLS and AUTH deadline |
 | tcp_write_timeout | 10s | Maximum TCP message write time; clients also apply it during authentication and UDP upgrade |
+| udp_liveness_timeout | 90s | Server time without authenticated UDP-QSP ingress before TCP fallback |
 | idle_timeout | 300s | Max idle time before disconnect |
 | ping_min | 10s | Minimum keepalive interval |
 | ping_max | 30s | Maximum keepalive interval |
@@ -455,6 +456,13 @@ Random jitter prevents thundering herd when many clients reconnect simultaneousl
 on any_inbound_message:
     last_activity = now
 
+on authenticated_udp_qsp_packet:
+    last_authenticated_udp_activity = now
+
+if tcp_alive and now - last_authenticated_udp_activity >= udp_liveness_timeout:
+    retire_udp_qsp()
+    request_tcp_fallback()
+
 on idle_deadline_reached:
     if now - last_activity >= idle_timeout:
         terminate_session()
@@ -473,6 +481,7 @@ on idle_deadline_reached:
 | Invalid packet number | Drop packet |
 | Replay detected | Drop packet |
 | UDP write failure | Fallback to TCP if alive |
+| No authenticated UDP packet before `udp_liveness_timeout` | Fallback to TCP if alive |
 
 ### 7.2 TCP Errors
 

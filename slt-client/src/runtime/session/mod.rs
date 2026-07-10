@@ -978,7 +978,7 @@ mod tests {
         );
         session.retained_udp_transport = Some(Box::new(test_udp_transport().await));
 
-        let error = SessionError::from(UdpQspError::from(QspSessionError::DeadChannel));
+        let error = SessionError::from(UdpQspError::from(QspSessionError::PacketNumberOverflow));
         assert!(session.handle_udp_error(&error).await.unwrap());
 
         assert!(session.retained_udp_transport.is_none());

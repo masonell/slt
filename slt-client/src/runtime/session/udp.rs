@@ -291,7 +291,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             self.retained_udp_transport = None;
             warn!(
                 error = %err,
-                dead_channel = err.is_udp_qsp_dead_channel(),
                 "retained udp receive path failed; preserving replacement attempt"
             );
             return Ok(true);
@@ -300,7 +299,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         if !self.tcp_alive {
             warn!(
                 error = %err,
-                dead_channel = err.is_udp_qsp_dead_channel(),
                 "udp-qsp io error and tcp dead; closing session"
             );
             return Ok(false);
@@ -308,7 +306,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
 
         warn!(
             error = %err,
-            dead_channel = err.is_udp_qsp_dead_channel(),
             "udp-qsp io error; falling back to tcp and scheduling retry"
         );
         self.request_tcp_fallback(TransportChangeReason::UdpError)
@@ -392,7 +389,6 @@ mod tests {
             let label = format!("{qsp:?}");
             let err = SessionError::from(UdpQspError::from(qsp));
             assert!(err.is_udp_qsp_recoverable(), "{label} must be recoverable");
-            assert!(!err.is_udp_qsp_dead_channel());
         }
     }
 
@@ -401,16 +397,10 @@ mod tests {
     /// packet errors: they propagate out of the refresh probe.
     #[test]
     fn refresh_does_not_drop_fatal_or_typed_session_errors() {
-        // Dead-channel is fatal (propagates).
-        let dead = SessionError::from(UdpQspError::from(QspSessionError::DeadChannel));
-        assert!(!dead.is_udp_qsp_recoverable());
-        assert!(dead.is_udp_qsp_dead_channel());
-
         // Packet-number overflow is fatal (propagates): the TX pn space is
         // exhausted; the refresh probe cannot succeed on this session.
         let overflow = SessionError::from(UdpQspError::from(QspSessionError::PacketNumberOverflow));
         assert!(!overflow.is_udp_qsp_recoverable());
-        assert!(!overflow.is_udp_qsp_dead_channel());
 
         // Plain socket io::Error wrapped as SessionError::Io (not via UdpQsp):
         // the typed UDP-QSP recoverable classification does not apply — it
@@ -425,7 +415,6 @@ mod tests {
         ] {
             let err = SessionError::from(io::Error::new(kind, "transport failure"));
             assert!(!err.is_udp_qsp_recoverable());
-            assert!(!err.is_udp_qsp_dead_channel());
         }
 
         // Typed (non-I/O) session errors propagate.
