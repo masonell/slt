@@ -561,8 +561,168 @@ async fn session_cleans_registry_on_shutdown() {
     assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 }
 
+async fn assert_udp_active_managed_shutdown(
+    reason: SessionShutdownReason,
+    expected_close: CloseCode,
+) {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, assigned, registry, shutdown) =
+        spawn_session_with_shutdown().await;
+
+    let dcid = Cid::from([0x53; MAX_DCID_LEN]);
+    let scid = Cid::from([0x54; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut register_payload = Vec::new();
+    register.encode(&mut register_payload).unwrap();
+    let mut frame = Vec::new();
+    encode_message(
+        Message::RegisterCid {
+            payload: &register_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let register_ok = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&register_ok, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let peer = SocketAddr::from(([127, 0, 0, 1], 33400));
+    complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1453,
+    )
+    .await;
+
+    shutdown.send(reason).unwrap();
+    assert_eq!(
+        read_until_close_code(&mut client, limits, Duration::from_secs(1)).await,
+        expected_close
+    );
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok());
+    assert!(registry.lookup_ip(assigned.addr()).is_none());
+    assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
+}
+
 #[tokio::test]
-async fn shutdown_token_exits_running_session_with_full_queue() {
+async fn server_restart_sends_tcp_close_while_udp_is_active() {
+    assert_udp_active_managed_shutdown(
+        SessionShutdownReason::ServerRestart,
+        CloseCode::ServerRestart,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn takeover_sends_tcp_close_while_udp_is_active() {
+    assert_udp_active_managed_shutdown(SessionShutdownReason::Takeover, CloseCode::Normal).await;
+}
+
+#[tokio::test]
+async fn managed_shutdown_retries_close_over_udp_when_tcp_stalls() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.tcp_write_timeout = Duration::from_secs(60);
+    let (join, mut client, tx, mut udp_rx, limits, assigned, registry, shutdown, write_gate) =
+        spawn_session_with_parkable_server_writes(timeouts).await;
+
+    let dcid = Cid::from([0x55; MAX_DCID_LEN]);
+    let scid = Cid::from([0x56; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut register_payload = Vec::new();
+    register.encode(&mut register_payload).unwrap();
+    let mut frame = Vec::new();
+    encode_message(
+        Message::RegisterCid {
+            payload: &register_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let register_ok = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&register_ok, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
+    let peer = SocketAddr::from(([127, 0, 0, 1], 33401));
+    let expected_server_pn = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1454,
+    )
+    .await;
+
+    write_gate.park();
+    shutdown.send(SessionShutdownReason::ServerRestart).unwrap();
+    timeout(
+        Duration::from_secs(1),
+        write_gate.wait_until_write_blocked(),
+    )
+    .await
+    .expect("managed shutdown attempted TCP CLOSE first");
+
+    let close_packet = timeout(Duration::from_secs(2), udp_rx.recv())
+        .await
+        .expect("UDP-QSP CLOSE after TCP deadline")
+        .unwrap();
+    let opened = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &close_packet,
+            expected_server_pn,
+        )
+        .unwrap();
+    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+    assert_eq!(consumed, opened.payload.len());
+    let Message::Close { payload } = message else {
+        panic!("expected UDP-QSP CLOSE");
+    };
+    assert_eq!(
+        ClosePayload::decode(payload).unwrap().code,
+        CloseCode::ServerRestart
+    );
+
+    let result = timeout(Duration::from_secs(3), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok());
+    assert!(registry.lookup_ip(assigned.addr()).is_none());
+}
+
+#[tokio::test]
+async fn shutdown_signal_exits_running_session_with_full_queue() {
     let (join, _client, tx, _tun_rx, _udp_rx, _limits, assigned, registry, shutdown) =
         spawn_session_with_shutdown().await;
 
@@ -578,7 +738,7 @@ async fn shutdown_token_exits_running_session_with_full_queue() {
         Err(mpsc::error::TrySendError::Full(SessionEvent::TunPacket(_)))
     ));
 
-    shutdown.cancel();
+    shutdown.send(SessionShutdownReason::ServerRestart).unwrap();
 
     let result = timeout(Duration::from_secs(1), join)
         .await
@@ -592,7 +752,7 @@ async fn shutdown_token_exits_running_session_with_full_queue() {
 async fn shutdown_cancels_blocked_tcp_write() {
     let mut timeouts = default_session_timeouts();
     timeouts.tcp_write_timeout = Duration::from_secs(60);
-    let (join, _client, tx, assigned, registry, shutdown, write_gate) =
+    let (join, _client, tx, _udp_rx, _limits, assigned, registry, shutdown, write_gate) =
         spawn_session_with_parkable_server_writes(timeouts).await;
     write_gate.park();
     tx.send(SessionEvent::TunPacket(vec![0x45; 20]))
@@ -605,7 +765,7 @@ async fn shutdown_cancels_blocked_tcp_write() {
     .await
     .expect("session entered the parked TCP write");
 
-    shutdown.cancel();
+    shutdown.send(SessionShutdownReason::ServerRestart).unwrap();
 
     let result = timeout(Duration::from_secs(1), join)
         .await
@@ -619,7 +779,7 @@ async fn shutdown_cancels_blocked_tcp_write() {
 async fn blocked_tcp_write_times_out() {
     let mut timeouts = default_session_timeouts();
     timeouts.tcp_write_timeout = Duration::from_millis(50);
-    let (join, _client, tx, assigned, registry, _shutdown, write_gate) =
+    let (join, _client, tx, _udp_rx, _limits, assigned, registry, _shutdown, write_gate) =
         spawn_session_with_parkable_server_writes(timeouts).await;
     write_gate.park();
     tx.send(SessionEvent::TunPacket(vec![0x45; 20]))

@@ -10,8 +10,7 @@ use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{ClientId, ServerUdpQspConfig};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error};
 
@@ -21,8 +20,8 @@ use crate::registry::SessionRegistry;
 #[cfg(test)]
 use crate::sessions::SessionKeyUpdater;
 use crate::sessions::{
-    ClientSessionBase, ServerUdpQspIoFactory, SessionTcpChannel, SessionTimeouts,
-    UdpSessionIoFactory,
+    ClientSessionBase, ServerUdpQspIoFactory, SessionShutdownReason, SessionTcpChannel,
+    SessionTimeouts, UdpSessionIoFactory,
 };
 use crate::tun::TunDeviceIo;
 
@@ -38,7 +37,6 @@ pub struct SessionManager<T: TunDeviceIo> {
     metrics: Arc<Metrics>,
     tun: Arc<T>,
     udp_io_factory: Arc<dyn UdpSessionIoFactory<UdpQspIo>>,
-    shutdown: CancellationToken,
     tasks: TaskTracker,
     state: Arc<Mutex<SessionManagerState>>,
     limits: MessageLimits,
@@ -56,7 +54,7 @@ struct SessionManagerState {
 #[derive(Debug)]
 struct ManagedSession {
     session_id: u64,
-    shutdown: CancellationToken,
+    shutdown: Option<oneshot::Sender<SessionShutdownReason>>,
 }
 
 impl SessionManagerState {
@@ -64,13 +62,13 @@ impl SessionManagerState {
         &mut self,
         client_id: ClientId,
         session_id: u64,
-        shutdown: CancellationToken,
+        shutdown: oneshot::Sender<SessionShutdownReason>,
     ) -> Option<ManagedSession> {
         self.sessions.insert(
             client_id,
             ManagedSession {
                 session_id,
-                shutdown,
+                shutdown: Some(shutdown),
             },
         )
     }
@@ -105,7 +103,6 @@ impl<T: TunDeviceIo> SessionManager<T> {
             metrics,
             tun,
             udp_io_factory: Arc::new(ServerUdpQspIoFactory::new(udp_socket)),
-            shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
             state: Arc::new(Mutex::new(SessionManagerState {
                 accepting_sessions: true,
@@ -148,13 +145,32 @@ impl<T: TunDeviceIo> SessionManager<T> {
 
     /// Begins graceful shutdown for all managed sessions.
     ///
-    /// Cancels the root session token and prevents any later authenticated
-    /// connection from registering a new session.
+    /// Prevents later authenticated connections from registering and asks each
+    /// active session to send `CLOSE(ServerRestart)` before cleanup.
     pub fn start_shutdown(&self) {
         let mut state = self.state.lock();
         state.accepting_sessions = false;
+        let shutdowns = state
+            .sessions
+            .iter_mut()
+            .filter_map(|(client_id, session)| {
+                session
+                    .shutdown
+                    .take()
+                    .map(|shutdown| (*client_id, session.session_id, shutdown))
+            })
+            .collect::<Vec<_>>();
         drop(state);
-        self.shutdown.cancel();
+
+        for (client_id, session_id, shutdown) in shutdowns {
+            if shutdown.send(SessionShutdownReason::ServerRestart).is_err() {
+                debug!(
+                    %client_id,
+                    session_id,
+                    "session exited before server shutdown notification"
+                );
+            }
+        }
         self.tasks.close();
     }
 
@@ -194,7 +210,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
         }
 
         let (tx, rx) = mpsc::channel(self.session_queue_size);
-        let shutdown = self.shutdown.child_token();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         // Keep this lock across registry registration and lifecycle replacement
         // so concurrent reconnects cannot make their active-session views diverge.
@@ -202,11 +218,18 @@ impl<T: TunDeviceIo> SessionManager<T> {
             .registry
             .register_session(client_id, assigned_ip, tx.clone());
 
-        if let Some(replaced) =
-            state.replace_session(client_id, handle.session_id, shutdown.clone())
+        if let Some(mut replaced) = state.replace_session(client_id, handle.session_id, shutdown_tx)
         {
             debug!(client_id = %client_id, session_id = %handle.session_id, replaced_session_id = %replaced.session_id, "replacing existing session");
-            replaced.shutdown.cancel();
+            if let Some(shutdown) = replaced.shutdown.take()
+                && shutdown.send(SessionShutdownReason::Takeover).is_err()
+            {
+                debug!(
+                    client_id = %client_id,
+                    replaced_session_id = replaced.session_id,
+                    "replaced session exited before takeover notification"
+                );
+            }
         }
 
         let session_id = handle.session_id;
@@ -221,7 +244,7 @@ impl<T: TunDeviceIo> SessionManager<T> {
             self.metrics.clone(),
             tx,
             rx,
-            shutdown,
+            shutdown_rx,
             self.limits,
             self.session_timeouts,
             self.udp_qsp_config.clone(),
@@ -319,12 +342,33 @@ impl<T: TunDeviceIo> SessionManager<T> {
 mod tests {
     use std::net::Ipv4Addr;
 
+    use slt_core::proto::{CloseCode, ClosePayload, Message, decode_message};
     use slt_core::transport::tcp::TcpChannel;
     use tokio::io::AsyncReadExt;
     use tokio::time::{Duration, timeout};
 
     use super::*;
-    use crate::test_support::{NullTun, default_session_timeouts, tls_pair};
+    use crate::test_support::{NullTun, TlsDuplexStream, default_session_timeouts, tls_pair};
+
+    async fn read_close_code(stream: &mut TlsDuplexStream, limits: MessageLimits) -> CloseCode {
+        timeout(Duration::from_secs(1), async {
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 256];
+            loop {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(n, 0, "stream closed before CLOSE");
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some((message, _)) = decode_message(&buf, limits).unwrap() {
+                    let Message::Close { payload } = message else {
+                        panic!("expected CLOSE");
+                    };
+                    return ClosePayload::decode(payload).unwrap().code;
+                }
+            }
+        })
+        .await
+        .expect("CLOSE within shutdown deadline")
+    }
 
     async fn make_manager() -> (SessionManager<NullTun>, Arc<SessionRegistry>, Arc<Metrics>) {
         let registry = Arc::new(SessionRegistry::new());
@@ -344,11 +388,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_cancels_and_awaits_active_sessions() {
+    async fn shutdown_sends_server_restart_close_and_awaits_active_sessions() {
         let (manager, registry, metrics) = make_manager().await;
         let client_id = ClientId([0x11; 16]);
         let assigned_ip = AssignedIp(Ipv4Addr::new(10, 0, 0, 2));
-        let (server_tcp, _client_tcp) = tls_pair().await;
+        let (server_tcp, mut client_tcp) = tls_pair().await;
         let mut tcp = Some(TcpChannel::with_key_updater(
             server_tcp,
             SessionKeyUpdater::new(metrics),
@@ -360,13 +404,17 @@ mod tests {
         assert!(registry.lookup_ip(assigned_ip.addr()).is_some());
 
         manager.start_shutdown();
+        assert_eq!(
+            read_close_code(&mut client_tcp, manager.limits()).await,
+            CloseCode::ServerRestart
+        );
         manager.wait_for_shutdown().await;
 
         assert!(registry.lookup_ip(assigned_ip.addr()).is_none());
     }
 
     #[tokio::test]
-    async fn replacement_cancels_previous_session() {
+    async fn replacement_sends_normal_close_to_previous_session() {
         let (manager, registry, metrics) = make_manager().await;
         let client_id = ClientId([0x22; 16]);
         let assigned_ip = AssignedIp(Ipv4Addr::new(10, 0, 0, 3));
@@ -389,12 +437,10 @@ mod tests {
             .create_session_test(client_id, assigned_ip, &mut new_tcp)
             .unwrap();
 
-        let mut eof = [0u8; 1];
-        let n = timeout(Duration::from_secs(1), old_client_tcp.read(&mut eof))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(n, 0);
+        assert_eq!(
+            read_close_code(&mut old_client_tcp, manager.limits()).await,
+            CloseCode::Normal
+        );
         assert!(registry.lookup_ip(assigned_ip.addr()).is_some());
 
         manager.start_shutdown();

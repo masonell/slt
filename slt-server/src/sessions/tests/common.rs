@@ -12,9 +12,8 @@ use slt_core::proto::{
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{Cid, ServerUdpQspConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
-use tokio_util::sync::CancellationToken;
 
 use super::super::*;
 use crate::quic::UdpClaim;
@@ -43,7 +42,7 @@ pub(super) type SpawnSessionWithShutdownResult = (
     MessageLimits,
     AssignedIp,
     Arc<SessionRegistry>,
-    CancellationToken,
+    oneshot::Sender<SessionShutdownReason>,
 );
 
 pub(super) type SpawnSessionWithPeerCaptureResult = (
@@ -74,9 +73,11 @@ pub(super) type SpawnSessionWithParkedWritesResult = (
     tokio::task::JoinHandle<Result<(), SessionError>>,
     TlsDuplexStream,
     SessionTx,
+    mpsc::Receiver<Vec<u8>>,
+    MessageLimits,
     AssignedIp,
     Arc<SessionRegistry>,
-    CancellationToken,
+    oneshot::Sender<SessionShutdownReason>,
     Arc<WriteGate>,
 );
 
@@ -101,7 +102,7 @@ pub(super) async fn spawn_session_with_expired_idle_and_ready_packet(
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
     let (tx, rx) = mpsc::channel(8);
-    let shutdown = CancellationToken::new();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
     let handle = registry.register_session(client_id, assigned, tx.clone());
@@ -118,7 +119,7 @@ pub(super) async fn spawn_session_with_expired_idle_and_ready_packet(
         metrics,
         tx.clone(),
         rx,
-        shutdown,
+        shutdown_rx,
         limits,
         timeouts,
         ServerUdpQspConfig::default(),
@@ -126,7 +127,11 @@ pub(super) async fn spawn_session_with_expired_idle_and_ready_packet(
     session.last_activity = Instant::now() - timeouts.idle_timeout - Duration::from_millis(1);
     tx.try_send(SessionEvent::TunPacket(vec![0x45; 20]))
         .unwrap();
-    let join = tokio::spawn(async move { session.run().await });
+    let join = tokio::spawn(async move {
+        let result = session.run().await;
+        drop(shutdown_tx);
+        result
+    });
     (
         join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
     )
@@ -153,7 +158,7 @@ pub(super) async fn spawn_session_with_udp_socket() -> SpawnSessionWithUdpSocket
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
     let (tx, rx) = mpsc::channel(8);
-    let shutdown = CancellationToken::new();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
     let handle = registry.register_session(client_id, assigned, tx.clone());
@@ -170,12 +175,16 @@ pub(super) async fn spawn_session_with_udp_socket() -> SpawnSessionWithUdpSocket
         metrics,
         tx.clone(),
         rx,
-        shutdown,
+        shutdown_rx,
         limits,
         default_session_timeouts(),
         ServerUdpQspConfig::default(),
     );
-    let join = tokio::spawn(async move { session.run().await });
+    let join = tokio::spawn(async move {
+        let result = session.run().await;
+        drop(shutdown_tx);
+        result
+    });
     (
         join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, udp,
     )
@@ -186,11 +195,11 @@ pub(super) async fn spawn_session_with_parkable_server_writes(
 ) -> SpawnSessionWithParkedWritesResult {
     let (server_tls, client_tls, write_gate) = tls_pair_with_parkable_server_writes().await;
     let (tun, _tun_rx) = TestTun::new(8);
-    let (udp, _udp_rx) = TestUdpSocket::new(16);
+    let (udp, udp_rx) = TestUdpSocket::new(16);
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
     let (tx, rx) = mpsc::channel(8);
-    let shutdown = CancellationToken::new();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
     let handle = registry.register_session(client_id, assigned, tx.clone());
@@ -207,14 +216,22 @@ pub(super) async fn spawn_session_with_parkable_server_writes(
         metrics,
         tx.clone(),
         rx,
-        shutdown.clone(),
+        shutdown_rx,
         limits,
         timeouts,
         ServerUdpQspConfig::default(),
     );
     let join = tokio::spawn(async move { session.run().await });
     (
-        join, client_tls, tx, assigned, registry, shutdown, write_gate,
+        join,
+        client_tls,
+        tx,
+        udp_rx,
+        limits,
+        assigned,
+        registry,
+        shutdown_tx,
+        write_gate,
     )
 }
 
@@ -222,8 +239,39 @@ async fn spawn_session_with_timeouts_and_udp_qsp_config(
     timeouts: SessionTimeouts,
     udp_qsp_config: ServerUdpQspConfig,
 ) -> SpawnSessionResult {
-    let (join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, _shutdown) =
-        spawn_session_with_shutdown_and_udp_qsp_config(timeouts, udp_qsp_config).await;
+    let (server_tls, client_tls) = tls_pair().await;
+    let (tun, tun_rx) = TestTun::new(8);
+    let (udp, udp_rx) = TestUdpSocket::new(16);
+    let registry = Arc::new(SessionRegistry::new());
+    let metrics = Arc::new(Metrics::default());
+    let (tx, rx) = mpsc::channel(8);
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let client_id = ClientId([0xA5; 16]);
+    let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
+    let handle = registry.register_session(client_id, assigned, tx.clone());
+    let limits = MessageLimits::from_mtu(1500);
+    let udp_io_factory = Arc::new(UdpIoFactory::new(udp));
+    let session = ClientSessionBase::new(
+        handle.session_id,
+        client_id,
+        assigned,
+        TcpChannel::with_key_updater(server_tls, SessionKeyUpdater::new(metrics.clone())),
+        tun,
+        udp_io_factory,
+        registry.clone(),
+        metrics,
+        tx.clone(),
+        rx,
+        shutdown_rx,
+        limits,
+        timeouts,
+        udp_qsp_config,
+    );
+    let join = tokio::spawn(async move {
+        let result = session.run().await;
+        drop(shutdown_tx);
+        result
+    });
     (
         join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
     )
@@ -239,7 +287,7 @@ async fn spawn_session_with_shutdown_and_udp_qsp_config(
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
     let (tx, rx) = mpsc::channel(8);
-    let shutdown = CancellationToken::new();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
     let handle = registry.register_session(client_id, assigned, tx.clone());
@@ -256,14 +304,22 @@ async fn spawn_session_with_shutdown_and_udp_qsp_config(
         metrics,
         tx.clone(),
         rx,
-        shutdown.clone(),
+        shutdown_rx,
         limits,
         timeouts,
         udp_qsp_config,
     );
     let join = tokio::spawn(async move { session.run().await });
     (
-        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, shutdown,
+        join,
+        client_tls,
+        tx,
+        tun_rx,
+        udp_rx,
+        limits,
+        assigned,
+        registry,
+        shutdown_tx,
     )
 }
 
@@ -274,7 +330,7 @@ pub(super) async fn spawn_session_with_peer_capture() -> SpawnSessionWithPeerCap
     let registry = Arc::new(SessionRegistry::new());
     let metrics = Arc::new(Metrics::default());
     let (tx, rx) = mpsc::channel(8);
-    let shutdown = CancellationToken::new();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let client_id = ClientId([0xA5; 16]);
     let assigned = AssignedIp(Ipv4Addr::new(10, 0, 0, 9));
     let handle = registry.register_session(client_id, assigned, tx.clone());
@@ -291,12 +347,16 @@ pub(super) async fn spawn_session_with_peer_capture() -> SpawnSessionWithPeerCap
         metrics,
         tx.clone(),
         rx,
-        shutdown,
+        shutdown_rx,
         limits,
         default_session_timeouts(),
         ServerUdpQspConfig::default(),
     );
-    let join = tokio::spawn(async move { session.run().await });
+    let join = tokio::spawn(async move {
+        let result = session.run().await;
+        drop(shutdown_tx);
+        result
+    });
     (
         join,
         client_tls,

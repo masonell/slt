@@ -653,8 +653,9 @@ mod tests {
     use slt_core::config::ClientConfig;
     use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, UdpQspKeys};
     use slt_core::proto::{
-        CipherSuite, FallbackOkPayload, FallbackToTcpPayload, Message, MessageType,
-        OwnedMessageBuf, SwitchAckPayload, SwitchOkPayload, SwitchToUdpPayload, encode_message,
+        CipherSuite, CloseCode, ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message,
+        MessageType, OwnedMessageBuf, SwitchAckPayload, SwitchOkPayload, SwitchToUdpPayload,
+        encode_message,
     };
     use slt_core::transport::tcp::TcpChannel;
     use slt_core::types::{Cid, MAX_DCID_LEN};
@@ -1108,6 +1109,41 @@ mod tests {
             SessionControl::Close(SessionExit::TcpClosed)
         );
         assert_eq!(session.active_transport, ActiveTransport::Tcp);
+    }
+
+    #[tokio::test]
+    async fn tcp_close_terminates_udp_preferred_session() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
+        session.active_transport = ActiveTransport::UdpQsp;
+
+        let mut close_payload = Vec::new();
+        ClosePayload {
+            code: CloseCode::ServerRestart,
+        }
+        .encode(&mut close_payload);
+        let mut frame = Vec::new();
+        encode_message(
+            Message::Close {
+                payload: &close_payload,
+            },
+            &mut frame,
+        )
+        .unwrap();
+        server_stream.write_all(&frame).await.unwrap();
+
+        assert_ne!(session.tcp.read_more().await.unwrap(), 0);
+        assert_eq!(
+            session.handle_tcp_read().await.unwrap(),
+            SessionControl::Close(SessionExit::RemoteClose(CloseCode::ServerRestart))
+        );
     }
 
     #[tokio::test]

@@ -1,16 +1,20 @@
 use super::*;
 
-fn assert_protocol_error_close(buf: &[u8], limits: MessageLimits) {
+fn assert_close_code(buf: &[u8], limits: MessageLimits, expected: CloseCode) {
     let (message, _) = slt_core::proto::decode_message(buf, limits)
         .unwrap()
         .unwrap();
     match message {
         Message::Close { payload } => {
             let close = ClosePayload::decode(payload).unwrap();
-            assert_eq!(close.code, CloseCode::ProtocolError);
+            assert_eq!(close.code, expected);
         }
-        _ => panic!("expected protocol error close, got {message:?}"),
+        _ => panic!("expected close, got {message:?}"),
     }
+}
+
+fn assert_protocol_error_close(buf: &[u8], limits: MessageLimits) {
+    assert_close_code(buf, limits, CloseCode::ProtocolError);
 }
 
 async fn assert_pre_auth_protocol_error(message: Message<'_>) {
@@ -410,7 +414,16 @@ async fn auth_phase_replaces_existing_session() {
     .unwrap()
     .unwrap();
 
-    let mut eof = [0u8; 1];
+    let close = timeout(
+        Duration::from_secs(2),
+        read_message(&mut old_client_tls, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_close_code(&close, limits, CloseCode::Normal);
+
+    let mut eof = [0_u8; 1];
     let n = timeout(Duration::from_secs(2), old_client_tls.read(&mut eof))
         .await
         .unwrap()

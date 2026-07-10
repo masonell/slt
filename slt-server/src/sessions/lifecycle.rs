@@ -1,5 +1,6 @@
 //! Session lifecycle loop and scheduling.
 
+use std::io;
 use std::time::{Duration, Instant};
 
 use fastrand;
@@ -9,8 +10,10 @@ use tokio::time;
 use tracing::{debug, error, info};
 
 use super::error::SessionError;
-use super::types::{SessionControl, SessionEvent};
-use super::{ActiveTransport, ClientSessionBase, UdpFailureRecovery, UdpSessionIo};
+use super::types::{SessionControl, SessionEvent, SessionShutdownReason};
+use super::{
+    ActiveTransport, BEST_EFFORT_IO_TIMEOUT, ClientSessionBase, UdpFailureRecovery, UdpSessionIo,
+};
 use crate::tun::TunDeviceIo;
 
 #[derive(Clone, Copy)]
@@ -18,6 +21,12 @@ enum SessionTimer {
     Ping,
     UdpLiveness,
     Idle,
+}
+
+enum SessionRunOutcome {
+    Completed(Result<(), SessionError>),
+    Shutdown(SessionShutdownReason),
+    ShutdownSignalUnavailable,
 }
 
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
@@ -38,17 +47,29 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             assigned_ip = %self.assigned_ipv4,
             "session created"
         );
-        let shutdown = self.shutdown.clone();
-        let result = tokio::select! {
-            biased;
+        let outcome = match self.shutdown.take() {
+            Some(mut shutdown) => tokio::select! {
+                biased;
 
-            () = shutdown.cancelled() => None,
-            result = self.run_inner() => Some(result),
+                reason = &mut shutdown => reason.map_or(
+                    SessionRunOutcome::ShutdownSignalUnavailable,
+                    SessionRunOutcome::Shutdown,
+                ),
+                result = self.run_inner() => SessionRunOutcome::Completed(result),
+            },
+            None => SessionRunOutcome::ShutdownSignalUnavailable,
         };
-        let result = result.unwrap_or_else(|| {
-            self.handle_shutdown_request();
-            Ok(())
-        });
+        let result = match outcome {
+            SessionRunOutcome::Completed(result) => result,
+            SessionRunOutcome::Shutdown(reason) => {
+                self.handle_managed_shutdown(reason).await;
+                Ok(())
+            }
+            SessionRunOutcome::ShutdownSignalUnavailable => Err(SessionError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "session shutdown signal unavailable without a reason",
+            ))),
+        };
         self.flush_pending_udp_session_best_effort().await;
         if let Err(err) = result.as_ref() {
             self.metrics.inc_disconnect_error();
@@ -73,11 +94,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         let mut next_ping_at = self.schedule_next_ping();
 
         loop {
-            if self.shutdown.is_cancelled() {
-                self.handle_shutdown_request();
-                return Ok(());
-            }
-
             if self.tcp_alive
                 && self.tcp.has_buffered_input()
                 && self.handle_tcp_read().await? == SessionControl::Close
@@ -86,7 +102,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             }
 
             let should_flush_udp = self.has_pending_udp_flush();
-            let shutdown = self.shutdown.clone();
             let (timer_at, timer) = self.next_session_timer(next_ping_at);
             let timer_due = time::Instant::from_std(timer_at) <= time::Instant::now();
 
@@ -106,10 +121,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             tokio::select! {
                 biased;
 
-                () = shutdown.cancelled() => {
-                    self.handle_shutdown_request();
-                    return Ok(());
-                }
                 res = self.tcp.read_more(), if self.tcp_alive => {
                     let n = res.map_err(|source| SessionError::Connection { source })?;
                     if n == 0 {
@@ -237,18 +248,90 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             SessionEvent::TunPacket(packet) => self.handle_tun_packet(packet).await,
             SessionEvent::Udp(claim) => self.handle_udp_claim(claim).await,
             SessionEvent::Shutdown => {
-                self.handle_shutdown_request();
+                self.handle_local_shutdown_request();
                 Ok(SessionControl::Close)
             }
         }
     }
 
-    fn handle_shutdown_request(&self) {
+    async fn handle_managed_shutdown(&mut self, reason: SessionShutdownReason) {
+        self.metrics.inc_disconnect_shutdown();
+        let close_code = reason.close_code();
+        info!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            reason = reason.as_str(),
+            ?close_code,
+            "session disconnect"
+        );
+
+        let tcp_available = self.tcp_alive && !self.tcp_write_interrupted;
+        if tcp_available {
+            match time::timeout(BEST_EFFORT_IO_TIMEOUT, self.send_close_over_tcp(close_code)).await
+            {
+                Ok(Ok(())) => return,
+                Ok(Err(err)) => {
+                    debug!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        reason = reason.as_str(),
+                        error = %err,
+                        "failed to send CLOSE over TCP during managed shutdown"
+                    );
+                }
+                Err(_) => {
+                    debug!(
+                        session_id = self.session_id,
+                        client_id = %self.client_id,
+                        reason = reason.as_str(),
+                        timeout_ms = BEST_EFFORT_IO_TIMEOUT.as_millis(),
+                        "timed out sending CLOSE over TCP during managed shutdown"
+                    );
+                }
+            }
+        }
+
+        if self.udp_session.is_none() {
+            if !tcp_available {
+                debug!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    reason = reason.as_str(),
+                    "no usable transport for CLOSE during managed shutdown"
+                );
+            }
+            return;
+        }
+
+        match time::timeout(BEST_EFFORT_IO_TIMEOUT, self.send_close_over_udp(close_code)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                debug!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    reason = reason.as_str(),
+                    error = %err,
+                    "failed to send CLOSE over UDP-QSP during managed shutdown"
+                );
+            }
+            Err(_) => {
+                debug!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    reason = reason.as_str(),
+                    timeout_ms = BEST_EFFORT_IO_TIMEOUT.as_millis(),
+                    "timed out sending CLOSE over UDP-QSP during managed shutdown"
+                );
+            }
+        }
+    }
+
+    fn handle_local_shutdown_request(&self) {
         self.metrics.inc_disconnect_shutdown();
         info!(
             session_id = self.session_id,
             client_id = %self.client_id,
-            reason = "shutdown_request",
+            reason = "local_shutdown_request",
             "session disconnect"
         );
     }

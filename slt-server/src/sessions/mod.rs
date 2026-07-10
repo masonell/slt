@@ -26,13 +26,14 @@ use slt_core::transport::UdpQspIo;
 use slt_core::types::ServerUdpQspConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio::sync::oneshot;
 use tokio::time;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use tun_rs::AsyncDevice;
 
 pub use self::error::{SessionError, UdpQspError};
 use self::types::SessionControl;
+pub(crate) use self::types::SessionShutdownReason;
 pub use self::types::{
     ActiveTransport, SessionEvent, SessionKeyUpdater, SessionRx, SessionTcpChannel,
     SessionTimeouts, SessionTx,
@@ -96,7 +97,7 @@ pub struct ClientSessionBase<
     registry: Arc<SessionRegistry>,
     metrics: Arc<Metrics>,
     tx: SessionTx,
-    shutdown: CancellationToken,
+    shutdown: Option<oneshot::Receiver<SessionShutdownReason>>,
     tcp: SessionTcpChannel<S>,
     tun: Arc<T>,
     udp_io_factory: Arc<dyn UdpSessionIoFactory<I>>,
@@ -120,6 +121,9 @@ pub struct ClientSessionBase<
     /// Whether the TCP connection is still usable. Set to false when TCP closes
     /// while UDP-QSP is active, allowing the session to continue on UDP alone.
     tcp_alive: bool,
+    /// A TCP write was interrupted by the managed-shutdown select. A new frame
+    /// cannot safely be appended because the prior frame may be partially sent.
+    tcp_write_interrupted: bool,
     /// Locally initiated TCP fallback awaiting its peer acknowledgement.
     pending_tcp_fallback: Option<u64>,
 }
@@ -138,7 +142,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     // All constructor inputs are required session wiring dependencies, and we
     // keep them explicit at call sites instead of hiding them behind a builder.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         session_id: u64,
         client_id: ClientId,
         assigned_ipv4: AssignedIp,
@@ -149,7 +153,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         metrics: Arc<Metrics>,
         tx: SessionTx,
         rx: SessionRx,
-        shutdown: CancellationToken,
+        shutdown: oneshot::Receiver<SessionShutdownReason>,
         limits: MessageLimits,
         timeouts: SessionTimeouts,
         udp_qsp_config: ServerUdpQspConfig,
@@ -165,7 +169,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             registry,
             metrics,
             tx,
-            shutdown,
+            shutdown: Some(shutdown),
             tcp,
             tun,
             udp_io_factory,
@@ -179,6 +183,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             udp_write_buf: Vec::new(),
             udp_opened_payload_buf: Vec::new(),
             tcp_alive: true,
+            tcp_write_interrupted: false,
             pending_tcp_fallback: None,
         }
     }
@@ -299,6 +304,25 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     }
 
     async fn send_tcp_message(&mut self, message: Message<'_>) -> Result<(), SessionError> {
+        if self.tcp_write_interrupted {
+            return Err(SessionError::Connection {
+                source: io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "TCP frame write was interrupted",
+                ),
+            });
+        }
+
+        // This marker deliberately remains set if the future is dropped by the
+        // managed-shutdown select. `write_all` may already have sent a frame
+        // prefix, so another framed write on the stream would be unsafe.
+        self.tcp_write_interrupted = true;
+        let result = self.send_tcp_message_inner(message).await;
+        self.tcp_write_interrupted = false;
+        result
+    }
+
+    async fn send_tcp_message_inner(&mut self, message: Message<'_>) -> Result<(), SessionError> {
         let timeout = self.timeouts.tcp_write_timeout;
         let write = self.tcp.write_message(message);
         tokio::pin!(write);
@@ -534,21 +558,50 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 .is_some_and(QuicQspSession::has_pending_flush)
     }
 
-    async fn send_close(&mut self, code: CloseCode) -> Result<(), SessionError> {
+    fn encode_close_payload(code: CloseCode) -> Vec<u8> {
         let payload = ClosePayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
+        buf
+    }
+
+    async fn send_close_over_tcp(&mut self, code: CloseCode) -> Result<(), SessionError> {
+        if !self.tcp_alive || self.tcp_write_interrupted {
+            return Err(SessionError::Connection {
+                source: io::Error::new(io::ErrorKind::NotConnected, "TCP unavailable for CLOSE"),
+            });
+        }
+
+        let buf = Self::encode_close_payload(code);
+        self.send_tcp_message(Message::Close { payload: &buf })
+            .await
+    }
+
+    async fn send_close_over_udp(&mut self, code: CloseCode) -> Result<(), SessionError> {
+        if self.udp_session.is_none() {
+            return Err(SessionError::Connection {
+                source: io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "UDP-QSP unavailable for CLOSE",
+                ),
+            });
+        }
+
+        let buf = Self::encode_close_payload(code);
+        self.queue_udp_message(Message::Close { payload: &buf })
+            .await?;
+        self.flush_udp_session()
+            .await
+            .map_err(|source| SessionError::UdpQsp(UdpQspError::Io(source)))
+    }
+
+    async fn send_close(&mut self, code: CloseCode) -> Result<(), SessionError> {
         // Prefer TCP for close messages to maximize delivery reliability.
         // Only use UDP when TCP is no longer available.
-        if self.tcp_alive {
-            self.send_tcp_message(Message::Close { payload: &buf })
-                .await
+        if self.tcp_alive && !self.tcp_write_interrupted {
+            self.send_close_over_tcp(code).await
         } else {
-            self.send_udp_message_and_flush(
-                Message::Close { payload: &buf },
-                UdpFailureRecovery::RetryMessageOnTcp,
-            )
-            .await
+            self.send_close_over_udp(code).await
         }
     }
 

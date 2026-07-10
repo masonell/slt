@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use boring::ssl::SslRef;
+use slt_core::proto::CloseCode;
 use slt_core::transport::tcp::{
     IntervalKeyUpdater, KeyUpdater, TcpChannel, default_interval_key_updater,
 };
@@ -14,6 +15,33 @@ use tracing::trace;
 
 use crate::metrics::Metrics;
 use crate::quic::UdpClaim;
+
+/// Manager-issued reason for terminating an established client session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionShutdownReason {
+    /// A newer authenticated connection took ownership of the client identity.
+    Takeover,
+    /// The server is shutting down or restarting.
+    ServerRestart,
+}
+
+impl SessionShutdownReason {
+    /// Return the wire-level close code for this shutdown reason.
+    pub const fn close_code(self) -> CloseCode {
+        match self {
+            Self::Takeover => CloseCode::Normal,
+            Self::ServerRestart => CloseCode::ServerRestart,
+        }
+    }
+
+    /// Return the stable reason label used in terminal logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Takeover => "takeover",
+            Self::ServerRestart => "server_restart",
+        }
+    }
+}
 
 /// Indicates which transport is preferred for a client session's outbound data.
 ///
