@@ -26,9 +26,10 @@ internal class NativeSessionSupervisor(
 
     private var restartConfig: NativeSessionConfig? = null
     private var nativeRestartAttempt = 0
-    // Once this Start request has authenticated, later native terminal errors
-    // should keep the VPN route installed and retry at the Android boundary.
-    private var authenticatedSinceStart = false
+    // Authentication arms fail-closed supervision for this Start request:
+    // later native terminal errors retain the Android-owned TUN while the
+    // supervisor restarts the native runtime.
+    private var failClosedArmed = false
     private val nativeRestartRunnable = Runnable { restartNativeSessionAfterTerminalError() }
 
     val handle: Long
@@ -39,14 +40,14 @@ internal class NativeSessionSupervisor(
 
     fun start(config: NativeSessionConfig): NativeSession {
         cancelRestart()
-        authenticatedSinceStart = false
+        failClosedArmed = false
         restartConfig = config
         return startSession(config)
     }
 
     fun stop() {
         cancelRestart()
-        authenticatedSinceStart = false
+        failClosedArmed = false
         restartConfig = null
         stopNativeClient()
     }
@@ -123,30 +124,35 @@ internal class NativeSessionSupervisor(
                 callbacks.onStopped(event.handle)
             }
             is NativeTerminal.Errored -> {
-                if (shouldRestartAfterTerminalError(terminal)) {
-                    Log.w(
-                        logTag,
-                        "Native client terminal error will restart: " +
-                            "retryable=${terminal.retryable} authenticatedSinceStart=$authenticatedSinceStart",
-                    )
-                    scheduleNativeRestartAfterError(event)
-                } else {
-                    Log.e(logTag, "Native client reported a non-retryable terminal error; stopping")
-                    callbacks.onFatalError((event.kind as? ClientEventKind.Error)?.detail ?: "Native client error")
+                when (terminalActionFor(terminal)) {
+                    NativeTerminalAction.RestartKeepingTunnel -> {
+                        Log.w(
+                            logTag,
+                            "Native client terminal error will restart with TUN retained: " +
+                                "retryable=${terminal.retryable} failClosedArmed=$failClosedArmed",
+                        )
+                        scheduleNativeRestartAfterError(event)
+                    }
+                    NativeTerminalAction.TearDownTunnel -> {
+                        Log.e(logTag, "Native client terminal error requires VPN teardown")
+                        callbacks.onFatalError(
+                            (event.kind as? ClientEventKind.Error)?.detail ?: "Native client error",
+                        )
+                    }
                 }
             }
         }
 
         if (event.kind is ClientEventKind.Authenticated) {
-            authenticatedSinceStart = true
+            failClosedArmed = true
             nativeRestartAttempt = 0
         }
     }
 
-    private fun shouldRestartAfterTerminalError(terminal: NativeTerminal.Errored): Boolean =
-        shouldRestartTerminalNativeError(
+    private fun terminalActionFor(terminal: NativeTerminal.Errored): NativeTerminalAction =
+        nativeTerminalAction(
             retryable = terminal.retryable,
-            authenticatedSinceStart = authenticatedSinceStart,
+            failClosedArmed = failClosedArmed,
         )
 
     private fun scheduleNativeRestartAfterError(event: ClientEvent) {
@@ -207,7 +213,17 @@ internal class NativeSessionSupervisor(
     }
 }
 
-internal fun shouldRestartTerminalNativeError(
+internal enum class NativeTerminalAction {
+    RestartKeepingTunnel,
+    TearDownTunnel,
+}
+
+internal fun nativeTerminalAction(
     retryable: Boolean,
-    authenticatedSinceStart: Boolean,
-): Boolean = retryable || authenticatedSinceStart
+    failClosedArmed: Boolean,
+): NativeTerminalAction =
+    if (retryable || failClosedArmed) {
+        NativeTerminalAction.RestartKeepingTunnel
+    } else {
+        NativeTerminalAction.TearDownTunnel
+    }

@@ -1,36 +1,49 @@
 package dev.slt.android.vpn
 
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class NativeSessionSupervisorPolicyTest {
     @Test
-    fun retryable_terminal_error_restarts_before_authentication() {
-        assertTrue(
-            shouldRestartTerminalNativeError(
+    fun retryable_terminal_error_restarts_with_tunnel_retained_before_authentication() {
+        assertEquals(
+            NativeTerminalAction.RestartKeepingTunnel,
+            nativeTerminalAction(
                 retryable = true,
-                authenticatedSinceStart = false,
+                failClosedArmed = false,
             ),
         )
     }
 
     @Test
-    fun non_retryable_terminal_error_restarts_after_authentication() {
-        assertTrue(
-            shouldRestartTerminalNativeError(
+    fun post_auth_non_retryable_error_restarts_with_fail_closed_tunnel_retained() {
+        assertEquals(
+            NativeTerminalAction.RestartKeepingTunnel,
+            nativeTerminalAction(
                 retryable = false,
-                authenticatedSinceStart = true,
+                failClosedArmed = true,
             ),
         )
     }
 
     @Test
-    fun non_retryable_terminal_error_stays_fatal_before_authentication() {
-        assertFalse(
-            shouldRestartTerminalNativeError(
+    fun post_auth_retryable_error_restarts_with_fail_closed_tunnel_retained() {
+        assertEquals(
+            NativeTerminalAction.RestartKeepingTunnel,
+            nativeTerminalAction(
+                retryable = true,
+                failClosedArmed = true,
+            ),
+        )
+    }
+
+    @Test
+    fun pre_auth_non_retryable_terminal_error_tears_down_tunnel() {
+        assertEquals(
+            NativeTerminalAction.TearDownTunnel,
+            nativeTerminalAction(
                 retryable = false,
-                authenticatedSinceStart = false,
+                failClosedArmed = false,
             ),
         )
     }

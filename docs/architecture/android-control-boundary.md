@@ -2,11 +2,12 @@
 
 The Android VPN client is two cooperating halves with a deliberate ownership
 split. Rust owns the VPN session — protocol state, connection/reconnect policy,
-transport selection, and the typed event stream. Android owns the platform — the
-`VpnService` lifecycle, the TUN file descriptor, socket protection/binding, DNS
-through the active underlying network, foreground-service lifecycle, network
-observation, and UI state rendering. The two halves talk through a small UniFFI
-surface that carries control and state, never packet data.
+transport selection, terminal-error classification, and the typed event stream.
+Android owns the platform — the `VpnService` lifecycle, native-runtime
+supervision, the TUN file descriptor, socket protection/binding, DNS through the
+active underlying network, foreground-service lifecycle, network observation,
+and UI state rendering. The two halves talk through a small UniFFI surface that
+carries control and state, never packet data.
 
 This document describes that boundary so future changes keep it clean.
 
@@ -14,9 +15,10 @@ This document describes that boundary so future changes keep it clean.
 
 | Responsibility                                                                         | Owner                                      |
 |----------------------------------------------------------------------------------------|--------------------------------------------|
-| Connection, auth, reconnect/backoff, UDP-QSP upgrade, transport selection              | Rust runtime (`slt-client`)                |
+| Connection, auth, in-runtime reconnect/backoff, UDP-QSP upgrade, transport selection   | Rust runtime (`slt-client`)                |
 | Session lifecycle event stream (`ClientEvent`)                                         | Rust runtime                               |
 | Path recovery on network change (UDP refresh / re-register / TCP fallback / reconnect) | Rust runtime                               |
+| Native-runtime restart after terminal events and TUN retention                         | Android (`NativeSessionSupervisor`)        |
 | VPN permission flow, `VpnService` foreground lifecycle, notification                   | Android (`SltVpnService`)                  |
 | TUN fd establishment and ownership                                                     | Android                                    |
 | `VpnService.protect(fd)` + bind to the active `Network`                                | Android (`PlatformServices.protectSocket`) |
@@ -25,8 +27,10 @@ This document describes that boundary so future changes keep it clean.
 | UI state model and rendering                                                           | Android (`VpnUiState`, `StatusLine`)       |
 
 Rust never touches `VpnService`, Android sockets, or the Android `Network`
-directly; it requests those platform operations through callbacks. Android never
-decides reconnect policy or parses protocol state; it renders what Rust reports.
+directly; it requests those platform operations through callbacks. Rust decides
+recovery while its runtime is active and reports whether a terminal error is
+retryable. Android does not parse protocol state; it combines that classification
+with its fail-closed lifecycle policy when supervising an exited native runtime.
 
 ## UniFFI surface
 
@@ -84,8 +88,9 @@ Events are non-secret: never keys, tokens, connection IDs, or payloads.
 Android reduces each event to a richer `VpnUiState` (status, fine-grained phase,
 typed transport, reconnect attempt/delay, last error) in `SltVpnStatusBus.applyEvent`
 and renders it. `applyEvent` returns a `NativeTerminal` (none / stopped / errored)
-so `SltVpnService` can run platform teardown; the store owns UI state, the service
-owns the VPN/TUN lifecycle. Because the handle is globally unique and
+so `NativeSessionSupervisor` can restart the native runtime or request platform
+teardown; the store owns UI state, and `SltVpnService` owns the VPN/TUN lifecycle.
+Because the handle is globally unique and
 `nativeHandle` is assigned on the main thread before any `mainHandler.post`
 callback can run, a handle mismatch is sufficient to reject stale events — no
 separate generation counter is needed.
@@ -93,6 +98,27 @@ separate generation counter is needed.
 Extension contract: a new `ClientEventKind` variant requires a new arm in
 `applyEvent` (the `when` is exhaustive, so the build fails otherwise) and, if the
 variant is terminal, a `NativeTerminal` mapping.
+
+## Terminal supervision and fail-closed policy
+
+The Rust runtime's `retryable` terminal-error field classifies whether restarting
+the native runtime is expected to recover without external intervention. Android
+also tracks whether an `Authenticated` event has armed fail-closed behavior for
+the current Start request. Once armed, Android retains the TUN and periodically
+restarts the native runtime after every terminal error. Packets routed into the
+VPN remain blocked during restart backoff instead of falling through to the
+underlying network.
+
+| Fail-closed armed | Rust `retryable` | Android action                       |
+|-------------------|------------------|--------------------------------------|
+| No                | `true`           | Restart native, retain TUN           |
+| No                | `false`          | Report fatal error and tear down TUN |
+| Yes               | Either           | Restart native, retain TUN           |
+
+An explicit Stop or a new Start request clears the fail-closed state. A terminal
+error before authentication tears down only when Rust classifies it as
+non-retryable, avoiding an indefinite blackhole for a Start request that has
+never authenticated successfully.
 
 ## Network handoff
 

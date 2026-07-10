@@ -62,9 +62,10 @@ data class VpnUiState(
 )
 
 /**
- * Terminal outcome of reducing an event, so [SltVpnService] can run platform
- * teardown. The store owns UI state; the service owns the VPN/TUN lifecycle, so
- * it — not the store — performs the side effects these signal.
+ * Terminal outcome of reducing an event, so [NativeSessionSupervisor] can
+ * restart the native runtime or request platform teardown. The store owns UI
+ * state; the supervisor owns native-runtime lifecycle decisions; and
+ * [SltVpnService] owns the VPN/TUN lifecycle.
  */
 sealed interface NativeTerminal {
     data object None : NativeTerminal
@@ -91,7 +92,7 @@ object SltVpnStatusBus {
     /**
      * Reduce one typed native event to a new [VpnUiState], owning all
      * event-derived state including terminal status. Returns whether the event
-     * is terminal so the service can react with platform teardown.
+     * is terminal so the native supervisor can apply restart/teardown policy.
      */
     fun applyEvent(event: ClientEvent): NativeTerminal {
         val current = mutableState.value
@@ -99,9 +100,9 @@ object SltVpnStatusBus {
         // Terminal status is sticky: a stale in-flight non-terminal event (e.g.
         // `TransportChanged`, `UdpRegistered`) arriving after `Stopped`/`Error`
         // must not resurrect a non-terminal status. The handle guard in
-        // [SltVpnService] already rejects cross-session staleness; this makes
-        // terminal sticky within a session too. A new session clears terminal
-        // status via [markStarting], not through this reducer.
+        // [NativeSessionSupervisor] already rejects cross-session staleness;
+        // this makes terminal sticky within a session too. A new session clears
+        // terminal status via [markStarting], not through this reducer.
         if (current.status == VpnStatus.Stopped || current.status == VpnStatus.Error) {
             return NativeTerminal.None
         }
@@ -263,7 +264,7 @@ object SltVpnStatusBus {
             VpnUiState(status = VpnStatus.Error, phase = VpnPhase.Error, lastError = detail)
     }
 
-    /** Native runtime exited but requested Android-level restart after backoff. */
+    /** Android supervision scheduled a native-runtime restart after backoff. */
     fun markNativeRestartScheduled(detail: String, attempt: ULong, delayMs: ULong) {
         mutableState.value =
             mutableState.value.copy(

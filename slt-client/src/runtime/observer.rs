@@ -57,8 +57,9 @@ pub enum ClientEventKind {
     Error {
         /// Human-readable error detail.
         detail: String,
-        /// Whether a supervising host may restart the runtime after this
-        /// terminal error.
+        /// Whether restarting the runtime is expected to recover without
+        /// external intervention. A platform supervisor may combine this with
+        /// its packet-interface lifecycle policy.
         retryable: bool,
     },
 

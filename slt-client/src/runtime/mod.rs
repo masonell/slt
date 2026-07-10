@@ -51,8 +51,9 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
-    /// Whether a supervising host may restart the runtime while keeping its
-    /// packet interface active after this terminal error.
+    /// Whether restarting the runtime is expected to recover without external
+    /// intervention. A platform host may combine this classification with its
+    /// packet-interface lifecycle policy.
     #[must_use]
     pub fn is_restart_retriable(&self) -> bool {
         match self {
