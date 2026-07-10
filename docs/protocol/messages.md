@@ -351,8 +351,15 @@ Transports a raw IP packet through the VPN tunnel.
 #### Validation Rules
 
 1. Payload length MUST NOT exceed `max_data_len` (derived from TUN MTU)
-2. `src_ip` in the IP header MUST equal the client's `assigned_ipv4`
+2. For client-originated DATA, `src_ip` in the IP header MUST equal the client's `assigned_ipv4`
 3. `tun_mtu` MUST be in range 1-1406
+
+SLT validates message framing, the size limit, enough of the IPv4 header to
+read addresses, and the identity-bound source-address rule. It intentionally
+delegates full IPv4 validation—including total length, header checksum, and
+fragmentation handling—to the receiving platform IP stack when the packet is
+delivered through TUN. Malformed inner packets are handled with the platform
+stack's normal per-packet semantics.
 
 #### MTU Constraints
 

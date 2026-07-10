@@ -1,4 +1,9 @@
-//! IPv4 packet parsing utilities.
+//! Lightweight IPv4 address extraction for routing and source-policy checks.
+//!
+//! These helpers validate only the version and header length needed to locate
+//! the fixed address fields. Full IPv4 validation, including total length,
+//! header checksum, and fragmentation handling, is delegated to the receiving
+//! platform IP stack when a DATA packet is delivered through TUN.
 
 use std::net::Ipv4Addr;
 
