@@ -43,8 +43,8 @@ import dev.slt.android.profile.rules.parseVpnRouteRules
 /**
  * The editor hub: renders the profile name field, the section cards that open
  * nested editors, the save action, and the editor-wide snackbar. It owns no
- * validation or persistence; [onSave] is invoked as a plain click and the
- * orchestration in [ProfileEditorScreen] decides what to do with it.
+ * validation or persistence; [onSave] delegates those transitions to the
+ * profile controller.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,6 +53,7 @@ internal fun ProfileEditorHub(
     profileId: String?,
     ownPackageName: String,
     saveEnabled: Boolean,
+    cancelEnabled: Boolean,
     onNameChange: (String) -> Unit,
     onOpenScreen: (ProfileEditorNestedScreen) -> Unit,
     onSave: () -> Unit,
@@ -77,7 +78,10 @@ internal fun ProfileEditorHub(
             TopAppBar(
                 title = { Text(if (profileId == null) "Add Profile" else "Edit Profile") },
                 navigationIcon = {
-                    IconButton(onClick = onCancel) {
+                    IconButton(
+                        onClick = onCancel,
+                        enabled = cancelEnabled,
+                    ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Cancel",

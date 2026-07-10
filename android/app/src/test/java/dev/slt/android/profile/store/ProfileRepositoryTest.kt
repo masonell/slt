@@ -14,6 +14,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class ProfileRepositoryTest {
@@ -76,6 +77,34 @@ class ProfileRepositoryTest {
             val savedIndex = loaded.metadata.name.removePrefix("Profile ").toInt()
             assertEquals("client-index=$savedIndex", loaded.clientToml)
             assertEquals(listOf("https://example.com/$savedIndex"), loaded.metadata.testUrls)
+        }
+    }
+
+    @Test
+    fun deleteProfileReportsDirectoryDeletionFailure() = runBlocking {
+        withTempProfiles { profilesDir ->
+            val activeProfileStore = MemoryActiveProfileStore()
+            activeProfileStore.setActiveProfileId("work")
+            var attemptedDirectory: File? = null
+            val repository = ProfileRepository(
+                profilesDir = profilesDir,
+                activeProfileStore = activeProfileStore,
+                deleteDirectory = { directory ->
+                    attemptedDirectory = directory
+                    false
+                },
+            )
+
+            val failure = try {
+                repository.deleteProfile("work")
+                null
+            } catch (error: IllegalStateException) {
+                error
+            }
+
+            assertNotNull(failure)
+            assertEquals(File(profilesDir, "work"), attemptedDirectory)
+            assertEquals("work", activeProfileStore.activeProfileId())
         }
     }
 

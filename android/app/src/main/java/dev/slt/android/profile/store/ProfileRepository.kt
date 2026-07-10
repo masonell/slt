@@ -22,16 +22,17 @@ import kotlin.text.get
 private val Context.profileDataStore by preferencesDataStore(name = "profiles")
 private val ACTIVE_PROFILE_ID = stringPreferencesKey("activeProfileId")
 
-class ProfileRepository internal constructor(
+internal class ProfileRepository(
     private val profilesDir: File,
     private val activeProfileStore: ActiveProfileStore,
-) {
+    private val deleteDirectory: (File) -> Boolean = File::deleteRecursively,
+) : ProfileStore {
     constructor(context: Context) : this(
         profilesDir = File(context.applicationContext.filesDir, "profiles"),
         activeProfileStore = DataStoreActiveProfileStore(context.applicationContext),
     )
 
-    suspend fun loadState(): ProfileStoreState =
+    override suspend fun loadState(): ProfileStoreState =
         withContext(Dispatchers.IO) {
             val activeProfileId = activeProfileId()
             val profiles = listProfiles(activeProfileId)
@@ -47,12 +48,12 @@ class ProfileRepository internal constructor(
             activeProfileId()?.let { loadProfileInternal(it) }
         }
 
-    suspend fun loadProfile(id: String): SltProfile? =
+    override suspend fun loadProfile(id: String): SltProfile? =
         withContext(Dispatchers.IO) {
             loadProfileInternal(id)
         }
 
-    suspend fun saveProfile(
+    override suspend fun saveProfile(
         id: String?,
         name: String,
         clientToml: String,
@@ -78,7 +79,7 @@ class ProfileRepository internal constructor(
             }
         }
 
-    suspend fun duplicateProfile(id: String): SltProfile? =
+    override suspend fun duplicateProfile(id: String): SltProfile? =
         withContext(Dispatchers.IO) {
             val source = loadProfileInternal(id) ?: return@withContext null
             val copyName = "${source.metadata.name} Copy"
@@ -90,15 +91,16 @@ class ProfileRepository internal constructor(
             )
         }
 
-    suspend fun deleteProfile(id: String) =
+    override suspend fun deleteProfile(id: String) =
         withContext(Dispatchers.IO) {
-            profileDir(id).deleteRecursively()
+            val dir = profileDir(id)
+            check(deleteDirectory(dir)) { "could not delete profile directory: $dir" }
             if (activeProfileId() == id) {
                 setActiveProfileId(null)
             }
         }
 
-    suspend fun setActiveProfileId(id: String?) {
+    override suspend fun setActiveProfileId(id: String?) {
         activeProfileStore.setActiveProfileId(id)
     }
 

@@ -1,5 +1,6 @@
 package dev.slt.android.ui
 
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
@@ -22,9 +23,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import dev.slt.android.log.LogStore
 import dev.slt.android.log.LogsScreen
-import dev.slt.android.profile.ProfileStoreState
-import dev.slt.android.profile.store.ProfileRepository
+import dev.slt.android.profile.store.ProfileStore
 import dev.slt.android.ui.main.MainScreenRoute
+import dev.slt.android.ui.profile.ProfileController
 import dev.slt.android.ui.profile.ProfileEditorScreen
 import dev.slt.android.ui.profiles.ProfilesScreen
 import dev.slt.android.ui.theme.SltTheme
@@ -33,7 +34,7 @@ import kotlinx.coroutines.launch
 
 @Composable
 internal fun SltApp(
-    profileRepository: ProfileRepository,
+    profileStore: ProfileStore,
     onStart: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -41,22 +42,32 @@ internal fun SltApp(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val logStore = remember { LogStore(context) }
+    val profileController = remember(profileStore) {
+        ProfileController(
+            profileStore = profileStore,
+            reportError = { message, error -> Log.e(TAG, message.text, error) },
+        )
+    }
+    val profileUiState by profileController.state.collectAsState()
+    val profileState = profileUiState.profileState
     var screen by remember { mutableStateOf<AppScreen>(AppScreen.Main) }
-    var profileState by remember { mutableStateOf<ProfileStoreState?>(null) }
-    var message by remember { mutableStateOf<UiMessage?>(null) }
 
-    LaunchedEffect(Unit) {
-        profileState = profileRepository.loadState()
+    LaunchedEffect(profileController) {
+        profileController.loadProfiles()
     }
 
     BackHandler(enabled = screen != AppScreen.Main) {
         screen = when (screen) {
             AppScreen.Main -> AppScreen.Main
             AppScreen.Profiles -> AppScreen.Main
-            is AppScreen.EditProfile -> AppScreen.Profiles
+            AppScreen.EditProfile -> if (profileController.closeEditor()) {
+                AppScreen.Profiles
+            } else {
+                AppScreen.EditProfile
+            }
             AppScreen.Logs -> AppScreen.Main
         }
-        message = null
+        profileController.setMessage(null)
     }
 
     SltTheme {
@@ -69,93 +80,82 @@ internal fun SltApp(
                 transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(220)) },
                 label = "screen",
             ) { currentScreen ->
-            when (currentScreen) {
-                AppScreen.Main -> MainScreenRoute(
-                    vpnState = vpnState,
-                    profileState = profileState,
-                    message = message,
-                    onMessageChange = { message = it },
-                    onSelectProfile = { id ->
-                        scope.launch {
-                            profileRepository.setActiveProfileId(id)
-                            profileState = profileRepository.loadState()
-                            message = UiMessage.info("Active profile changed")
-                        }
-                    },
-                    onStart = onStart,
-                    onStop = onStop,
-                    onOpenProfiles = {
-                        screen = AppScreen.Profiles
-                    },
-                    onOpenLogs = {
-                        screen = AppScreen.Logs
-                    },
-                )
-
-                AppScreen.Profiles -> ProfilesScreen(
-                    profileState = profileState,
-                    message = message,
-                    onBack = {
-                        message = null
-                        screen = AppScreen.Main
-                    },
-                    onDismissMessage = { message = null },
-                    onAdd = {
-                        message = null
-                        screen = AppScreen.EditProfile(null)
-                    },
-                    onEdit = { id ->
-                        message = null
-                        screen = AppScreen.EditProfile(id)
-                    },
-                    onSelect = { id ->
-                        scope.launch {
-                            profileRepository.setActiveProfileId(id)
-                            profileState = profileRepository.loadState()
-                            message = UiMessage.info("Active profile changed")
-                        }
-                    },
-                    onDuplicate = { id ->
-                        scope.launch {
-                            val profile = profileRepository.duplicateProfile(id)
-                            profileState = profileRepository.loadState()
-                            message = profile?.let { UiMessage.info("Duplicated ${it.metadata.name}") }
-                                ?: UiMessage.error("Profile not found")
-                        }
-                    },
-                    onDelete = { id ->
-                        scope.launch {
-                            profileRepository.deleteProfile(id)
-                            profileState = profileRepository.loadState()
-                            message = UiMessage.info("Profile deleted")
-                        }
-                    },
-                )
-
-                is AppScreen.EditProfile -> ProfileEditorScreen(
-                    profileRepository = profileRepository,
-                    profileId = currentScreen.profileId,
-                    onSaved = {
-                        scope.launch {
-                            profileState = profileRepository.loadState()
-                            message = UiMessage.info("Profile saved")
+                when (currentScreen) {
+                    AppScreen.Main -> MainScreenRoute(
+                        vpnState = vpnState,
+                        profileState = profileState,
+                        message = profileUiState.message,
+                        onMessageChange = profileController::setMessage,
+                        onSelectProfile = { id ->
+                            scope.launch { profileController.selectProfile(id) }
+                        },
+                        onStart = onStart,
+                        onStop = onStop,
+                        onOpenProfiles = {
+                            profileController.setMessage(null)
                             screen = AppScreen.Profiles
-                        }
-                    },
-                    onCancel = {
-                        message = null
-                        screen = AppScreen.Profiles
-                    },
-                )
+                        },
+                        onOpenLogs = {
+                            profileController.setMessage(null)
+                            screen = AppScreen.Logs
+                        },
+                    )
 
-                AppScreen.Logs -> LogsScreen(
-                    logStore = logStore,
-                    onBack = {
-                        message = null
-                        screen = AppScreen.Main
-                    },
-                )
-            }
+                    AppScreen.Profiles -> ProfilesScreen(
+                        profilesState = profileUiState.profiles,
+                        message = profileUiState.message,
+                        onBack = {
+                            profileController.setMessage(null)
+                            screen = AppScreen.Main
+                        },
+                        onDismissMessage = { profileController.setMessage(null) },
+                        onAdd = {
+                            if (profileController.beginNewEditor()) {
+                                screen = AppScreen.EditProfile
+                            }
+                        },
+                        onRetry = {
+                            scope.launch { profileController.loadProfiles() }
+                        },
+                        onEdit = { id ->
+                            if (profileController.beginExistingEditor(id)) {
+                                screen = AppScreen.EditProfile
+                            }
+                        },
+                        onSelect = { id ->
+                            scope.launch { profileController.selectProfile(id) }
+                        },
+                        onDuplicate = { id ->
+                            scope.launch { profileController.duplicateProfile(id) }
+                        },
+                        onDelete = { id ->
+                            scope.launch { profileController.deleteProfile(id) }
+                        },
+                    )
+
+                    AppScreen.EditProfile -> {
+                        val editor = profileUiState.editor
+                        if (editor != null) {
+                            ProfileEditorScreen(
+                                controller = profileController,
+                                state = editor,
+                                onClose = {
+                                    if (profileController.closeEditor()) {
+                                        screen = AppScreen.Profiles
+                                    }
+                                },
+                            )
+                        }
+                    }
+
+                    AppScreen.Logs -> LogsScreen(
+                        logStore = logStore,
+                        onBack = {
+                            profileController.setMessage(null)
+                            screen = AppScreen.Main
+                        },
+                    )
+                }
             }
         }
     }
@@ -166,7 +166,9 @@ private sealed interface AppScreen {
 
     data object Profiles : AppScreen
 
-    data class EditProfile(val profileId: String?) : AppScreen
+    data object EditProfile : AppScreen
 
     data object Logs : AppScreen
 }
+
+private const val TAG = "SltApp"

@@ -32,6 +32,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,22 +45,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.slt.android.profile.ProfileListItem
-import dev.slt.android.profile.ProfileStoreState
 import dev.slt.android.ui.UiMessage
+import dev.slt.android.ui.profile.ProfilesUiState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ProfilesScreen(
-    profileState: ProfileStoreState?,
+    profilesState: ProfilesUiState,
     message: UiMessage?,
     onBack: () -> Unit,
     onDismissMessage: () -> Unit,
     onAdd: () -> Unit,
+    onRetry: () -> Unit,
     onEdit: (String) -> Unit,
     onSelect: (String) -> Unit,
     onDuplicate: (String) -> Unit,
     onDelete: (String) -> Unit,
 ) {
+    val profileState = (profilesState as? ProfilesUiState.Ready)?.value
+    val profileStateUnavailable = profilesState is ProfilesUiState.Unavailable
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(message) {
         message?.let {
@@ -86,7 +90,10 @@ internal fun ProfilesScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onAdd) {
+                    IconButton(
+                        onClick = onAdd,
+                        enabled = profileState != null && !profileStateUnavailable,
+                    ) {
                         Icon(
                             imageVector = Icons.Filled.Add,
                             contentDescription = "Add profile",
@@ -122,15 +129,28 @@ internal fun ProfilesScreen(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
-                        text = "No profiles yet",
+                        text = when {
+                            profileStateUnavailable -> "Profiles unavailable"
+                            profilesState is ProfilesUiState.Loading -> "Loading profiles"
+                            else -> "No profiles yet"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        text = "Tap + to add one",
+                        text = when {
+                            profileStateUnavailable -> "Reload profiles before making changes"
+                            profilesState is ProfilesUiState.Loading -> "Reading saved profiles"
+                            else -> "Tap + to add one"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (profileStateUnavailable) {
+                        TextButton(onClick = onRetry) {
+                            Text("Retry")
+                        }
+                    }
                 }
             } else {
                 profiles.forEach { profile ->
