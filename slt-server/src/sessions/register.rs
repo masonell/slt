@@ -198,7 +198,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         };
         let mut ok_buf = Vec::new();
         ok.encode(&mut ok_buf)?;
-        self.send_message(Message::RegisterOk { payload: &ok_buf })
+        self.send_tcp_message(Message::RegisterOk { payload: &ok_buf })
             .await?;
 
         Ok(SessionControl::Continue)
@@ -206,8 +206,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
 
     /// Sends a `RegisterFail` message to the client.
     ///
-    /// Encodes the failure code into a payload and sends it via the currently
-    /// preferred transport (TCP or UDP-QSP).
+    /// Encodes the failure code into a payload and sends it over the authenticated
+    /// TCP control channel.
     ///
     /// # Parameters
     ///
@@ -221,7 +221,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         let payload = RegisterFailPayload { code };
         let mut buf = Vec::with_capacity(1);
         payload.encode(&mut buf);
-        self.send_message(Message::RegisterFail { payload: &buf })
+        self.send_tcp_message(Message::RegisterFail { payload: &buf })
             .await
     }
 }

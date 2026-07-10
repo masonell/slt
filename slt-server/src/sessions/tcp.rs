@@ -82,7 +82,13 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             }
             Message::Pong { .. } => Ok(SessionControl::Continue),
             Message::Close { .. } => Ok(self.peer_close_control(true)),
-            Message::RegisterCid { payload } => self.handle_register_cid(payload).await,
+            Message::RegisterCid { payload } => {
+                if self.active_transport == ActiveTransport::UdpQsp {
+                    Err(SessionError::ProtocolViolation)
+                } else {
+                    self.handle_register_cid(payload).await
+                }
+            }
             Message::FallbackToTcp { payload } => self.handle_fallback_to_tcp(payload).await,
             Message::FallbackOk { payload } => self.handle_fallback_ok(payload),
         }

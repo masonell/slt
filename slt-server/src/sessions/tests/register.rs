@@ -2,7 +2,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    CipherSuite, Message, MessageLimits, RegisterFailCode, RegisterFailPayload, decode_message,
+    CipherSuite, FallbackOkPayload, FallbackToTcpPayload, Message, MessageLimits,
+    RegisterCidPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload, decode_message,
     encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN, ServerUdpQspCipher, ServerUdpQspConfig};
@@ -17,6 +18,49 @@ use super::common::{
 };
 use crate::test_support::TlsDuplexStream;
 use crate::{AssignedIp, ClientId};
+
+async fn register_and_activate_udp(
+    client: &mut TlsDuplexStream,
+    tx: &SessionTx,
+    udp_rx: &mut mpsc::Receiver<Vec<u8>>,
+    limits: MessageLimits,
+    dcid_byte: u8,
+    scid_byte: u8,
+    peer_port: u16,
+    upgrade_id: u64,
+) -> RegisterCidPayload {
+    let register = make_register_payload(
+        Cid::from([dcid_byte; MAX_DCID_LEN]),
+        Cid::from([scid_byte; MAX_DCID_LEN]),
+        CipherSuite::Aes128Gcm,
+    );
+    let mut payload = Vec::new();
+    register.encode(&mut payload).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &payload }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let response = timeout(Duration::from_secs(1), read_message_bytes(client, limits))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        decode_message(&response, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    complete_udp_upgrade_handshake(
+        client,
+        tx,
+        udp_rx,
+        limits,
+        &register,
+        SocketAddr::from(([127, 0, 0, 1], peer_port)),
+        upgrade_id,
+    )
+    .await;
+    register
+}
 
 async fn assert_register_response_fail(
     client: &mut TlsDuplexStream,
@@ -311,4 +355,229 @@ async fn session_register_rejects_prefix_collision() {
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_rejects_tcp_register_while_udp_active() {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+    let _active = register_and_activate_udp(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        0xD1,
+        0xD2,
+        45_001,
+        0xD100,
+    )
+    .await;
+
+    let replacement = make_register_payload(
+        Cid::from([0xD3; MAX_DCID_LEN]),
+        Cid::from([0xD4; MAX_DCID_LEN]),
+        CipherSuite::Aes128Gcm,
+    );
+    let mut payload = Vec::new();
+    replacement.encode(&mut payload).unwrap();
+    let mut frame = Vec::new();
+    encode_message(Message::RegisterCid { payload: &payload }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(SessionError::ProtocolViolation)));
+    assert!(
+        udp_rx.try_recv().is_err(),
+        "registration response was sent over udp"
+    );
+}
+
+#[tokio::test]
+async fn session_registers_replacement_after_ordered_tcp_fallback() {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+    let _active = register_and_activate_udp(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        0xD5,
+        0xD6,
+        45_002,
+        0xD200,
+    )
+    .await;
+
+    let replacement = make_register_payload(
+        Cid::from([0xD7; MAX_DCID_LEN]),
+        Cid::from([0xD8; MAX_DCID_LEN]),
+        CipherSuite::Aes128Gcm,
+    );
+    let fallback_id = 0xD200_D200;
+    let fallback = FallbackToTcpPayload { fallback_id };
+    let mut fallback_payload = Vec::new();
+    fallback.encode(&mut fallback_payload);
+    let mut replacement_payload = Vec::new();
+    replacement.encode(&mut replacement_payload).unwrap();
+    let mut frame = Vec::new();
+    encode_message(
+        Message::FallbackToTcp {
+            payload: &fallback_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    encode_message(
+        Message::RegisterCid {
+            payload: &replacement_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let fallback_response = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Message::FallbackOk { payload } = decode_message(&fallback_response, limits)
+        .unwrap()
+        .unwrap()
+        .0
+    else {
+        panic!("expected fallback_ok");
+    };
+    assert_eq!(
+        FallbackOkPayload::decode(payload).unwrap().fallback_id,
+        fallback_id
+    );
+
+    let register_response = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Message::RegisterOk { payload } = decode_message(&register_response, limits)
+        .unwrap()
+        .unwrap()
+        .0
+    else {
+        panic!("expected register_ok");
+    };
+    assert_eq!(
+        RegisterOkPayload::decode(payload)
+            .unwrap()
+            .client_to_server_cid,
+        replacement.client_to_server_cid
+    );
+    assert!(
+        udp_rx.try_recv().is_err(),
+        "registration response was sent over udp"
+    );
+
+    complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &replacement,
+        SocketAddr::from(([127, 0, 0, 1], 45_003)),
+        0xD201,
+    )
+    .await;
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn session_sends_malformed_register_failure_on_tcp_after_fallback() {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+    let _active = register_and_activate_udp(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        0xD9,
+        0xDA,
+        45_004,
+        0xD300,
+    )
+    .await;
+
+    let fallback_id = 0xD300_D300;
+    let fallback = FallbackToTcpPayload { fallback_id };
+    let mut fallback_payload = Vec::new();
+    fallback.encode(&mut fallback_payload);
+    let malformed_payload = [1, 0xAA, 0x00];
+    let mut frame = Vec::new();
+    encode_message(
+        Message::FallbackToTcp {
+            payload: &fallback_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    encode_message(
+        Message::RegisterCid {
+            payload: &malformed_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let fallback_response = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Message::FallbackOk { payload } = decode_message(&fallback_response, limits)
+        .unwrap()
+        .unwrap()
+        .0
+    else {
+        panic!("expected fallback_ok");
+    };
+    assert_eq!(
+        FallbackOkPayload::decode(payload).unwrap().fallback_id,
+        fallback_id
+    );
+
+    let register_response = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Message::RegisterFail { payload } = decode_message(&register_response, limits)
+        .unwrap()
+        .unwrap()
+        .0
+    else {
+        panic!("expected register_fail");
+    };
+    assert_eq!(
+        RegisterFailPayload::decode(payload).unwrap().code,
+        RegisterFailCode::InvalidCid
+    );
+    assert!(
+        udp_rx.try_recv().is_err(),
+        "registration response was sent over udp"
+    );
+
+    let _ = tx.send(SessionEvent::Shutdown).await;
+    join.await.unwrap().unwrap();
 }

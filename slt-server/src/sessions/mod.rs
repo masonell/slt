@@ -298,16 +298,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         self.active_transport = transport;
     }
 
-    async fn send_message(&mut self, message: Message<'_>) -> Result<(), SessionError> {
-        match self.active_transport {
-            ActiveTransport::Tcp => self.send_tcp_message(message).await,
-            ActiveTransport::UdpQsp => {
-                self.send_udp_message_and_flush(message, UdpFailureRecovery::RetryMessageOnTcp)
-                    .await
-            }
-        }
-    }
-
     async fn send_tcp_message(&mut self, message: Message<'_>) -> Result<(), SessionError> {
         let timeout = self.timeouts.tcp_write_timeout;
         let write = self.tcp.write_message(message);
