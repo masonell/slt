@@ -2,7 +2,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    CipherSuite, CloseCode, Message, PingPayload, PongPayload, decode_message, encode_message,
+    CipherSuite, CloseCode, Message, PayloadError, PingPayload, PongPayload, decode_message,
+    encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
@@ -316,6 +317,78 @@ async fn session_handles_udp_pong() {
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_sends_protocol_close_for_invalid_udp_close_payload() {
+    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+
+    let dcid = Cid::from([0xA3; MAX_DCID_LEN]);
+    let scid = Cid::from([0xA4; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut register_payload = Vec::new();
+    register.encode(&mut register_payload).unwrap();
+    let mut register_frame = Vec::new();
+    encode_message(
+        Message::RegisterCid {
+            payload: &register_payload,
+        },
+        &mut register_frame,
+    )
+    .unwrap();
+    client.write_all(&register_frame).await.unwrap();
+
+    let response = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&response, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
+    let invalid_close_payload = [0xFF];
+    let mut close_frame = Vec::new();
+    encode_message(
+        Message::Close {
+            payload: &invalid_close_payload,
+        },
+        &mut close_frame,
+    )
+    .unwrap();
+    let protected_close = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx,
+            register.key_phase,
+            &close_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer: SocketAddr::from(([127, 0, 0, 1], 23457)),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: protected_close,
+    }))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        read_close_code(&mut client, limits).await,
+        CloseCode::ProtocolError
+    );
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(SessionError::Payload(PayloadError::InvalidCloseCode(0xFF)))
+    ));
 }
 
 #[tokio::test]

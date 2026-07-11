@@ -387,7 +387,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         Instant::now() + min + jitter
     }
 
-    pub(super) fn note_activity(&mut self) {
-        self.last_activity = Instant::now();
+    pub(super) const fn note_activity(&mut self, received_at: Instant) {
+        self.last_activity = received_at;
     }
 }

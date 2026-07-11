@@ -1,6 +1,10 @@
 //! TCP message handling for client sessions.
 
-use slt_core::proto::{FallbackOkPayload, FallbackToTcpPayload, Message};
+use std::time::Instant;
+
+use slt_core::proto::{
+    ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message, PongPayload,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace};
 
@@ -29,8 +33,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 return Ok(SessionControl::Continue);
             };
 
-            self.note_activity();
-            if self.handle_tcp_message(msg_buf.message()).await? == SessionControl::Close {
+            let received_at = Instant::now();
+            let control = self.handle_tcp_message(msg_buf.message()).await?;
+            self.note_activity(received_at);
+            if control == SessionControl::Close {
                 return Ok(SessionControl::Close);
             }
         }
@@ -80,8 +86,26 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     .await?;
                 Ok(SessionControl::Continue)
             }
-            Message::Pong { .. } => Ok(SessionControl::Continue),
-            Message::Close { .. } => Ok(self.peer_close_control(true)),
+            Message::Pong { payload } => {
+                let pong = PongPayload::decode(payload)?;
+                trace!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    nonce = pong.nonce,
+                    "received tcp pong"
+                );
+                Ok(SessionControl::Continue)
+            }
+            Message::Close { payload } => {
+                let close = ClosePayload::decode(payload)?;
+                info!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    code = ?close.code,
+                    "received tcp close"
+                );
+                Ok(self.peer_close_control(true))
+            }
             Message::RegisterCid { payload } => {
                 if self.active_transport == ActiveTransport::UdpQsp {
                     Err(SessionError::ProtocolViolation)

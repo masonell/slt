@@ -1,8 +1,11 @@
 //! UDP message handling for client sessions.
 
+use std::time::Instant;
+
 use slt_core::crypto::udp_qsp::QspSessionError;
 use slt_core::proto::{
-    Message, MessageSender, PongPayload, decode_padded_message, is_message_allowed_on_udp_qsp,
+    ClosePayload, Message, MessageSender, PongPayload, decode_padded_message,
+    is_message_allowed_on_udp_qsp,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace};
@@ -66,8 +69,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 match self.decode_udp_message(&opened) {
                     Ok(Some(message)) => {
                         if is_message_allowed_on_udp_qsp(message.ty(), MessageSender::Client) {
-                            self.note_activity();
-                            self.dispatch_udp_message(message).await
+                            let received_at = Instant::now();
+                            let control = self.dispatch_udp_message(message).await?;
+                            self.note_activity(received_at);
+                            Ok(control)
                         } else {
                             Err(SessionError::ProtocolViolation)
                         }
@@ -253,7 +258,16 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 Ok(SessionControl::Continue)
             }
             Message::UpgradeProbe { payload } => self.handle_upgrade_probe(payload).await,
-            Message::Close { .. } => Ok(self.peer_close_control(false)),
+            Message::Close { payload } => {
+                let close = ClosePayload::decode(payload)?;
+                info!(
+                    session_id = self.session_id,
+                    client_id = %self.client_id,
+                    code = ?close.code,
+                    "received udp close"
+                );
+                Ok(self.peer_close_control(false))
+            }
             Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. }

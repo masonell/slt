@@ -181,6 +181,58 @@ async fn session_sends_protocol_close_for_invalid_ping_payload() {
     ));
 }
 
+async fn assert_tcp_payload_protocol_error(message: Message<'_>, expected: PayloadError) {
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+
+    let mut frame = Vec::new();
+    encode_message(message, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    assert_eq!(
+        read_close_code(&mut client, limits).await,
+        CloseCode::ProtocolError
+    );
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    match result {
+        Err(SessionError::Payload(actual)) => assert_eq!(actual, expected),
+        other => panic!("expected payload error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn session_sends_protocol_close_for_invalid_pong_payload() {
+    assert_tcp_payload_protocol_error(
+        Message::Pong { payload: &[] },
+        PayloadError::LengthMismatch {
+            expected: 8,
+            actual: 0,
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn session_sends_protocol_close_for_invalid_close_payloads() {
+    let cases: &[(&[u8], PayloadError)] = &[
+        (
+            &[],
+            PayloadError::LengthMismatch {
+                expected: 1,
+                actual: 0,
+            },
+        ),
+        (&[0xFF], PayloadError::InvalidCloseCode(0xFF)),
+    ];
+
+    for &(payload, expected) in cases {
+        assert_tcp_payload_protocol_error(Message::Close { payload }, expected).await;
+    }
+}
+
 #[tokio::test]
 async fn session_drops_oversized_tun_packet() {
     let (join, mut client, tx, _tun_rx, _udp_rx, limits, assigned, _registry) =
