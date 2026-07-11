@@ -72,9 +72,9 @@ pub enum UdpQspError {
     #[error(transparent)]
     Message(#[from] MessageError),
 
-    /// Received a UDP-QSP packet whose decrypted payload did not contain a
-    /// complete framed message. The session dropped the partial packet.
-    /// Recoverable: a transient decode outcome, not a fatal session condition.
+    /// Received a UDP-QSP packet whose authenticated payload did not contain a
+    /// complete framed message. Fatal: UDP datagrams are atomic, so a later
+    /// datagram cannot complete this message.
     #[error("udp-qsp message incomplete")]
     IncompleteMessage,
 }
@@ -83,10 +83,9 @@ impl UdpQspError {
     /// Recoverable-vs-fatal policy for the UDP-QSP transport.
     ///
     /// Recoverable failures are *droppable* (drop & continue): the session drops
-    /// the offending packet and keeps the UDP path alive. Fatal failures must
-    /// propagate out of the UDP-QSP transport so the session can take a
-    /// session-level decision (TCP fallback when TCP is alive, or session close
-    /// otherwise) — they are never silently dropped.
+    /// the offending packet and keeps the UDP path alive. Other failures must
+    /// propagate so the session can distinguish path failure from an
+    /// authenticated protocol violation.
     ///
     /// # Policy
     ///
@@ -104,11 +103,8 @@ impl UdpQspError {
     ///   close / reconnect so the session fails fast instead of spinning on a
     ///   persistent I/O error (and the refresh probe doesn't retry until its
     ///   timeout on an immediate permanent failure).
-    /// - [`Self::Frame`] / [`Self::Message`] / [`Self::IncompleteMessage`] — a
-    ///   malformed/garbage/partial packet from the peer. Dropped, session
-    ///   continues.
     ///
-    /// Fatal (propagate out of the UDP-QSP transport):
+    /// Non-recoverable (propagate out of the UDP-QSP transport):
     /// - [`Self::Qsp`] with inner `PacketNumberOverflow` — the TX packet-number
     ///   space is exhausted; the session cannot send again on this UDP path.
     ///   Dropping overflow would silently lose packets on a session that can no
@@ -117,6 +113,10 @@ impl UdpQspError {
     ///   for a fresh packet-number space only once it re-establishes (via the
     ///   runtime's reconnect policy), not as an immediate consequence of the
     ///   overflow.
+    /// - [`Self::Frame`] — a local message-encoding failure.
+    /// - [`Self::Message`] / [`Self::IncompleteMessage`] — an authenticated
+    ///   framing violation, invalid message, or incomplete atomic datagram.
+    ///   These protocol failures terminate the session with `ProtocolError`.
     ///
     /// Arms are grouped by policy for reviewability. Pinned by
     /// `recoverable_policy_pins_each_shape`.
@@ -147,8 +147,8 @@ impl UdpQspError {
             // classification here would silently drop packets on a session that
             // can no longer send). See doc above.
             Self::Qsp(QspSessionError::PacketNumberOverflow) => false,
-            // Recoverable: malformed/garbage/partial packet from the peer.
-            Self::Frame(_) | Self::Message(_) | Self::IncompleteMessage => true,
+            // Protocol encode/decode failures terminate the session.
+            Self::Frame(_) | Self::Message(_) | Self::IncompleteMessage => false,
         }
     }
 }
@@ -410,7 +410,9 @@ mod tests {
     use std::sync::Arc;
 
     use slt_core::crypto::udp_qsp::{QspCryptoError, QspSessionError, QuicQspSession};
-    use slt_core::proto::{HEADER_LEN, Message, MessageLimits, PingPayload, PongPayload};
+    use slt_core::proto::{
+        HEADER_LEN, Message, MessageLimits, MessageType, PingPayload, PongPayload, encode_message,
+    };
     use slt_core::types::Cid;
     use tokio::sync::mpsc;
 
@@ -450,6 +452,34 @@ mod tests {
 
     fn snapshot(transport: &UdpQspTransport<ChanIo>) -> MetricsSnapshot {
         transport.metrics.snapshot()
+    }
+
+    async fn read_authenticated_payload(
+        payload: &[u8],
+        limits: MessageLimits,
+    ) -> Result<slt_core::proto::OwnedMessageBuf, UdpQspError> {
+        let (c2s_tx, c2s_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (s2c_tx, s2c_rx) = mpsc::channel::<Vec<u8>>(8);
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
+
+        let client_io = ChanIo {
+            tx: c2s_tx,
+            rx: s2c_rx,
+        };
+        let client_session =
+            QuicQspSession::new(client_io, scid, dcid, make_test_keys(), 0, 0, false);
+        let mut client = make_transport(client_session);
+
+        let server_io = ChanIo {
+            tx: s2c_tx,
+            rx: c2s_rx,
+        };
+        let mut server =
+            QuicQspSession::new(server_io, dcid, scid, make_server_keys(), 0, 0, false);
+        server.send(payload).await.unwrap();
+
+        client.read_next_message(limits).await
     }
 
     #[tokio::test]
@@ -526,6 +556,82 @@ mod tests {
             }
             _ => panic!("expected ping"),
         }
+    }
+
+    #[tokio::test]
+    async fn authenticated_plaintext_violations_are_not_recoverable() {
+        let unknown_type = [0xff, 0, 0, 0, 0];
+        let unknown = read_authenticated_payload(&unknown_type, MessageLimits::new(2048, 2048))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            &unknown,
+            UdpQspError::Message(MessageError::Frame(FrameError::UnknownType(0xff)))
+        ));
+        assert!(!unknown.is_recoverable());
+
+        let mut oversized_data = Vec::new();
+        encode_message(Message::Data { packet: &[0; 9] }, &mut oversized_data).unwrap();
+        let oversized = read_authenticated_payload(&oversized_data, MessageLimits::new(2048, 8))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            &oversized,
+            UdpQspError::Message(MessageError::DataTooLarge { len: 9, max: 8 })
+        ));
+        assert!(!oversized.is_recoverable());
+
+        let mut incomplete = vec![u8::from(MessageType::Ping)];
+        incomplete.extend_from_slice(&8u32.to_be_bytes());
+        incomplete.extend_from_slice(&[0; 7]);
+        let incomplete = read_authenticated_payload(&incomplete, MessageLimits::new(2048, 2048))
+            .await
+            .unwrap_err();
+        assert!(matches!(&incomplete, UdpQspError::IncompleteMessage));
+        assert!(!incomplete.is_recoverable());
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_packet_noise_does_not_poison_the_receive_path() {
+        let (c2s_tx, c2s_rx) = mpsc::channel::<Vec<u8>>(8);
+        let (s2c_tx, s2c_rx) = mpsc::channel::<Vec<u8>>(8);
+        let packet_injector = s2c_tx.clone();
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
+
+        let client_io = ChanIo {
+            tx: c2s_tx,
+            rx: s2c_rx,
+        };
+        let client_session =
+            QuicQspSession::new(client_io, scid, dcid, make_test_keys(), 0, 0, false);
+        let mut client = make_transport(client_session);
+
+        let server_io = ChanIo {
+            tx: s2c_tx,
+            rx: c2s_rx,
+        };
+        let mut server =
+            QuicQspSession::new(server_io, dcid, scid, make_server_keys(), 0, 0, false);
+
+        packet_injector.send(vec![0; 64]).await.unwrap();
+        let err = client
+            .read_next_message(MessageLimits::new(2048, 2048))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, UdpQspError::Qsp(QspSessionError::Crypto(_))));
+        assert!(err.is_recoverable());
+
+        let valid = encode_ping(0xCAFE_BABE);
+        server.send(&valid).await.unwrap();
+        let message = client
+            .read_next_message(MessageLimits::new(2048, 2048))
+            .await
+            .unwrap();
+        let Message::Ping { payload } = message.message() else {
+            panic!("expected ping after unauthenticated packet noise");
+        };
+        assert_eq!(PingPayload::decode(payload).unwrap().nonce, 0xCAFE_BABE);
     }
 
     #[tokio::test]
@@ -950,16 +1056,18 @@ mod tests {
         // `is_recoverable` doc.
         assert!(!UdpQspError::from(QspSessionError::PacketNumberOverflow).is_recoverable());
 
-        // === Recoverable: drop & continue ===
-        // These are dropped by the session, which keeps the UDP path alive.
+        assert!(!UdpQspError::from(FrameError::UnknownType(0xFF)).is_recoverable());
+        assert!(
+            !UdpQspError::from(MessageError::DataTooLarge { len: 10, max: 5 }).is_recoverable()
+        );
+        assert!(!UdpQspError::IncompleteMessage.is_recoverable());
+
+        // === Recoverable packet noise: drop & continue ===
         assert!(UdpQspError::from(QspSessionError::Replay).is_recoverable());
         assert!(UdpQspError::from(QspSessionError::TooOld).is_recoverable());
         assert!(
             UdpQspError::from(QspSessionError::Crypto(QspCryptoError::CryptoFail)).is_recoverable()
         );
-        assert!(UdpQspError::from(FrameError::UnknownType(0xFF)).is_recoverable());
-        assert!(UdpQspError::from(MessageError::DataTooLarge { len: 10, max: 5 }).is_recoverable());
-        assert!(UdpQspError::IncompleteMessage.is_recoverable());
 
         // === Recoverable: transient datagram I/O ===
         // Dropping a single transient recv failure is correct for UDP; the

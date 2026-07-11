@@ -24,9 +24,9 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     /// If UDP-QSP is the preferred data path, first tries to validate the existing
     /// UDP socket by sending an authenticated ping and waiting for the matching
     /// pong. A successful round trip proves the server accepted the client's
-    /// current source address and updated its peer. On refresh failure, a live
-    /// TCP channel is used to rediscover QUIC IDs and register a fresh UDP path;
-    /// if TCP is unavailable the session exits so the runtime reconnects TCP.
+    /// current source address and updated its peer. UDP path failures recreate
+    /// the socket or fall back to TCP; authenticated protocol failures propagate
+    /// and terminate the session.
     pub(super) async fn handle_network_changed(&mut self) -> Result<SessionControl, SessionError> {
         info!("underlying network changed");
 
@@ -49,6 +49,9 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 self.services
                     .observer()
                     .emit(ClientEventKind::UdpPathRefreshFailed { detail });
+                if !err.is_udp_path_transport_error() {
+                    return Err(err);
+                }
                 if !self.tcp_alive {
                     self.emit_network_changed_reconnect();
                     return Ok(SessionControl::Close(SessionExit::NetworkChanged));
@@ -67,9 +70,10 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     ) -> Result<SessionControl, SessionError> {
         match self.refresh_udp_path().await {
             Ok(control) => return Ok(control),
-            Err(err) => {
+            Err(err) if err.is_udp_path_transport_error() => {
                 warn!(error = %err, "udp-qsp path refresh failed on existing socket");
             }
+            Err(err) => return Err(err),
         }
 
         info!("recreating udp-qsp socket after path refresh failure");
@@ -208,8 +212,8 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                     Ok(Ok(msg_buf)) => msg_buf,
                     // Typed UDP-QSP transport error: drop recoverable
                     // packet-level failures (replay, too-old, single crypto
-                    // failure, partial packet); propagate the rest (dead-channel
-                    // signal, packet-number overflow).
+                    // failure); propagate path failures and authenticated
+                    // protocol violations.
                     Ok(Err(err)) => {
                         let err = SessionError::from(err);
                         if err.is_udp_qsp_recoverable() {
@@ -277,7 +281,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         err: &SessionError,
     ) -> Result<bool, SessionError> {
         // Recoverable UDP-QSP transport failure (replay, too-old, single crypto
-        // failure, partial packet, transient socket I/O): drop & continue.
+        // failure, transient socket I/O): drop & continue.
         if err.is_udp_qsp_recoverable() {
             trace!(error = %err, "dropping udp-qsp packets");
             return Ok(true);

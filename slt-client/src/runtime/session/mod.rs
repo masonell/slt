@@ -257,6 +257,10 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                 self.send_close_best_effort(CloseCode::Normal, "tun_failure")
                     .await;
             }
+            SessionExit::ProtocolError => {
+                self.send_close_best_effort(CloseCode::ProtocolError, "protocol_error")
+                    .await;
+            }
             _ => {}
         }
         self.flush_pending_udp_transport_best_effort().await;
@@ -484,26 +488,11 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                     Ok(control)
                 }
                 Err(err) => {
-                    // Typed UDP-QSP transport error: the slt-core
-                    // QspSessionError/QspCryptoError and proto encode errors
-                    // are preserved here, not flattened. `err` is always a
-                    // `UdpQspError` (the sole error type `read_next_message`
-                    // returns), so `SessionError::from(err)` is always
-                    // `SessionError::UdpQsp(_)`, which `is_udp_path_transport_error()`
-                    // always returns true for. Recoverable packet failures are
-                    // dropped; fatal path failures use authenticated TCP fallback.
                     let err = SessionError::from(err);
                     if err.is_udp_path_transport_error() {
                         return self.handle_udp_event_error(&err).await;
                     }
-                    // Unreachable: `UdpResult`'s error is always a `UdpQspError`,
-                    // which maps to `SessionError::UdpQsp(_)` (a UDP-path
-                    // transport error). Reached only if `read_next_message`'s
-                    // error type gains a non-`UdpQspError` shape without
-                    // updating this arm.
-                    unreachable!(
-                        "UdpResult error must be a UdpQspError (UDP-path transport error): {err:?}"
-                    )
+                    Err(err)
                 }
             },
             SessionEvent::PingTick => {
@@ -653,13 +642,13 @@ mod tests {
     use slt_core::config::ClientConfig;
     use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, UdpQspKeys};
     use slt_core::proto::{
-        CipherSuite, CloseCode, ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message,
-        MessageType, OwnedMessageBuf, SwitchAckPayload, SwitchOkPayload, SwitchToUdpPayload,
-        encode_message,
+        CipherSuite, CloseCode, ClosePayload, FallbackOkPayload, FallbackToTcpPayload, FrameError,
+        Message, MessageError, MessageType, OwnedMessageBuf, SwitchAckPayload, SwitchOkPayload,
+        SwitchToUdpPayload, decode_message, encode_message,
     };
     use slt_core::transport::tcp::TcpChannel;
     use slt_core::types::{Cid, MAX_DCID_LEN};
-    use tokio::io::{AsyncWriteExt, DuplexStream};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
     use tokio::net::UdpSocket;
     use tokio::sync::mpsc;
     use tokio::time;
@@ -675,8 +664,8 @@ mod tests {
     use crate::runtime::observer::TransportChangeReason;
     use crate::runtime::services::DesktopServices;
     use crate::test_support::{
-        ParkableWriteStream, WriteGate, mock_quic_ids, test_config,
-        tls_pair_with_parkable_client_writes, tls_tcp_stream_pair,
+        ParkableWriteStream, WriteGate, make_server_keys, make_test_keys, mock_quic_ids,
+        test_config, tls_pair_with_parkable_client_writes, tls_tcp_stream_pair,
     };
     use crate::transport::tcp::{ClientKeyUpdater, TcpSession};
     use crate::transport::udp_qsp::{ClientTransport, UdpQspError, client_udp_qsp_io};
@@ -1144,6 +1133,94 @@ mod tests {
             session.handle_tcp_read().await.unwrap(),
             SessionControl::Close(SessionExit::RemoteClose(CloseCode::ServerRestart))
         );
+    }
+
+    #[tokio::test]
+    async fn protocol_error_sends_protocol_close_before_session_exit() {
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
+        server_stream.write_all(&[0xff, 0, 0, 0, 0]).await.unwrap();
+
+        let tun_fault = CancellationToken::new();
+        let outcome = time::timeout(Duration::from_secs(1), session.run(&tun_fault))
+            .await
+            .expect("protocol violation must terminate the session");
+        assert_eq!(outcome.exit, SessionExit::ProtocolError);
+        assert!(matches!(outcome.error, Some(SessionError::Message(_))));
+
+        let mut close_frame = [0u8; 6];
+        time::timeout(
+            Duration::from_secs(1),
+            server_stream.read_exact(&mut close_frame),
+        )
+        .await
+        .expect("client must attempt a protocol close")
+        .unwrap();
+        let (message, consumed) = decode_message(&close_frame, session.limits)
+            .unwrap()
+            .expect("close frame must be complete");
+        assert_eq!(consumed, close_frame.len());
+        let Message::Close { payload } = message else {
+            panic!("expected close message");
+        };
+        assert_eq!(
+            ClosePayload::decode(payload).unwrap().code,
+            CloseCode::ProtocolError
+        );
+    }
+
+    #[tokio::test]
+    async fn network_change_propagates_authenticated_udp_protocol_error() {
+        let mut config = test_config();
+        config.timing.register_timeout = Duration::from_millis(50);
+        let services = DesktopServices::new();
+        let (_tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+
+        let client_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let client_addr = client_socket.local_addr().unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
+
+        let client_io = client_udp_qsp_io(&client_socket, server_addr).unwrap();
+        let client_qsp = QuicQspSession::new(client_io, scid, dcid, make_test_keys(), 0, 0, false);
+        session.udp_state = UdpState::Active(Box::new(ClientTransport::new(
+            client_qsp,
+            Arc::new(Metrics::default()),
+        )));
+        session.active_transport = ActiveTransport::UdpQsp;
+
+        let server_io = client_udp_qsp_io(&server_socket, client_addr).unwrap();
+        let mut server_qsp =
+            QuicQspSession::new(server_io, dcid, scid, make_server_keys(), 0, 0, false);
+        server_qsp.send(&[0xff, 0, 0, 0, 0]).await.unwrap();
+        server_qsp.flush().await.unwrap();
+
+        let err = time::timeout(Duration::from_secs(1), session.handle_network_changed())
+            .await
+            .expect("authenticated protocol failure must not enter refresh recovery")
+            .unwrap_err();
+        assert!(matches!(
+            &err,
+            SessionError::Message(MessageError::Frame(FrameError::UnknownType(0xff)))
+        ));
+        assert_eq!(err.exit(), SessionExit::ProtocolError);
+        assert_eq!(session.active_transport, ActiveTransport::UdpQsp);
+        assert!(session.pending_tcp_fallback.is_none());
     }
 
     #[tokio::test]

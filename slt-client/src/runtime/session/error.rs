@@ -24,9 +24,9 @@ use crate::transport::udp_qsp::UdpQspError;
 /// [`SessionExit`](super::SessionExit); like [`crate::error::ConnectError::stage`]
 /// it can never disagree with the variant because it is derived from it.
 ///
-/// The UDP-QSP transport failure flows via [`Self::UdpQsp`]: the typed
-/// [`UdpQspError`] carries its own recoverable-vs-fatal classification via
-/// [`UdpQspError::is_recoverable`].
+/// UDP-QSP packet and path failures flow via [`Self::UdpQsp`]. Protocol
+/// encode/decode failures are normalized into the protocol variants so they
+/// cannot enter UDP path fallback handling.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     /// Client-detected protocol violation on the session path.
@@ -95,14 +95,14 @@ pub enum SessionError {
 
     /// UDP-QSP transport failure.
     ///
-    /// The typed [`UdpQspError`] preserves the slt-core UDP-QSP session/crypto
-    /// errors and the proto encode errors. The recoverable-vs-fatal decision
-    /// lives on the inner type ([`UdpQspError::is_recoverable`]): recoverable
-    /// failures (replay, too-old, crypto failure, proto decode, partial packet,
-    /// transient socket I/O) are dropped by the session and keep the UDP path
-    /// alive; packet-number overflow propagates.
+    /// The typed [`UdpQspError`] preserves UDP-QSP packet protection and socket
+    /// failures. Recoverable failures (replay, too-old, receive-side crypto
+    /// failure, transient socket I/O) are dropped by the session; path failures
+    /// such as packet-number overflow propagate to fallback handling.
+    /// Protocol encode/decode failures are converted into
+    /// [`Self::Frame`], [`Self::Message`], or [`Self::ProtocolViolation`].
     #[error(transparent)]
-    UdpQsp(#[from] UdpQspError),
+    UdpQsp(UdpQspError),
 
     /// Cryptographic operation failure on the session path (e.g. `RAND_bytes`
     /// during UDP-QSP registration key generation). Fatal: local crypto state.
@@ -152,6 +152,25 @@ impl From<TcpWriteError> for SessionError {
     }
 }
 
+impl From<UdpQspError> for SessionError {
+    /// Separates authenticated protocol failures from UDP packet/path failures.
+    ///
+    /// `Message` and `IncompleteMessage` are produced only after inbound packet
+    /// protection and replay validation succeed. `Frame` is an outbound encode
+    /// failure. None is a recoverable UDP path condition; the remaining variants
+    /// retain the path recovery policy carried by [`Self::UdpQsp`].
+    fn from(err: UdpQspError) -> Self {
+        match err {
+            UdpQspError::Frame(source) => Self::Frame(source),
+            UdpQspError::Message(source) => Self::Message(source),
+            UdpQspError::IncompleteMessage => Self::ProtocolViolation {
+                detail: "authenticated udp-qsp datagram contained an incomplete message".into(),
+            },
+            transport => Self::UdpQsp(transport),
+        }
+    }
+}
+
 impl SessionError {
     /// Reconnect/fatal policy projection onto [`SessionExit`](super::SessionExit).
     ///
@@ -168,11 +187,9 @@ impl SessionError {
     /// - [`Self::Connection`] / generic [`Self::Io`] / [`Self::UdpQsp`] →
     ///   `ConnectionError` (reconnect), except `PermissionDenied` wrapped by
     ///   `Connection`/`Io`, which projects to `PermissionDenied` (fatal).
-    ///   [`Self::UdpQsp`] buckets here because the recoverable-vs-fatal
-    ///   *transport* decision (drop & continue vs. fallback) is made before
-    ///   reaching `exit()`: a dropped recoverable failure never produces a
-    ///   `SessionError` at all, and fatal transport failures route through
-    ///   `exit()` as a reconnect.
+    ///   [`Self::UdpQsp`] contains only packet/path failures because its protocol
+    ///   variants are normalized by `From<UdpQspError>`. The transport decision
+    ///   (drop & continue vs. fallback) is made before reaching `exit()`.
     ///
     /// Proto decode failures all map to `ProtocolError` (fatal). Per-variant
     /// exit policy may be revisited separately if warranted.
@@ -462,6 +479,24 @@ mod tests {
         .into();
         assert!(!send_io.is_udp_qsp_recoverable());
         assert!(send_io.is_udp_path_transport_error());
+
+        // Authenticated framing/message failures normalize into session-level
+        // protocol errors and never enter UDP path fallback handling.
+        let frame: SessionError = UdpQspError::from(FrameError::UnknownType(0xFF)).into();
+        assert!(matches!(frame, SessionError::Frame(_)));
+        assert_eq!(frame.exit(), SessionExit::ProtocolError);
+        assert!(!frame.is_udp_path_transport_error());
+
+        let message: SessionError =
+            UdpQspError::from(MessageError::DataTooLarge { len: 10, max: 5 }).into();
+        assert!(matches!(message, SessionError::Message(_)));
+        assert_eq!(message.exit(), SessionExit::ProtocolError);
+        assert!(!message.is_udp_path_transport_error());
+
+        let incomplete: SessionError = UdpQspError::IncompleteMessage.into();
+        assert!(matches!(incomplete, SessionError::ProtocolViolation { .. }));
+        assert_eq!(incomplete.exit(), SessionExit::ProtocolError);
+        assert!(!incomplete.is_udp_path_transport_error());
 
         // Non-UdpQsp variants never report as UDP-QSP transport conditions.
         let proto = SessionError::Payload(PayloadError::InvalidCipher(0x99));
