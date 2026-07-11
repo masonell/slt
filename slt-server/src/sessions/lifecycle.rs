@@ -70,6 +70,13 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 "session shutdown signal unavailable without a reason",
             ))),
         };
+        if result
+            .as_ref()
+            .is_err_and(SessionError::is_peer_protocol_error)
+        {
+            self.send_close_best_effort(CloseCode::ProtocolError, "protocol_error")
+                .await;
+        }
         self.flush_pending_udp_session_best_effort().await;
         if let Err(err) = result.as_ref() {
             self.metrics.inc_disconnect_error();
@@ -265,6 +272,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             "session disconnect"
         );
 
+        self.send_close_best_effort(close_code, reason.as_str())
+            .await;
+    }
+
+    async fn send_close_best_effort(&mut self, close_code: CloseCode, reason: &'static str) {
         let tcp_available = self.tcp_alive && !self.tcp_write_interrupted;
         if tcp_available {
             match time::timeout(BEST_EFFORT_IO_TIMEOUT, self.send_close_over_tcp(close_code)).await
@@ -274,18 +286,18 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                     debug!(
                         session_id = self.session_id,
                         client_id = %self.client_id,
-                        reason = reason.as_str(),
+                        reason,
                         error = %err,
-                        "failed to send CLOSE over TCP during managed shutdown"
+                        "failed to send CLOSE over TCP"
                     );
                 }
                 Err(_) => {
                     debug!(
                         session_id = self.session_id,
                         client_id = %self.client_id,
-                        reason = reason.as_str(),
+                        reason,
                         timeout_ms = BEST_EFFORT_IO_TIMEOUT.as_millis(),
-                        "timed out sending CLOSE over TCP during managed shutdown"
+                        "timed out sending CLOSE over TCP"
                     );
                 }
             }
@@ -296,8 +308,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 debug!(
                     session_id = self.session_id,
                     client_id = %self.client_id,
-                    reason = reason.as_str(),
-                    "no usable transport for CLOSE during managed shutdown"
+                    reason,
+                    "no usable transport for CLOSE"
                 );
             }
             return;
@@ -309,18 +321,18 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 debug!(
                     session_id = self.session_id,
                     client_id = %self.client_id,
-                    reason = reason.as_str(),
+                    reason,
                     error = %err,
-                    "failed to send CLOSE over UDP-QSP during managed shutdown"
+                    "failed to send CLOSE over UDP-QSP"
                 );
             }
             Err(_) => {
                 debug!(
                     session_id = self.session_id,
                     client_id = %self.client_id,
-                    reason = reason.as_str(),
+                    reason,
                     timeout_ms = BEST_EFFORT_IO_TIMEOUT.as_millis(),
-                    "timed out sending CLOSE over UDP-QSP during managed shutdown"
+                    "timed out sending CLOSE over UDP-QSP"
                 );
             }
         }

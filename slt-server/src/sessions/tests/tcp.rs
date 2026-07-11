@@ -1,8 +1,8 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::proto::{
-    CipherSuite, CloseCode, ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message,
-    PingPayload, PongPayload, decode_message, encode_message,
+    CipherSuite, CloseCode, ClosePayload, FallbackOkPayload, FallbackToTcpPayload, FrameError,
+    Message, MessageError, PayloadError, PingPayload, PongPayload, decode_message, encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
@@ -10,8 +10,8 @@ use tokio::time::{Duration, timeout};
 
 use super::super::*;
 use super::common::{
-    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session,
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_close_code,
+    read_message_bytes, spawn_session,
 };
 
 #[tokio::test]
@@ -113,18 +113,72 @@ async fn session_handles_close_message() {
 
 #[tokio::test]
 async fn session_rejects_unexpected_control_message() {
-    let (join, mut client, _tx, _tun_rx, _udp_rx, _limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
     let mut frame = Vec::new();
     encode_message(Message::AuthOk { payload: &[] }, &mut frame).unwrap();
     client.write_all(&frame).await.unwrap();
 
+    assert_eq!(
+        read_close_code(&mut client, limits).await,
+        CloseCode::ProtocolError
+    );
+
     let result = timeout(Duration::from_secs(1), join)
         .await
         .unwrap()
         .unwrap();
-    assert!(result.is_err());
+    assert!(matches!(result, Err(SessionError::ProtocolViolation)));
+}
+
+#[tokio::test]
+async fn session_sends_protocol_close_for_unknown_frame_type() {
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+
+    client.write_all(&[0xFF, 0, 0, 0, 0]).await.unwrap();
+
+    assert_eq!(
+        read_close_code(&mut client, limits).await,
+        CloseCode::ProtocolError
+    );
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(SessionError::Message(MessageError::Frame(
+            FrameError::UnknownType(0xFF)
+        )))
+    ));
+}
+
+#[tokio::test]
+async fn session_sends_protocol_close_for_invalid_ping_payload() {
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+
+    let mut frame = Vec::new();
+    encode_message(Message::Ping { payload: &[] }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    assert_eq!(
+        read_close_code(&mut client, limits).await,
+        CloseCode::ProtocolError
+    );
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(SessionError::Payload(PayloadError::LengthMismatch {
+            expected: 8,
+            actual: 0
+        }))
+    ));
 }
 
 #[tokio::test]

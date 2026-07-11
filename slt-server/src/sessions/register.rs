@@ -198,7 +198,8 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             client_to_server_cid: register.client_to_server_cid,
         };
         let mut ok_buf = Vec::new();
-        ok.encode(&mut ok_buf)?;
+        ok.encode(&mut ok_buf)
+            .map_err(SessionError::PayloadEncode)?;
         self.send_tcp_message(Message::RegisterOk { payload: &ok_buf })
             .await?;
 

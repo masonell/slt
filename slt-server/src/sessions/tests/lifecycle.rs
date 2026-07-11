@@ -776,6 +776,94 @@ async fn shutdown_cancels_blocked_tcp_write() {
 }
 
 #[tokio::test]
+async fn protocol_error_close_falls_back_to_udp_when_tcp_stalls() {
+    let mut timeouts = default_session_timeouts();
+    timeouts.tcp_write_timeout = Duration::from_secs(60);
+    let (join, mut client, tx, mut udp_rx, limits, assigned, registry, _shutdown, write_gate) =
+        spawn_session_with_parkable_server_writes(timeouts).await;
+
+    let dcid = Cid::from([0x57; MAX_DCID_LEN]);
+    let scid = Cid::from([0x58; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut register_payload = Vec::new();
+    register.encode(&mut register_payload).unwrap();
+    let mut frame = Vec::new();
+    encode_message(
+        Message::RegisterCid {
+            payload: &register_payload,
+        },
+        &mut frame,
+    )
+    .unwrap();
+    client.write_all(&frame).await.unwrap();
+
+    let register_ok = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&register_ok, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
+    let peer = SocketAddr::from(([127, 0, 0, 1], 33402));
+    let expected_server_pn = complete_udp_upgrade_handshake(
+        &mut client,
+        &tx,
+        &mut udp_rx,
+        limits,
+        &register,
+        peer,
+        0x1455,
+    )
+    .await;
+
+    write_gate.park();
+
+    frame.clear();
+    encode_message(Message::AuthOk { payload: &[] }, &mut frame).unwrap();
+    client.write_all(&frame).await.unwrap();
+    timeout(
+        Duration::from_secs(1),
+        write_gate.wait_until_write_blocked(),
+    )
+    .await
+    .expect("session attempted the protocol-error CLOSE");
+
+    let close_packet = timeout(Duration::from_secs(2), udp_rx.recv())
+        .await
+        .expect("UDP-QSP CLOSE after TCP deadline")
+        .unwrap();
+    let opened = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &close_packet,
+            expected_server_pn,
+        )
+        .unwrap();
+    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+    assert_eq!(consumed, opened.payload.len());
+    let Message::Close { payload } = message else {
+        panic!("expected UDP-QSP CLOSE");
+    };
+    assert_eq!(
+        ClosePayload::decode(payload).unwrap().code,
+        CloseCode::ProtocolError
+    );
+
+    let result = timeout(Duration::from_secs(3), join)
+        .await
+        .expect("protocol-error CLOSE fallback must be bounded")
+        .unwrap();
+    assert!(matches!(result, Err(SessionError::ProtocolViolation)));
+    assert!(registry.lookup_ip(assigned.addr()).is_none());
+}
+
+#[tokio::test]
 async fn blocked_tcp_write_times_out() {
     let mut timeouts = default_session_timeouts();
     timeouts.tcp_write_timeout = Duration::from_millis(50);
@@ -918,8 +1006,8 @@ async fn session_continues_on_udp_after_tcp_close() {
 }
 
 #[tokio::test]
-async fn session_closes_via_udp_when_tcp_dead() {
-    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
+async fn protocol_error_closes_via_udp_when_tcp_dead() {
+    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, assigned, registry) =
         spawn_session().await;
 
     // Register and complete upgrade commit.
@@ -1008,9 +1096,52 @@ async fn session_closes_via_udp_when_tcp_dead() {
         _ => panic!("expected pong via UDP"),
     }
 
-    // Clean shutdown
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let next_server_pn = opened.pn + 1;
+    let mut invalid_frame = Vec::new();
+    encode_message(Message::AuthOk { payload: &[] }, &mut invalid_frame).unwrap();
+    let invalid_packet = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx + 2,
+            register.key_phase,
+            &invalid_frame,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer,
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: invalid_packet,
+    }))
+    .await
+    .unwrap();
+
+    let close_packet = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .expect("protocol-error CLOSE over UDP-QSP")
+        .unwrap();
+    let opened = keys
+        .open(
+            register.client_to_server_cid.len(),
+            &close_packet,
+            next_server_pn,
+        )
+        .unwrap();
+    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+    assert_eq!(consumed, opened.payload.len());
+    let Message::Close { payload } = message else {
+        panic!("expected UDP-QSP CLOSE");
+    };
+    assert_eq!(
+        ClosePayload::decode(payload).unwrap().code,
+        CloseCode::ProtocolError
+    );
+
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(SessionError::ProtocolViolation)));
+    assert!(registry.lookup_ip(assigned.addr()).is_none());
 }
 
 #[tokio::test]

@@ -5,9 +5,9 @@ use std::time::Instant;
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    CipherSuite, Message, MessageLimits, RegisterCidPayload, SwitchAckPayload, SwitchOkPayload,
-    SwitchToUdpPayload, UDP_QSP_TRAFFIC_SECRET_LEN, UdpReadyPayload, UpgradeProbeAckPayload,
-    UpgradeProbePayload, decode_message, encode_message,
+    CipherSuite, CloseCode, ClosePayload, Message, MessageLimits, RegisterCidPayload,
+    SwitchAckPayload, SwitchOkPayload, SwitchToUdpPayload, UDP_QSP_TRAFFIC_SECRET_LEN,
+    UdpReadyPayload, UpgradeProbeAckPayload, UpgradeProbePayload, decode_message, encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{Cid, ServerUdpQspConfig};
@@ -393,6 +393,21 @@ pub(super) async fn read_message_bytes(
             }
         }
     }
+}
+
+pub(super) async fn read_close_code(
+    stream: &mut TlsDuplexStream,
+    limits: MessageLimits,
+) -> CloseCode {
+    let buf = timeout(Duration::from_secs(1), read_message_bytes(stream, limits))
+        .await
+        .expect("server must send CLOSE before terminating")
+        .unwrap();
+    let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
+    let Message::Close { payload } = message else {
+        panic!("expected CLOSE, got {message:?}");
+    };
+    ClosePayload::decode(payload).unwrap().code
 }
 
 pub(super) fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, payload_len: usize) -> Vec<u8> {

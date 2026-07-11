@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    CipherSuite, FallbackOkPayload, FallbackToTcpPayload, Message, MessageLimits,
+    CipherSuite, CloseCode, FallbackOkPayload, FallbackToTcpPayload, Message, MessageLimits,
     RegisterCidPayload, RegisterFailCode, RegisterFailPayload, RegisterOkPayload, decode_message,
     encode_message,
 };
@@ -13,8 +13,9 @@ use tokio::time::{Duration, timeout};
 
 use super::super::*;
 use super::common::{
-    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session, spawn_session_with_peer_capture, spawn_session_with_udp_qsp_config,
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_close_code,
+    read_message_bytes, spawn_session, spawn_session_with_peer_capture,
+    spawn_session_with_udp_qsp_config,
 };
 use crate::test_support::TlsDuplexStream;
 use crate::{AssignedIp, ClientId};
@@ -383,6 +384,11 @@ async fn session_rejects_tcp_register_while_udp_active() {
     let mut frame = Vec::new();
     encode_message(Message::RegisterCid { payload: &payload }, &mut frame).unwrap();
     client.write_all(&frame).await.unwrap();
+
+    assert_eq!(
+        read_close_code(&mut client, limits).await,
+        CloseCode::ProtocolError
+    );
 
     let result = timeout(Duration::from_secs(1), join)
         .await

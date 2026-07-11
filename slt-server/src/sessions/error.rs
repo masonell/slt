@@ -98,15 +98,30 @@ pub enum SessionError {
     #[error(transparent)]
     Io(#[from] io::Error),
 
-    /// Protocol framing error.
+    /// Failure encoding a locally constructed protocol frame.
     #[error(transparent)]
     Frame(#[from] FrameError),
-    /// Protocol message error.
+    /// Error decoding an inbound protocol message or frame.
     #[error(transparent)]
     Message(#[from] MessageError),
-    /// Protocol payload decode error.
+    /// Error decoding an inbound protocol payload.
     #[error(transparent)]
     Payload(#[from] PayloadError),
+
+    /// Failure encoding a locally constructed protocol payload.
+    #[error(transparent)]
+    PayloadEncode(PayloadError),
+}
+
+impl SessionError {
+    /// Return whether the peer caused a protocol error that warrants a CLOSE.
+    #[must_use]
+    pub(super) const fn is_peer_protocol_error(&self) -> bool {
+        matches!(
+            self,
+            Self::ProtocolViolation | Self::Message(_) | Self::Payload(_)
+        )
+    }
 }
 
 #[cfg(test)]
@@ -117,7 +132,7 @@ mod tests {
     /// miss a variant. Adding a variant without a representative case fails the
     /// distinct-discriminant check below.
     ///
-    /// Covers all 7 distinct `SessionError` variants.
+    /// Covers all 8 distinct `SessionError` variants.
     #[test]
     fn representative_cases_cover_every_variant() {
         let cases: Vec<SessionError> = vec![
@@ -130,14 +145,15 @@ mod tests {
             SessionError::Frame(FrameError::UnknownType(0xFF)),
             SessionError::Message(MessageError::DataTooLarge { len: 10, max: 5 }),
             SessionError::Payload(PayloadError::InvalidCipher(0x99)),
+            SessionError::PayloadEncode(PayloadError::InvalidClientToServerCidLen(1)),
         ];
-        assert_eq!(cases.len(), 7, "expected 7 representative cases");
+        assert_eq!(cases.len(), 8, "expected 8 representative cases");
         let distinct: std::collections::HashSet<_> =
             cases.iter().map(std::mem::discriminant).collect();
         assert_eq!(
             distinct.len(),
-            7,
-            "representative_cases must cover all 7 distinct SessionError variants exactly once"
+            8,
+            "representative_cases must cover all 8 distinct SessionError variants exactly once"
         );
         let udp: Vec<&SessionError> = cases
             .iter()
@@ -208,5 +224,30 @@ mod tests {
             qsp,
             SessionError::UdpQsp(UdpQspError::Qsp(QspSessionError::Replay))
         ));
+    }
+
+    #[test]
+    fn peer_protocol_error_classification_excludes_local_failures() {
+        let peer_errors = [
+            SessionError::ProtocolViolation,
+            SessionError::Message(MessageError::Frame(FrameError::UnknownType(0xFF))),
+            SessionError::Payload(PayloadError::InvalidCloseCode(0xFF)),
+        ];
+        for err in peer_errors {
+            assert!(err.is_peer_protocol_error(), "peer error: {err:?}");
+        }
+
+        let local_errors = [
+            SessionError::Connection {
+                source: io::Error::from(io::ErrorKind::ConnectionReset),
+            },
+            SessionError::Io(io::Error::other("tun failure")),
+            SessionError::UdpQsp(UdpQspError::from(QspSessionError::Replay)),
+            SessionError::Frame(FrameError::LengthOverflow(usize::MAX)),
+            SessionError::PayloadEncode(PayloadError::InvalidClientToServerCidLen(1)),
+        ];
+        for err in local_errors {
+            assert!(!err.is_peer_protocol_error(), "local error: {err:?}");
+        }
     }
 }

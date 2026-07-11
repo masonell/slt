@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
 use slt_core::proto::{
-    CipherSuite, Message, PingPayload, PongPayload, decode_message, encode_message,
+    CipherSuite, CloseCode, Message, PingPayload, PongPayload, decode_message, encode_message,
 };
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
@@ -10,8 +10,8 @@ use tokio::time::{Duration, timeout};
 
 use super::super::*;
 use super::common::{
-    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session, spawn_session_with_peer_capture,
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_close_code,
+    read_message_bytes, spawn_session, spawn_session_with_peer_capture,
 };
 use crate::quic::UdpClaim;
 
@@ -585,6 +585,11 @@ async fn register_cid_over_udp_is_protocol_violation() {
     }))
     .await
     .unwrap();
+
+    assert_eq!(
+        read_close_code(&mut client, limits).await,
+        CloseCode::ProtocolError
+    );
 
     let result = timeout(Duration::from_secs(1), join)
         .await
