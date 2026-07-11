@@ -1,5 +1,7 @@
 //! VPN protocol framing, message types, and payload schemas.
 
+/// Static message transport and direction rules.
+pub mod admissibility;
 /// AUTH message construction (signature context + payload builder).
 pub mod auth;
 /// Frame encoding/decoding.
@@ -11,6 +13,8 @@ pub mod payloads;
 /// Message type identifiers.
 pub mod types;
 
+/// Static message transport and direction rules.
+pub use admissibility::{MessageSender, is_message_allowed_on_udp_qsp};
 /// AUTH message construction.
 pub use auth::{AUTH_CHALLENGE_LABEL, auth_signature_context, build_auth_payload};
 /// Frame encoding/decoding and frame types.

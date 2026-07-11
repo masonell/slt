@@ -594,11 +594,32 @@ async fn register_cid_over_udp_is_protocol_violation() {
 }
 
 #[tokio::test]
-async fn session_ignores_udp_control_messages() {
-    let (join, mut client, tx, mut tun_rx, mut udp_rx, limits, assigned, _registry) =
+async fn session_rejects_transport_invalid_udp_controls() {
+    let control_messages = [
+        Message::Auth { payload: &[] },
+        Message::AuthOk { payload: &[] },
+        Message::AuthFail { payload: &[] },
+        Message::RegisterOk { payload: &[] },
+        Message::RegisterFail { payload: &[] },
+        Message::UpgradeProbeAck { payload: &[] },
+        Message::UdpReady { payload: &[] },
+        Message::SwitchToUdp { payload: &[] },
+        Message::SwitchAck { payload: &[] },
+        Message::SwitchOk { payload: &[] },
+        Message::FallbackToTcp { payload: &[] },
+        Message::FallbackOk { payload: &[] },
+    ];
+
+    for message in control_messages {
+        assert_transport_invalid_udp_message(message).await;
+    }
+}
+
+async fn assert_transport_invalid_udp_message(message: Message<'static>) {
+    let message_type = message.ty();
+    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
-    // Register and complete upgrade commit.
     let dcid = Cid::from([0xB1; MAX_DCID_LEN]);
     let scid = Cid::from([0xB2; MAX_DCID_LEN]);
     let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
@@ -623,87 +644,30 @@ async fn session_ignores_udp_control_messages() {
     let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
     let peer = SocketAddr::from(([127, 0, 0, 1], 34567));
 
-    let _ = complete_udp_upgrade_handshake(
-        &mut client,
-        &tx,
-        &mut udp_rx,
-        limits,
-        &register,
-        peer,
-        0x1202,
-    )
-    .await;
-
-    // Send various control messages via UDP that should be ignored
-    let control_messages = [
-        Message::Auth { payload: &[] },
-        Message::AuthOk { payload: &[] },
-        Message::AuthFail { payload: &[] },
-        Message::RegisterOk { payload: &[] },
-        Message::RegisterFail { payload: &[] },
-        Message::UpgradeProbeAck { payload: &[] },
-        Message::UdpReady { payload: &[] },
-        Message::SwitchToUdp { payload: &[] },
-        Message::SwitchAck { payload: &[] },
-    ];
-
-    for (i, msg) in control_messages.into_iter().enumerate() {
-        let mut ctrl_frame = Vec::new();
-        encode_message(msg, &mut ctrl_frame).unwrap();
-        let udp_ctrl = keys
-            .protect(
-                register.client_to_server_cid.as_slice(),
-                register.pn_start_rx + 1 + i as u64,
-                register.key_phase,
-                &ctrl_frame,
-            )
-            .unwrap();
-        tx.send(SessionEvent::Udp(UdpClaim {
-            peer,
-            dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-            payload: udp_ctrl,
-        }))
-        .await
-        .unwrap();
-    }
-
-    // Control messages should be silently ignored - no TUN output
-    if let Ok(Some(_)) = timeout(Duration::from_millis(200), tun_rx.recv()).await {
-        panic!("UDP control messages should be ignored")
-    }
-
-    // Session should still work - send a data packet
-    let uplink_packet2 = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 61), 8);
-    let mut data_frame2 = Vec::new();
-    encode_message(
-        Message::Data {
-            packet: &uplink_packet2,
-        },
-        &mut data_frame2,
-    )
-    .unwrap();
-    let udp_packet2 = keys
+    let mut control_frame = Vec::new();
+    encode_message(message, &mut control_frame).unwrap();
+    let udp_control = keys
         .protect(
             register.client_to_server_cid.as_slice(),
-            register.pn_start_rx + 1 + control_messages.len() as u64,
+            register.pn_start_rx,
             register.key_phase,
-            &data_frame2,
+            &control_frame,
         )
         .unwrap();
     tx.send(SessionEvent::Udp(UdpClaim {
         peer,
         dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
-        payload: udp_packet2,
+        payload: udp_control,
     }))
     .await
     .unwrap();
 
-    let received = timeout(Duration::from_secs(1), tun_rx.recv())
+    let result = timeout(Duration::from_secs(1), join)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(received, uplink_packet2);
-
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    assert!(
+        matches!(result, Err(SessionError::ProtocolViolation)),
+        "expected {message_type:?} over UDP-QSP to terminate the session, got {result:?}",
+    );
 }

@@ -1,7 +1,9 @@
 //! UDP message handling for client sessions.
 
 use slt_core::crypto::udp_qsp::QspSessionError;
-use slt_core::proto::{Message, PongPayload, decode_padded_message};
+use slt_core::proto::{
+    Message, MessageSender, PongPayload, decode_padded_message, is_message_allowed_on_udp_qsp,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace};
 
@@ -63,8 +65,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 self.adopt_udp_peer_if_newer(peer, packet_number);
                 match self.decode_udp_message(&opened) {
                     Ok(Some(message)) => {
-                        self.note_activity();
-                        self.dispatch_udp_message(message).await
+                        if is_message_allowed_on_udp_qsp(message.ty(), MessageSender::Client) {
+                            self.note_activity();
+                            self.dispatch_udp_message(message).await
+                        } else {
+                            Err(SessionError::ProtocolViolation)
+                        }
                     }
                     Ok(None) => Ok(SessionControl::Continue),
                     Err(err) => Err(err),
@@ -204,8 +210,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     /// - Data: Forwards to TUN device if valid
     /// - `UpgradeProbe`: Sends UDP probe ack and may trigger a TCP switch request
     /// - Close: Initiates session shutdown
-    /// - `RegisterCid`: Fails as a protocol violation
-    /// - Other control messages: Silently ignored
+    /// - Transport-invalid controls: Fail as protocol violations
     ///
     /// # Parameters
     ///
@@ -249,10 +254,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             }
             Message::UpgradeProbe { payload } => self.handle_upgrade_probe(payload).await,
             Message::Close { .. } => Ok(self.peer_close_control(false)),
-            Message::RegisterCid { .. } => Err(SessionError::ProtocolViolation),
             Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. }
+            | Message::RegisterCid { .. }
             | Message::RegisterOk { .. }
             | Message::RegisterFail { .. }
             | Message::UpgradeProbeAck { .. }
@@ -261,7 +266,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             | Message::SwitchAck { .. }
             | Message::SwitchOk { .. }
             | Message::FallbackToTcp { .. }
-            | Message::FallbackOk { .. } => Ok(SessionControl::Continue),
+            | Message::FallbackOk { .. } => Err(SessionError::ProtocolViolation),
         }
     }
 }

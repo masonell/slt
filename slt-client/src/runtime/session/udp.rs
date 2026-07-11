@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use slt_core::proto::{
-    ClosePayload, Message, MessageType, OwnedMessageBuf, PingPayload, PongPayload,
+    ClosePayload, Message, MessageSender, MessageType, OwnedMessageBuf, PingPayload, PongPayload,
+    is_message_allowed_on_udp_qsp,
 };
 use tokio::time;
 use tracing::{info, trace, warn};
@@ -137,17 +138,16 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         &mut self,
         msg_buf: OwnedMessageBuf,
     ) -> Result<SessionControl, SessionError> {
-        if msg_buf.message().ty() == MessageType::Data {
+        let message_type = msg_buf.message().ty();
+        if !is_message_allowed_on_udp_qsp(message_type, MessageSender::Server) {
+            return Err(unexpected_udp_qsp_message(message_type));
+        }
+
+        if message_type == MessageType::Data {
             return Ok(self.send_to_tun_or_shutdown(msg_buf).await);
         }
 
         match msg_buf.message() {
-            Message::RegisterOk { .. } => Err(SessionError::ProtocolViolation {
-                detail: "unexpected register_ok on udp-qsp transport".into(),
-            }),
-            Message::RegisterFail { .. } => Err(SessionError::ProtocolViolation {
-                detail: "unexpected register_fail on udp-qsp transport".into(),
-            }),
             Message::Ping { payload } => {
                 let ping_in = PingPayload::decode(payload)?;
                 let pong_payload = ping_in.nonce.to_be_bytes();
@@ -171,19 +171,19 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 Ok(SessionControl::Close(SessionExit::RemoteClose(close.code)))
             }
             Message::UpgradeProbeAck { payload } => self.handle_upgrade_probe_ack(payload).await,
-            Message::RegisterCid { .. }
-            | Message::Auth { .. }
+            Message::Auth { .. }
             | Message::AuthOk { .. }
             | Message::AuthFail { .. }
+            | Message::RegisterCid { .. }
+            | Message::RegisterOk { .. }
+            | Message::RegisterFail { .. }
             | Message::UpgradeProbe { .. }
             | Message::UdpReady { .. }
             | Message::SwitchToUdp { .. }
             | Message::SwitchAck { .. }
             | Message::SwitchOk { .. }
             | Message::FallbackToTcp { .. }
-            | Message::FallbackOk { .. } => Err(SessionError::ProtocolViolation {
-                detail: "unexpected control message on udp-qsp transport".into(),
-            }),
+            | Message::FallbackOk { .. } => Err(unexpected_udp_qsp_message(message_type)),
         }
     }
 
@@ -320,6 +320,13 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     }
 }
 
+fn unexpected_udp_qsp_message(message_type: MessageType) -> SessionError {
+    SessionError::ProtocolViolation {
+        detail: format!("unexpected {message_type:?} message from server on udp-qsp transport")
+            .into(),
+    }
+}
+
 fn is_matching_pong(msg_buf: &OwnedMessageBuf, nonce: u64) -> Result<bool, SessionError> {
     let Message::Pong { payload } = msg_buf.message() else {
         return Ok(false);
@@ -428,34 +435,21 @@ mod tests {
         assert!(!violation.is_udp_qsp_recoverable());
     }
 
-    /// The unexpected-message branches in `handle_udp_message` emit
-    /// `SessionError::ProtocolViolation` with specific `detail` strings (these
-    /// are the variants the producer builds, not synthetic io::Errors). Each
-    /// must project to the fatal `ProtocolError` exit and render its detail, so
-    /// the terminal `{:#}` report is stage-specific.
+    /// Shared UDP-QSP admissibility failures become typed protocol violations
+    /// with the rejected message type preserved in terminal diagnostics.
     #[test]
-    fn udp_unexpected_message_variants_are_typed_protocol_violations() {
+    fn udp_unexpected_message_is_typed_protocol_violation() {
         use crate::runtime::session::SessionExit;
 
-        for detail in [
-            "unexpected register_ok on udp-qsp transport",
-            "unexpected register_fail on udp-qsp transport",
-            "unexpected control message on udp-qsp transport",
-        ] {
-            let err = SessionError::ProtocolViolation {
-                detail: detail.into(),
-            };
-            assert_eq!(err.exit(), SessionExit::ProtocolError);
-            let rendered = format!("{err:#}");
-            assert!(
-                rendered.contains("session protocol violation"),
-                "missing stage framing: {rendered:?}"
-            );
-            assert!(
-                rendered.contains(detail),
-                "missing producer detail: {rendered:?}"
-            );
-        }
+        let err = unexpected_udp_qsp_message(MessageType::RegisterOk);
+        assert_eq!(err.exit(), SessionExit::ProtocolError);
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("session protocol violation"),
+            "missing stage framing: {rendered:?}"
+        );
+        assert!(rendered.contains("RegisterOk"), "{rendered:?}");
+        assert!(rendered.contains("udp-qsp transport"), "{rendered:?}");
     }
 
     /// The "udp-qsp transport missing" sites report
