@@ -70,21 +70,25 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         payload: &[u8],
     ) -> Result<SessionControl, SessionError> {
         let request = FallbackToTcpPayload::decode(payload)?;
-        self.discard_pending_udp_send_for_fallback("server");
-        if self.active_transport == ActiveTransport::UdpQsp {
-            self.metrics.inc_transport_udp_to_tcp_server();
-            self.active_transport = ActiveTransport::Tcp;
-            self.note_transport_change(
-                Transport::UdpQsp,
-                Transport::Tcp,
-                TransportChangeReason::ServerInitiated,
-            );
+        let is_duplicate = self.last_peer_fallback_id == Some(request.fallback_id);
+        if !is_duplicate {
+            self.discard_pending_udp_send_for_fallback("server");
+            if self.active_transport == ActiveTransport::UdpQsp {
+                self.metrics.inc_transport_udp_to_tcp_server();
+                self.active_transport = ActiveTransport::Tcp;
+                self.note_transport_change(
+                    Transport::UdpQsp,
+                    Transport::Tcp,
+                    TransportChangeReason::ServerInitiated,
+                );
+            }
+            // The client owns CID discovery, so peer fallback resets the handshake
+            // and starts make-before-break rediscovery while the old UDP transport
+            // remains available for authenticated receive traffic.
+            self.schedule_discovery_retry();
+            self.last_peer_fallback_id = Some(request.fallback_id);
         }
         self.note_tcp_activity();
-        // The client owns CID discovery, so peer fallback resets the handshake
-        // and starts make-before-break rediscovery while the old UDP transport
-        // remains available for authenticated receive traffic.
-        self.schedule_discovery_retry();
 
         let ok = FallbackOkPayload {
             fallback_id: request.fallback_id,
@@ -93,10 +97,17 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         ok.encode(&mut buf);
         self.write_tcp_message(Message::FallbackOk { payload: &buf })
             .await?;
-        info!(
-            fallback_id = request.fallback_id,
-            "accepted server tcp fallback"
-        );
+        if is_duplicate {
+            trace!(
+                fallback_id = request.fallback_id,
+                "acknowledged duplicate server tcp fallback"
+            );
+        } else {
+            info!(
+                fallback_id = request.fallback_id,
+                "accepted server tcp fallback"
+            );
+        }
         Ok(SessionControl::Continue)
     }
 

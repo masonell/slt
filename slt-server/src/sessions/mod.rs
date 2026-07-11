@@ -130,6 +130,8 @@ pub struct ClientSessionBase<
     tcp_write_interrupted: bool,
     /// Locally initiated TCP fallback awaiting its peer acknowledgement.
     pending_tcp_fallback: Option<u64>,
+    /// Peer fallback identifier retained for session-long duplicate suppression.
+    last_peer_fallback_id: Option<u64>,
 }
 
 /// Default client session type using the async TUN device.
@@ -190,6 +192,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             tcp_alive: true,
             tcp_write_interrupted: false,
             pending_tcp_fallback: None,
+            last_peer_fallback_id: None,
         }
     }
 

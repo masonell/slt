@@ -81,6 +81,8 @@ pub(super) struct ClientSession<
     tcp_alive: bool,
     /// Locally initiated TCP fallback awaiting its peer acknowledgement.
     pending_tcp_fallback: Option<u64>,
+    /// Peer fallback identifier retained for session-long duplicate suppression.
+    last_peer_fallback_id: Option<u64>,
     control_rx: Option<&'a mut ClientCommandReceiver>,
 }
 
@@ -210,6 +212,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             services,
             tcp_alive: true,
             pending_tcp_fallback: None,
+            last_peer_fallback_id: None,
             control_rx,
         }
     }
@@ -862,7 +865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_fallback_request_switches_client_and_is_acknowledged() {
+    async fn duplicate_server_fallback_preserves_replacement_registration() {
         let mut config = test_config();
         config.enable_upgrade = true;
         let services = DesktopServices::new();
@@ -910,8 +913,76 @@ mod tests {
         let mut server = TcpChannel::new(server_stream);
         assert_ne!(server.read_more().await.unwrap(), 0);
         let ack = server.try_pop_message(session.limits).unwrap().unwrap();
-        let Message::FallbackOk { payload } = ack.message() else {
+        let Message::FallbackOk {
+            payload: ack_payload,
+        } = ack.message()
+        else {
             panic!("expected fallback acknowledgement");
+        };
+        assert_eq!(
+            FallbackOkPayload::decode(ack_payload).unwrap().fallback_id,
+            fallback_id
+        );
+        assert_eq!(session.last_peer_fallback_id, Some(fallback_id));
+
+        let quic_ids = mock_quic_ids().await;
+        let expected_dcid = quic_ids.dcid;
+        session.udp_state = UdpState::Pending {
+            quic_ids,
+            backoff: ReconnectBackoff::new(
+                config.timing.reconnect_min,
+                config.timing.reconnect_max,
+            ),
+            reconnect_at: Instant::now(),
+            registration: None,
+        };
+        assert_eq!(
+            session.attempt_udp_registration().await.unwrap(),
+            SessionControl::Continue
+        );
+        let registration_deadline = session.udp_state.register_deadline().unwrap();
+
+        let registration = loop {
+            if let Some(message) = server.try_pop_message(session.limits).unwrap() {
+                break message;
+            }
+            assert_ne!(server.read_more().await.unwrap(), 0);
+        };
+        assert!(matches!(
+            registration.message(),
+            Message::RegisterCid { .. }
+        ));
+
+        server
+            .write_message(Message::FallbackToTcp { payload: &payload })
+            .await
+            .unwrap();
+        assert_ne!(session.tcp.read_more().await.unwrap(), 0);
+        assert_eq!(
+            session.handle_tcp_read().await.unwrap(),
+            SessionControl::Continue
+        );
+
+        let UdpState::Pending {
+            quic_ids,
+            registration,
+            ..
+        } = &session.udp_state
+        else {
+            panic!("duplicate fallback replaced pending registration state");
+        };
+        assert_eq!(quic_ids.dcid, expected_dcid);
+        assert!(registration.is_some());
+        assert_eq!(
+            session.udp_state.register_deadline(),
+            Some(registration_deadline)
+        );
+        assert!(session.retained_udp_transport.is_some());
+
+        assert_ne!(server.read_more().await.unwrap(), 0);
+        let duplicate_ack = server.try_pop_message(session.limits).unwrap().unwrap();
+        let Message::FallbackOk { payload } = duplicate_ack.message() else {
+            panic!("expected duplicate fallback acknowledgement");
         };
         assert_eq!(
             FallbackOkPayload::decode(payload).unwrap().fallback_id,

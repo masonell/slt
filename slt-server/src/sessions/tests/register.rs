@@ -397,7 +397,7 @@ async fn session_rejects_tcp_register_while_udp_active() {
 
 #[tokio::test]
 async fn session_registers_replacement_after_ordered_tcp_fallback() {
-    let (join, mut client, tx, _tun_rx, mut udp_rx, mut udp_peer_rx, limits, _assigned, _registry) =
+    let (join, mut client, tx, _tun_rx, mut udp_rx, mut udp_peer_rx, limits, assigned, _registry) =
         spawn_session_with_peer_capture().await;
     let initial_peer = SocketAddr::from(([127, 0, 0, 1], 45_002));
     let _active = register_and_activate_udp(
@@ -492,7 +492,7 @@ async fn session_registers_replacement_after_ordered_tcp_fallback() {
     );
 
     let replacement_peer = SocketAddr::from(([127, 0, 0, 1], 45_003));
-    complete_udp_upgrade_handshake(
+    let next_server_pn = complete_udp_upgrade_handshake(
         &mut client,
         &tx,
         &mut udp_rx,
@@ -510,6 +510,63 @@ async fn session_registers_replacement_after_ordered_tcp_fallback() {
         replacement_peer,
         "replacement registration did not reset the UDP peer watermark"
     );
+
+    let mut duplicate_fallback_frame = Vec::new();
+    encode_message(
+        Message::FallbackToTcp {
+            payload: &fallback_payload,
+        },
+        &mut duplicate_fallback_frame,
+    )
+    .unwrap();
+    client.write_all(&duplicate_fallback_frame).await.unwrap();
+
+    let duplicate_response = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let Message::FallbackOk { payload } = decode_message(&duplicate_response, limits)
+        .unwrap()
+        .unwrap()
+        .0
+    else {
+        panic!("expected duplicate fallback_ok");
+    };
+    assert_eq!(
+        FallbackOkPayload::decode(payload).unwrap().fallback_id,
+        fallback_id
+    );
+
+    let downlink = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 92), 8);
+    tx.send(SessionEvent::TunPacket(downlink.clone()))
+        .await
+        .unwrap();
+    let protected = timeout(Duration::from_secs(1), udp_rx.recv())
+        .await
+        .expect("duplicate fallback must not disable replacement UDP")
+        .unwrap();
+    let keys = UdpQspKeys::new(
+        replacement.cipher,
+        replacement.secret_rx,
+        replacement.secret_tx,
+    )
+    .unwrap();
+    let opened = keys
+        .open(
+            replacement.client_to_server_cid.len(),
+            &protected,
+            next_server_pn,
+        )
+        .unwrap();
+    let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+    assert_eq!(consumed, opened.payload.len());
+    match message {
+        Message::Data { packet } => assert_eq!(packet, downlink.as_slice()),
+        other => panic!("expected UDP data after duplicate fallback, got {other:?}"),
+    }
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     join.await.unwrap().unwrap();

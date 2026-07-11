@@ -99,8 +99,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         payload: &[u8],
     ) -> Result<SessionControl, SessionError> {
         let request = FallbackToTcpPayload::decode(payload)?;
-        self.set_active_transport(ActiveTransport::Tcp);
-        self.reset_udp_upgrade_state();
+        let is_duplicate = self.last_peer_fallback_id == Some(request.fallback_id);
+        if !is_duplicate {
+            self.set_active_transport(ActiveTransport::Tcp);
+            self.reset_udp_upgrade_state();
+            self.last_peer_fallback_id = Some(request.fallback_id);
+        }
 
         let ok = FallbackOkPayload {
             fallback_id: request.fallback_id,
@@ -109,12 +113,21 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         ok.encode(&mut buf);
         self.send_tcp_message(Message::FallbackOk { payload: &buf })
             .await?;
-        info!(
-            session_id = self.session_id,
-            client_id = %self.client_id,
-            fallback_id = request.fallback_id,
-            "accepted tcp fallback"
-        );
+        if is_duplicate {
+            trace!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                fallback_id = request.fallback_id,
+                "acknowledged duplicate tcp fallback"
+            );
+        } else {
+            info!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                fallback_id = request.fallback_id,
+                "accepted tcp fallback"
+            );
+        }
         Ok(SessionControl::Continue)
     }
 
