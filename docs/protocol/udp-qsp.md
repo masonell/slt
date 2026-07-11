@@ -394,6 +394,10 @@ Packets with any of the following conditions MUST be silently dropped:
 - Replay detected
 - Packet older than replay window
 
+An authenticated packet whose plaintext does not contain one complete framed VPN
+message is a protocol violation. The endpoint terminates the session with
+`ProtocolError`.
+
 The implementation returns structured errors via `QspCryptoError` and `QspSessionError`.
 
 ## 11. Server Peer Address Migration

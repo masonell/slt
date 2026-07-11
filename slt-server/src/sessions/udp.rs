@@ -67,7 +67,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 self.note_authenticated_udp_activity();
                 self.adopt_udp_peer_if_newer(peer, packet_number);
                 match self.decode_udp_message(&opened) {
-                    Ok(Some(message)) => {
+                    Ok(message) => {
                         if is_message_allowed_on_udp_qsp(message.ty(), MessageSender::Client) {
                             let received_at = Instant::now();
                             let control = self.dispatch_udp_message(message).await?;
@@ -77,7 +77,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                             Err(SessionError::ProtocolViolation)
                         }
                     }
-                    Ok(None) => Ok(SessionControl::Continue),
                     Err(err) => Err(err),
                 }
             }
@@ -193,18 +192,12 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(message))` - A valid message was decoded
-    /// * `Ok(None)` - The payload was empty or incomplete
-    /// * `Err(SessionError)` - The message was malformed
-    fn decode_udp_message<'a>(
-        &self,
-        payload: &'a [u8],
-    ) -> Result<Option<Message<'a>>, SessionError> {
-        let decoded = decode_padded_message(payload, self.limits)?;
-        let Some((message, _frame_bytes)) = decoded else {
-            return Ok(None);
-        };
-        Ok(Some(message))
+    /// * `Ok(message)` - A valid message was decoded
+    /// * `Err(SessionError)` - The message was malformed or incomplete
+    fn decode_udp_message<'a>(&self, payload: &'a [u8]) -> Result<Message<'a>, SessionError> {
+        decode_padded_message(payload, self.limits)?
+            .map(|(message, _frame_bytes)| message)
+            .ok_or(SessionError::ProtocolViolation)
     }
 
     /// Dispatches a decoded UDP message to its appropriate handler.

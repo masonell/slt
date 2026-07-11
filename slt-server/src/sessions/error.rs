@@ -65,11 +65,11 @@ pub enum UdpQspError {
 pub enum SessionError {
     /// Client-detected protocol violation on the session path.
     ///
-    /// An unexpected control message on an established session. Fatal: retry
-    /// won't help, the peer is speaking a protocol we don't expect. A unit
-    /// variant (carries no detail); see the module docs for why it is narrower
-    /// than the client's `ProtocolViolation { detail }`.
-    #[error("session protocol violation: unexpected control message")]
+    /// Authenticated peer input violated the established-session protocol.
+    /// Fatal: retry won't help, the peer is speaking a protocol we don't
+    /// expect. A unit variant (carries no detail); see the module docs for why
+    /// it is narrower than the client's `ProtocolViolation { detail }`.
+    #[error("session protocol violation")]
     ProtocolViolation,
 
     /// Network-level I/O error on the session's TCP connection.

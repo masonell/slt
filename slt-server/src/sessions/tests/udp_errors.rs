@@ -1,15 +1,17 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
-use slt_core::proto::{CipherSuite, Message, decode_message, encode_message};
+use slt_core::proto::{
+    CipherSuite, CloseCode, Message, MessageType, decode_message, encode_message,
+};
 use slt_core::types::{Cid, MAX_DCID_LEN};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
 use super::super::*;
 use super::common::{
-    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session, spawn_session_with_udp_socket,
+    complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_close_code,
+    read_message_bytes, spawn_session, spawn_session_with_udp_socket,
 };
 use crate::quic::UdpClaim;
 
@@ -95,6 +97,76 @@ async fn session_ignores_trailing_data_after_udp_message() {
 // =========================================================================
 // UDP error handling tests
 // =========================================================================
+
+#[tokio::test]
+async fn session_rejects_authenticated_incomplete_udp_datagrams() {
+    let mut incomplete_ping = vec![u8::from(MessageType::Ping)];
+    incomplete_ping.extend_from_slice(&8u32.to_be_bytes());
+    incomplete_ping.extend_from_slice(&[0; 7]);
+
+    for plaintext in [Vec::new(), incomplete_ping] {
+        assert_authenticated_incomplete_udp_datagram_rejected(&plaintext).await;
+    }
+}
+
+async fn assert_authenticated_incomplete_udp_datagram_rejected(plaintext: &[u8]) {
+    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+        spawn_session().await;
+
+    let dcid = Cid::from([0x83; MAX_DCID_LEN]);
+    let scid = Cid::from([0x84; MAX_DCID_LEN]);
+    let register = make_register_payload(dcid, scid, CipherSuite::Aes128Gcm);
+    let mut register_payload = Vec::new();
+    register.encode(&mut register_payload).unwrap();
+    let mut register_frame = Vec::new();
+    encode_message(
+        Message::RegisterCid {
+            payload: &register_payload,
+        },
+        &mut register_frame,
+    )
+    .unwrap();
+    client.write_all(&register_frame).await.unwrap();
+
+    let response = timeout(
+        Duration::from_secs(1),
+        read_message_bytes(&mut client, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        decode_message(&response, limits).unwrap().unwrap().0,
+        Message::RegisterOk { .. }
+    ));
+
+    let keys = UdpQspKeys::new(register.cipher, register.secret_rx, register.secret_tx).unwrap();
+    let protected = keys
+        .protect(
+            register.client_to_server_cid.as_slice(),
+            register.pn_start_rx,
+            register.key_phase,
+            plaintext,
+        )
+        .unwrap();
+    tx.send(SessionEvent::Udp(UdpClaim {
+        peer: SocketAddr::from(([127, 0, 0, 1], 44445)),
+        dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+        payload: protected,
+    }))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        read_close_code(&mut client, limits).await,
+        CloseCode::ProtocolError
+    );
+    let result = timeout(Duration::from_secs(1), join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(SessionError::ProtocolViolation)));
+}
 
 #[tokio::test]
 async fn session_drops_udp_replay_packet() {
