@@ -22,7 +22,7 @@ pub const AEAD_IV_LEN: usize = 12;
 /// Length of a UDP-QSP directional traffic secret in bytes.
 pub const UDP_QSP_TRAFFIC_SECRET_LEN: usize = 32;
 /// Length of the AUTH payload in bytes.
-pub const AUTH_PAYLOAD_LEN: usize = 16 + 4 + AUTH_CHALLENGE_LEN + AUTH_SIGNATURE_LEN;
+pub const AUTH_PAYLOAD_LEN: usize = 16 + 4 + 2 + AUTH_CHALLENGE_LEN + AUTH_SIGNATURE_LEN;
 /// Length of the PING/PONG payload in bytes.
 pub const PING_PAYLOAD_LEN: usize = 8;
 /// Length of upgrade identifier payloads in bytes.
@@ -94,6 +94,8 @@ pub enum AuthFailCode {
     IpMismatch = 0x04,
     /// Challenge is expired or invalid.
     ChallengeInvalid = 0x05,
+    /// Client and server TUN MTUs do not match.
+    MtuMismatch = 0x06,
 }
 
 /// Register-CID failure reasons.
@@ -135,9 +137,11 @@ pub struct AuthPayload {
     pub client_id: ClientId,
     /// Assigned IPv4 address.
     pub assigned_ipv4: Ipv4Addr,
+    /// Client TUN interface MTU.
+    pub tun_mtu: u16,
     /// Server-provided challenge bytes.
     pub challenge: [u8; AUTH_CHALLENGE_LEN],
-    /// Ed25519 signature over the challenge and context.
+    /// Ed25519 signature over the authentication context.
     pub signature: [u8; AUTH_SIGNATURE_LEN],
 }
 
@@ -147,7 +151,7 @@ impl AuthPayload {
     /// # Errors
     ///
     /// Returns `PayloadError::LengthMismatch` if the payload length is not
-    /// exactly `AUTH_PAYLOAD_LEN` (116 bytes).
+    /// exactly `AUTH_PAYLOAD_LEN` (118 bytes).
     pub fn decode(payload: &[u8]) -> Result<Self, PayloadError> {
         if payload.len() != AUTH_PAYLOAD_LEN {
             return Err(PayloadError::LengthMismatch {
@@ -161,18 +165,20 @@ impl AuthPayload {
         let client_id = ClientId(client_id_bytes);
 
         let assigned_ipv4 = Ipv4Addr::new(payload[16], payload[17], payload[18], payload[19]);
+        let tun_mtu = u16::from_be_bytes([payload[20], payload[21]]);
 
         let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-        challenge.copy_from_slice(&payload[20..20 + AUTH_CHALLENGE_LEN]);
+        challenge.copy_from_slice(&payload[22..22 + AUTH_CHALLENGE_LEN]);
 
         let mut signature = [0u8; AUTH_SIGNATURE_LEN];
         signature.copy_from_slice(
-            &payload[20 + AUTH_CHALLENGE_LEN..20 + AUTH_CHALLENGE_LEN + AUTH_SIGNATURE_LEN],
+            &payload[22 + AUTH_CHALLENGE_LEN..22 + AUTH_CHALLENGE_LEN + AUTH_SIGNATURE_LEN],
         );
 
         Ok(Self {
             client_id,
             assigned_ipv4,
+            tun_mtu,
             challenge,
             signature,
         })
@@ -183,6 +189,7 @@ impl AuthPayload {
         out.reserve(AUTH_PAYLOAD_LEN);
         out.extend_from_slice(self.client_id.as_bytes());
         out.extend_from_slice(&self.assigned_ipv4.octets());
+        out.extend_from_slice(&self.tun_mtu.to_be_bytes());
         out.extend_from_slice(&self.challenge);
         out.extend_from_slice(&self.signature);
     }
@@ -1009,6 +1016,7 @@ mod tests {
         let payload = AuthPayload {
             client_id: ClientId([0x11; 16]),
             assigned_ipv4: Ipv4Addr::new(10, 10, 0, 2),
+            tun_mtu: 1280,
             challenge: [0x22; AUTH_CHALLENGE_LEN],
             signature: [0x33; AUTH_SIGNATURE_LEN],
         };

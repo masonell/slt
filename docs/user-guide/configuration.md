@@ -104,7 +104,7 @@ front-door cap until nginx closes them through settings such as
 | `tun_name` | string | Yes | - | TUN interface name (e.g., `tun0`). Must not be empty. Must already exist on the host. |
 | `tun_ipv4` | IPv4 address | No | `10.10.0.1` | Local overlay address on the interface. Server: the gateway address. Client: must equal `assigned_ipv4`. |
 | `tun_prefix` | integer | No | `24` | Overlay subnet prefix length. Must be 1-32. Client IPs must fall within this subnet. |
-| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface. |
+| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface and every authenticating client. |
 
 #### Timing Section
 
@@ -270,7 +270,7 @@ reconnect_max = "5s"
 | `tun_name` | string | Yes | - | TUN interface name (e.g., `tun0`). Must not be empty. Must already exist on the host. |
 | `tun_ipv4` | IPv4 address | No | `10.10.0.1` | Local overlay address on the interface. Server: the gateway address. Client: must equal `assigned_ipv4`. |
 | `tun_prefix` | integer | No | `24` | Overlay subnet prefix length. Must be 1-32. Client IPs must fall within this subnet. |
-| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface. |
+| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface and server MTU. |
 
 #### Transport Options
 
@@ -458,7 +458,7 @@ The TUN MTU has a maximum value of **1406 bytes**. This ensures that UDP-QSP DAT
 
 The default value of **1280 bytes** is safe for all scenarios.
 
-`slt init` writes `tun_mtu = 1406` (and `slt add-client` copies that into the client config); omitting the field falls back to the 1280 default above. Whatever value you use, the preconfigured interface's MTU must match it exactly or the server/client will refuse to attach (see [Server Setup](../deployment/server-setup.md) and [Client Setup](../deployment/client-setup.md)).
+`slt init` writes `tun_mtu = 1406` (and `slt add-client` copies that into the client config); omitting the field falls back to the 1280 default above. Whatever value you use, each preconfigured interface must match its local configuration, and the client and server values must match or authentication is rejected (see [Server Setup](../deployment/server-setup.md) and [Client Setup](../deployment/client-setup.md)).
 
 ---
 

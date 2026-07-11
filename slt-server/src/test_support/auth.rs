@@ -14,6 +14,9 @@ use crate::sessions::SessionTimeouts;
 use crate::test_support::tls::tls_acceptor;
 use crate::test_support::tun::NullTun;
 
+/// TUN MTU used by authentication test fixtures.
+pub const TEST_TUN_MTU: u16 = 1280;
+
 /// Default session timeouts for testing.
 #[must_use]
 pub fn default_session_timeouts() -> SessionTimeouts {
@@ -33,6 +36,7 @@ pub struct TestAuthHandlerBuilder {
     max_auth_inflight: usize,
     auth_timeout: Duration,
     timeouts: SessionTimeouts,
+    tun_mtu: u16,
 }
 
 impl Default for TestAuthHandlerBuilder {
@@ -43,6 +47,7 @@ impl Default for TestAuthHandlerBuilder {
             max_auth_inflight: 128,
             auth_timeout: Duration::from_secs(30),
             timeouts: default_session_timeouts(),
+            tun_mtu: TEST_TUN_MTU,
         }
     }
 }
@@ -89,6 +94,13 @@ impl TestAuthHandlerBuilder {
         self
     }
 
+    /// Sets the server TUN MTU authenticated by the handler.
+    #[must_use]
+    pub const fn with_tun_mtu(mut self, tun_mtu: u16) -> Self {
+        self.tun_mtu = tun_mtu;
+        self
+    }
+
     /// Builds the test auth handler (async version for use with #[`tokio::test`]).
     ///
     /// Returns (handler, registry, metrics) for inspection.
@@ -105,14 +117,14 @@ impl TestAuthHandlerBuilder {
             .await
             .expect("failed to bind UDP socket");
 
-        let authenticator = Authenticator::new(self.clients);
+        let authenticator = Authenticator::new(self.clients, self.tun_mtu);
 
         let sessions = SessionManager::new(
             registry.clone(),
             metrics.clone(),
             Arc::new(NullTun),
             Arc::new(udp_socket),
-            MessageLimits::from_mtu(1500),
+            MessageLimits::from_mtu(self.tun_mtu),
             self.timeouts,
             self.session_queue_size,
             ServerUdpQspConfig::default(),
@@ -156,14 +168,14 @@ impl TestAuthHandlerBuilder {
                 .expect("failed to bind UDP socket")
         });
 
-        let authenticator = Authenticator::new(self.clients);
+        let authenticator = Authenticator::new(self.clients, self.tun_mtu);
 
         let sessions = SessionManager::new(
             registry.clone(),
             metrics.clone(),
             Arc::new(NullTun),
             Arc::new(udp_socket),
-            MessageLimits::from_mtu(1500),
+            MessageLimits::from_mtu(self.tun_mtu),
             self.timeouts,
             self.session_queue_size,
             ServerUdpQspConfig::default(),

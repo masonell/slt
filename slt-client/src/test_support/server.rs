@@ -309,6 +309,17 @@ impl MockTlsServer {
         let payload = &msg.buf[5..];
         let payload = AuthPayload::decode(payload)?;
 
+        if payload.tun_mtu != config.tun.tun_mtu {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "AUTH tun_mtu {} does not match client config {}",
+                    payload.tun_mtu, config.tun.tun_mtu
+                ),
+            )
+            .into());
+        }
+
         // Verify signature
         let challenge = self.export_keying_material()?;
         verify_auth_signature(&payload, challenge, config)?;
@@ -449,6 +460,7 @@ fn verify_auth_signature(
     let context = slt_core::proto::auth_signature_context(
         &payload.client_id,
         payload.assigned_ipv4,
+        payload.tun_mtu,
         &challenge,
     );
 

@@ -530,10 +530,11 @@ mod tests {
         let payload = AuthPayload {
             client_id: ClientId([0x11; 16]),
             assigned_ipv4: std::net::Ipv4Addr::new(10, 10, 0, 2),
+            tun_mtu: 1280,
             challenge: [0x44; AUTH_CHALLENGE_LEN],
             signature: [0x77; 64],
         };
-        assert_eq!(AUTH_PAYLOAD_LEN, 16 + 4 + AUTH_CHALLENGE_LEN + 64);
+        assert_eq!(AUTH_PAYLOAD_LEN, 16 + 4 + 2 + AUTH_CHALLENGE_LEN + 64);
         let mut payload_buf = Vec::new();
         payload.encode(&mut payload_buf);
         let mut frame = Vec::new();
@@ -551,6 +552,7 @@ mod tests {
             Message::Auth { payload } => {
                 let decoded = AuthPayload::decode(payload).unwrap();
                 assert_eq!(decoded.client_id, ClientId([0x11; 16]));
+                assert_eq!(decoded.tun_mtu, 1280);
                 assert_eq!(decoded.signature, [0x77; 64]);
             }
             other => panic!("expected Auth, got {other:?}"),

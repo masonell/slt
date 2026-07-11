@@ -301,6 +301,60 @@ async fn auth_phase_successful_authentication() {
 }
 
 #[tokio::test]
+async fn auth_phase_mtu_mismatch_sends_auth_fail() {
+    let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+    let client_id = ClientId([0xA1; 16]);
+    let assigned_ipv4 = Ipv4Addr::new(10, 0, 0, 9);
+    let client = make_client(client_id, &signing_key, assigned_ipv4, true);
+
+    let (handler, registry, metrics) = TestAuthHandler::builder()
+        .with_client(client)
+        .with_auth_timeout(Duration::from_secs(5))
+        .build_async()
+        .await;
+
+    let (server_tls, mut client_tls) = tls_pair().await;
+    let limits = MessageLimits::from_mtu(1500);
+    let challenge = slt_core::crypto::export_auth_challenge(server_tls.ssl()).unwrap();
+    let handle = tokio::spawn(async move { handler.inner.handle_with_tls(server_tls).await });
+
+    let auth_payload = make_payload_with_mtu(
+        client_id,
+        assigned_ipv4,
+        TEST_TUN_MTU + 1,
+        challenge,
+        &signing_key,
+    );
+    let mut auth_buf = Vec::new();
+    auth_payload.encode(&mut auth_buf);
+    let mut frame = Vec::new();
+    slt_core::proto::encode_message(Message::Auth { payload: &auth_buf }, &mut frame).unwrap();
+    client_tls.write_all(&frame).await.unwrap();
+
+    let buf = timeout(
+        Duration::from_secs(2),
+        read_message(&mut client_tls, limits),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (message, _) = slt_core::proto::decode_message(&buf, limits)
+        .unwrap()
+        .unwrap();
+    let Message::AuthFail { payload } = message else {
+        panic!("expected AUTH_FAIL, got {message:?}");
+    };
+    assert_eq!(
+        AuthFailPayload::decode(payload).unwrap().code,
+        AuthFailCode::MtuMismatch
+    );
+    assert!(registry.lookup_ip(assigned_ipv4).is_none());
+    assert_eq!(metrics.snapshot().auth_rejections, 1);
+
+    let _ = handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn auth_phase_failed_authentication_sends_auth_fail() {
     let signing_key = SigningKey::from_bytes(&[0x42; 32]);
     let client_id = ClientId([0xA1; 16]);

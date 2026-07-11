@@ -18,23 +18,25 @@ use crate::types::ClientId;
 /// challenge bytes; centralizing it prevents the two sides from drifting apart.
 pub const AUTH_CHALLENGE_LABEL: &str = "slt-auth-challenge";
 
-/// Length of the `"slt-auth-v1"` context prefix.
+/// Length of the `"slt-auth-v2"` context prefix.
 const CONTEXT_PREFIX_LEN: usize = 11;
 
 /// Build the canonical bytes an AUTH Ed25519 signature covers.
 ///
-/// The context is `"slt-auth-v1" || client_id || assigned_ipv4 || challenge`. Signing
-/// and verification both build these exact bytes, then sign/verify over them.
+/// The context is `"slt-auth-v2" || client_id || assigned_ipv4 || tun_mtu || challenge`.
+/// Signing and verification both build these exact bytes, then sign/verify over them.
 #[must_use]
 pub fn auth_signature_context(
     client_id: &ClientId,
     assigned_ipv4: Ipv4Addr,
+    tun_mtu: u16,
     challenge: &[u8; AUTH_CHALLENGE_LEN],
 ) -> Vec<u8> {
-    let mut context = Vec::with_capacity(CONTEXT_PREFIX_LEN + 16 + 4 + challenge.len());
-    context.extend_from_slice(b"slt-auth-v1");
+    let mut context = Vec::with_capacity(CONTEXT_PREFIX_LEN + 16 + 4 + 2 + challenge.len());
+    context.extend_from_slice(b"slt-auth-v2");
     context.extend_from_slice(client_id.as_bytes());
     context.extend_from_slice(&assigned_ipv4.octets());
+    context.extend_from_slice(&tun_mtu.to_be_bytes());
     context.extend_from_slice(challenge);
     context
 }
@@ -56,6 +58,7 @@ pub fn build_auth_payload(
     let context = auth_signature_context(
         &config.identity.client_id,
         config.identity.assigned_ipv4,
+        config.tun.tun_mtu,
         &challenge,
     );
     let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
@@ -63,6 +66,7 @@ pub fn build_auth_payload(
     AuthPayload {
         client_id: config.identity.client_id,
         assigned_ipv4: config.identity.assigned_ipv4,
+        tun_mtu: config.tun.tun_mtu,
         challenge,
         signature,
     }
@@ -119,7 +123,12 @@ mod tests {
         challenge: [u8; AUTH_CHALLENGE_LEN],
         verifying_key: &ed25519_dalek::VerifyingKey,
     ) -> Result<(), ed25519_dalek::SignatureError> {
-        let context = auth_signature_context(&payload.client_id, payload.assigned_ipv4, &challenge);
+        let context = auth_signature_context(
+            &payload.client_id,
+            payload.assigned_ipv4,
+            payload.tun_mtu,
+            &challenge,
+        );
         let signature = Signature::from_bytes(&payload.signature);
         verifying_key.verify(&context, &signature)
     }
@@ -198,6 +207,21 @@ mod tests {
         let challenge = [0x44; AUTH_CHALLENGE_LEN];
         let mut payload = build_auth_payload(&config, challenge);
         payload.assigned_ipv4 = Ipv4Addr::new(10, 10, 0, 3);
+
+        let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
+        assert!(verify_signature(&payload, challenge, &signing_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn signature_fails_with_tampered_tun_mtu() {
+        let config = config_with_identity(
+            ClientId([0x11; 16]),
+            Ipv4Addr::new(10, 10, 0, 2),
+            PrivKeyEd25519([0x33; 32]),
+        );
+        let challenge = [0x44; AUTH_CHALLENGE_LEN];
+        let mut payload = build_auth_payload(&config, challenge);
+        payload.tun_mtu -= 1;
 
         let signing_key = SigningKey::from_bytes(config.identity.privkey_ed25519.as_bytes());
         assert!(verify_signature(&payload, challenge, &signing_key.verifying_key()).is_err());

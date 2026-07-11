@@ -34,12 +34,14 @@ Client                                    Server
   |  6. AUTH message                        |
   |    - client_id (16 bytes)               |
   |    - assigned_ipv4 (4 bytes)            |
+  |    - tun_mtu (2 bytes)                  |
   |    - challenge (32 bytes, TLS exporter) |
   |    - signature (64 bytes, Ed25519)      |
   |---------------------------------------->|
   |                                         |  7. Validate AUTH
   |                                         |     - client_id exists and enabled
   |                                         |     - IPv4 matches config
+  |                                         |     - TUN MTU matches server
   |                                         |     - challenge matches exporter
   |                                         |     - signature verifies
   |                                         |
@@ -56,7 +58,7 @@ The client proves its identity by signing a challenge derived from the TLS sessi
 
 ```
 challenge = TLS-Exporter("slt-auth-challenge", "", 32)
-context = b"slt-auth-v1" || client_id || assigned_ipv4 || challenge
+context = b"slt-auth-v2" || client_id || assigned_ipv4 || tun_mtu_be || challenge
 signature = Ed25519.sign(client_private_key, context)
 ```
 
@@ -77,6 +79,7 @@ Before `AUTH_OK` is received:
 | 0x03 | BadSignature | Signature verification failed |
 | 0x04 | IpMismatch | assigned_ipv4 does not match |
 | 0x05 | ChallengeInvalid | TLS challenge mismatch |
+| 0x06 | MtuMismatch | Client and server TUN MTUs differ |
 
 ---
 

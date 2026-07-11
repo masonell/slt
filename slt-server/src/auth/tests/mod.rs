@@ -18,7 +18,7 @@ use super::authenticator::verify_auth_payload;
 use super::*;
 use crate::AssignedIp;
 use crate::test_support::{
-    TestAuthHandler, TlsDuplexStream, tls_pair, tls_pair_with_parkable_server_writes,
+    TEST_TUN_MTU, TestAuthHandler, TlsDuplexStream, tls_pair, tls_pair_with_parkable_server_writes,
 };
 
 mod authenticator_tests;
@@ -45,11 +45,29 @@ pub(super) fn make_payload(
     challenge: [u8; AUTH_CHALLENGE_LEN],
     signing_key: &SigningKey,
 ) -> AuthPayload {
-    let context = slt_core::proto::auth_signature_context(&client_id, assigned_ipv4, &challenge);
+    make_payload_with_mtu(
+        client_id,
+        assigned_ipv4,
+        TEST_TUN_MTU,
+        challenge,
+        signing_key,
+    )
+}
+
+pub(super) fn make_payload_with_mtu(
+    client_id: ClientId,
+    assigned_ipv4: Ipv4Addr,
+    tun_mtu: u16,
+    challenge: [u8; AUTH_CHALLENGE_LEN],
+    signing_key: &SigningKey,
+) -> AuthPayload {
+    let context =
+        slt_core::proto::auth_signature_context(&client_id, assigned_ipv4, tun_mtu, &challenge);
     let signature = signing_key.sign(&context).to_bytes();
     AuthPayload {
         client_id,
         assigned_ipv4,
+        tun_mtu,
         challenge,
         signature,
     }

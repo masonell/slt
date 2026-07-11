@@ -50,7 +50,7 @@ and refuses to start if any field mismatches.
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
 | `tun_name` | string | Yes | - | non-empty; must match an existing interface |
-| `tun_mtu` | integer | No | `1280` | 1-1406; must match the interface MTU |
+| `tun_mtu` | integer | No | `1280` | 1-1406; must match the interface MTU and every authenticating client |
 | `tun_ipv4` | IPv4 address | No | `10.10.0.1` | server's local overlay address; must be present on the interface |
 | `tun_prefix` | integer | No | `24` | 1-32; overlay subnet prefix length |
 
@@ -184,7 +184,7 @@ with a matching name, address, prefix, MTU, and UP state before SLT starts.
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
 | `tun_name` | string | Yes | - | non-empty; must match an existing interface |
-| `tun_mtu` | integer | No | `1280` | 1-1406; must match the interface MTU |
+| `tun_mtu` | integer | No | `1280` | 1-1406; must match the interface MTU and server MTU |
 | `tun_ipv4` | IPv4 address | No | `10.10.0.1` | must equal this client's `assigned_ipv4` |
 | `tun_prefix` | integer | No | `24` | 1-32; overlay subnet prefix length |
 

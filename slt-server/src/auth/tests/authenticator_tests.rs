@@ -70,7 +70,7 @@ fn verify_auth_accepts_valid_payload() {
     let assigned_ipv4 = Ipv4Addr::new(10, 0, 0, 9);
     let challenge = [0x5A; AUTH_CHALLENGE_LEN];
     let client = make_client(client_id, &signing_key, assigned_ipv4, true);
-    let authenticator = Authenticator::new([client]);
+    let authenticator = Authenticator::new([client], TEST_TUN_MTU);
 
     let payload = make_payload(client_id, assigned_ipv4, challenge, &signing_key);
     let assigned = verify_auth_payload(&authenticator, &payload, &challenge).unwrap();
@@ -84,7 +84,7 @@ fn verify_auth_reports_mismatches() {
     let assigned_ipv4 = Ipv4Addr::new(10, 0, 0, 10);
     let challenge = [0x6B; AUTH_CHALLENGE_LEN];
     let client = make_client(client_id, &signing_key, assigned_ipv4, true);
-    let authenticator = Authenticator::new([client]);
+    let authenticator = Authenticator::new([client], TEST_TUN_MTU);
 
     let wrong_ip = Ipv4Addr::new(10, 0, 0, 11);
     let payload = make_payload(client_id, wrong_ip, challenge, &signing_key);
@@ -100,6 +100,18 @@ fn verify_auth_reports_mismatches() {
         verify_auth_payload(&authenticator, &payload, &challenge),
         Err(AuthFailCode::ChallengeInvalid)
     );
+
+    let payload = make_payload_with_mtu(
+        client_id,
+        assigned_ipv4,
+        TEST_TUN_MTU + 1,
+        challenge,
+        &signing_key,
+    );
+    assert_eq!(
+        verify_auth_payload(&authenticator, &payload, &challenge),
+        Err(AuthFailCode::MtuMismatch)
+    );
 }
 
 #[test]
@@ -109,7 +121,7 @@ fn verify_auth_reports_disabled_or_unknown() {
     let assigned_ipv4 = Ipv4Addr::new(10, 0, 0, 12);
     let challenge = [0x7C; AUTH_CHALLENGE_LEN];
     let client = make_client(client_id, &signing_key, assigned_ipv4, false);
-    let authenticator = Authenticator::new([client]);
+    let authenticator = Authenticator::new([client], TEST_TUN_MTU);
 
     let payload = make_payload(client_id, assigned_ipv4, challenge, &signing_key);
     assert_eq!(
@@ -133,7 +145,7 @@ fn verify_auth_rejects_bad_signature() {
     let assigned_ipv4 = Ipv4Addr::new(10, 0, 0, 13);
     let challenge = [0x8D; AUTH_CHALLENGE_LEN];
     let client = make_client(client_id, &signing_key, assigned_ipv4, true);
-    let authenticator = Authenticator::new([client]);
+    let authenticator = Authenticator::new([client], TEST_TUN_MTU);
 
     let payload = make_payload(client_id, assigned_ipv4, challenge, &other_key);
     assert_eq!(

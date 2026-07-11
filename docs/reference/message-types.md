@@ -4,7 +4,7 @@
 
 | Type ID | Name            | Direction | Payload Size | Description                              |
 |---------|-----------------|-----------|--------------|------------------------------------------|
-| `0x01`  | AUTH            | C->S      | 116 bytes    | Client authentication request            |
+| `0x01`  | AUTH            | C->S      | 118 bytes    | Client authentication request            |
 | `0x02`  | AUTH_OK         | S->C      | 0 bytes      | Authentication accepted                  |
 | `0x03`  | AUTH_FAIL       | S->C      | 1 byte       | Authentication rejected                  |
 | `0x04`  | REGISTER_CID    | C->S      | 104-124 bytes | Register UDP-QSP CID and traffic secrets |
@@ -35,6 +35,7 @@
 | `0x03` | BadSignature    | Signature verification failed      |
 | `0x04` | IpMismatch      | Assigned IP does not match config  |
 | `0x05` | ChallengeInvalid| Challenge is expired or invalid    |
+| `0x06` | MtuMismatch     | Client and server TUN MTUs differ  |
 
 ### RegisterFailCode (`REGISTER_FAIL` payload)
 
@@ -77,7 +78,7 @@ Both suites use a 12-byte IV and a 16-byte tag. The client selects the suite in
 | `CLIENT_ID_LEN`      | 16     | Client identifier length                   |
 | `AUTH_CHALLENGE_LEN` | 32     | Authentication challenge length            |
 | `AUTH_SIGNATURE_LEN` | 64     | Ed25519 signature length                   |
-| `AUTH_PAYLOAD_LEN`   | 116    | Full AUTH payload length                   |
+| `AUTH_PAYLOAD_LEN`   | 118    | Full AUTH payload length                   |
 | `PING_PAYLOAD_LEN`   | 8      | PING/PONG payload length                   |
 | `CLOSE_PAYLOAD_LEN`  | 1      | CLOSE payload length                       |
 | `UPGRADE_ID_PAYLOAD_LEN`| 8    | Upgrade identifier payload length          |

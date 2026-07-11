@@ -22,7 +22,7 @@ All VPN messages are framed as:
 
 | Type              | ID    | Direction       | Payload Size | Description                           |
 |-------------------|-------|-----------------|--------------|---------------------------------------|
-| AUTH              | 0x01  | Client -> Server| 116 bytes    | Client authentication request         |
+| AUTH              | 0x01  | Client -> Server| 118 bytes    | Client authentication request         |
 | AUTH_OK           | 0x02  | Server -> Client| 0 bytes      | Authentication accepted               |
 | AUTH_FAIL         | 0x03  | Server -> Client| 1 byte       | Authentication rejected               |
 | REGISTER_CID      | 0x04  | Client -> Server| Variable     | Register UDP-QSP CID and traffic secrets |
@@ -48,7 +48,7 @@ All VPN messages are framed as:
 ### AUTH (0x01)
 
 **Direction:** Client -> Server
-**Payload Size:** 116 bytes
+**Payload Size:** 118 bytes
 
 Client authentication request sent after TLS handshake completion.
 
@@ -58,13 +58,15 @@ Client authentication request sent after TLS handshake completion.
 |--------|------|----------------|------------------------------------------|
 | 0      | 16   | client_id      | Client identifier (16-byte UUID)         |
 | 16     | 4    | assigned_ipv4  | Assigned IPv4 address (network order)    |
-| 20     | 32   | challenge      | TLS exporter challenge                   |
-| 52     | 64   | signature      | Ed25519 signature                        |
+| 20     | 2    | tun_mtu        | Client TUN MTU (big-endian)              |
+| 22     | 32   | challenge      | TLS exporter challenge                   |
+| 54     | 64   | signature      | Ed25519 signature                        |
 
 #### Field Descriptions
 
 - **client_id** (16 bytes): Unique client identifier. Must exist in server configuration.
 - **assigned_ipv4** (4 bytes): The IPv4 address assigned to this client. Must match server configuration for this client.
+- **tun_mtu** (2 bytes): Client TUN MTU. Must exactly match the server TUN MTU.
 - **challenge** (32 bytes): Challenge bytes derived from TLS handshake:
   ```
   challenge = TLS-Exporter("slt-auth-challenge", "", 32)
@@ -72,7 +74,7 @@ Client authentication request sent after TLS handshake completion.
   Computed after TLS handshake completes.
 - **signature** (64 bytes): Ed25519 signature over the authentication context:
   ```
-  context = b"slt-auth-v1" || client_id || assigned_ipv4 || challenge
+  context = b"slt-auth-v2" || client_id || assigned_ipv4 || tun_mtu_be || challenge
   signature = Ed25519.sign(client_private_key, context)
   ```
 
@@ -80,8 +82,9 @@ Client authentication request sent after TLS handshake completion.
 
 1. `client_id` must exist in server's client configuration
 2. `assigned_ipv4` must match the configured IP for this `client_id`
-3. `challenge` must equal the TLS exporter output from the current session
-4. `signature` must verify under the public key configured for this `client_id`
+3. `tun_mtu` must equal the server's configured TUN MTU
+4. `challenge` must equal the TLS exporter output from the current session
+5. `signature` must verify under the public key configured for this `client_id`
 
 ---
 
@@ -121,6 +124,7 @@ Indicates authentication failure.
 | 0x03 | BadSignature      | Ed25519 signature verification failed          |
 | 0x04 | IpMismatch        | Assigned IPv4 does not match configuration     |
 | 0x05 | ChallengeInvalid  | Challenge is expired or invalid                |
+| 0x06 | MtuMismatch       | Client and server TUN MTUs do not match        |
 
 ---
 

@@ -23,6 +23,7 @@ All VPN messages use a simple length-prefixed framing:
 - `LEN` MUST be <= `max_frame_len` (configurable)
 - `DATA` payload length MUST be <= `max_data_len` (configurable)
 - `tun_mtu` MUST be in `1..=1406`
+- The client `tun_mtu` carried in `AUTH` MUST equal the server `tun_mtu`
 
 ### MTU Rationale
 

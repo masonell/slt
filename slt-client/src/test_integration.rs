@@ -831,9 +831,12 @@ mod tests {
         async fn auth_fail_code_values() {
             let codes = [
                 AuthFailCode::Unknown,
-                AuthFailCode::BadSignature,
                 AuthFailCode::UnknownClient,
+                AuthFailCode::Disabled,
+                AuthFailCode::BadSignature,
                 AuthFailCode::IpMismatch,
+                AuthFailCode::ChallengeInvalid,
+                AuthFailCode::MtuMismatch,
             ];
 
             for code in codes {

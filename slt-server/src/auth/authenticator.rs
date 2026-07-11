@@ -16,6 +16,7 @@ use crate::AssignedIp;
 #[derive(Debug, Clone)]
 pub struct Authenticator {
     clients_config: HashMap<ClientId, ServerClient>,
+    tun_mtu: u16,
 }
 
 impl Authenticator {
@@ -30,6 +31,7 @@ impl Authenticator {
             .collect();
         Self {
             clients_config: clients,
+            tun_mtu: config.tun.tun_mtu,
         }
     }
 
@@ -49,12 +51,13 @@ impl Authenticator {
     /// Creates an authenticator with the given clients (test-only).
     #[cfg(test)]
     #[must_use]
-    pub fn new(clients: impl IntoIterator<Item = ServerClient>) -> Self {
+    pub fn new(clients: impl IntoIterator<Item = ServerClient>, tun_mtu: u16) -> Self {
         Self {
             clients_config: clients
                 .into_iter()
                 .map(|client| (client.client_id, client))
                 .collect(),
+            tun_mtu,
         }
     }
 }
@@ -65,6 +68,7 @@ impl Authenticator {
 /// - Client existence in the allowlist
 /// - Client enabled status
 /// - Assigned IP address match
+/// - TUN MTU equality
 /// - Challenge value correctness
 /// - Ed25519 signature verification over the context string
 ///
@@ -100,6 +104,10 @@ pub(super) fn verify_auth_payload(
         trace!(client_id = %payload.client_id, expected = %client.assigned_ipv4, provided = %payload.assigned_ipv4, "IP address mismatch");
         return Err(AuthFailCode::IpMismatch);
     }
+    if authenticator.tun_mtu != payload.tun_mtu {
+        trace!(client_id = %payload.client_id, expected = authenticator.tun_mtu, provided = payload.tun_mtu, "TUN MTU mismatch");
+        return Err(AuthFailCode::MtuMismatch);
+    }
     if &payload.challenge != challenge {
         trace!(client_id = %payload.client_id, "challenge mismatch");
         return Err(AuthFailCode::ChallengeInvalid);
@@ -108,6 +116,7 @@ pub(super) fn verify_auth_payload(
     let context = slt_core::proto::auth_signature_context(
         &payload.client_id,
         payload.assigned_ipv4,
+        payload.tun_mtu,
         challenge,
     );
 
