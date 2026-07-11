@@ -262,12 +262,13 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         }
 
         let upgrade_id = fastrand::u64(..);
+        let probe_nonce = fastrand::u64(..);
         self.udp_upgrade = UdpUpgradeState::Upgrading {
             upgrade_id,
             deadline: now + self.config.timing.register_timeout,
             attempts: 0,
             next_probe_at: now,
-            last_probe_nonce: 0,
+            probe_nonce,
             probe_acked: false,
             ready_sent: false,
             probe_backoff: ReconnectBackoff::new(
@@ -534,7 +535,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 upgrade_id,
                 attempts,
                 next_probe_at,
-                last_probe_nonce,
+                probe_nonce,
                 probe_backoff,
                 probe_acked,
                 ..
@@ -546,11 +547,9 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 return Ok(());
             }
 
-            let nonce = fastrand::u64(..);
             *attempts = attempts.saturating_add(1);
-            *last_probe_nonce = nonce;
             *next_probe_at = now + probe_backoff.next_delay();
-            (*upgrade_id, nonce, *attempts)
+            (*upgrade_id, *probe_nonce, *attempts)
         };
 
         let probe = UpgradeProbePayload { upgrade_id, nonce };
@@ -624,7 +623,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             upgrade_id,
             probe_acked,
             ready_sent,
-            last_probe_nonce,
+            probe_nonce,
             ..
         } = &mut self.udp_upgrade
         {
@@ -637,11 +636,11 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 return Ok(SessionControl::Continue);
             }
 
-            if ack.nonce != *last_probe_nonce {
+            if ack.nonce != *probe_nonce {
                 trace!(
-                    expected_nonce = *last_probe_nonce,
+                    expected_nonce = *probe_nonce,
                     received_nonce = ack.nonce,
-                    "ignoring stale udp upgrade probe ack nonce"
+                    "ignoring udp upgrade probe ack with mismatched nonce"
                 );
                 return Ok(SessionControl::Continue);
             }
@@ -1264,7 +1263,7 @@ mod tests {
                 deadline: Instant::now() + config.timing.register_timeout,
                 attempts: 1,
                 next_probe_at: Instant::now() + config.timing.reconnect_min,
-                last_probe_nonce: nonce,
+                probe_nonce: nonce,
                 probe_acked: false,
                 ready_sent: false,
                 probe_backoff: ReconnectBackoff::new(
@@ -1316,16 +1315,22 @@ mod tests {
         use std::sync::Arc;
         use std::time::Instant;
 
-        use slt_core::proto::OwnedMessageBuf;
+        use slt_core::crypto::udp_qsp::QuicQspSession;
+        use slt_core::proto::{MessageLimits, OwnedMessageBuf};
         use slt_core::transport::tcp::TcpChannel;
+        use slt_core::types::Cid;
+        use tokio::net::UdpSocket;
         use tokio::sync::mpsc;
         use tokio_util::sync::CancellationToken;
 
         use super::*;
         use crate::metrics::Metrics;
         use crate::runtime::services::DesktopServices;
-        use crate::test_support::{test_config, tls_tcp_stream_pair};
+        use crate::test_support::{
+            make_server_keys, make_test_keys, test_config, tls_tcp_stream_pair,
+        };
         use crate::transport::tcp::{ClientKeyUpdater, TcpSession, TcpTransport};
+        use crate::transport::udp_qsp::{ClientTransport, client_udp_qsp_io};
         use crate::tun::TunChannels;
 
         async fn loopback_tcp_transport() -> TcpTransport {
@@ -1344,8 +1349,131 @@ mod tests {
             }
         }
 
+        async fn udp_transport_pair() -> (ClientTransport, ClientTransport) {
+            let client_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let server_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let client_addr = client_socket.local_addr().unwrap();
+            let server_addr = server_socket.local_addr().unwrap();
+            let scid = Cid::from([0xA1; 20]);
+            let dcid = Cid::from([0xB2; 20]);
+
+            let client_io = client_udp_qsp_io(&client_socket, server_addr).unwrap();
+            let client_session =
+                QuicQspSession::new(client_io, scid, dcid, make_test_keys(), 0, 0, false);
+            let server_io = client_udp_qsp_io(&server_socket, client_addr).unwrap();
+            let server_session =
+                QuicQspSession::new(server_io, dcid, scid, make_server_keys(), 0, 0, false);
+
+            (
+                ClientTransport::new(client_session, Arc::new(Metrics::default())),
+                ClientTransport::new(server_session, Arc::new(Metrics::default())),
+            )
+        }
+
+        async fn read_probe(transport: &mut ClientTransport) -> UpgradeProbePayload {
+            let message = transport
+                .read_next_message(MessageLimits::new(2048, 2048))
+                .await
+                .unwrap();
+            let Message::UpgradeProbe { payload } = message.message() else {
+                panic!("expected upgrade_probe");
+            };
+            UpgradeProbePayload::decode(payload).unwrap()
+        }
+
         #[tokio::test]
-        async fn delayed_probe_ack_from_superseded_probe_does_not_mark_probe_acked() {
+        async fn delayed_probe_ack_after_retransmission_validates_udp_path() {
+            let mut config = test_config();
+            config.enable_upgrade = true;
+            let services = DesktopServices::new();
+            let mut tun = tun_channels();
+            let metrics = Arc::new(Metrics::default());
+            let updater = ClientKeyUpdater::new(metrics.clone());
+            let (client_stream, server_stream) = tls_tcp_stream_pair().await;
+            let tcp_session = TcpSession {
+                transport: TcpChannel::with_key_updater(client_stream, updater),
+                peer: None,
+                sni: None,
+            };
+            let mut session = ClientSession::new(
+                &config,
+                tcp_session,
+                &mut tun,
+                CancellationToken::new(),
+                metrics,
+                &services,
+                None,
+            );
+            let mut server_tcp = TcpChannel::new(server_stream);
+            let (client_udp, mut server_udp) = udp_transport_pair().await;
+            session.udp_state = UdpState::Active(Box::new(client_udp));
+
+            let now = Instant::now();
+            session.start_udp_upgrade_attempt(now);
+            session.send_upgrade_probe(now).await.unwrap();
+            let first_probe = read_probe(&mut server_udp).await;
+
+            session
+                .send_upgrade_probe(now + config.timing.reconnect_min)
+                .await
+                .unwrap();
+            let second_probe = read_probe(&mut server_udp).await;
+            assert_eq!(second_probe, first_probe);
+
+            let ack = UpgradeProbeAckPayload {
+                upgrade_id: first_probe.upgrade_id,
+                nonce: first_probe.nonce,
+            };
+            let mut ack_payload = Vec::new();
+            ack.encode(&mut ack_payload);
+            server_udp
+                .write_message(Message::UpgradeProbeAck {
+                    payload: &ack_payload,
+                })
+                .await
+                .unwrap();
+            server_udp.flush().await.unwrap();
+
+            let ack_message = session
+                .udp_state
+                .as_active_mut()
+                .unwrap()
+                .read_next_message(MessageLimits::new(2048, 2048))
+                .await
+                .unwrap();
+            assert_eq!(
+                session.handle_udp_message(ack_message).await.unwrap(),
+                SessionControl::Continue
+            );
+
+            let UdpUpgradeState::Upgrading {
+                attempts,
+                probe_nonce,
+                probe_acked,
+                ready_sent,
+                ..
+            } = session.udp_upgrade
+            else {
+                panic!("delayed ack should keep the active upgrade attempt");
+            };
+            assert_eq!(attempts, 2);
+            assert_eq!(probe_nonce, first_probe.nonce);
+            assert!(probe_acked);
+            assert!(ready_sent);
+
+            assert_ne!(server_tcp.read_more().await.unwrap(), 0);
+            let ready = server_tcp.try_pop_message(session.limits).unwrap().unwrap();
+            let Message::UdpReady { payload } = ready.message() else {
+                panic!("expected udp_ready");
+            };
+            assert_eq!(
+                UdpReadyPayload::decode(payload).unwrap().upgrade_id,
+                first_probe.upgrade_id
+            );
+        }
+
+        #[tokio::test]
+        async fn probe_ack_with_mismatched_nonce_does_not_mark_probe_acked() {
             let mut config = test_config();
             config.enable_upgrade = true;
             let services = DesktopServices::new();
@@ -1367,14 +1495,14 @@ mod tests {
             );
 
             let upgrade_id = 0xAA;
-            let superseded_probe_nonce = 0x10;
-            let last_probe_nonce = 0x11;
+            let mismatched_nonce = 0x10;
+            let probe_nonce = 0x11;
             session.udp_upgrade = UdpUpgradeState::Upgrading {
                 upgrade_id,
                 deadline: Instant::now() + config.timing.register_timeout,
                 attempts: 2,
                 next_probe_at: Instant::now() + config.timing.reconnect_min,
-                last_probe_nonce,
+                probe_nonce,
                 probe_acked: false,
                 ready_sent: false,
                 probe_backoff: ReconnectBackoff::new(
@@ -1385,7 +1513,7 @@ mod tests {
 
             let ack = UpgradeProbeAckPayload {
                 upgrade_id,
-                nonce: superseded_probe_nonce,
+                nonce: mismatched_nonce,
             };
             let mut payload = Vec::new();
             ack.encode(&mut payload);
@@ -1393,27 +1521,24 @@ mod tests {
             let control = session.handle_upgrade_probe_ack(&payload).await.unwrap();
             assert!(
                 matches!(control, SessionControl::Continue),
-                "delayed superseded ack should be ignored, got {control:?}",
+                "mismatched ack should be ignored, got {control:?}",
             );
 
             let UdpUpgradeState::Upgrading {
                 probe_acked,
                 ready_sent,
-                last_probe_nonce: stored_nonce,
+                probe_nonce: stored_nonce,
                 ..
             } = session.udp_upgrade
             else {
-                panic!("delayed superseded ack should leave upgrade attempt active");
+                panic!("mismatched ack should leave upgrade attempt active");
             };
             assert!(
                 !probe_acked,
-                "delayed superseded ack must not validate the udp path"
+                "mismatched ack must not validate the udp path"
             );
-            assert!(
-                !ready_sent,
-                "delayed superseded ack must not send udp_ready"
-            );
-            assert_eq!(stored_nonce, last_probe_nonce);
+            assert!(!ready_sent, "mismatched ack must not send udp_ready");
+            assert_eq!(stored_nonce, probe_nonce);
         }
     }
 }

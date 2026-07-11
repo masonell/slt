@@ -390,7 +390,7 @@ UDP path validation probe sent during the upgrade sequence.
 #### Field Descriptions
 
 - **upgrade_id**: Unique identifier for this upgrade attempt
-- **nonce**: Random value to be echoed in the acknowledgment
+- **nonce**: Random value generated once per upgrade attempt, reused by probe retransmissions, and echoed in the acknowledgment
 
 ---
 
@@ -410,7 +410,7 @@ Acknowledgment of UDP path validation probe.
 
 #### Validation Rules
 
-1. Both `upgrade_id` and `nonce` MUST exactly match the values from UPGRADE_PROBE
+1. Both `upgrade_id` and `nonce` MUST exactly match the active upgrade attempt
 
 ---
 

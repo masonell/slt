@@ -205,7 +205,8 @@ switch, as on an ordinary IP network.
 - Maximum probe attempts: 8 per upgrade cycle
 - Probe backoff: exponential with jitter
 - Probe timeout triggers `TcpOnlyBlockedUdp` state with cooldown
-- New probe with different `upgrade_id` supersedes previous attempt
+- Each upgrade attempt uses one random `(upgrade_id, nonce)` pair for all probe retransmissions
+- A probe with a different `upgrade_id` supersedes the active attempt
 
 ---
 

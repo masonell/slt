@@ -1084,7 +1084,7 @@ mod tests {
             deadline: Instant::now() + config.timing.register_timeout,
             attempts: 1,
             next_probe_at: Instant::now() + config.timing.reconnect_min,
-            last_probe_nonce: 7,
+            probe_nonce: 7,
             probe_acked: true,
             ready_sent: true,
             probe_backoff: ReconnectBackoff::new(

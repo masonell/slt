@@ -113,8 +113,8 @@ pub(super) enum UdpUpgradeState {
         attempts: u32,
         /// Next probe send deadline.
         next_probe_at: Instant,
-        /// Last probe nonce sent.
-        last_probe_nonce: u64,
+        /// Probe nonce shared by all retransmissions in this attempt.
+        probe_nonce: u64,
         /// Whether a valid `UpgradeProbeAck` has been observed.
         probe_acked: bool,
         /// Whether `UdpReady` has been sent on TCP.
@@ -214,7 +214,7 @@ mod tests {
                 deadline,
                 attempts: 2,
                 next_probe_at: Instant::now() + Duration::from_secs(1),
-                last_probe_nonce: 11,
+                probe_nonce: 11,
                 probe_acked: true,
                 ready_sent: true,
                 probe_backoff: ReconnectBackoff::new(
