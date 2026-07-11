@@ -467,6 +467,60 @@ async fn peer_changes_only_after_authenticated_udp_packet() {
     assert_eq!(consumed, opened.payload.len());
     assert!(matches!(message, Message::Pong { .. }));
 
+    // Advance the peer watermark on the new path, then deliver an unseen lower
+    // packet from the old path. The lower packet remains valid replay-window
+    // traffic and elicits a PONG, but it must not move replies back to old_peer.
+    for (response_offset, (packet_number, source_peer)) in [
+        (register.pn_start_rx + 4, new_peer),
+        (register.pn_start_rx + 3, old_peer),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ping_packet = keys
+            .protect(
+                register.client_to_server_cid.as_slice(),
+                packet_number,
+                register.key_phase,
+                &ping_frame,
+            )
+            .unwrap();
+        tx.send(SessionEvent::Udp(UdpClaim {
+            peer: source_peer,
+            dcid_prefix: register.client_to_server_cid.prefix().unwrap(),
+            payload: ping_packet,
+        }))
+        .await
+        .unwrap();
+
+        let pong_packet = timeout(Duration::from_secs(1), udp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let reply_peer = timeout(Duration::from_secs(1), udp_peer_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reply_peer, new_peer,
+            "out-of-order packet from old path rolled reply peer back"
+        );
+
+        let opened = keys
+            .open(
+                register.client_to_server_cid.len(),
+                &pong_packet,
+                server_expected_pn + 2 + response_offset as u64,
+            )
+            .unwrap();
+        let (message, consumed) = decode_message(&opened.payload, limits).unwrap().unwrap();
+        assert_eq!(consumed, opened.payload.len());
+        let Message::Pong { payload } = message else {
+            panic!("expected pong for authenticated packet")
+        };
+        assert_eq!(PongPayload::decode(payload).unwrap().nonce, ping.nonce);
+    }
+
     let _ = tx.send(SessionEvent::Shutdown).await;
     let _ = join.await.unwrap();
 }

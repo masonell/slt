@@ -79,6 +79,10 @@ pub trait SessionIo {
 /// I/O backends that can update their UDP peer address.
 pub trait PeerUpdate {
     /// Update the accepted receive peer and outbound transmit destination.
+    ///
+    /// Protected packets buffered but not submitted to the socket are sent to
+    /// the updated peer when flushed. Packets already submitted to the socket
+    /// cannot be redirected.
     fn set_peer(&mut self, peer: SocketAddr);
 }
 

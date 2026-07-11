@@ -15,7 +15,10 @@ use crate::tun::TunDeviceIo;
 /// `open_udp_packet`.
 enum UdpOpenOutcome {
     /// Decrypted; plaintext written to the reused output buffer.
-    Opened,
+    Opened {
+        /// Reconstructed client-to-server packet number.
+        packet_number: u64,
+    },
     /// Dropped (replay / too-old / crypto / other). Already counted and logged.
     Dropped,
 }
@@ -55,8 +58,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
 
         let mut opened = std::mem::take(&mut self.udp_opened_payload_buf);
         let control = match self.open_udp_packet(&claim.payload, &mut opened) {
-            UdpOpenOutcome::Opened => {
-                self.note_authenticated_udp_activity(peer);
+            UdpOpenOutcome::Opened { packet_number } => {
+                self.note_authenticated_udp_activity();
+                self.adopt_udp_peer_if_newer(peer, packet_number);
                 match self.decode_udp_message(&opened) {
                     Ok(Some(message)) => {
                         self.note_activity();
@@ -98,9 +102,11 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         };
         let rx_phase_before = session.rx_key_phase();
 
-        match session.open_packet(payload) {
+        let packet_number = match session.open_packet(payload) {
             Ok(opened) => {
+                let packet_number = opened.pn;
                 out.extend_from_slice(opened.payload);
+                packet_number
             }
             Err(QspSessionError::Replay) => {
                 self.metrics.inc_udp_qsp_decrypt_fail_replay();
@@ -144,7 +150,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 );
                 return UdpOpenOutcome::Dropped;
             }
-        }
+        };
 
         // Check for key phase transition after the match to avoid borrow conflicts.
         if let Some(session) = self.udp_session.as_ref()
@@ -159,7 +165,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             );
         }
 
-        UdpOpenOutcome::Opened
+        UdpOpenOutcome::Opened { packet_number }
     }
 
     /// Decodes a VPN message from the decrypted UDP payload.

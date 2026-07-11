@@ -14,7 +14,7 @@ use tokio::time::{Duration, timeout};
 use super::super::*;
 use super::common::{
     complete_udp_upgrade_handshake, ipv4_packet, make_register_payload, read_message_bytes,
-    spawn_session, spawn_session_with_udp_qsp_config,
+    spawn_session, spawn_session_with_peer_capture, spawn_session_with_udp_qsp_config,
 };
 use crate::test_support::TlsDuplexStream;
 use crate::{AssignedIp, ClientId};
@@ -397,8 +397,9 @@ async fn session_rejects_tcp_register_while_udp_active() {
 
 #[tokio::test]
 async fn session_registers_replacement_after_ordered_tcp_fallback() {
-    let (join, mut client, tx, _tun_rx, mut udp_rx, limits, _assigned, _registry) =
-        spawn_session().await;
+    let (join, mut client, tx, _tun_rx, mut udp_rx, mut udp_peer_rx, limits, _assigned, _registry) =
+        spawn_session_with_peer_capture().await;
+    let initial_peer = SocketAddr::from(([127, 0, 0, 1], 45_002));
     let _active = register_and_activate_udp(
         &mut client,
         &tx,
@@ -410,6 +411,13 @@ async fn session_registers_replacement_after_ordered_tcp_fallback() {
         0xD200,
     )
     .await;
+    assert_eq!(
+        timeout(Duration::from_secs(1), udp_peer_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        initial_peer
+    );
 
     let replacement = make_register_payload(
         Cid::from([0xD7; MAX_DCID_LEN]),
@@ -483,16 +491,25 @@ async fn session_registers_replacement_after_ordered_tcp_fallback() {
         "registration response was sent over udp"
     );
 
+    let replacement_peer = SocketAddr::from(([127, 0, 0, 1], 45_003));
     complete_udp_upgrade_handshake(
         &mut client,
         &tx,
         &mut udp_rx,
         limits,
         &replacement,
-        SocketAddr::from(([127, 0, 0, 1], 45_003)),
+        replacement_peer,
         0xD201,
     )
     .await;
+    assert_eq!(
+        timeout(Duration::from_secs(1), udp_peer_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        replacement_peer,
+        "replacement registration did not reset the UDP peer watermark"
+    );
 
     let _ = tx.send(SessionEvent::Shutdown).await;
     join.await.unwrap().unwrap();

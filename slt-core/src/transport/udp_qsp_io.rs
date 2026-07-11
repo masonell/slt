@@ -79,6 +79,9 @@ impl UdpQspIo {
 
     /// Update the accepted receive peer and outbound transmit destination.
     ///
+    /// Protected datagrams in the pending send slab are retargeted because the
+    /// destination is selected when the slab is flushed.
+    ///
     /// Already-queued receive datagrams are kept: they matched the previously
     /// accepted peer when received and still have to pass UDP-QSP crypto/replay
     /// checks before the session accepts them.
@@ -442,6 +445,36 @@ mod tests {
         let mut buf = [0u8; 64];
         let len = timeout(Duration::from_secs(1), rx.recv(&mut buf)).await??;
         assert_eq!(&buf[..len], b"packet");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_peer_retargets_pending_send() -> io::Result<()> {
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let old_peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let new_peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+        sender.set_nonblocking(true)?;
+        old_peer.set_nonblocking(true)?;
+        new_peer.set_nonblocking(true)?;
+
+        let sender_addr = sender.local_addr()?;
+        let old_peer_addr = old_peer.local_addr()?;
+        let new_peer_addr = new_peer.local_addr()?;
+        let mut tx = UdpQspIo::new(sender, old_peer_addr)?;
+        let mut new_peer_rx = UdpQspIo::new(new_peer, sender_addr)?;
+
+        tx.send(b"pending packet").await?;
+        assert!(tx.has_pending_flush());
+        tx.set_peer(new_peer_addr);
+        tx.flush().await?;
+
+        let mut buf = [0u8; 64];
+        let len = timeout(Duration::from_secs(1), new_peer_rx.recv(&mut buf)).await??;
+        assert_eq!(&buf[..len], b"pending packet");
+        assert_eq!(
+            old_peer.recv(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         Ok(())
     }
 

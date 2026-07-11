@@ -395,3 +395,24 @@ Packets with any of the following conditions MUST be silently dropped:
 - Packet older than replay window
 
 The implementation returns structured errors via `QspCryptoError` and `QspSessionError`.
+
+## 11. Server Peer Address Migration
+
+The server learns the client's UDP reply address from authenticated client-to-server
+packets. It maintains a peer-selection watermark containing the highest reconstructed
+packet number that selected the current address.
+
+After AEAD authentication and replay acceptance:
+
+- The first accepted packet establishes the reply address and watermark.
+- A packet with a number strictly greater than the watermark updates both the reply
+  address and watermark, even when the address itself is unchanged.
+- An unseen out-of-order packet at or below the watermark is processed normally but
+  MUST NOT change the reply address.
+- A successful `REGISTER_CID` starts a new UDP-QSP packet-number space and resets the
+  peer-selection watermark.
+
+Protected packets buffered for send but not submitted to the UDP socket use the current
+reply address when flushed. A peer update therefore retargets those buffered packets.
+Datagrams already submitted to the socket cannot be redirected and may still arrive on
+the prior path.

@@ -109,6 +109,10 @@ pub struct ClientSessionBase<
     ///
     /// In both cases, the peer has already been set on the session.
     udp_session: Option<QuicQspSession<I>>,
+    /// Highest authenticated client-to-server packet number allowed to select
+    /// the UDP reply peer. Lower unseen packets remain valid replay-window
+    /// traffic but cannot roll the peer back to an older path.
+    udp_peer_packet_number: Option<u64>,
     /// Last packet that authenticated under this session's UDP-QSP receive keys.
     last_authenticated_udp_activity: Option<Instant>,
     udp_upgrade: UdpUpgradeState,
@@ -174,6 +178,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             tun,
             udp_io_factory,
             udp_session: None,
+            udp_peer_packet_number: None,
             last_authenticated_udp_activity: None,
             udp_upgrade: UdpUpgradeState::default(),
             rx,
@@ -257,12 +262,24 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         SessionControl::Close
     }
 
-    /// Record authenticated UDP ingress and adopt its source as the reply peer.
-    fn note_authenticated_udp_activity(&mut self, peer: SocketAddr) {
+    /// Record authenticated UDP ingress for path-liveness accounting.
+    fn note_authenticated_udp_activity(&mut self) {
+        self.last_authenticated_udp_activity = Some(Instant::now());
+    }
+
+    /// Adopt `peer` only when `packet_number` advances the receive path.
+    fn adopt_udp_peer_if_newer(&mut self, peer: SocketAddr, packet_number: u64) {
+        if matches!(
+            self.udp_peer_packet_number,
+            Some(current) if packet_number <= current
+        ) {
+            return;
+        }
+
         if let Some(session) = self.udp_session.as_mut() {
             session.set_peer(peer);
+            self.udp_peer_packet_number = Some(packet_number);
         }
-        self.last_authenticated_udp_activity = Some(Instant::now());
     }
 
     fn set_active_transport(&mut self, transport: ActiveTransport) {
@@ -518,6 +535,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
     fn retire_udp_transport(&mut self) {
         self.registry.remove_cids_for_session(self.session_id);
         self.udp_session = None;
+        self.udp_peer_packet_number = None;
         self.last_authenticated_udp_activity = None;
         self.reset_udp_upgrade_state();
     }

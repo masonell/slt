@@ -179,6 +179,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         );
 
         self.udp_session = Some(udp);
+        self.udp_peer_packet_number = None;
         self.last_authenticated_udp_activity = None;
         self.reset_udp_upgrade_state();
         // Keep TCP preferred until explicit switch commit.
