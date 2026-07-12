@@ -79,6 +79,12 @@ enabled = true
 | `tcp_connection_cap` | integer | No | Maximum classifying and nginx-proxied TCP connections held by the front door. Default: `512 * detected CPU count` on the host loading the config. Must be > 0. |
 | `clients` | array of [ServerClient](#clients-section) | Yes | List of authorized clients. |
 
+When `tcp_connection_cap` is omitted, it is calculated on the host loading the
+config. `slt init` calculates it on the initialization host and writes the
+resulting integer into `server.toml`, so that explicit value remains in effect
+if the file is copied to another host. Omit or edit it to derive or select a cap
+for the deployment host.
+
 `tcp_connection_cap` should be sized relative to nginx's `worker_connections`
 and timeout configuration. Connections classified as pass-through stay in this
 front-door cap until nginx closes them through settings such as
@@ -521,9 +527,12 @@ reconnect_max = "30s"
 
 ---
 
-## Validation
+## Common Validation Errors
 
-Both server and client configurations are validated when loaded. Common validation errors include:
+Both server and client configurations are validated when loaded. This table is
+an intentionally shorter list of common semantic errors; see the [exhaustive
+semantic validation summary](../reference/config-schema.md#exhaustive-semantic-validation-summary)
+for every `ConfigError` and the distinction between parse and validation errors.
 
 | Error | Cause | Fix |
 |-------|-------|-----|

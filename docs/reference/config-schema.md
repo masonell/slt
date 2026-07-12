@@ -2,6 +2,29 @@
 
 Quick reference for SLT configuration fields. For detailed explanations, see [User Guide: Configuration](../user-guide/configuration.md).
 
+## Parsing Rules
+
+SLT rejects unknown fields at the configuration root and in nested tables and
+objects. A misspelled or incorrectly scoped field fails parsing with an error
+that names the unknown field instead of being silently ignored.
+
+TOML keys following a table header belong to that table. Put root fields before
+the first table header. For example, client-wide transport controls must use
+this placement:
+
+```toml
+enable_upgrade = true
+require_udp = false
+
+[network]
+hostname = "vpn.example.com"
+port = 443
+```
+
+Placing `enable_upgrade` or `require_udp` after `[tun]` makes it a TUN field,
+which SLT rejects as unknown. The same placement rule applies to server root
+fields such as `tcp_connection_cap`.
+
 ## ServerConfig
 
 ### Top-Level Fields
@@ -20,8 +43,12 @@ Quick reference for SLT configuration fields. For detailed explanations, see [Us
 | `tcp_connection_cap` | integer | No | `512 * detected CPU count` | > 0 |
 | `clients` | array of tables | Yes | - | May be empty |
 
-`tcp_connection_cap` is evaluated on the host that deserializes the config when
-the field is omitted. Size it against nginx `worker_connections` and nginx's
+When `tcp_connection_cap` is omitted, it is calculated as `512 * detected CPU
+count` on the host that deserializes the config. `slt init` performs that
+calculation on the initialization host and serializes the resulting integer
+explicitly. A generated config therefore retains that value when copied to
+another host; omit or edit the field if the deployment host should use a
+different cap. Size it against nginx `worker_connections` and nginx's
 connection timeout window for pass-through TCP traffic.
 
 ### `[network]`
@@ -268,17 +295,24 @@ nginx_tcp_upstream = "127.0.0.1:8080"
 
 ---
 
-## Validation Summary
+## Exhaustive Semantic Validation Summary
+
+This table lists every semantic `ConfigError` returned after TOML parsing.
+Syntax errors, missing required fields, invalid field types, and unknown fields
+are parse errors and occur before these checks.
 
 | Error | Trigger |
 |-------|---------|
 | `EmptyHostname` | Client `hostname` is empty |
+| `ZeroPort` | Client `network.port` or a server listener/upstream port is 0 |
 | `EmptyTunName` | `tun_name` is empty |
 | `InvalidTunMtu` | MTU is 0 or > 1406 |
 | `InvalidTunPrefix` | `tun_prefix` is outside 1-32 |
 | `ClientTunIpMismatch` | Client `tun_ipv4` differs from its `assigned_ipv4` |
 | `ClientOutsideTunSubnet` | Server client `assigned_ipv4` is outside the `tun_ipv4`/`tun_prefix` subnet |
 | `ClientUsesTunAddress` | Server client `assigned_ipv4` equals the server's `tun_ipv4` |
+| `DuplicateClientId` | Two server client entries have the same `client_id` |
+| `DuplicateAssignedIpv4` | Two server client entries have the same `assigned_ipv4` |
 | `InvalidPingInterval` | `ping_min` > `ping_max` |
 | `InvalidReconnectInterval` | `reconnect_min` > `reconnect_max` |
 | `IntervalTooSmall` | A ping or reconnect interval is below 1 millisecond |
