@@ -13,8 +13,11 @@ pub mod payloads;
 /// Message type identifiers.
 pub mod types;
 
-/// Static message transport and direction rules.
-pub use admissibility::{MessageSender, is_message_allowed_on_udp_qsp};
+/// Shared inbound-message validation.
+pub use admissibility::{
+    MessageContext, MessageSender, MessageTransport, MessageValidationError, ProtocolPhase,
+    validate_message, validate_message_type,
+};
 /// AUTH message construction.
 pub use auth::{AUTH_CHALLENGE_LABEL, auth_signature_context, build_auth_payload};
 /// Frame encoding/decoding and frame types.

@@ -6,7 +6,8 @@ use std::time::Instant;
 use boring::ssl::SslAcceptor;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailCode, AuthFailPayload, AuthOkPayload, AuthPayload, CloseCode,
-    ClosePayload, Message, PingPayload, PongPayload,
+    ClosePayload, Message, MessageContext, MessageSender, MessageTransport, PingPayload,
+    PongPayload, ProtocolPhase, validate_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::ClientId;
@@ -284,18 +285,47 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
         F: FnMut(ClientId, AssignedIp, &mut Option<SessionTcpChannel<S>>) -> io::Result<()>,
     {
+        validate_message(
+            message,
+            MessageContext::new(
+                MessageSender::Client,
+                ProtocolPhase::Authentication,
+                MessageTransport::Tcp,
+            ),
+        )?;
+
         match message {
             Message::Auth { payload } => {
                 self.handle_auth(payload, tcp, challenge, create_session)
                     .await
             }
             Message::Ping { payload } => self.handle_ping(payload, tcp).await,
+            Message::Pong { payload } => {
+                let pong = PongPayload::decode(payload)?;
+                trace!(nonce = pong.nonce, "received pong during auth phase");
+                Ok(AuthStep::Continue)
+            }
             Message::Close { payload } => {
                 let close = ClosePayload::decode(payload)?;
                 trace!(code = ?close.code, "received close message during auth phase");
                 Ok(AuthStep::Done(AuthPhaseResult::Completed))
             }
-            other => Self::handle_unexpected_message(other),
+            Message::AuthOk { .. }
+            | Message::AuthFail { .. }
+            | Message::RegisterCid { .. }
+            | Message::RegisterOk { .. }
+            | Message::RegisterFail { .. }
+            | Message::Data { .. }
+            | Message::UpgradeProbe { .. }
+            | Message::UpgradeProbeAck { .. }
+            | Message::UdpReady { .. }
+            | Message::SwitchToUdp { .. }
+            | Message::SwitchAck { .. }
+            | Message::FallbackToTcp { .. }
+            | Message::FallbackOk { .. }
+            | Message::SwitchOk { .. } => {
+                unreachable!("shared validation rejected inadmissible auth message")
+            }
         }
     }
 
@@ -355,14 +385,6 @@ impl<T: TunDeviceIo> AuthHandlerBase<T> {
         self.send_message(as_tcp_channel(tcp)?, Message::Pong { payload: &pong_buf })
             .await?;
         Ok(AuthStep::Continue)
-    }
-
-    /// Handles unexpected messages during auth phase.
-    fn handle_unexpected_message(message: Message<'_>) -> Result<AuthStep, AuthError> {
-        warn!(message = ?message, "received unexpected message during auth phase");
-        Err(AuthError::ProtocolViolation {
-            message_type: message.ty(),
-        })
     }
 
     /// Record auth-phase metrics from the typed outcome.

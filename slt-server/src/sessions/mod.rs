@@ -265,9 +265,10 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         SessionControl::Close
     }
 
-    /// Record authenticated UDP ingress for path-liveness accounting.
-    fn note_authenticated_udp_activity(&mut self) {
-        self.last_authenticated_udp_activity = Some(Instant::now());
+    /// Record accepted authenticated UDP ingress for idle and path-liveness accounting.
+    const fn note_authenticated_udp_activity(&mut self, received_at: Instant) {
+        self.last_activity = received_at;
+        self.last_authenticated_udp_activity = Some(received_at);
     }
 
     /// Adopt `peer` only when `packet_number` advances the receive path.

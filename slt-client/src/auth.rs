@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use slt_core::config::ClientConfig;
 use slt_core::proto::{
     AUTH_CHALLENGE_LEN, AuthFailPayload, AuthOkPayload, AuthPayload, CloseCode, ClosePayload,
-    Message, MessageLimits, PingPayload, PongPayload,
+    Message, MessageContext, MessageLimits, MessageSender, MessageTransport, PingPayload,
+    PongPayload, ProtocolPhase, validate_message,
 };
 use slt_core::transport::tcp::{KeyUpdater, TcpChannel, TcpWriteError};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -188,6 +189,15 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     K: KeyUpdater,
 {
+    validate_message(
+        message,
+        MessageContext::new(
+            MessageSender::Server,
+            ProtocolPhase::Authentication,
+            MessageTransport::Tcp,
+        ),
+    )?;
+
     match message {
         Message::AuthOk { payload } => {
             AuthOkPayload::decode(payload)?;
@@ -221,6 +231,11 @@ where
             .map_err(map_auth_write_error)?;
             Ok(AuthResult::Continue)
         }
+        Message::Pong { payload } => {
+            let pong = PongPayload::decode(payload)?;
+            debug!(nonce = pong.nonce, "received pong during auth");
+            Ok(AuthResult::Continue)
+        }
         Message::Close { payload } => {
             let close = ClosePayload::decode(payload)?;
             warn!(code = ?close.code, "received close during auth");
@@ -230,12 +245,20 @@ where
                 Ok(AuthResult::Disconnected)
             }
         }
-        other => {
-            warn!(message = ?other, "unexpected message during auth");
-            // Client-detected protocol violation, not a server-sent AUTH_FAIL.
-            // `AuthRejected` is reserved for codes the server actually sent;
-            // use `AuthUnexpectedMessage` so the distinction survives.
-            Err(ConnectError::AuthUnexpectedMessage)
+        Message::Auth { .. }
+        | Message::RegisterCid { .. }
+        | Message::RegisterOk { .. }
+        | Message::RegisterFail { .. }
+        | Message::Data { .. }
+        | Message::UpgradeProbe { .. }
+        | Message::UpgradeProbeAck { .. }
+        | Message::UdpReady { .. }
+        | Message::SwitchToUdp { .. }
+        | Message::SwitchAck { .. }
+        | Message::FallbackToTcp { .. }
+        | Message::FallbackOk { .. }
+        | Message::SwitchOk { .. } => {
+            unreachable!("shared validation rejected inadmissible auth message")
         }
     }
 }
@@ -501,14 +524,12 @@ mod integration_tests {
         let mut server = MockTlsServer::new(server);
         let metrics = Arc::new(crate::metrics::Metrics::default());
 
-        // After receiving AUTH, send an unsolicited Pong (not
-        // AUTH_OK/AUTH_FAIL/PING/CLOSE). An 8-byte frame is a valid encoded
-        // `PongPayload` (u64 nonce); the client never decodes it — the `other`
-        // arm returns before any payload decode.
+        // AUTH is a valid fixed-layout message type, but only clients may send
+        // it. Direction validation must run before payload decoding.
         let server_fut = async {
             server.recv_auth_verify(&config).await?;
             server
-                .write_message(slt_core::proto::Message::Pong { payload: &[0u8; 8] })
+                .write_message(slt_core::proto::Message::Auth { payload: &[] })
                 .await
         };
 

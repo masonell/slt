@@ -17,7 +17,7 @@
 use std::io;
 
 use slt_core::crypto::udp_qsp::QspSessionError;
-use slt_core::proto::{FrameError, MessageError, PayloadError};
+use slt_core::proto::{FrameError, MessageError, MessageValidationError, PayloadError};
 
 /// A failure from the UDP-QSP transport on the server's session path.
 ///
@@ -111,6 +111,17 @@ pub enum SessionError {
     /// Failure encoding a locally constructed protocol payload.
     #[error(transparent)]
     PayloadEncode(PayloadError),
+}
+
+impl From<MessageValidationError> for SessionError {
+    fn from(err: MessageValidationError) -> Self {
+        match err {
+            MessageValidationError::InvalidPayload { source, .. } => Self::Payload(source),
+            MessageValidationError::InvalidDirection { .. }
+            | MessageValidationError::InvalidPhase { .. }
+            | MessageValidationError::InvalidTransport { .. } => Self::ProtocolViolation,
+        }
+    }
 }
 
 impl SessionError {

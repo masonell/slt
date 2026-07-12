@@ -4,8 +4,9 @@ use std::io;
 use std::time::Instant;
 
 use slt_core::proto::{
-    ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message, MessageType, OwnedMessageBuf,
-    PingPayload, PongPayload,
+    ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message, MessageContext, MessageSender,
+    MessageTransport, MessageType, OwnedMessageBuf, PingPayload, PongPayload, ProtocolPhase,
+    validate_message,
 };
 use tracing::{debug, info, trace};
 
@@ -166,6 +167,15 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         &mut self,
         msg_buf: OwnedMessageBuf,
     ) -> Result<SessionControl, SessionError> {
+        validate_message(
+            msg_buf.message(),
+            MessageContext::new(
+                MessageSender::Server,
+                ProtocolPhase::Established,
+                MessageTransport::Tcp,
+            ),
+        )?;
+
         if msg_buf.message().ty() == MessageType::Data {
             return Ok(self.send_to_tun_or_shutdown(msg_buf).await);
         }
@@ -207,9 +217,9 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             | Message::UpgradeProbe { .. }
             | Message::UpgradeProbeAck { .. }
             | Message::UdpReady { .. }
-            | Message::SwitchAck { .. } => Err(SessionError::ProtocolViolation {
-                detail: "unexpected control message on established session".into(),
-            }),
+            | Message::SwitchAck { .. } => {
+                unreachable!("shared validation rejected inadmissible tcp session message")
+            }
         }
     }
 }

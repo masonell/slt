@@ -67,7 +67,8 @@ Maximum `tun_mtu` of 1406 is derived from:
 
 Before `AUTH_OK` is received:
 
-- **Valid from client**: `AUTH`, `PING`, `CLOSE`
+- **Valid from client**: `AUTH`, `PING`, `PONG`, `CLOSE`
+- **Valid from server**: `AUTH_OK`, `AUTH_FAIL`, `PING`, `PONG`, `CLOSE`
 - **Invalid**: `DATA`, `REGISTER_CID`, and all other messages
 - Any `DATA` or `REGISTER_CID` received before `AUTH_OK` MUST be rejected as protocol error
 

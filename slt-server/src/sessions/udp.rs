@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use slt_core::crypto::udp_qsp::QspSessionError;
 use slt_core::proto::{
-    ClosePayload, Message, MessageSender, PongPayload, decode_padded_message,
-    is_message_allowed_on_udp_qsp,
+    ClosePayload, Message, MessageContext, MessageSender, MessageTransport, PongPayload,
+    ProtocolPhase, decode_padded_message, validate_message,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace};
@@ -64,18 +64,21 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         let mut opened = std::mem::take(&mut self.udp_opened_payload_buf);
         let control = match self.open_udp_packet(&claim.payload, &mut opened) {
             UdpOpenOutcome::Opened { packet_number } => {
-                self.note_authenticated_udp_activity();
                 self.adopt_udp_peer_if_newer(peer, packet_number);
                 match self.decode_udp_message(&opened) {
                     Ok(message) => {
-                        if is_message_allowed_on_udp_qsp(message.ty(), MessageSender::Client) {
-                            let received_at = Instant::now();
-                            let control = self.dispatch_udp_message(message).await?;
-                            self.note_activity(received_at);
-                            Ok(control)
-                        } else {
-                            Err(SessionError::ProtocolViolation)
-                        }
+                        validate_message(
+                            message,
+                            MessageContext::new(
+                                MessageSender::Client,
+                                ProtocolPhase::Established,
+                                MessageTransport::UdpQsp,
+                            ),
+                        )?;
+                        let received_at = Instant::now();
+                        let control = self.dispatch_udp_message(message).await?;
+                        self.note_authenticated_udp_activity(received_at);
+                        Ok(control)
                     }
                     Err(err) => Err(err),
                 }
@@ -273,7 +276,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             | Message::SwitchAck { .. }
             | Message::SwitchOk { .. }
             | Message::FallbackToTcp { .. }
-            | Message::FallbackOk { .. } => Err(SessionError::ProtocolViolation),
+            | Message::FallbackOk { .. } => {
+                unreachable!("shared validation rejected inadmissible udp-qsp session message")
+            }
         }
     }
 }

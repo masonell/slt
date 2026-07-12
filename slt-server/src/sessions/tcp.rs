@@ -3,7 +3,8 @@
 use std::time::Instant;
 
 use slt_core::proto::{
-    ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message, PongPayload,
+    ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message, MessageContext, MessageSender,
+    MessageTransport, PongPayload, ProtocolPhase, validate_message,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace};
@@ -61,6 +62,15 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         &mut self,
         message: Message<'_>,
     ) -> Result<SessionControl, SessionError> {
+        validate_message(
+            message,
+            MessageContext::new(
+                MessageSender::Client,
+                ProtocolPhase::Established,
+                MessageTransport::Tcp,
+            ),
+        )?;
+
         match message {
             Message::Auth { .. }
             | Message::AuthOk { .. }
@@ -70,7 +80,9 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             | Message::UpgradeProbe { .. }
             | Message::UpgradeProbeAck { .. }
             | Message::SwitchToUdp { .. }
-            | Message::SwitchOk { .. } => Err(SessionError::ProtocolViolation),
+            | Message::SwitchOk { .. } => {
+                unreachable!("shared validation rejected inadmissible tcp session message")
+            }
             Message::UdpReady { payload } => self.handle_udp_ready(payload).await,
             Message::SwitchAck { payload } => self.handle_switch_ack(payload).await,
             Message::Data { packet } => {

@@ -13,7 +13,9 @@ use std::time::Duration;
 use boring::error::ErrorStack;
 use boring::ssl::ErrorCode;
 use boring::x509::X509VerifyError;
-use slt_core::proto::{AuthFailCode, FrameError, MessageError, PayloadError};
+use slt_core::proto::{
+    AuthFailCode, FrameError, MessageError, MessageValidationError, PayloadError,
+};
 use slt_core::transport::tcp::TcpWriteError;
 use slt_core::types::ClientId;
 
@@ -233,8 +235,7 @@ pub enum ConnectError {
 
     /// Client received an unexpected protocol message during the auth exchange.
     ///
-    /// This is a client-detected protocol violation (a message that is not
-    /// `AUTH_OK`/`AUTH_FAIL`/`PING`/`CLOSE` arrived while authenticating), as
+    /// This is a client-detected direction, phase, or transport violation, as
     /// opposed to [`Self::AuthRejected`], which only ever carries a code the
     /// server actually sent inside a decoded `AUTH_FAIL`. Fatal: the server is
     /// speaking a protocol we don't expect, so retry won't help.
@@ -294,6 +295,17 @@ impl From<TcpWriteError> for ConnectError {
         match err {
             TcpWriteError::Frame(frame) => Self::Frame(frame),
             TcpWriteError::Io(io) => Self::Io(io),
+        }
+    }
+}
+
+impl From<MessageValidationError> for ConnectError {
+    fn from(err: MessageValidationError) -> Self {
+        match err {
+            MessageValidationError::InvalidPayload { source, .. } => Self::Payload(source),
+            MessageValidationError::InvalidDirection { .. }
+            | MessageValidationError::InvalidPhase { .. }
+            | MessageValidationError::InvalidTransport { .. } => Self::AuthUnexpectedMessage,
         }
     }
 }

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use slt_core::proto::{
-    ClosePayload, Message, MessageSender, MessageType, OwnedMessageBuf, PingPayload, PongPayload,
-    is_message_allowed_on_udp_qsp,
+    ClosePayload, Message, MessageContext, MessageSender, MessageTransport, MessageType,
+    OwnedMessageBuf, PingPayload, PongPayload, ProtocolPhase, validate_message,
 };
 use tokio::time;
 use tracing::{info, trace, warn};
@@ -137,11 +137,16 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         &mut self,
         msg_buf: OwnedMessageBuf,
     ) -> Result<SessionControl, SessionError> {
-        let message_type = msg_buf.message().ty();
-        if !is_message_allowed_on_udp_qsp(message_type, MessageSender::Server) {
-            return Err(unexpected_udp_qsp_message(message_type));
-        }
+        validate_message(
+            msg_buf.message(),
+            MessageContext::new(
+                MessageSender::Server,
+                ProtocolPhase::Established,
+                MessageTransport::UdpQsp,
+            ),
+        )?;
 
+        let message_type = msg_buf.message().ty();
         if message_type == MessageType::Data {
             return Ok(self.send_to_tun_or_shutdown(msg_buf).await);
         }
@@ -182,7 +187,9 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             | Message::SwitchAck { .. }
             | Message::SwitchOk { .. }
             | Message::FallbackToTcp { .. }
-            | Message::FallbackOk { .. } => Err(unexpected_udp_qsp_message(message_type)),
+            | Message::FallbackOk { .. } => {
+                unreachable!("shared validation rejected inadmissible udp-qsp session message")
+            }
         }
     }
 
@@ -325,13 +332,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
     }
 }
 
-fn unexpected_udp_qsp_message(message_type: MessageType) -> SessionError {
-    SessionError::ProtocolViolation {
-        detail: format!("unexpected {message_type:?} message from server on udp-qsp transport")
-            .into(),
-    }
-}
-
 fn is_matching_pong(msg_buf: &OwnedMessageBuf, nonce: u64) -> Result<bool, SessionError> {
     let Message::Pong { payload } = msg_buf.message() else {
         return Ok(false);
@@ -446,7 +446,16 @@ mod tests {
     fn udp_unexpected_message_is_typed_protocol_violation() {
         use crate::runtime::session::SessionExit;
 
-        let err = unexpected_udp_qsp_message(MessageType::RegisterOk);
+        let validation = validate_message(
+            Message::RegisterOk { payload: &[] },
+            MessageContext::new(
+                MessageSender::Server,
+                ProtocolPhase::Established,
+                MessageTransport::UdpQsp,
+            ),
+        )
+        .unwrap_err();
+        let err = SessionError::from(validation);
         assert_eq!(err.exit(), SessionExit::ProtocolError);
         let rendered = format!("{err:#}");
         assert!(
@@ -454,7 +463,7 @@ mod tests {
             "missing stage framing: {rendered:?}"
         );
         assert!(rendered.contains("RegisterOk"), "{rendered:?}");
-        assert!(rendered.contains("udp-qsp transport"), "{rendered:?}");
+        assert!(rendered.contains("UdpQsp"), "{rendered:?}");
     }
 
     /// The "udp-qsp transport missing" sites report

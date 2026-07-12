@@ -68,7 +68,7 @@ context value.
 ### 1.3 Pre-Authentication Constraints
 
 Before `AUTH_OK` is received:
-- Only `AUTH`, `PING`, and `CLOSE` messages are valid from the client
+- Only `AUTH`, `PING`, `PONG`, and `CLOSE` messages are valid from the client
 - Any `DATA` or `REGISTER_CID` received before authentication MUST be rejected
 - TCP classification is bounded separately by `tcp_classification_timeout`
 - After the classifier returns `CLAIM`, the server enforces one `auth_timeout`
@@ -271,7 +271,7 @@ UDP_ACTIVE -- FALLBACK_TO_TCP --> TCP preferred + UDP rediscovery
 
 | State | Valid Client Messages | Valid Server Messages |
 |-------|----------------------|----------------------|
-| AUTHENTICATING | AUTH, PING, CLOSE | AUTH_OK, AUTH_FAIL, PING, PONG, CLOSE |
+| AUTHENTICATING | AUTH, PING, PONG, CLOSE | AUTH_OK, AUTH_FAIL, PING, PONG, CLOSE |
 | AUTHENTICATED | All except UPGRADE_* | All except SWITCH_TO_UDP |
 | UDP_REGISTERING | (waiting for response) | REGISTER_OK, REGISTER_FAIL |
 | UDP_PROBING | UPGRADE_PROBE, DATA, PING, PONG | UPGRADE_PROBE_ACK, DATA, PING, PONG |

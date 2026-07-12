@@ -13,7 +13,9 @@ use std::io;
 
 use boring::error::ErrorStack;
 use boring::ssl::ErrorCode;
-use slt_core::proto::{FrameError, MessageError, MessageType, PayloadError};
+use slt_core::proto::{
+    FrameError, MessageError, MessageType, MessageValidationError, PayloadError,
+};
 
 /// A wrapper that preserves a boring TLS handshake failure, decoupled from the
 /// underlying stream type.
@@ -184,6 +186,19 @@ impl AuthError {
             | Self::Frame(_)
             | Self::Message(_)
             | Self::Payload(_) => io::ErrorKind::InvalidData,
+        }
+    }
+}
+
+impl From<MessageValidationError> for AuthError {
+    fn from(err: MessageValidationError) -> Self {
+        match err {
+            MessageValidationError::InvalidPayload { source, .. } => Self::Payload(source),
+            MessageValidationError::InvalidDirection { .. }
+            | MessageValidationError::InvalidPhase { .. }
+            | MessageValidationError::InvalidTransport { .. } => Self::ProtocolViolation {
+                message_type: err.message_type(),
+            },
         }
     }
 }

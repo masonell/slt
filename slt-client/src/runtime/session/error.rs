@@ -13,7 +13,7 @@ use std::io;
 
 use boring::error::ErrorStack;
 use slt_core::crypto::udp_qsp::QspCryptoError;
-use slt_core::proto::{FrameError, MessageError, PayloadError};
+use slt_core::proto::{FrameError, MessageError, MessageValidationError, PayloadError};
 use slt_core::transport::tcp::TcpWriteError;
 
 use crate::transport::udp_qsp::UdpQspError;
@@ -148,6 +148,19 @@ impl From<TcpWriteError> for SessionError {
         match err {
             TcpWriteError::Frame(frame) => Self::Frame(frame),
             TcpWriteError::Io(io) => Self::Io(io),
+        }
+    }
+}
+
+impl From<MessageValidationError> for SessionError {
+    fn from(err: MessageValidationError) -> Self {
+        match err {
+            MessageValidationError::InvalidPayload { source, .. } => Self::Payload(source),
+            MessageValidationError::InvalidDirection { .. }
+            | MessageValidationError::InvalidPhase { .. }
+            | MessageValidationError::InvalidTransport { .. } => Self::ProtocolViolation {
+                detail: err.to_string().into(),
+            },
         }
     }
 }
