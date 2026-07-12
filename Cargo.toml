@@ -16,6 +16,8 @@ fastrand = "2.4"
 hex = "0.4"
 humantime-serde = "1.1"
 libc = "0.2"
+# Feature anchor for release_max_level_info; SLT does not call log directly.
+log = { version = "0.4", features = ["release_max_level_info"] }
 lru = "0.18"
 parking_lot = "0.12"
 quinn-udp = "0.6"

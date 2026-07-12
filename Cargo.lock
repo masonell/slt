@@ -1855,6 +1855,7 @@ dependencies = [
  "foreign-types",
  "hex",
  "humantime-serde",
+ "log",
  "num_enum",
  "parking_lot",
  "quiche",

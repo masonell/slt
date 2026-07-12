@@ -20,6 +20,7 @@ foreign-types = { workspace = true }
 fastrand = { workspace = true }
 hex = { workspace = true }
 humantime-serde = { workspace = true }
+log = { workspace = true }
 parking_lot = { workspace = true }
 quinn-udp = { workspace = true, optional = true }
 quiche = { workspace = true }
