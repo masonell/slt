@@ -8,6 +8,7 @@ use crate::config::{ConfigError, DEFAULT_TUN_MTU, MAX_TUN_MTU};
 
 /// TUN interface configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TunConfig {
     /// TUN interface name.
     #[serde(default = "default_tun_name")]
@@ -16,7 +17,6 @@ pub struct TunConfig {
     #[serde(default = "default_tun_mtu")]
     pub tun_mtu: u16,
     /// Local IPv4 address expected on the TUN interface.
-    #[serde(default = "default_tun_ipv4")]
     pub tun_ipv4: Ipv4Addr,
     /// IPv4 overlay subnet prefix length.
     #[serde(default = "default_tun_prefix")]
@@ -167,13 +167,25 @@ mod tests {
 
     #[test]
     fn serde_defaults_tun_name_when_omitted() {
-        // Android configs omit `tun_name`; it should deserialize to the default,
-        // not fail, and the result must still validate.
-        let config: TunConfig = toml::from_str("tun_mtu = 1280").unwrap();
+        let config: TunConfig = toml::from_str(
+            r#"
+                tun_mtu = 1280
+                tun_ipv4 = "10.10.0.2"
+            "#,
+        )
+        .unwrap();
         assert_eq!(config.tun_name, "tun0");
-        assert_eq!(config.tun_ipv4, Ipv4Addr::new(10, 10, 0, 1));
+        assert_eq!(config.tun_ipv4, Ipv4Addr::new(10, 10, 0, 2));
         assert_eq!(config.tun_prefix, 24);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn serde_requires_tun_ipv4() {
+        let err = toml::from_str::<TunConfig>("tun_mtu = 1280").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("missing field"), "{message}");
+        assert!(message.contains("tun_ipv4"), "{message}");
     }
 
     #[test]

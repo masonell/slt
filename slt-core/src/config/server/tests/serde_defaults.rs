@@ -4,6 +4,34 @@ use crate::config::{ConfigError, ConfigLoadError};
 use crate::proto::CipherSuite;
 use crate::types::ServerUdpQspCipher;
 
+fn serialized_test_config() -> toml::Value {
+    let raw = toml::to_string(&test_config()).unwrap();
+    toml::from_str(&raw).unwrap()
+}
+
+fn insert_unknown_field(value: &mut toml::Value, path: &[&str], field: &str) {
+    let mut current = value;
+    for key in path {
+        current = current.as_table_mut().unwrap().get_mut(*key).unwrap();
+    }
+    current
+        .as_table_mut()
+        .unwrap()
+        .insert(field.to_string(), toml::Value::Boolean(true));
+}
+
+fn assert_unknown_field_rejected(path: &[&str], field: &str) {
+    let mut value = serialized_test_config();
+    insert_unknown_field(&mut value, path, field);
+    let raw = toml::to_string(&value).unwrap();
+
+    let err = ServerConfig::from_toml_str(&raw).unwrap_err();
+    assert!(matches!(&err, ConfigLoadError::ParseToml(_)));
+    let message = err.to_string();
+    assert!(message.contains("unknown field"), "{message}");
+    assert!(message.contains(field), "{message}");
+}
+
 #[test]
 fn from_toml_accepts_empty_client_list() {
     let mut config = test_config();
@@ -192,4 +220,58 @@ fn serde_rejects_empty_udp_qsp_allowed_ciphers() {
         err,
         ConfigLoadError::Validate(ConfigError::EmptyUdpQspAllowedCiphers)
     ));
+}
+
+#[test]
+fn serde_rejects_unknown_fields_in_server_sections() {
+    let cases: &[(&[&str], &str)] = &[
+        (&[], "session_quee_size"),
+        (&["network"], "listen_tcq"),
+        (&["tls"], "tls_crt"),
+        (&["tun"], "tun_mttu"),
+        (&["timing"], "auth_timout"),
+        (&["transport"], "udp_qspp"),
+        (&["transport", "udp_qsp"], "allowed_cipher"),
+    ];
+
+    for (path, field) in cases {
+        assert_unknown_field_rejected(path, field);
+    }
+
+    let mut value = serialized_test_config();
+    value
+        .get_mut("clients")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .first_mut()
+        .unwrap()
+        .as_table_mut()
+        .unwrap()
+        .insert("assigned_ip4".to_string(), toml::Value::Boolean(true));
+    let raw = toml::to_string(&value).unwrap();
+    let err = ServerConfig::from_toml_str(&raw).unwrap_err();
+    assert!(matches!(&err, ConfigLoadError::ParseToml(_)));
+    let message = err.to_string();
+    assert!(message.contains("unknown field"), "{message}");
+    assert!(message.contains("assigned_ip4"), "{message}");
+}
+
+#[test]
+fn serde_requires_server_tun_ipv4() {
+    let mut value = serialized_test_config();
+    value
+        .get_mut("tun")
+        .unwrap()
+        .as_table_mut()
+        .unwrap()
+        .remove("tun_ipv4")
+        .unwrap();
+    let raw = toml::to_string(&value).unwrap();
+
+    let err = ServerConfig::from_toml_str(&raw).unwrap_err();
+    assert!(matches!(&err, ConfigLoadError::ParseToml(_)));
+    let message = err.to_string();
+    assert!(message.contains("missing field"), "{message}");
+    assert!(message.contains("tun_ipv4"), "{message}");
 }

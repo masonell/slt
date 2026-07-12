@@ -14,6 +14,7 @@ const fn default_enable_upgrade() -> bool {
 
 /// Static client configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     /// Network settings (hostname, port, IP override).
     pub network: ClientNetworkConfig,
@@ -137,6 +138,34 @@ mod tests {
         }
     }
 
+    fn serialized_test_config() -> toml::Value {
+        let raw = toml::to_string(&test_config()).unwrap();
+        toml::from_str(&raw).unwrap()
+    }
+
+    fn insert_unknown_field(value: &mut toml::Value, path: &[&str], field: &str) {
+        let mut current = value;
+        for key in path {
+            current = current.as_table_mut().unwrap().get_mut(*key).unwrap();
+        }
+        current
+            .as_table_mut()
+            .unwrap()
+            .insert(field.to_string(), toml::Value::Boolean(true));
+    }
+
+    fn assert_unknown_field_rejected(path: &[&str], field: &str) {
+        let mut value = serialized_test_config();
+        insert_unknown_field(&mut value, path, field);
+        let raw = toml::to_string(&value).unwrap();
+
+        let err = ClientConfig::from_toml_str(&raw).unwrap_err();
+        assert!(matches!(&err, ConfigLoadError::ParseToml(_)));
+        let message = err.to_string();
+        assert!(message.contains("unknown field"), "{message}");
+        assert!(message.contains(field), "{message}");
+    }
+
     #[test]
     fn validate_accepts_valid_config() {
         let config = test_config();
@@ -250,7 +279,6 @@ mod tests {
             privkey_ed25519 = { hex = "0000000000000000000000000000000000000000000000000000000000000000" }
 
             [tun]
-            tun_name = "tun0"
             tun_mtu = 1280
             tun_ipv4 = "10.10.0.2"
             tun_prefix = 24
@@ -260,6 +288,7 @@ mod tests {
         assert_eq!(config.transport.udp_qsp.cipher, ClientUdpQspCipher::Auto);
         assert!(config.enable_upgrade);
         assert!(!config.require_udp);
+        assert_eq!(config.tun.tun_name, "tun0");
     }
 
     #[test]
@@ -293,5 +322,65 @@ mod tests {
             config.transport.udp_qsp.cipher,
             ClientUdpQspCipher::ChaCha20Poly1305
         );
+    }
+
+    #[test]
+    fn serde_rejects_unknown_fields_in_client_sections() {
+        let cases: &[(&[&str], &str)] = &[
+            (&[], "enable_upgarde"),
+            (&["network"], "hostnmae"),
+            (&["tls"], "tls_caa"),
+            (&["identity"], "client_iid"),
+            (&["tun"], "tun_mttu"),
+            (&["timing"], "ping_miin"),
+            (&["transport"], "udp_qspp"),
+            (&["transport", "udp_qsp"], "cipheer"),
+        ];
+
+        for (path, field) in cases {
+            assert_unknown_field_rejected(path, field);
+        }
+    }
+
+    #[test]
+    fn serde_rejects_root_setting_misplaced_under_tun() {
+        let mut value = serialized_test_config();
+        let enable_upgrade = value
+            .as_table_mut()
+            .unwrap()
+            .remove("enable_upgrade")
+            .unwrap();
+        value
+            .get_mut("tun")
+            .unwrap()
+            .as_table_mut()
+            .unwrap()
+            .insert("enable_upgrade".to_string(), enable_upgrade);
+        let raw = toml::to_string(&value).unwrap();
+
+        let err = ClientConfig::from_toml_str(&raw).unwrap_err();
+        assert!(matches!(&err, ConfigLoadError::ParseToml(_)));
+        let message = err.to_string();
+        assert!(message.contains("unknown field"), "{message}");
+        assert!(message.contains("enable_upgrade"), "{message}");
+    }
+
+    #[test]
+    fn serde_requires_client_tun_ipv4() {
+        let mut value = serialized_test_config();
+        value
+            .get_mut("tun")
+            .unwrap()
+            .as_table_mut()
+            .unwrap()
+            .remove("tun_ipv4")
+            .unwrap();
+        let raw = toml::to_string(&value).unwrap();
+
+        let err = ClientConfig::from_toml_str(&raw).unwrap_err();
+        assert!(matches!(&err, ConfigLoadError::ParseToml(_)));
+        let message = err.to_string();
+        assert!(message.contains("missing field"), "{message}");
+        assert!(message.contains("tun_ipv4"), "{message}");
     }
 }

@@ -11,6 +11,7 @@ use crate::types::{ClientId, PubKeyEd25519, TlsMaterial};
 
 /// Server network configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerNetworkConfig {
     /// TCP listener for TLS-wrapped VPN traffic.
     pub listen_tcp: SocketAddr,
@@ -55,6 +56,7 @@ impl ServerNetworkConfig {
 
 /// Server TLS configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerTlsConfig {
     /// TLS certificate chain (PEM) or file reference for server auth.
     pub tls_cert: TlsMaterial,
@@ -64,6 +66,7 @@ pub struct ServerTlsConfig {
 
 /// Per-client entry in the server allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerClient {
     /// Stable 16-byte client identifier.
     pub client_id: ClientId,
@@ -111,6 +114,7 @@ fn default_allowed_udp_qsp_ciphers() -> Vec<ServerUdpQspCipher> {
 
 /// Server UDP-QSP transport configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerUdpQspConfig {
     /// Cipher suites accepted from client `REGISTER_CID` requests.
     #[serde(default = "default_allowed_udp_qsp_ciphers")]
@@ -150,6 +154,7 @@ impl ServerUdpQspConfig {
 
 /// Server transport configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ServerTransportConfig {
     /// UDP-QSP transport settings.
     #[serde(default)]
@@ -169,6 +174,7 @@ impl ServerTransportConfig {
 
 /// Server timing configuration with defaults and validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerTimingConfig {
     /// Minimum ping interval.
     #[serde(default = "crate::config::default_ping_min", with = "humantime_serde")]

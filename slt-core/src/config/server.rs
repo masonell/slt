@@ -44,6 +44,7 @@ pub fn default_tcp_connection_cap() -> usize {
 
 /// Static server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Pre-shared secret for `ClientHello` classification.
     pub server_secret: SharedSecret,

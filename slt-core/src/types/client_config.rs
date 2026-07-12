@@ -11,6 +11,7 @@ use crate::types::{ClientId, PrivKeyEd25519, SharedSecret, TlsMaterial};
 
 /// Client network configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientNetworkConfig {
     /// Server hostname used for SNI and certificate verification.
     pub hostname: String,
@@ -42,6 +43,7 @@ impl ClientNetworkConfig {
 
 /// Client TLS configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientTlsConfig {
     /// Certificate authority for verifying SLT server certificate (TCP).
     pub tls_ca: TlsMaterial,
@@ -56,6 +58,7 @@ pub struct ClientTlsConfig {
 
 /// Client identity configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientIdentity {
     /// Stable 16-byte client identifier.
     pub client_id: ClientId,
@@ -97,6 +100,7 @@ impl ClientUdpQspCipher {
 
 /// Client UDP-QSP transport configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ClientUdpQspConfig {
     /// Packet protection cipher selection policy.
     #[serde(default)]
@@ -105,6 +109,7 @@ pub struct ClientUdpQspConfig {
 
 /// Client transport configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ClientTransportConfig {
     /// UDP-QSP transport settings.
     #[serde(default)]
@@ -113,6 +118,7 @@ pub struct ClientTransportConfig {
 
 /// Client timing configuration with defaults and validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientTimingConfig {
     /// Minimum ping interval.
     #[serde(default = "crate::config::default_ping_min", with = "humantime_serde")]
