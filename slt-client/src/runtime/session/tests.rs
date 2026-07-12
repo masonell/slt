@@ -5,8 +5,8 @@ use slt_core::config::ClientConfig;
 use slt_core::crypto::udp_qsp::{QspSessionError, QuicQspSession, UdpQspKeys};
 use slt_core::proto::{
     CipherSuite, CloseCode, ClosePayload, FallbackOkPayload, FallbackToTcpPayload, FrameError,
-    Message, MessageError, MessageType, OwnedMessageBuf, SwitchAckPayload, SwitchOkPayload,
-    SwitchToUdpPayload, decode_message, encode_message,
+    Message, MessageError, MessageType, OwnedMessageBuf, PingPayload, SwitchAckPayload,
+    SwitchOkPayload, SwitchToUdpPayload, decode_message, encode_message,
 };
 use slt_core::transport::tcp::TcpChannel;
 use slt_core::types::{Cid, MAX_DCID_LEN};
@@ -548,6 +548,52 @@ async fn tcp_eof_before_switch_ok_reconnects_without_preferring_udp() {
         SessionControl::Close(SessionExit::TcpClosed)
     );
     assert_eq!(session.active_transport, ActiveTransport::Tcp);
+}
+
+#[tokio::test]
+async fn partial_tcp_frame_does_not_reset_activity() {
+    let config = test_config();
+    let services = DesktopServices::new();
+    let (_tun_tx, to_session_rx) = mpsc::channel(1);
+    let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+    let mut tun = TunChannels {
+        to_session_rx,
+        to_tun_tx,
+    };
+    let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
+
+    let mut payload = Vec::new();
+    PingPayload { nonce: 0xCAFE }.encode(&mut payload);
+    let mut frame = Vec::new();
+    encode_message(Message::Ping { payload: &payload }, &mut frame).unwrap();
+
+    let last_complete_message = Instant::now() - Duration::from_secs(1);
+    session.last_tcp_rx = last_complete_message;
+    let mut next_ping_at = session.schedule_next_ping();
+
+    server_stream.write_all(&frame[..1]).await.unwrap();
+    let partial_read = session.tcp.read_more().await.unwrap();
+    assert_ne!(partial_read, 0);
+    assert_eq!(
+        session
+            .handle_event(SessionEvent::TcpRead(partial_read), &mut next_ping_at)
+            .await
+            .unwrap(),
+        SessionControl::Continue
+    );
+    assert_eq!(session.last_tcp_rx, last_complete_message);
+
+    server_stream.write_all(&frame[1..]).await.unwrap();
+    let complete_read = session.tcp.read_more().await.unwrap();
+    assert_ne!(complete_read, 0);
+    assert_eq!(
+        session
+            .handle_event(SessionEvent::TcpRead(complete_read), &mut next_ping_at)
+            .await
+            .unwrap(),
+        SessionControl::Continue
+    );
+    assert!(session.last_tcp_rx > last_complete_message);
 }
 
 #[tokio::test]

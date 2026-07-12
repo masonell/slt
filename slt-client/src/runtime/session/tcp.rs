@@ -88,8 +88,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             self.schedule_discovery_retry();
             self.last_peer_fallback_id = Some(request.fallback_id);
         }
-        self.note_tcp_activity();
-
         let ok = FallbackOkPayload {
             fallback_id: request.fallback_id,
         };
@@ -143,6 +141,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 return Ok(SessionControl::Continue);
             };
 
+            self.note_tcp_activity();
             if let SessionControl::Close(exit) = self.handle_tcp_message(msg_buf).await? {
                 return Ok(SessionControl::Close(exit));
             }

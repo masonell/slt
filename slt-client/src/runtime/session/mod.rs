@@ -540,7 +540,6 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                     self.metrics.inc_disconnect_close();
                     return Ok(SessionControl::Close(SessionExit::TcpClosed));
                 }
-                self.note_tcp_activity();
                 self.handle_tcp_read().await
             }
             SessionEvent::TunPacket(maybe) => {
