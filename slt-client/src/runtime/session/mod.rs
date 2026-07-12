@@ -273,6 +273,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
 
     async fn run_inner(&mut self) -> SessionOutcome {
         let mut next_ping_at = self.schedule_next_ping();
+        let mut flush_before_next_tun = false;
         loop {
             if self.tcp_alive && self.tcp.has_buffered_input() {
                 match self.handle_tcp_read().await {
@@ -285,15 +286,32 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                 }
             }
 
-            let event = match self.poll_event(next_ping_at).await {
+            let should_flush_udp = self.has_pending_udp_flush();
+            flush_before_next_tun &= should_flush_udp;
+            let event = match self.poll_event(next_ping_at, !flush_before_next_tun).await {
                 Ok(event) => event,
                 Err(err) => {
                     self.metrics.inc_disconnect_error();
                     break SessionOutcome::from_error(err);
                 }
             };
+            let is_tun_event = matches!(event, SessionEvent::TunPacket(_));
+            let extends_udp_batch = self.event_extends_udp_batch(&event);
+            let is_udp_flush = matches!(event, SessionEvent::UdpFlushReady);
             match self.handle_event(event, &mut next_ping_at).await {
-                Ok(SessionControl::Continue) => {}
+                Ok(SessionControl::Continue) => {
+                    if is_udp_flush {
+                        flush_before_next_tun = false;
+                    } else if is_tun_event {
+                        // Valid uplink packets extend the GSO batch. Once a
+                        // non-batching TUN event wins, gate more TUN work until
+                        // the pending partial batch drains.
+                        flush_before_next_tun =
+                            should_flush_udp && !extends_udp_batch && self.has_pending_udp_flush();
+                    } else {
+                        flush_before_next_tun &= self.has_pending_udp_flush();
+                    }
+                }
                 Ok(SessionControl::Close(exit)) => break SessionOutcome::from_exit(exit),
                 Err(err) => {
                     self.metrics.inc_disconnect_error();
@@ -323,7 +341,11 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
     /// - UDP reconnect timer (if waiting)
     /// - Registration timeout (if in-flight registration)
     /// - Discovery task completion (if discovery is running)
-    async fn poll_event(&mut self, next_ping_at: Instant) -> Result<SessionEvent, SessionError> {
+    async fn poll_event(
+        &mut self,
+        next_ping_at: Instant,
+        can_receive_tun: bool,
+    ) -> Result<SessionEvent, SessionError> {
         let limits = self.limits;
         let idle_deadline = match self.active_transport {
             ActiveTransport::Tcp => self.last_tcp_rx + self.config.timing.idle_timeout,
@@ -334,11 +356,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
         let udp_enabled = self.udp_receive_transport().is_some();
         let has_discovery_task = self.discovery_task.is_some();
         let udp_upgrade_timer_at = self.udp_upgrade.timer_at();
-        let udp_pending_flush = self.active_transport == ActiveTransport::UdpQsp
-            && self
-                .udp_state
-                .as_active()
-                .is_some_and(ClientTransport::has_pending_flush);
+        let udp_pending_flush = self.has_pending_udp_flush();
 
         let mut timer_at = idle_deadline;
         let mut timer = SessionTimer::Idle;
@@ -370,11 +388,63 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
         );
         let timer_due = time::Instant::from_std(timer_at) <= time::Instant::now();
 
-        // An expired deadline precedes packet sources, while a future deadline
-        // stays below them so the hot path does not register and drop a Tokio
-        // timer on every packet. Rechecking on the next iteration bounds timer
-        // lateness to one packet. Keep UDP-QSP partial-batch flush last; full GSO
-        // slabs flush inline.
+        let tun_work = async {
+            // Ready uplink packets extend the current GSO batch. The lifecycle
+            // gates this arm after a non-batching TUN event so a partial batch
+            // cannot remain pending indefinitely.
+            tokio::select! {
+                biased;
+
+                maybe = self.tun_channels.to_session_rx.recv(), if can_receive_tun => {
+                    SessionEvent::TunPacket(maybe)
+                }
+                () = std::future::ready(()), if udp_pending_flush => {
+                    SessionEvent::UdpFlushReady
+                }
+                else => std::future::pending().await,
+            }
+        };
+        let packet_work = async {
+            tokio::select! {
+                res = self.tcp.read_more(), if self.tcp_alive => {
+                    Ok::<_, SessionError>(SessionEvent::TcpRead(res?))
+                }
+                event = tun_work => Ok::<_, SessionError>(event),
+                udp_res = async {
+                    // Defensive: this arm is gated by `udp_enabled` (which checks
+                    // `udp_receive_transport().is_some()`), so the mutable lookup failing
+                    // here would be a client-state inconsistency that should never
+                    // happen. Unlike the 6 other "transport missing" sites (which
+                    // return `SessionError::ProtocolViolation`), this arm's type is
+                    // `Result<_, UdpQspError>` because it returns through
+                    // `SessionEvent::UdpResult`; routing it to `ProtocolViolation`
+                    // would require restructuring the select arm for no behavioral
+                    // gain (the branch is unreachable in practice). The error
+                    // surfaces as `UdpQspError::Io(BrokenPipe)`. `BrokenPipe` is
+                    // not a transient kind, so `is_recoverable()` is false and the
+                    // `UdpResult(Err)` handler propagates it to TCP fallback (or
+                    // close if TCP is dead) — the same routing a real `BrokenPipe`
+                    // gets. Moot either way: the branch never fires.
+                    let udp = self
+                        .udp_state
+                        .as_active_mut()
+                        .or(self.retained_udp_transport.as_deref_mut())
+                        .ok_or_else(|| {
+                        UdpQspError::from(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "udp-qsp transport missing",
+                        ))
+                    })?;
+                    udp.read_next_message(limits).await
+                }, if udp_enabled => Ok(SessionEvent::UdpResult(udp_res)),
+            }
+        };
+
+        // Cancellation, control work, and expired deadlines retain explicit
+        // priority. Packet sources are selected fairly inside `packet_work`.
+        // A future deadline remains below ready packet work so the hot path
+        // avoids registering and dropping a Tokio timer for every packet; the
+        // due check on the next iteration bounds lateness to one event.
         tokio::select! {
             biased;
 
@@ -389,38 +459,26 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             }, if has_discovery_task => {
                 Ok(SessionEvent::DiscoveryResult(result))
             }
-            res = self.tcp.read_more(), if self.tcp_alive => Ok(SessionEvent::TcpRead(res?)),
-            maybe = self.tun_channels.to_session_rx.recv() => Ok(SessionEvent::TunPacket(maybe)),
-            udp_res = async {
-                // Defensive: this arm is gated by `udp_enabled` (which checks
-                // `udp_receive_transport().is_some()`), so the mutable lookup failing
-                // here would be a client-state inconsistency that should never
-                // happen. Unlike the 6 other "transport missing" sites (which
-                // return `SessionError::ProtocolViolation`), this arm's type is
-                // `Result<_, UdpQspError>` because it returns through
-                // `SessionEvent::UdpResult`; routing it to `ProtocolViolation`
-                // would require restructuring the select arm for no behavioral
-                // gain (the branch is unreachable in practice). The error
-                // surfaces as `UdpQspError::Io(BrokenPipe)`. `BrokenPipe` is
-                // not a transient kind, so `is_recoverable()` is false and the
-                // `UdpResult(Err)` handler propagates it to TCP fallback (or
-                // close if TCP is dead) — the same routing a real `BrokenPipe`
-                // gets. Moot either way: the branch never fires.
-                let udp = self
-                    .udp_state
-                    .as_active_mut()
-                    .or(self.retained_udp_transport.as_deref_mut())
-                    .ok_or_else(|| {
-                    UdpQspError::from(io::Error::new(
-                        io::ErrorKind::BrokenPipe,
-                        "udp-qsp transport missing",
-                    ))
-                })?;
-                udp.read_next_message(limits).await
-            }, if udp_enabled => Ok(SessionEvent::UdpResult(udp_res)),
+            event = packet_work => event,
             () = time::sleep_until(timer_at.into()), if !timer_due => Ok(timer.into_event()),
-            () = std::future::ready(()), if udp_pending_flush => Ok(SessionEvent::UdpFlushReady),
         }
+    }
+
+    fn has_pending_udp_flush(&self) -> bool {
+        self.active_transport == ActiveTransport::UdpQsp
+            && self
+                .udp_state
+                .as_active()
+                .is_some_and(ClientTransport::has_pending_flush)
+    }
+
+    fn event_extends_udp_batch(&self, event: &SessionEvent) -> bool {
+        self.active_transport == ActiveTransport::UdpQsp
+            && matches!(
+                event,
+                SessionEvent::TunPacket(Some(packet))
+                    if !packet.is_empty() && packet.len() <= self.limits.max_data_len
+            )
     }
 
     /// Dispatches a session event to the appropriate handler.
@@ -671,7 +729,9 @@ mod tests {
         test_config, tls_pair_with_parkable_client_writes, tls_tcp_stream_pair,
     };
     use crate::transport::tcp::{ClientKeyUpdater, TcpSession};
-    use crate::transport::udp_qsp::{ClientTransport, UdpQspError, client_udp_qsp_io};
+    use crate::transport::udp_qsp::{
+        ClientTransport, ClientUdpQspIo, UdpQspError, client_udp_qsp_io,
+    };
     use crate::tun::TunChannels;
 
     async fn test_session<'a>(
@@ -760,6 +820,23 @@ mod tests {
             false,
         );
         ClientTransport::new(session, Arc::new(Metrics::default()))
+    }
+
+    async fn paired_udp_transports() -> (ClientTransport, QuicQspSession<ClientUdpQspIo>) {
+        let client_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let server_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let client_addr = client_socket.local_addr().unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+        let scid = Cid::from([0xA1; 20]);
+        let dcid = Cid::from([0xB2; 20]);
+
+        let client_io = client_udp_qsp_io(&client_socket, server_addr).unwrap();
+        let client_qsp = QuicQspSession::new(client_io, scid, dcid, make_test_keys(), 0, 0, false);
+        let client = ClientTransport::new(client_qsp, Arc::new(Metrics::default()));
+
+        let server_io = client_udp_qsp_io(&server_socket, client_addr).unwrap();
+        let server = QuicQspSession::new(server_io, dcid, scid, make_server_keys(), 0, 0, false);
+        (client, server)
     }
 
     #[tokio::test]
@@ -1326,6 +1403,193 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saturated_tcp_tun_and_udp_sources_are_polled_fairly() {
+        const MAX_POLLS: usize = 128;
+
+        let config = test_config();
+        let services = DesktopServices::new();
+        let packet = vec![0x45; 20];
+        let (tun_tx, to_session_rx) = mpsc::channel(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(1);
+        tun_tx.try_send(packet.clone()).unwrap();
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
+        let (client_udp, mut server_udp) = paired_udp_transports().await;
+        session.udp_state = UdpState::Active(Box::new(client_udp));
+
+        let mut frame = Vec::new();
+        encode_message(
+            Message::Data {
+                packet: packet.as_slice(),
+            },
+            &mut frame,
+        )
+        .unwrap();
+        for _ in 0..16 {
+            server_udp.send(&frame).await.unwrap();
+        }
+        server_udp.flush().await.unwrap();
+        let limits = session.limits;
+        session
+            .udp_receive_transport_mut()
+            .unwrap()
+            .read_next_message(limits)
+            .await
+            .unwrap();
+        server_stream.write_all(&frame).await.unwrap();
+
+        let mut tcp_seen = 0;
+        let mut tun_seen = 0;
+        let mut udp_seen = 0;
+        for _ in 0..MAX_POLLS {
+            let event = time::timeout(
+                Duration::from_secs(1),
+                session.poll_event(Instant::now() + Duration::from_secs(60), true),
+            )
+            .await
+            .expect("saturated source must remain ready")
+            .unwrap();
+
+            match event {
+                SessionEvent::TcpRead(n) => {
+                    assert_ne!(n, 0);
+                    tcp_seen += 1;
+                    server_stream.write_all(&frame).await.unwrap();
+                }
+                SessionEvent::TunPacket(Some(received)) => {
+                    assert_eq!(received, packet);
+                    tun_seen += 1;
+                    tun_tx.try_send(packet.clone()).unwrap();
+                }
+                SessionEvent::UdpResult(Ok(_)) => {
+                    udp_seen += 1;
+                    server_udp.send(&frame).await.unwrap();
+                    server_udp.flush().await.unwrap();
+                }
+                SessionEvent::UdpResult(Err(err)) => panic!("UDP source failed: {err}"),
+                _ => panic!("unexpected event while packet sources are saturated"),
+            }
+
+            if tcp_seen != 0 && tun_seen != 0 && udp_seen != 0 {
+                break;
+            }
+        }
+
+        assert_ne!(tcp_seen, 0, "ready TCP source was not selected");
+        assert_ne!(tun_seen, 0, "ready TUN source was starved by TCP");
+        assert_ne!(udp_seen, 0, "ready UDP source was starved by TCP or TUN");
+    }
+
+    #[tokio::test]
+    async fn saturated_tcp_and_udp_reads_cannot_starve_partial_udp_flush() {
+        const MAX_POLLS: usize = 128;
+
+        let config = test_config();
+        let services = DesktopServices::new();
+        let (tun_tx, to_session_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(1);
+        let mut tun = TunChannels {
+            to_session_rx,
+            to_tun_tx,
+        };
+        let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
+        let (client_udp, mut server_udp) = paired_udp_transports().await;
+        session.udp_state = UdpState::Active(Box::new(client_udp));
+        session.active_transport = ActiveTransport::UdpQsp;
+
+        let pending_packet = vec![0x45; 20];
+        session
+            .write_active_message(Message::Data {
+                packet: pending_packet.as_slice(),
+            })
+            .await
+            .unwrap();
+        assert!(session.has_pending_udp_flush());
+
+        let saturated_packet = vec![0x46; 20];
+        let mut saturated_frame = Vec::new();
+        encode_message(
+            Message::Data {
+                packet: saturated_packet.as_slice(),
+            },
+            &mut saturated_frame,
+        )
+        .unwrap();
+        for _ in 0..16 {
+            server_udp.send(&saturated_frame).await.unwrap();
+        }
+        server_udp.flush().await.unwrap();
+        let limits = session.limits;
+        session
+            .udp_receive_transport_mut()
+            .unwrap()
+            .read_next_message(limits)
+            .await
+            .unwrap();
+        server_stream.write_all(&saturated_frame).await.unwrap();
+
+        let mut flush_seen = false;
+        let mut next_ping_at = Instant::now() + Duration::from_secs(60);
+        for _ in 0..MAX_POLLS {
+            let event = time::timeout(
+                Duration::from_secs(1),
+                session.poll_event(next_ping_at, true),
+            )
+            .await
+            .expect("saturated source must remain ready")
+            .unwrap();
+
+            match event {
+                SessionEvent::TcpRead(n) => {
+                    assert_ne!(n, 0);
+                    server_stream.write_all(&saturated_frame).await.unwrap();
+                }
+                SessionEvent::UdpResult(Ok(_)) => {
+                    server_udp.send(&saturated_frame).await.unwrap();
+                    server_udp.flush().await.unwrap();
+                }
+                SessionEvent::UdpFlushReady => {
+                    assert_eq!(
+                        session
+                            .handle_event(SessionEvent::UdpFlushReady, &mut next_ping_at)
+                            .await
+                            .unwrap(),
+                        SessionControl::Continue
+                    );
+                    flush_seen = true;
+                    break;
+                }
+                SessionEvent::UdpResult(Err(err)) => panic!("UDP source failed: {err}"),
+                _ => panic!("unexpected event while reads and flush are saturated"),
+            }
+        }
+        drop(tun_tx);
+
+        assert!(
+            flush_seen,
+            "ready TCP or UDP reads starved the partial flush"
+        );
+        assert!(!session.has_pending_udp_flush());
+
+        let mut packet_buf = vec![0u8; 2048];
+        let opened = time::timeout(Duration::from_secs(1), server_udp.recv(&mut packet_buf))
+            .await
+            .expect("server must receive the flushed packet")
+            .unwrap();
+        let (message, consumed) = decode_message(&opened.payload, session.limits)
+            .unwrap()
+            .expect("flushed packet must contain a complete message");
+        assert_eq!(consumed, opened.payload.len());
+        assert!(matches!(
+            message,
+            Message::Data { packet } if packet == pending_packet
+        ));
+    }
+
+    #[tokio::test]
     async fn expired_idle_deadline_preempts_ready_tun_packet() {
         let config = test_config();
         let services = DesktopServices::new();
@@ -1341,7 +1605,7 @@ mod tests {
             Instant::now() - config.timing.idle_timeout - Duration::from_millis(1);
 
         let event = session
-            .poll_event(Instant::now() + Duration::from_secs(60))
+            .poll_event(Instant::now() + Duration::from_secs(60), true)
             .await
             .unwrap();
 
@@ -1362,7 +1626,7 @@ mod tests {
         let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
 
         let event = session
-            .poll_event(Instant::now() - Duration::from_millis(1))
+            .poll_event(Instant::now() - Duration::from_millis(1), true)
             .await
             .unwrap();
 
