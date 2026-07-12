@@ -279,7 +279,11 @@ Keepalive ping. Sent on the preferred transport.
 
 #### Semantics
 
-- The responder echoes the nonce in PONG
+- The responder MUST echo the nonce in PONG
+- During UDP path refresh, the client requires the PONG nonce to match the
+  current refresh PING before marking the path refreshed
+- During periodic keepalive, endpoints do not track outstanding PING nonces;
+  PONGs count as inbound activity like any other valid message
 
 ---
 
@@ -299,6 +303,7 @@ Keepalive pong response to PING.
 #### Validation Rules
 
 1. `nonce` MUST echo the value from the corresponding PING message
+2. A stale or non-matching PONG does not complete UDP path refresh
 
 ---
 
