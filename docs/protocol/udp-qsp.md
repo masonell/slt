@@ -258,8 +258,8 @@ pn_mask = 0xFFFF
 candidate = (0x00AB_CDEF & !0xFFFF) | 0x1234 = 0x00AB_0000 | 0x1234 = 0x00AB_1234
 ```
 
-Since `0x00AB_1234 + 0x8000 > 0x00AB_CDEF`, no adjustment needed.
-Result: `0x00AB_1234`
+Since `0x00AB_1234 + 0x8000 < 0x00AB_CDEF`, the forward-window adjustment is applied.
+Result: `0x00AC_1234`
 
 ## 7. Replay Protection
 
