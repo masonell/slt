@@ -15,7 +15,7 @@ Quick reference for SLT configuration fields. For detailed explanations, see [Us
 | `timing` | table | No | defaults apply | See below |
 | `transport` | table | No | defaults apply | See below |
 | `udp_nat_max_entries` | integer | No | `1024` | > 0 |
-| `session_queue_size` | integer | No | `256` | > 0 |
+| `session_queue_size` | integer | No | `1024` | > 0 |
 | `max_auth_inflight` | integer | No | `128` | > 0 |
 | `tcp_connection_cap` | integer | No | `512 * detected CPU count` | > 0 |
 | `clients` | array of tables | Yes | - | May be empty |
@@ -49,10 +49,16 @@ and refuses to start if any field mismatches.
 
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
-| `tun_name` | string | Yes | - | non-empty; must match an existing interface |
-| `tun_mtu` | integer | No | `1280` | 1-1406; must match the interface MTU and every authenticating client |
-| `tun_ipv4` | IPv4 address | No | `10.10.0.1` | server's local overlay address; must be present on the interface |
+| `tun_name` | string | No | `"tun0"` | non-empty; must match an existing interface |
+| `tun_mtu` | integer | No | `1186` | 1-1406; must match the interface MTU and every authenticating client |
+| `tun_ipv4` | IPv4 address | Yes | - | server's local overlay address; must be present on the interface |
 | `tun_prefix` | integer | No | `24` | 1-32; overlay subnet prefix length |
+
+The `1186` default fits an outer IPv6 PMTU of 1280 with the current UDP-QSP
+overhead. An explicit inner MTU of `1280` needs at least 1374 bytes, and the
+`1406` maximum needs at least 1500 bytes. These budgets use a base IPv6 header
+without extension headers; see [TUN MTU
+Constraints](../user-guide/configuration.md#tun-mtu-constraints).
 
 ### `[timing]` (Server)
 
@@ -112,7 +118,7 @@ sanitized, self-contained example parsed and validated by the test suite.
 | `identity` | table | Yes | - | See below |
 | `tun` | table | Yes | - | See below |
 | `transport` | table | No | defaults apply | See below |
-| `enable_upgrade` | boolean | No | `false` | - |
+| `enable_upgrade` | boolean | No | `true` | - |
 | `require_udp` | boolean | No | `false` | requires `enable_upgrade = true` |
 | `timing` | table | No | defaults apply | See below |
 
@@ -147,9 +153,9 @@ with a matching name, address, prefix, MTU, and UP state before SLT starts.
 
 | Field | Type | Required | Default | Constraints |
 |-------|------|----------|---------|-------------|
-| `tun_name` | string | Yes | - | non-empty; must match an existing interface |
-| `tun_mtu` | integer | No | `1280` | 1-1406; must match the interface MTU and server MTU |
-| `tun_ipv4` | IPv4 address | No | `10.10.0.1` | must equal this client's `assigned_ipv4` |
+| `tun_name` | string | No | `"tun0"` | non-empty; must match an existing interface |
+| `tun_mtu` | integer | No | `1186` | 1-1406; must match the interface MTU and server MTU |
+| `tun_ipv4` | IPv4 address | Yes | - | must equal this client's `assigned_ipv4` |
 | `tun_prefix` | integer | No | `24` | 1-32; overlay subnet prefix length |
 
 ### `[transport.udp_qsp]` (Client)

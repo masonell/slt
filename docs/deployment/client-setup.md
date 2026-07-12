@@ -66,7 +66,7 @@ sudo slt net up --config /etc/slt/client.toml --user slt --group slt
 
 ```bash
 ip -brief addr show tun0          # expect: tun0  UP  10.10.0.2/24
-ip link show tun0 | grep mtu      # expect: mtu 1406
+ip link show tun0 | grep mtu      # expect: mtu 1186
 ```
 
 > **Tip:** A persistent interface survives a client restart, so it only needs to be created once. Run `slt net up` from a provisioning step or the service's `ExecStartPre` so the interface is ready before the client starts — SLT simply attaches on each start.
@@ -487,7 +487,7 @@ ip link show tun0
 ip addr show tun0
 
 # Expected output:
-# 3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1406 qdisc fq_codel state UNKNOWN ...
+# 3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1186 qdisc fq_codel state UNKNOWN ...
 #     inet 10.10.0.2/24 scope global tun0
 ```
 
@@ -750,11 +750,11 @@ EOF
 ```bash
 # Check MTU settings
 ip link show tun0 | grep mtu
-# Should match config (default 1280)
+# Should match config (default 1186)
 
 # Test for MTU issues
-ping -s 1252 -M do 10.10.0.1
-# 1252 + 28 (IP/ICMP headers) = 1280 MTU
+ping -s 1158 -M do 10.10.0.1
+# 1158 + 28 bytes of IPv4/ICMP headers = 1186
 
 # Check for packet loss
 ping -c 100 10.10.0.1 | tail -2

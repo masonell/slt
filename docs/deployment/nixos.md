@@ -76,7 +76,7 @@ release artifact is dynamically linked GNU/Linux and should be patched for NixOS
 
     tun = {
       name = "slt0";
-      mtu = 1406;
+      mtu = 1186;
       ipv4 = "10.10.0.1";
       prefix = 24;
     };
@@ -143,7 +143,7 @@ Prefer `networking.nat` for masquerading instead of
 
     tun = {
       name = "slt0";
-      mtu = 1406;
+      mtu = 1186;
       prefix = 24;
     };
 

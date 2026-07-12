@@ -112,7 +112,7 @@ Verify before starting SLT:
 
 ```bash
 ip -brief addr show tun0          # expect: tun0  UP  10.10.0.1/24
-ip link show tun0 | grep mtu      # expect: mtu 1406
+ip link show tun0 | grep mtu      # expect: mtu 1186
 sudo nft list table inet slt      # expect SLT forward + masquerade rules
 ```
 
@@ -129,8 +129,8 @@ sudo slt net down --config /etc/slt/server.toml --masquerade
 The interface parameters all come from `server.toml`'s `[tun]` section:
 
 - **Interface name**: `tun_name` (default: `tun0`)
-- **MTU**: `tun_mtu` (default: 1280, max: 1406)
-- **Server overlay address**: `tun_ipv4` (default: `10.10.0.1`) — the gateway address clients reach
+- **MTU**: `tun_mtu` (default: 1186; the 1406 maximum requires a known outer IPv6 PMTU of at least 1500)
+- **Server overlay address**: `tun_ipv4` (required) — the gateway address clients reach
 - **Subnet prefix**: `tun_prefix` (default: 24); every client `assigned_ipv4` must fall within this subnet and must not equal `tun_ipv4`
 
 ### VPN Subnet Selection
@@ -172,7 +172,7 @@ tls_key = { file = "/etc/slt/server.key" }
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1406
+tun_mtu = 1186
 tun_ipv4 = "10.10.0.1"
 tun_prefix = 24
 
@@ -547,7 +547,7 @@ sudo modprobe tun
 # The interface must exist BEFORE starting the server, with a matching
 # address, MTU, and UP state
 ip -brief addr show tun0          # expect: tun0  UP  10.10.0.1/24
-ip link show tun0 | grep mtu      # expect: mtu 1406
+ip link show tun0 | grep mtu      # expect: mtu 1186
 
 # Recreate it from server.toml if needed
 sudo slt net up --config /etc/slt/server.toml --user slt --group slt --ipv4-forward --masquerade

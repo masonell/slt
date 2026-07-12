@@ -58,6 +58,10 @@ This command:
 - Adds the client to the server configuration
 - Writes a client config file to `/etc/slt/clients/client-<ID>.toml`
 
+The generated client configuration copies the server's `tun_mtu`. With a
+default `slt init` configuration, both sides use `1186`; authentication rejects
+a client whose configured MTU differs from the server.
+
 The output will show the client ID and config file path:
 
 ```
@@ -97,7 +101,7 @@ sudo slt-server --config /etc/slt/server.toml
 You should see log output indicating the server is running:
 
 ```
-INFO server starting: listen_tcp=0.0.0.0:443 listen_udp=0.0.0.0:443 tun_name="tun0" tun_mtu=1406
+INFO server starting: listen_tcp=0.0.0.0:443 listen_udp=0.0.0.0:443 tun_name="tun0" tun_mtu=1186
 ```
 
 The server is now listening on port 443 for both TCP and UDP connections.
@@ -119,7 +123,7 @@ slt-client --config ~/slt-client.toml
 You should see log output indicating a successful connection:
 
 ```
-INFO client starting: hostname="vpn.example.com" port=443 tun_name="tun0" tun_mtu=1406
+INFO client starting: hostname="vpn.example.com" port=443 tun_name="tun0" tun_mtu=1186
 INFO session established: client_id=a1b2c3d4e5f67890a1b2c3d4e5f67890
 ```
 

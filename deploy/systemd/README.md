@@ -51,7 +51,7 @@ sudo systemctl enable --now slt-server.service   # pulls in slt-setup via Requir
 
 ```sh
 systemctl status slt-server slt-setup
-ip -br addr show tun0                       # tun0 UP, 10.10.0.1/24, mtu 1406
+ip -br addr show tun0                       # tun0 UP, 10.10.0.1/24, mtu 1186
 nft list table inet slt                     # forward + masquerade rules present
 sudo sysctl net.ipv4.ip_forward             # = 1
 journalctl -u slt-server -f
@@ -65,7 +65,7 @@ by `slt net`, so update the config's `[tun]` section to change them:
 ```toml
 [tun]
 tun_name = "tun1"
-tun_mtu = 1406
+tun_mtu = 1186
 tun_ipv4 = "10.20.0.1"
 tun_prefix = 24
 ```

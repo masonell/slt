@@ -374,10 +374,16 @@ stack's normal per-packet semantics.
 #### MTU Constraints
 
 Maximum `tun_mtu` is 1406 bytes, derived from:
-- Ethernet/IP MTU: 1500 bytes
-- Outer overhead (worst case): IPv6 header (40) + UDP header (8) = 48 bytes
-- UDP-QSP + VPN framing: short header (1 + 20 + 4) + AEAD tag (16) + VPN frame (5) = 46 bytes
+- Known outer IPv6 PMTU: 1500 bytes
+- Base outer headers: IPv6 header (40) + UDP header (8) = 48 bytes
+- Current worst-case UDP-QSP + VPN framing: short header (1 + 20 + 4) + AEAD tag (16) + VPN frame (5) = 46 bytes
 - Budget: 1500 - 48 - 46 = 1406 bytes
+
+The same overhead gives the conservative default budget
+`1186 + 46 + 48 = 1280`. An explicit inner MTU of 1280 requires an outer IPv6
+PMTU of at least 1374. These budgets include the current maximum UDP-QSP header
+and a base IPv6 header, not arbitrary IPv6 extension headers or additional
+encapsulation.
 
 ---
 

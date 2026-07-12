@@ -145,7 +145,7 @@ let
           type = tunMtuType;
           default = 1186;
           example = 1406;
-          description = "TUN interface MTU. SLT supports values from 1 through 1406.";
+          description = "TUN interface MTU. The 1186 default targets an outer IPv6 PMTU of 1280; the 1406 maximum requires a known outer IPv6 PMTU of 1500.";
         };
 
         ipv4 = mkOption {

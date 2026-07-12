@@ -29,14 +29,20 @@ All VPN messages use a simple length-prefixed framing:
 
 Maximum `tun_mtu` of 1406 is derived from:
 
-- Target outer transport envelope: Ethernet IP MTU `1500`
-- Outer overhead budget (worst case): IPv6 header `40` + UDP header `8`
-- UDP-QSP + VPN framing overhead (worst case):
+- Known outer IPv6 PMTU: `1500`
+- Base outer headers: IPv6 header `40` + UDP header `8`
+- Current worst-case UDP-QSP + VPN framing overhead:
   - Short-header fields: `1 + 20 + 4`
   - AEAD tag: `16`
   - VPN frame header: `5`
   - Total overhead: `46`
 - Budget: `1500 - 48 - 46 = 1406`
+
+The `1186` default fits an outer IPv6 PMTU of 1280:
+`1186 + 46 + 48 = 1280`. An explicit inner MTU of `1280` requires at least
+`1374` bytes of outer IPv6 PMTU. These calculations cover the current maximum
+UDP-QSP header and a base IPv6 header; they do not reserve space for arbitrary
+IPv6 extension headers or additional encapsulation.
 
 ## 2. Message Types
 

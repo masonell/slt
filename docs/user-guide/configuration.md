@@ -25,7 +25,7 @@ parse as written.
 # Server configuration (server.toml)
 server_secret = { hex = "..." }  # 32-byte hex object
 udp_nat_max_entries = 1024
-session_queue_size = 256
+session_queue_size = 1024
 max_auth_inflight = 128
 tcp_connection_cap = 1024
 
@@ -41,7 +41,7 @@ tls_key = { pem = "..." }       # { pem = "..." } or { file = "path" }
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1280
+tun_mtu = 1186
 tun_ipv4 = "10.10.0.1"
 tun_prefix = 24
 
@@ -74,7 +74,7 @@ enabled = true
 | `tun` | [TunConfig](#tun-section) | Yes | TUN interface settings. |
 | `timing` | [ServerTimingConfig](#timing-section) | No | Timing parameters with sensible defaults. |
 | `udp_nat_max_entries` | integer | No | Maximum UDP NAT peers for nginx forwarding. Default: `1024`. Must be > 0. |
-| `session_queue_size` | integer | No | Bounded queue size for per-session event channels. Default: `256`. Must be > 0. |
+| `session_queue_size` | integer | No | Bounded queue size for per-session event channels. Default: `1024`. Must be > 0. |
 | `max_auth_inflight` | integer | No | Maximum VPN-claimed TCP connections concurrently in TLS/AUTH. Default: `128`. Must be > 0. |
 | `tcp_connection_cap` | integer | No | Maximum classifying and nginx-proxied TCP connections held by the front door. Default: `512 * detected CPU count` on the host loading the config. Must be > 0. |
 | `clients` | array of [ServerClient](#clients-section) | Yes | List of authorized clients. |
@@ -105,10 +105,10 @@ front-door cap until nginx closes them through settings such as
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `tun_name` | string | Yes | - | TUN interface name (e.g., `tun0`). Must not be empty. Must already exist on the host. |
-| `tun_ipv4` | IPv4 address | No | `10.10.0.1` | Local overlay address on the interface. Server: the gateway address. Client: must equal `assigned_ipv4`. |
+| `tun_name` | string | No | `tun0` | TUN interface name. Must not be empty and must already exist on the host. |
+| `tun_ipv4` | IPv4 address | Yes | - | Server overlay gateway address expected on the interface. |
 | `tun_prefix` | integer | No | `24` | Overlay subnet prefix length. Must be 1-32. Client IPs must fall within this subnet. |
-| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface and every authenticating client. |
+| `tun_mtu` | integer | No | `1186` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface and every authenticating client. |
 
 #### Timing Section
 
@@ -169,7 +169,7 @@ privkey_ed25519 = { hex = "..." }
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1280
+tun_mtu = 1186
 tun_ipv4 = "10.10.0.2"
 tun_prefix = 24
 
@@ -220,16 +220,16 @@ reconnect_max = "5s"
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `tun_name` | string | Yes | - | TUN interface name (e.g., `tun0`). Must not be empty. Must already exist on the host. |
-| `tun_ipv4` | IPv4 address | No | `10.10.0.1` | Local overlay address on the interface. Server: the gateway address. Client: must equal `assigned_ipv4`. |
+| `tun_name` | string | No | `tun0` | TUN interface name. Must not be empty and must already exist on the host. |
+| `tun_ipv4` | IPv4 address | Yes | - | Local overlay address expected on the interface. Must equal `assigned_ipv4`. |
 | `tun_prefix` | integer | No | `24` | Overlay subnet prefix length. Must be 1-32. Client IPs must fall within this subnet. |
-| `tun_mtu` | integer | No | `1280` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface and server MTU. |
+| `tun_mtu` | integer | No | `1186` | TUN interface MTU. Must be 1-1406 and match the preconfigured interface and server MTU. |
 
 #### Transport Options
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enable_upgrade` | boolean | No | `false` | Enable QUIC DCID discovery and UDP-QSP upgrade. |
+| `enable_upgrade` | boolean | No | `true` | Enable QUIC DCID discovery and UDP-QSP upgrade. |
 | `require_udp` | boolean | No | `false` | Require UDP upgrade success; if upgrade times out, fail the session. Requires `enable_upgrade = true`. |
 
 #### UDP-QSP Transport Section
@@ -359,17 +359,28 @@ nginx_tcp_upstream = "127.0.0.1:8080"
 
 ### TUN MTU Constraints
 
-The TUN MTU has a maximum value of **1406 bytes**. This ensures that UDP-QSP DATA messages fit within a 1500-byte Ethernet IP MTU when accounting for:
+The UDP-QSP packet budget uses 46 bytes for the current worst-case wrapper: a
+25-byte short header (1-byte flags, 20-byte DCID, and 4-byte packet number), a
+16-byte AEAD tag, and the 5-byte SLT frame header. The outer-header budget is
+48 bytes for UDP over a base IPv6 header (40-byte IPv6 plus 8-byte UDP). It does
+not reserve space for IPv6 extension headers or additional encapsulation.
 
-- IPv6 header (40 bytes)
-- UDP header (8 bytes)
-- QUIC short header (variable, up to 21 bytes)
-- AEAD tag (16 bytes)
-- SLT frame header (5 bytes)
+Three values are useful when choosing the inner TUN MTU:
 
-The default value of **1280 bytes** is safe for all scenarios.
+- **1186 bytes** is the conservative default. The complete UDP-QSP packet fits
+  an outer IPv6 PMTU of 1280: `1186 + 46 + 48 = 1280`.
+- **1280 bytes** is a valid explicit inner MTU, but it requires an outer IPv6
+  PMTU of at least 1374: `1280 + 46 + 48 = 1374`.
+- **1406 bytes** is the supported maximum and requires a known outer IPv6 PMTU
+  of at least 1500: `1406 + 46 + 48 = 1500`.
 
-`slt init` writes `tun_mtu = 1406` (and `slt add-client` copies that into the client config); omitting the field falls back to the 1280 default above. Whatever value you use, each preconfigured interface must match its local configuration, and the client and server values must match or authentication is rejected (see [Server Setup](../deployment/server-setup.md) and [Client Setup](../deployment/client-setup.md)).
+Use a smaller inner MTU when the path has a smaller PMTU or extra outer headers.
+`slt init` writes `tun_mtu = 1186`, while omitting the field uses the same
+default. `slt add-client` copies the server's configured MTU into the generated
+client configuration. Each preconfigured interface must match its local
+configuration, and authentication rejects a client/server MTU mismatch (see
+[Server Setup](../deployment/server-setup.md) and [Client
+Setup](../deployment/client-setup.md)).
 
 ---
 
@@ -401,7 +412,7 @@ tls_key = { file = "/etc/slt/server.key" }
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1280
+tun_mtu = 1186
 tun_ipv4 = "10.10.0.1"
 tun_prefix = 24
 
@@ -434,7 +445,7 @@ privkey_ed25519 = { file = "/etc/slt/client.key" }
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1280
+tun_mtu = 1186
 tun_ipv4 = "10.10.0.2"
 tun_prefix = 24
 ```
