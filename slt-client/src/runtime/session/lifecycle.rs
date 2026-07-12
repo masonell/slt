@@ -301,18 +301,16 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         Instant::now() + Duration::from_millis(min_ms + jitter_ms)
     }
 
-    /// Updates the last TCP activity timestamp to now.
-    ///
-    /// Should be called whenever data is received from the server via TCP.
-    pub(super) fn note_tcp_activity(&mut self) {
-        self.last_tcp_rx = Instant::now();
+    /// Records an accepted inbound message for session-idle accounting.
+    pub(super) const fn note_activity(&mut self, received_at: Instant) {
+        self.last_activity = received_at;
     }
 
-    /// Updates the last UDP activity timestamp to now.
-    ///
-    /// Should be called whenever data is received from the server via UDP-QSP.
-    pub(super) fn note_udp_activity(&mut self) {
-        self.last_udp_rx = Instant::now();
+    /// Records accepted authenticated UDP-QSP ingress for both session-idle and
+    /// UDP path-liveness accounting.
+    pub(super) const fn note_authenticated_udp_activity(&mut self, received_at: Instant) {
+        self.last_activity = received_at;
+        self.last_authenticated_udp_activity = Some(received_at);
     }
 }
 
@@ -511,15 +509,17 @@ mod tests {
         fn default_timing_values_are_reasonable() {
             let config = ClientTimingConfig::default();
 
-            // Default: ping_min=10s, ping_max=30s, idle_timeout=5m
+            // Defaults leave multiple ping intervals before either liveness deadline.
             assert_eq!(config.ping_min, Duration::from_secs(10));
             assert_eq!(config.ping_max, Duration::from_secs(30));
+            assert_eq!(config.udp_liveness_timeout, Duration::from_secs(90));
             assert_eq!(config.idle_timeout, Duration::from_mins(5));
 
             // ping_min should not exceed ping_max
             assert!(config.ping_min <= config.ping_max);
 
             // ping interval should be less than idle timeout for effective keepalive
+            assert!(config.ping_max < config.udp_liveness_timeout);
             assert!(config.ping_max < config.idle_timeout);
         }
     }
@@ -527,13 +527,13 @@ mod tests {
     mod idle_timeout_logic {
         use super::*;
 
-        /// Test idle deadline calculation for TCP transport.
+        /// Test session idle deadline calculation from accepted ingress.
         #[test]
-        fn tcp_idle_deadline_is_last_rx_plus_timeout() {
+        fn session_idle_deadline_is_last_activity_plus_timeout() {
             let idle_timeout = Duration::from_mins(1);
-            let last_tcp_rx = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+            let last_activity = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
 
-            let idle_deadline = last_tcp_rx + idle_timeout;
+            let idle_deadline = last_activity + idle_timeout;
 
             // Deadline should be 30 seconds in the future
             let expected_remaining = Duration::from_secs(30);
@@ -548,23 +548,24 @@ mod tests {
             );
         }
 
-        /// Test idle deadline calculation for UDP transport.
+        /// Test UDP path-liveness deadline calculation.
         #[test]
-        fn udp_idle_deadline_is_last_rx_plus_timeout() {
-            let idle_timeout = Duration::from_mins(1);
-            let last_udp_rx = Instant::now().checked_sub(Duration::from_secs(45)).unwrap();
+        fn udp_liveness_deadline_is_last_authenticated_ingress_plus_timeout() {
+            let udp_liveness_timeout = Duration::from_mins(1);
+            let last_authenticated_udp_activity =
+                Instant::now().checked_sub(Duration::from_secs(45)).unwrap();
 
-            let idle_deadline = last_udp_rx + idle_timeout;
+            let liveness_deadline = last_authenticated_udp_activity + udp_liveness_timeout;
 
             // Deadline should be 15 seconds in the future
             let expected_remaining = Duration::from_secs(15);
-            let actual_remaining = idle_deadline.duration_since(Instant::now());
+            let actual_remaining = liveness_deadline.duration_since(Instant::now());
 
             let tolerance = Duration::from_millis(100);
             assert!(
                 actual_remaining >= expected_remaining.checked_sub(tolerance).unwrap()
                     && actual_remaining <= expected_remaining + tolerance,
-                "idle deadline should be ~15s away, got {actual_remaining:?}"
+                "UDP liveness deadline should be ~15s away, got {actual_remaining:?}"
             );
         }
 
@@ -631,8 +632,7 @@ mod tests {
         fn ping_interval_less_than_idle_timeout_for_keepalive() {
             let config = ClientTimingConfig::default();
 
-            // By default, ping_min=10s, ping_max=30s, idle_timeout=60s
-            // This means pings will be sent every 10-30s, preventing the 60s idle timeout
+            // Regular ping responses keep the session from reaching its idle deadline.
             assert!(
                 config.ping_max < config.idle_timeout,
                 "ping_max ({:?}) should be less than idle_timeout ({:?}) for effective keepalive",
@@ -775,50 +775,37 @@ mod tests {
         }
     }
 
-    mod timestamp_independence {
+    mod activity_clock_independence {
         use super::*;
 
-        /// Test that TCP and UDP activity timestamps are tracked independently.
+        /// TCP ingress extends session activity without masking UDP path failure.
         #[test]
-        fn tcp_and_udp_timestamps_are_independent() {
+        fn tcp_activity_does_not_extend_udp_liveness() {
             let idle_timeout = Duration::from_mins(1);
+            let udp_liveness_timeout = Duration::from_secs(30);
             let now = Instant::now();
+            let last_authenticated_udp_activity = now;
+            let tcp_activity = now + Duration::from_secs(20);
 
-            // Simulate: TCP activity at t=0, UDP activity at t=30s
-            let tcp_last_rx = now;
-            let udp_last_rx = now + Duration::from_secs(30);
+            let idle_deadline = tcp_activity + idle_timeout;
+            let udp_liveness_deadline = last_authenticated_udp_activity + udp_liveness_timeout;
 
-            let tcp_deadline = tcp_last_rx + idle_timeout;
-            let udp_deadline = udp_last_rx + idle_timeout;
-
-            // UDP deadline should be later than TCP deadline
-            assert!(udp_deadline > tcp_deadline);
-
-            // If we're using TCP transport, we check tcp_deadline
-            // If we're using UDP transport, we check udp_deadline
-            // They don't affect each other
+            assert!(udp_liveness_deadline < idle_deadline);
         }
 
-        /// Test that switching transports uses correct deadline.
+        /// Authenticated UDP ingress extends both independent clocks.
         #[test]
-        fn transport_switch_uses_correct_deadline() {
+        fn udp_activity_extends_idle_and_udp_liveness() {
             let idle_timeout = Duration::from_mins(1);
+            let udp_liveness_timeout = Duration::from_secs(30);
             let now = Instant::now();
+            let udp_activity = now + Duration::from_secs(20);
 
-            // Start on TCP
-            let tcp_last_rx = now;
-            let tcp_deadline = tcp_last_rx + idle_timeout;
-
-            // Switch to UDP at t=20s with UDP activity
-            let switch_time = now + Duration::from_secs(20);
-            let udp_last_rx = switch_time;
-            let udp_deadline = udp_last_rx + idle_timeout;
-
-            // After switch, we should use UDP deadline
-            assert!(udp_deadline > tcp_deadline);
-
-            // TCP deadline is still the same (not updated by UDP activity)
-            assert_eq!(tcp_deadline, now + idle_timeout);
+            assert_eq!(udp_activity + idle_timeout, now + Duration::from_secs(80));
+            assert_eq!(
+                udp_activity + udp_liveness_timeout,
+                now + Duration::from_secs(50)
+            );
         }
     }
 }

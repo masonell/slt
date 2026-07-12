@@ -1,6 +1,7 @@
 //! TCP message handling for `ClientSession`.
 
 use std::io;
+use std::time::Instant;
 
 use slt_core::proto::{
     ClosePayload, FallbackOkPayload, FallbackToTcpPayload, Message, MessageType, OwnedMessageBuf,
@@ -61,7 +62,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             self.active_transport = ActiveTransport::Tcp;
             self.note_transport_change(Transport::UdpQsp, Transport::Tcp, reason);
         }
-        self.note_tcp_activity();
         Ok(())
     }
 
@@ -141,8 +141,10 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 return Ok(SessionControl::Continue);
             };
 
-            self.note_tcp_activity();
-            if let SessionControl::Close(exit) = self.handle_tcp_message(msg_buf).await? {
+            let received_at = Instant::now();
+            let control = self.handle_tcp_message(msg_buf).await?;
+            self.note_activity(received_at);
+            if let SessionControl::Close(exit) = control {
                 return Ok(SessionControl::Close(exit));
             }
         }

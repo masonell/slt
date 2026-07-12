@@ -194,7 +194,7 @@ pub struct ServerTimingConfig {
         with = "humantime_serde"
     )]
     pub udp_liveness_timeout: Duration,
-    /// Idle connection timeout.
+    /// Time without an accepted inbound message on either live transport.
     #[serde(
         default = "crate::config::default_idle_timeout",
         with = "humantime_serde"

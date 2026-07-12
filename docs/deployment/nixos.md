@@ -150,7 +150,10 @@ Prefer `networking.nat` for masquerading instead of
     enableUpgrade = true;
     requireUdp = false;
 
-    timing.tcpWriteTimeout = "10s";
+    timing = {
+      tcpWriteTimeout = "10s";
+      udpLivenessTimeout = "90s";
+    };
   };
 }
 ```

@@ -394,7 +394,8 @@ Close is best-effort on UDP-QSP (may be dropped). TCP fallback is used if UDP fa
 
 ### 5.3 Idle Timeout
 
-Sessions terminate if no inbound traffic is received on the preferred transport:
+Sessions terminate if no accepted inbound VPN message is received on either
+live authenticated transport:
 
 ```
 idle_deadline = last_activity + idle_timeout
@@ -405,6 +406,9 @@ on idle_deadline_reached:
 ```
 
 Keepalive PING/PONG exchanges prevent idle timeout during normal operation.
+Activity is session-wide and does not depend on an endpoint's current preferred
+outbound transport. Partial TCP frames, unauthenticated or replayed UDP-QSP
+packets, and rejected messages do not extend the idle deadline.
 
 ### 5.4 Server Restart
 
@@ -440,7 +444,7 @@ On session termination:
 |-----------|---------|-------------|
 | auth_timeout | 10s | Server TLS and AUTH deadline starting when TCP classification returns `CLAIM` |
 | tcp_write_timeout | 10s | Maximum TCP message write time; clients also apply it during authentication and UDP upgrade |
-| udp_liveness_timeout | 90s | Server time without authenticated UDP-QSP ingress before TCP fallback |
+| udp_liveness_timeout | 90s | Endpoint time without authenticated UDP-QSP ingress before TCP fallback |
 | idle_timeout | 300s | Max idle time before disconnect |
 | ping_min | 10s | Minimum keepalive interval |
 | ping_max | 30s | Maximum keepalive interval |
@@ -462,13 +466,14 @@ Random jitter prevents thundering herd when many clients reconnect simultaneousl
 ### 6.3 Activity Tracking
 
 ```
-on any_inbound_message:
+on accepted_inbound_message_on_any_live_transport:
     last_activity = now
 
 on authenticated_udp_qsp_packet:
     last_authenticated_udp_activity = now
 
-if tcp_alive and now - last_authenticated_udp_activity >= udp_liveness_timeout:
+if udp_qsp_preferred and tcp_alive
+   and now - last_authenticated_udp_activity >= udp_liveness_timeout:
     retire_udp_qsp()
     request_tcp_fallback()
 

@@ -159,15 +159,27 @@ async fn udp_data_is_accepted_while_tcp_is_preferred() {
     };
     let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
     let packet = b"authenticated udp data";
+    let previous_activity = Instant::now() - Duration::from_secs(1);
+    session.last_activity = previous_activity;
+    session.last_authenticated_udp_activity = None;
+    let mut next_ping_at = session.schedule_next_ping();
 
     assert_eq!(
         session
-            .handle_udp_message(data_message(packet))
+            .handle_event(
+                SessionEvent::UdpResult(Ok(data_message(packet))),
+                &mut next_ping_at,
+            )
             .await
             .unwrap(),
         SessionControl::Continue
     );
     assert_eq!(session.active_transport, ActiveTransport::Tcp);
+    assert!(session.last_activity > previous_activity);
+    assert_eq!(
+        session.last_authenticated_udp_activity,
+        Some(session.last_activity)
+    );
     let delivered = to_tun_rx.try_recv().unwrap();
     assert!(matches!(
         delivered.message(),
@@ -187,6 +199,10 @@ async fn tcp_data_is_accepted_while_udp_is_preferred() {
     };
     let (mut session, mut server_stream) = test_session(&config, &mut tun, &services).await;
     session.active_transport = ActiveTransport::UdpQsp;
+    let previous_activity = Instant::now() - Duration::from_secs(1);
+    let previous_udp_activity = previous_activity - Duration::from_secs(1);
+    session.last_activity = previous_activity;
+    session.last_authenticated_udp_activity = Some(previous_udp_activity);
     let packet = b"late tcp data";
     let mut frame = Vec::new();
     encode_message(Message::Data { packet }, &mut frame).unwrap();
@@ -198,6 +214,11 @@ async fn tcp_data_is_accepted_while_udp_is_preferred() {
         SessionControl::Continue
     );
     assert_eq!(session.active_transport, ActiveTransport::UdpQsp);
+    assert!(session.last_activity > previous_activity);
+    assert_eq!(
+        session.last_authenticated_udp_activity,
+        Some(previous_udp_activity)
+    );
     let delivered = to_tun_rx.try_recv().unwrap();
     assert!(matches!(
         delivered.message(),
@@ -218,10 +239,13 @@ async fn fallback_request_precedes_retried_tcp_data() {
     let (mut session, server_stream) = test_session(&config, &mut tun, &services).await;
     let mut server = TcpChannel::new(server_stream);
     session.active_transport = ActiveTransport::UdpQsp;
+    let last_activity = Instant::now() - Duration::from_secs(1);
+    session.last_activity = last_activity;
     session
         .request_tcp_fallback(TransportChangeReason::UdpError)
         .await
         .unwrap();
+    assert_eq!(session.last_activity, last_activity);
     let packet = vec![0x45; 20];
     assert_eq!(
         session.handle_tun_packet(packet.clone()).await.unwrap(),
@@ -568,7 +592,7 @@ async fn partial_tcp_frame_does_not_reset_activity() {
     encode_message(Message::Ping { payload: &payload }, &mut frame).unwrap();
 
     let last_complete_message = Instant::now() - Duration::from_secs(1);
-    session.last_tcp_rx = last_complete_message;
+    session.last_activity = last_complete_message;
     let mut next_ping_at = session.schedule_next_ping();
 
     server_stream.write_all(&frame[..1]).await.unwrap();
@@ -581,7 +605,7 @@ async fn partial_tcp_frame_does_not_reset_activity() {
             .unwrap(),
         SessionControl::Continue
     );
-    assert_eq!(session.last_tcp_rx, last_complete_message);
+    assert_eq!(session.last_activity, last_complete_message);
 
     server_stream.write_all(&frame[1..]).await.unwrap();
     let complete_read = session.tcp.read_more().await.unwrap();
@@ -593,7 +617,7 @@ async fn partial_tcp_frame_does_not_reset_activity() {
             .unwrap(),
         SessionControl::Continue
     );
-    assert!(session.last_tcp_rx > last_complete_message);
+    assert!(session.last_activity > last_complete_message);
 }
 
 #[tokio::test]
@@ -949,7 +973,7 @@ async fn expired_idle_deadline_preempts_ready_tun_packet() {
         to_tun_tx,
     };
     let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
-    session.last_tcp_rx = Instant::now() - config.timing.idle_timeout - Duration::from_millis(1);
+    session.last_activity = Instant::now() - config.timing.idle_timeout - Duration::from_millis(1);
 
     let event = session
         .poll_event(Instant::now() + Duration::from_secs(60), true)
@@ -957,6 +981,85 @@ async fn expired_idle_deadline_preempts_ready_tun_packet() {
         .unwrap();
 
     assert!(matches!(event, SessionEvent::IdleTimeout));
+}
+
+#[tokio::test]
+async fn expired_udp_liveness_deadline_is_distinct_from_session_idle() {
+    let mut config = test_config();
+    config.timing.udp_liveness_timeout = Duration::from_millis(50);
+    let services = DesktopServices::new();
+    let (tun_tx, to_session_rx) = mpsc::channel(1);
+    let (to_tun_tx, _to_tun_rx) = mpsc::channel::<OwnedMessageBuf>(1);
+    tun_tx.try_send(vec![0x45; 20]).unwrap();
+    let mut tun = TunChannels {
+        to_session_rx,
+        to_tun_tx,
+    };
+    let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+    session.active_transport = ActiveTransport::UdpQsp;
+    session.last_activity = Instant::now();
+    session.last_authenticated_udp_activity =
+        Some(Instant::now() - config.timing.udp_liveness_timeout - Duration::from_millis(1));
+
+    let event = session
+        .poll_event(Instant::now() + Duration::from_secs(60), true)
+        .await
+        .unwrap();
+
+    assert!(matches!(event, SessionEvent::UdpLivenessTimeout));
+}
+
+#[tokio::test]
+async fn idle_timeout_closes_udp_preferred_session() {
+    let config = test_config();
+    let services = DesktopServices::new();
+    let (_tun_tx, to_session_rx) = mpsc::channel(1);
+    let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+    let mut tun = TunChannels {
+        to_session_rx,
+        to_tun_tx,
+    };
+    let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+    session.active_transport = ActiveTransport::UdpQsp;
+    let mut next_ping_at = session.schedule_next_ping();
+
+    assert_eq!(
+        session
+            .handle_event(SessionEvent::IdleTimeout, &mut next_ping_at)
+            .await
+            .unwrap(),
+        SessionControl::Close(SessionExit::IdleTimeout)
+    );
+    assert_eq!(session.active_transport, ActiveTransport::UdpQsp);
+}
+
+#[tokio::test]
+async fn udp_liveness_timeout_falls_back_without_resetting_session_activity() {
+    let config = test_config();
+    let services = DesktopServices::new();
+    let (_tun_tx, to_session_rx) = mpsc::channel(1);
+    let (to_tun_tx, _to_tun_rx) = mpsc::channel(1);
+    let mut tun = TunChannels {
+        to_session_rx,
+        to_tun_tx,
+    };
+    let (mut session, _server_stream) = test_session(&config, &mut tun, &services).await;
+    session.active_transport = ActiveTransport::UdpQsp;
+    let last_activity = Instant::now() - Duration::from_secs(1);
+    session.last_activity = last_activity;
+    session.last_authenticated_udp_activity = Some(last_activity);
+    let mut next_ping_at = session.schedule_next_ping();
+
+    assert_eq!(
+        session
+            .handle_event(SessionEvent::UdpLivenessTimeout, &mut next_ping_at)
+            .await
+            .unwrap(),
+        SessionControl::Continue
+    );
+    assert_eq!(session.active_transport, ActiveTransport::Tcp);
+    assert_eq!(session.last_activity, last_activity);
+    assert_eq!(session.last_authenticated_udp_activity, None);
 }
 
 #[tokio::test]

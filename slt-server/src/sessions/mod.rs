@@ -89,7 +89,7 @@ pub struct ClientSessionBase<
     pub assigned_ipv4: AssignedIp,
     /// Session creation timestamp.
     pub created_at: Instant,
-    /// Last activity timestamp.
+    /// Receipt time of the latest accepted message on either live transport.
     pub last_activity: Instant,
     /// Preferred outbound data transport.
     pub active_transport: ActiveTransport,

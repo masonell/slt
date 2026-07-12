@@ -61,8 +61,10 @@ pub(super) struct ClientSession<
     active_transport: ActiveTransport,
     cancel: CancellationToken,
     limits: MessageLimits,
-    last_tcp_rx: Instant,
-    last_udp_rx: Instant,
+    /// Receipt time of the latest accepted message on either live transport.
+    last_activity: Instant,
+    /// Receipt time of the latest authenticated UDP-QSP message.
+    last_authenticated_udp_activity: Option<Instant>,
     udp_state: UdpState,
     /// Superseded UDP transport kept alive for authenticated receive traffic
     /// until replacement registration completes.
@@ -113,6 +115,7 @@ pub(super) struct SessionOutcome {
 enum SessionTimer {
     Ping,
     Idle,
+    UdpLiveness,
     UdpReconnect,
     Register,
     UdpUpgrade,
@@ -123,6 +126,7 @@ impl SessionTimer {
         match self {
             Self::Ping => SessionEvent::PingTick,
             Self::Idle => SessionEvent::IdleTimeout,
+            Self::UdpLiveness => SessionEvent::UdpLivenessTimeout,
             Self::UdpReconnect => SessionEvent::UdpReconnectTick,
             Self::Register => SessionEvent::RegisterTimeout,
             Self::UdpUpgrade => SessionEvent::UdpUpgradeTick,
@@ -221,8 +225,8 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             active_transport: ActiveTransport::Tcp,
             cancel,
             limits,
-            last_tcp_rx: now,
-            last_udp_rx: now,
+            last_activity: now,
+            last_authenticated_udp_activity: None,
             udp_state,
             retained_udp_transport: None,
             udp_upgrade,
@@ -354,6 +358,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
     /// - UDP-QSP message (if UDP is active)
     /// - Ping timer
     /// - Idle timeout
+    /// - UDP-QSP liveness timeout
     /// - UDP reconnect timer (if waiting)
     /// - Registration timeout (if in-flight registration)
     /// - Discovery task completion (if discovery is running)
@@ -363,10 +368,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
         can_receive_tun: bool,
     ) -> Result<SessionEvent, SessionError> {
         let limits = self.limits;
-        let idle_deadline = match self.active_transport {
-            ActiveTransport::Tcp => self.last_tcp_rx + self.config.timing.idle_timeout,
-            ActiveTransport::UdpQsp => self.last_udp_rx + self.config.timing.idle_timeout,
-        };
+        let idle_deadline = self.last_activity + self.config.timing.idle_timeout;
         let udp_reconnect_at = self.udp_state.reconnect_at();
         let register_deadline = self.udp_state.register_deadline();
         let udp_enabled = self.udp_receive_transport().is_some();
@@ -382,6 +384,17 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             Some(next_ping_at),
             SessionTimer::Ping,
         );
+        if self.active_transport == ActiveTransport::UdpQsp
+            && self.tcp_alive
+            && let Some(last_authenticated) = self.last_authenticated_udp_activity
+        {
+            update_earliest_timer(
+                &mut timer_at,
+                &mut timer,
+                Some(last_authenticated + self.config.timing.udp_liveness_timeout),
+                SessionTimer::UdpLiveness,
+            );
+        }
         if self.udp_state.is_waiting() && !has_discovery_task {
             update_earliest_timer(
                 &mut timer_at,
@@ -553,6 +566,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
             }
             SessionEvent::UdpResult(udp_res) => match udp_res {
                 Ok(msg_buf) => {
+                    let received_at = Instant::now();
                     let result = self.handle_udp_message(msg_buf).await;
                     let control = match result {
                         Ok(control) => control,
@@ -566,7 +580,7 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                             return Err(err);
                         }
                     };
-                    self.note_udp_activity();
+                    self.note_authenticated_udp_activity(received_at);
                     Ok(control)
                 }
                 Err(err) => {
@@ -582,27 +596,26 @@ impl<'a, S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'a, S, T> {
                 *next_ping_at = self.schedule_next_ping();
                 Ok(SessionControl::Continue)
             }
-            SessionEvent::IdleTimeout => match self.active_transport {
-                ActiveTransport::Tcp => {
-                    info!("idle timeout reached");
-                    self.metrics.inc_disconnect_idle_timeout();
-                    self.send_close_best_effort(CloseCode::IdleTimeout, "idle_timeout")
-                        .await;
-                    Ok(SessionControl::Close(SessionExit::IdleTimeout))
+            SessionEvent::IdleTimeout => {
+                info!("idle timeout reached");
+                self.metrics.inc_disconnect_idle_timeout();
+                self.send_close_best_effort(CloseCode::IdleTimeout, "idle_timeout")
+                    .await;
+                Ok(SessionControl::Close(SessionExit::IdleTimeout))
+            }
+            SessionEvent::UdpLivenessTimeout => {
+                if self.active_transport != ActiveTransport::UdpQsp || !self.tcp_alive {
+                    return Ok(SessionControl::Continue);
                 }
-                ActiveTransport::UdpQsp => {
-                    if !self.tcp_alive {
-                        warn!("udp-qsp idle timeout and tcp dead; closing session");
-                        self.metrics.inc_disconnect_idle_timeout();
-                        return Ok(SessionControl::Close(SessionExit::IdleTimeout));
-                    }
-                    warn!("udp-qsp idle timeout; switching to tcp");
-                    self.request_tcp_fallback(TransportChangeReason::IdleTimeout)
-                        .await?;
-                    self.schedule_discovery_retry();
-                    Ok(SessionControl::Continue)
-                }
-            },
+                warn!(
+                    timeout_ms = self.config.timing.udp_liveness_timeout.as_millis(),
+                    "UDP-QSP authenticated liveness timeout; switching to tcp"
+                );
+                self.request_tcp_fallback(TransportChangeReason::UdpLivenessTimeout)
+                    .await?;
+                self.schedule_discovery_retry();
+                Ok(SessionControl::Continue)
+            }
             SessionEvent::UdpReconnectTick => {
                 match &self.udp_state {
                     UdpState::NeedDiscovery { .. } => {

@@ -276,7 +276,8 @@ let
               udpLivenessTimeout =
                 durationOption "90s" "90s"
                   "Maximum time without authenticated UDP-QSP ingress before TCP fallback.";
-              idleTimeout = durationOption "5m" "5m" "Idle session timeout.";
+              idleTimeout =
+                durationOption "5m" "5m" "Maximum time without accepted session ingress.";
               metricsInterval = durationOption "5m" "5m" "Metrics logging interval.";
               tcpClassificationTimeout = durationOption "60s" "60s" "TCP ClientHello classification timeout.";
             };
@@ -485,7 +486,10 @@ let
                 durationOption "10s" "10s" "Maximum time for one TCP message write.";
               registerTimeout = durationOption "10s" "10s" "UDP-QSP registration timeout.";
               quicDiscoveryTimeout = durationOption "15s" "15s" "QUIC discovery timeout.";
-              idleTimeout = durationOption "5m" "5m" "Idle session timeout.";
+              udpLivenessTimeout =
+                durationOption "90s" "90s" "Authenticated UDP-QSP ingress timeout.";
+              idleTimeout =
+                durationOption "5m" "5m" "Maximum time without accepted session ingress.";
               metricsInterval = durationOption "5m" "5m" "Metrics logging interval.";
               reconnectMin = durationOption "200ms" "200ms" "Minimum reconnect backoff.";
               reconnectMax = durationOption "5s" "5s" "Maximum reconnect backoff.";
@@ -614,6 +618,7 @@ let
         tcp_write_timeout = client.timing.tcpWriteTimeout;
         register_timeout = client.timing.registerTimeout;
         quic_discovery_timeout = client.timing.quicDiscoveryTimeout;
+        udp_liveness_timeout = client.timing.udpLivenessTimeout;
         idle_timeout = client.timing.idleTimeout;
         metrics_interval = client.timing.metricsInterval;
         reconnect_min = client.timing.reconnectMin;

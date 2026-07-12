@@ -144,7 +144,13 @@ pub struct ClientTimingConfig {
         with = "humantime_serde"
     )]
     pub quic_discovery_timeout: Duration,
-    /// Session idle timeout (no activity before disconnect).
+    /// Maximum time without authenticated UDP-QSP ingress before TCP fallback.
+    #[serde(
+        default = "crate::config::default_udp_liveness_timeout",
+        with = "humantime_serde"
+    )]
+    pub udp_liveness_timeout: Duration,
+    /// Time without an accepted inbound message on either live transport.
     #[serde(
         default = "crate::config::default_idle_timeout",
         with = "humantime_serde"
@@ -176,6 +182,7 @@ impl Default for ClientTimingConfig {
             default_auth_timeout, default_idle_timeout, default_metrics_interval, default_ping_max,
             default_ping_min, default_quic_discovery_timeout, default_reconnect_max,
             default_reconnect_min, default_register_timeout, default_tcp_write_timeout,
+            default_udp_liveness_timeout,
         };
         Self {
             ping_min: default_ping_min(),
@@ -184,6 +191,7 @@ impl Default for ClientTimingConfig {
             tcp_write_timeout: default_tcp_write_timeout(),
             register_timeout: default_register_timeout(),
             quic_discovery_timeout: default_quic_discovery_timeout(),
+            udp_liveness_timeout: default_udp_liveness_timeout(),
             idle_timeout: default_idle_timeout(),
             metrics_interval: default_metrics_interval(),
             reconnect_min: default_reconnect_min(),
@@ -216,6 +224,7 @@ impl ClientTimingConfig {
         validate_timeout("tcp_write_timeout", self.tcp_write_timeout)?;
         validate_timeout("register_timeout", self.register_timeout)?;
         validate_timeout("quic_discovery_timeout", self.quic_discovery_timeout)?;
+        validate_timeout("udp_liveness_timeout", self.udp_liveness_timeout)?;
         validate_timeout("idle_timeout", self.idle_timeout)?;
         validate_timeout("metrics_interval", self.metrics_interval)?;
         Ok(())
@@ -242,6 +251,7 @@ mod tests {
             tcp_write_timeout: Duration::from_secs(10),
             register_timeout: Duration::from_secs(10),
             quic_discovery_timeout: Duration::from_secs(15),
+            udp_liveness_timeout: Duration::from_secs(45),
             idle_timeout: Duration::from_mins(1),
             metrics_interval: Duration::from_mins(5),
             reconnect_min: Duration::from_millis(200),
@@ -297,6 +307,15 @@ mod tests {
         assert_eq!(
             config.tcp_write_timeout,
             crate::config::DEFAULT_TCP_WRITE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn serde_defaults_udp_liveness_timeout_when_omitted() {
+        let config: ClientTimingConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            config.udp_liveness_timeout,
+            crate::config::DEFAULT_UDP_LIVENESS_TIMEOUT
         );
     }
 
@@ -425,6 +444,19 @@ mod tests {
             err,
             ConfigError::ZeroTimeout {
                 field: "tcp_write_timeout"
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_udp_liveness_timeout() {
+        let mut config = test_timing_config();
+        config.udp_liveness_timeout = Duration::ZERO;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::ZeroTimeout {
+                field: "udp_liveness_timeout"
             }
         ));
     }

@@ -27,8 +27,8 @@ pub enum Transport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(target_os = "android", derive(uniffi::Enum))]
 pub enum TransportChangeReason {
-    /// UDP-QSP idle timeout elapsed; fell back to TCP.
-    IdleTimeout,
+    /// UDP-QSP authenticated ingress timeout elapsed; fell back to TCP.
+    UdpLivenessTimeout,
     /// UDP-QSP I/O error; fell back to TCP.
     UdpError,
     /// Server explicitly requested TCP fallback.

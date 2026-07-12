@@ -105,8 +105,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         Ok(())
     }
 
-    fn note_udp_path_refresh_succeeded(&mut self) -> SessionControl {
-        self.note_udp_activity();
+    fn note_udp_path_refresh_succeeded(&self) -> SessionControl {
         self.services
             .observer()
             .emit(ClientEventKind::UdpPathRefreshSucceeded);
@@ -230,9 +229,13 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                     }
                 }
             };
+            let received_at = Instant::now();
 
             match is_matching_pong(&msg_buf, nonce) {
-                Ok(true) => return Ok(SessionControl::Continue),
+                Ok(true) => {
+                    self.note_authenticated_udp_activity(received_at);
+                    return Ok(SessionControl::Continue);
+                }
                 Ok(false) => {}
                 Err(err) if err.is_udp_qsp_recoverable() => {
                     trace!(error = %err, "dropping udp-qsp pong during path refresh");
@@ -249,6 +252,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 }
                 Err(err) => return Err(err),
             };
+            self.note_authenticated_udp_activity(received_at);
             if !matches!(control, SessionControl::Continue) {
                 return Ok(control);
             }
@@ -293,6 +297,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
         ) && self.retained_udp_transport.is_some()
         {
             self.retained_udp_transport = None;
+            self.last_authenticated_udp_activity = None;
             warn!(
                 error = %err,
                 "retained udp receive path failed; preserving replacement attempt"

@@ -96,6 +96,8 @@ pub(super) enum SessionEvent {
     PingTick,
     /// Idle timeout expired.
     IdleTimeout,
+    /// Authenticated UDP-QSP ingress timeout expired.
+    UdpLivenessTimeout,
     /// UDP reconnect timer expired.
     UdpReconnectTick,
     /// Registration timeout expired.

@@ -82,6 +82,7 @@ pub fn default_timing() -> ClientTimingConfig {
         tcp_write_timeout: Duration::from_secs(10),
         register_timeout: Duration::from_secs(10),
         quic_discovery_timeout: Duration::from_secs(15),
+        udp_liveness_timeout: Duration::from_secs(45),
         idle_timeout: Duration::from_mins(1),
         metrics_interval: Duration::from_mins(5),
         reconnect_min: Duration::from_millis(200),

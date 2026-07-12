@@ -124,7 +124,7 @@ impl Metrics {
 
     /// Increment UDP -> TCP transport switch counter (client-initiated).
     ///
-    /// Called when the client falls back to TCP due to UDP idle timeout or
+    /// Called when the client falls back to TCP due to UDP liveness timeout or
     /// error, as opposed to server-initiated switches.
     pub fn inc_transport_udp_to_tcp(&self) {
         let count = inc(&self.transport_udp_to_tcp);

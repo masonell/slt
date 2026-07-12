@@ -149,7 +149,7 @@ pub struct SessionTimeouts {
     pub ping_max: Duration,
     /// Time without authenticated UDP-QSP ingress before TCP fallback.
     pub udp_liveness_timeout: Duration,
-    /// Idle timeout for the session.
+    /// Time without an accepted message on either live transport.
     pub idle_timeout: Duration,
     /// Timeout for one TCP message write.
     pub tcp_write_timeout: Duration,

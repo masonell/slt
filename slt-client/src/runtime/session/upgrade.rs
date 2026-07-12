@@ -167,6 +167,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             self.retained_udp_transport = None;
             self.udp_state = UdpState::Disabled;
             self.udp_upgrade = UdpUpgradeState::Disabled;
+            self.last_authenticated_udp_activity = None;
             return;
         }
 
@@ -179,6 +180,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             }
         } else if !preserve_receive_path {
             self.retained_udp_transport = None;
+            self.last_authenticated_udp_activity = None;
         }
 
         let UdpState::NeedDiscovery {
@@ -213,10 +215,12 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             self.retained_udp_transport = None;
             self.udp_state = UdpState::Disabled;
             self.udp_upgrade = UdpUpgradeState::Disabled;
+            self.last_authenticated_udp_activity = None;
             return;
         }
 
         self.retained_udp_transport = None;
+        self.last_authenticated_udp_activity = None;
         self.udp_upgrade = UdpUpgradeState::Idle;
         self.udp_state = UdpState::NeedDiscovery {
             backoff: ReconnectBackoff::new(
@@ -348,7 +352,7 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
             self.metrics.clone(),
         )));
         self.retained_udp_transport = None;
-        self.last_udp_rx = Instant::now();
+        self.last_authenticated_udp_activity = None;
         self.services
             .observer()
             .emit(ClientEventKind::UdpRegistered);
@@ -769,7 +773,6 @@ impl<S: ClientRuntimeServices, T: ClientTcpIo> ClientSession<'_, S, T> {
                 TransportChangeReason::UpgradeCommitted,
             );
         }
-        self.last_udp_rx = Instant::now();
         self.udp_upgrade = UdpUpgradeState::Idle;
         self.udp_upgrade_backoff.reset();
         self.pending_tcp_fallback = None;
