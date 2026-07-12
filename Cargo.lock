@@ -1799,7 +1799,7 @@ checksum = "7a2ae44ef20feb57a68b23d846850f861394c2e02dc425a50098ae8c90267589"
 
 [[package]]
 name = "slt-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "boring",
@@ -1821,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "slt-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "boring",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "slt-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "boring",
  "boring-sys",
@@ -1871,7 +1871,7 @@ dependencies = [
 
 [[package]]
 name = "slt-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "boring",
  "clap",
@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "slt-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "boring",
  "clap",
