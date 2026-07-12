@@ -30,7 +30,7 @@ connection ID (CID) via `REGISTER_CID`. Once active:
 Bit 7: Header Form (MUST be 0 for short header)
 Bit 6: Fixed Bit (MUST be 1)
 Bit 5: Spin Bit (unused, SHOULD be 0, receiver ignores)
-Bits 4-3: Reserved (MUST be 0 on transmit, ignored on receive after HP removal)
+Bits 4-3: Reserved (MUST be 0 on transmit and on receive after HP removal)
 Bit 2: Key Phase (0 or 1)
 Bits 1-0: Packet Number Length minus 1 (00=1 byte, 01=2 bytes, 10=3 bytes, 11=4 bytes)
 ```
