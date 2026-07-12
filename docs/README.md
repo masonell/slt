@@ -12,6 +12,13 @@ Installation, configuration, and getting started with SLT.
 - [Quick Start](user-guide/quick-start.md) - Get up and running quickly
 - [Configuration](user-guide/configuration.md) - Configuration options for client and server
 
+### Configuration Examples
+
+Sanitized examples that are parsed and validated by the test suite.
+
+- [Server configuration](examples/server.toml)
+- [Client configuration](examples/client.toml)
+
 ### Architecture
 
 High-level system design and internal workings of SLT.

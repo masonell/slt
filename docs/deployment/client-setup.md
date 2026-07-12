@@ -36,30 +36,12 @@ Before setting up the SLT client, ensure you have:
 
 ### Client Configuration File
 
-Your server administrator should provide a configuration file (typically `/etc/slt/client.toml`) containing:
-
-```toml
-[network]
-hostname = "vpn.example.com"
-port = 443
-
-[tls]
-tls_ca = { file = "/etc/slt/ca.crt" }
-
-[identity]
-client_id = "0102030405060708090a0b0c0d0e0f10"
-shared_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
-assigned_ipv4 = "10.10.0.2"
-privkey_ed25519 = { file = "/etc/slt/client.key" }
-
-[tun]
-tun_name = "tun0"
-tun_mtu = 1406          # copied from the server's tun_mtu by slt add-client
-tun_ipv4 = "10.10.0.2"
-tun_prefix = 24
-
-enable_upgrade = true
-```
+Your server administrator should provide a generated configuration file,
+typically `/etc/slt/client.toml`. The sanitized, parseable
+[client configuration example](../examples/client.toml) shows the complete
+layout. In particular, `enable_upgrade` and `require_udp` are root fields and
+must appear before the first TOML table; placing them after `[tun]` scopes them
+as unknown TUN settings.
 
 See [Configuration Reference](../user-guide/configuration.md) for all options.
 

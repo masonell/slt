@@ -149,84 +149,15 @@ ip addr show tun0
 
 ### Server Configuration (`server.toml`)
 
-The server configuration file contains:
-
-```toml
-# Pre-shared secret for client classification
-server_secret = { hex = "hex-encoded-32-byte-secret" }
-max_auth_inflight = 128
-tcp_connection_cap = 1024
-
-[network]
-listen_tcp = "0.0.0.0:443"        # TCP listener address
-listen_udp = "0.0.0.0:443"        # UDP listener address
-nginx_tcp_upstream = "127.0.0.1:8080"  # Forward non-VPN TCP here
-nginx_udp_upstream = "127.0.0.1:8080"  # Forward non-VPN UDP here
-
-[tls]
-tls_cert = { file = "server.pem" }     # Server certificate
-tls_key = { file = "server-key.pem" }  # Server private key
-
-[tun]
-tun_name = "tun0"        # TUN interface name
-tun_mtu = 1406           # MTU (init uses 1406, default is 1280)
-tun_ipv4 = "10.10.0.1"   # server overlay gateway address
-tun_prefix = 24          # overlay subnet prefix length
-
-[timing]
-ping_min = "10s"
-ping_max = "30s"
-auth_timeout = "10s"
-tcp_write_timeout = "10s"
-udp_liveness_timeout = "90s"
-idle_timeout = "5m"
-metrics_interval = "5m"
-tcp_classification_timeout = "60s"
-
-# Client entries are added by `slt add-client`
-[[clients]]
-client_id = "a1b2c3d4e5f67890a1b2c3d4e5f67890"
-pubkey_ed25519 = "hex-encoded-32-byte-public-key"
-assigned_ipv4 = "10.10.0.2"
-enabled = true
-```
+See the sanitized, parseable [server configuration example](../examples/server.toml)
+for the complete file shape. `slt init` writes deployment-specific secrets,
+certificate references, and a host-derived TCP connection cap.
 
 ### Client Configuration (`client-*.toml`)
 
-The client configuration file contains:
-
-```toml
-[network]
-hostname = "vpn.example.com"  # Server domain
-port = 443
-
-[tls.tls_ca]
-pem = '''-----BEGIN CERTIFICATE-----
-... embedded server certificate for pinning ...
------END CERTIFICATE-----'''
-
-[identity]
-client_id = "a1b2c3d4e5f67890a1b2c3d4e5f67890"
-shared_secret = { hex = "hex-encoded-32-byte-secret" }
-assigned_ipv4 = "10.10.0.2"
-privkey_ed25519 = { hex = "hex-encoded-32-byte-private-key" }
-
-[tun]
-tun_name = "tun0"
-tun_mtu = 1406          # copied from the server by `slt add-client`
-tun_ipv4 = "10.10.0.2"  # equals assigned_ipv4
-tun_prefix = 24
-
-# Transport options (top-level)
-enable_upgrade = true   # Enable UDP-QSP upgrade
-require_udp = false     # Don't fail if UDP upgrade fails
-
-[timing]
-ping_min = "10s"
-ping_max = "30s"
-tcp_write_timeout = "10s"
-metrics_interval = "5m"
-```
+See the sanitized, parseable [client configuration example](../examples/client.toml)
+for the complete file shape. Client-wide scalars such as `enable_upgrade` and
+`require_udp` must appear before the first TOML table so they remain root fields.
 
 ## Common Issues
 

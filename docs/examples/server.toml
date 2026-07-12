@@ -1,0 +1,52 @@
+# Sanitized, parseable server configuration.
+# Replace the sample secrets and PEM material before deployment.
+server_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+udp_nat_max_entries = 1024
+session_queue_size = 1024
+max_auth_inflight = 128
+tcp_connection_cap = 1024
+
+[network]
+listen_tcp = "0.0.0.0:443"
+listen_udp = "0.0.0.0:443"
+nginx_tcp_upstream = "127.0.0.1:8080"
+nginx_udp_upstream = "127.0.0.1:8080"
+
+[tls.tls_cert]
+pem = """
+-----BEGIN CERTIFICATE-----
+SANITIZED_SERVER_CERTIFICATE
+-----END CERTIFICATE-----
+"""
+
+[tls.tls_key]
+pem = """
+-----BEGIN PRIVATE KEY-----
+SANITIZED_SERVER_PRIVATE_KEY
+-----END PRIVATE KEY-----
+"""
+
+[tun]
+tun_name = "tun0"
+tun_mtu = 1186
+tun_ipv4 = "10.10.0.1"
+tun_prefix = 24
+
+[timing]
+ping_min = "10s"
+ping_max = "30s"
+auth_timeout = "10s"
+tcp_write_timeout = "10s"
+udp_liveness_timeout = "90s"
+idle_timeout = "5m"
+metrics_interval = "5m"
+tcp_classification_timeout = "60s"
+
+[transport.udp_qsp]
+allowed_ciphers = ["aes-128-gcm", "chacha20-poly1305"]
+
+[[clients]]
+client_id = "0102030405060708090a0b0c0d0e0f10"
+pubkey_ed25519 = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+assigned_ipv4 = "10.10.0.2"
+enabled = true

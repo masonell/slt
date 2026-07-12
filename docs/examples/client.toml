@@ -1,0 +1,50 @@
+# Sanitized, parseable client configuration.
+# Replace the sample secrets and PEM material before deployment.
+enable_upgrade = true
+require_udp = false
+
+[network]
+hostname = "vpn.example.com"
+port = 443
+
+[tls.tls_ca]
+pem = """
+-----BEGIN CERTIFICATE-----
+SANITIZED_SERVER_CERTIFICATE
+-----END CERTIFICATE-----
+"""
+
+[tls.quic_ca]
+pem = """
+-----BEGIN CERTIFICATE-----
+SANITIZED_QUIC_CA_CERTIFICATE
+-----END CERTIFICATE-----
+"""
+
+[identity]
+client_id = "0102030405060708090a0b0c0d0e0f10"
+shared_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+assigned_ipv4 = "10.10.0.2"
+privkey_ed25519 = { hex = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60" }
+
+[tun]
+tun_name = "tun0"
+tun_mtu = 1186
+tun_ipv4 = "10.10.0.2"
+tun_prefix = 24
+
+[transport.udp_qsp]
+cipher = "auto"
+
+[timing]
+ping_min = "10s"
+ping_max = "30s"
+auth_timeout = "10s"
+tcp_write_timeout = "10s"
+register_timeout = "10s"
+quic_discovery_timeout = "15s"
+udp_liveness_timeout = "90s"
+idle_timeout = "5m"
+metrics_interval = "5m"
+reconnect_min = "200ms"
+reconnect_max = "5s"

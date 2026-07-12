@@ -96,48 +96,8 @@ adds entries to it.
 
 ### Full Server Example
 
-```toml
-server_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
-udp_nat_max_entries = 1024
-session_queue_size = 256
-max_auth_inflight = 128
-tcp_connection_cap = 1024
-
-[network]
-listen_tcp = "0.0.0.0:443"
-listen_udp = "0.0.0.0:443"
-nginx_tcp_upstream = "127.0.0.1:8080"
-nginx_udp_upstream = "127.0.0.1:8080"
-
-[tls]
-tls_cert = { file = "/etc/slt/server.crt" }
-tls_key = { file = "/etc/slt/server.key" }
-
-[tun]
-tun_name = "tun0"
-tun_mtu = 1280
-tun_ipv4 = "10.10.0.1"
-tun_prefix = 24
-
-[timing]
-ping_min = "10s"
-ping_max = "30s"
-auth_timeout = "10s"
-tcp_write_timeout = "10s"
-udp_liveness_timeout = "90s"
-idle_timeout = "5m"
-metrics_interval = "5m"
-tcp_classification_timeout = "60s"
-
-[transport.udp_qsp]
-allowed_ciphers = ["aes-128-gcm", "chacha20-poly1305"]
-
-[[clients]]
-client_id = "0102030405060708090a0b0c0d0e0f10"
-pubkey_ed25519 = "1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"
-assigned_ipv4 = "10.10.0.2"
-enabled = true
-```
+See the canonical [server configuration](../examples/server.toml). It is a
+sanitized, self-contained example parsed and validated by the test suite.
 
 ---
 
@@ -219,45 +179,9 @@ ChaCha20-Poly1305 otherwise.
 
 ### Full Client Example
 
-```toml
-[network]
-hostname = "vpn.example.com"
-port = 443
-
-[tls]
-tls_ca = { file = "/etc/slt/ca.crt" }
-
-[identity]
-client_id = "0102030405060708090a0b0c0d0e0f10"
-shared_secret = { hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
-assigned_ipv4 = "10.10.0.2"
-privkey_ed25519 = { file = "/etc/slt/client.key" }
-
-[tun]
-tun_name = "tun0"
-tun_mtu = 1280
-tun_ipv4 = "10.10.0.2"
-tun_prefix = 24
-
-enable_upgrade = true
-require_udp = false
-
-[transport.udp_qsp]
-cipher = "auto"
-
-[timing]
-ping_min = "10s"
-ping_max = "30s"
-auth_timeout = "10s"
-tcp_write_timeout = "10s"
-register_timeout = "10s"
-quic_discovery_timeout = "15s"
-udp_liveness_timeout = "90s"
-idle_timeout = "5m"
-metrics_interval = "5m"
-reconnect_min = "200ms"
-reconnect_max = "5s"
-```
+See the canonical [client configuration](../examples/client.toml). Its root
+options precede the first TOML table, and the test suite verifies that UDP
+upgrade is enabled after parsing.
 
 ---
 
