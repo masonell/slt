@@ -86,7 +86,7 @@ After `AUTH_OK`:
 
 ### Session Lifecycle
 
-1. Client connects and completes TLS handshake
+1. Client connects and completes TLS 1.3 handshake
 2. Client sends `AUTH`
 3. Server replies `AUTH_OK` or `AUTH_FAIL`
 4. On success, TCP data transfer is permitted

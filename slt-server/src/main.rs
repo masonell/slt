@@ -3,11 +3,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
 
+use boring::error::ErrorStack;
 use boring::pkey::PKey;
-use boring::ssl::{SslAcceptor, SslFiletype, SslMethod};
+use boring::ssl::{SslAcceptor, SslAcceptorBuilder, SslFiletype, SslMethod};
 use boring::x509::X509;
 use clap::Parser;
 use slt_core::config::ServerConfig;
+use slt_core::crypto::configure_tcp_tls13_only;
 use slt_core::packet::extract_dst_ipv4;
 use slt_core::proto::MessageLimits;
 use slt_core::transport::tun::{
@@ -533,8 +535,8 @@ fn spawn_metrics_task(
 /// Builds a TLS acceptor from server configuration.
 ///
 /// Loads TLS certificates and private keys from either file paths or inline
-/// PEM data, then constructs an `SslAcceptor` configured with Mozilla
-/// Intermediate v5 settings.
+/// PEM data, then constructs a TLS-1.3-only `SslAcceptor` with Mozilla
+/// Intermediate v5 cipher settings.
 ///
 /// # Arguments
 ///
@@ -549,7 +551,7 @@ fn spawn_metrics_task(
 /// Returns an error if certificate/key loading fails or if the private key
 /// doesn't match the certificate.
 fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std::error::Error>> {
-    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
+    let mut builder = tls13_acceptor_builder()?;
 
     // Load TLS certificate
     match &config.tls.tls_cert {
@@ -595,6 +597,12 @@ fn build_tls_acceptor(config: &ServerConfig) -> Result<SslAcceptor, Box<dyn std:
     builder.check_private_key()?;
     trace!("tls acceptor built successfully");
     Ok(builder.build())
+}
+
+fn tls13_acceptor_builder() -> Result<SslAcceptorBuilder, ErrorStack> {
+    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
+    configure_tcp_tls13_only(&mut builder)?;
+    Ok(builder)
 }
 
 /// Reads packets from the TUN device and routes them to active sessions.
@@ -771,14 +779,23 @@ async fn run_tun_writer(
 mod tests {
     use std::io;
 
+    use boring::ssl::SslVersion;
     use tokio::time::Duration;
 
-    use super::{DEFAULT_TRACING_FILTER, await_graceful_shutdown};
+    use super::{DEFAULT_TRACING_FILTER, await_graceful_shutdown, tls13_acceptor_builder};
 
     #[test]
     fn default_tracing_filter_includes_server_and_core_targets() {
         assert!(DEFAULT_TRACING_FILTER.contains("slt_server=info"));
         assert!(DEFAULT_TRACING_FILTER.contains("slt_core=info"));
+    }
+
+    #[test]
+    fn vpn_tls_acceptor_is_tls13_only() {
+        let mut builder = tls13_acceptor_builder().unwrap();
+
+        assert_eq!(builder.min_proto_version(), Some(SslVersion::TLS1_3));
+        assert_eq!(builder.max_proto_version(), Some(SslVersion::TLS1_3));
     }
 
     #[tokio::test]

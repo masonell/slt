@@ -5,7 +5,7 @@ UDP-QSP upgrade, including state transitions and termination handling.
 
 ## 1. TCP Session Establishment
 
-The TCP connection flow establishes an authenticated VPN session over TLS.
+The TCP connection flow establishes an authenticated VPN session over TLS 1.3.
 
 ### 1.1 Connection Sequence
 
@@ -61,6 +61,9 @@ challenge = TLS-Exporter("slt-auth-challenge", "", 32)
 context = b"slt-auth-v2" || client_id || assigned_ipv4 || tun_mtu_be || challenge
 signature = Ed25519.sign(client_private_key, context)
 ```
+
+The exporter uses the TLS 1.3 exporter master secret and an explicit empty
+context value.
 
 ### 1.3 Pre-Authentication Constraints
 

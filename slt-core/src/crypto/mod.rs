@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use boring::error::ErrorStack;
 use boring::ssl::{
     CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef,
+    SslVersion,
 };
 use boring::x509::X509;
 use boring::x509::verify::{X509CheckFlags, X509VerifyFlags};
@@ -47,6 +48,17 @@ const CHROME_CIPHERS: &str = "AES128-GCM-SHA256:\
     AES256-SHA";
 
 const CHROME_QUIC_CURVE_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
+
+/// Restrict a TCP TLS context to TLS 1.3.
+///
+/// # Errors
+///
+/// Returns an error if `BoringSSL` rejects either protocol-version bound.
+pub fn configure_tcp_tls13_only(ctx: &mut SslContextBuilder) -> Result<(), ErrorStack> {
+    ctx.set_min_proto_version(Some(SslVersion::TLS1_3))?;
+    ctx.set_max_proto_version(Some(SslVersion::TLS1_3))?;
+    Ok(())
+}
 
 #[cfg(target_os = "android")]
 const ANDROID_SYSTEM_CA_DIRS: &[&str] = &[
@@ -281,10 +293,14 @@ fn quic_config_from_ctx(tls_ctx: SslContextBuilder) -> Result<quiche::Config, Qu
 
 /// Build a TLS client context builder with Chrome-like defaults.
 ///
+/// The client retains `BoringSSL`'s TLS 1.2 and 1.3 offer so its `ClientHello`
+/// keeps the browser-like version and cipher-suite shape. Claimed connections
+/// are restricted to TLS 1.3 by the server acceptor.
+///
 /// # Errors
 ///
-/// Returns an error if SSL context builder creation fails or if setting
-/// cipher suites, signature algorithms, or compression algorithms fails.
+/// Returns an error if SSL context builder creation fails or if setting cipher
+/// suites, signature algorithms, or compression algorithms fails.
 pub fn tcp_client_chrome_ctx_builder() -> Result<SslContextBuilder, ErrorStack> {
     let mut builder = SslContextBuilder::new(SslMethod::tls())?;
     builder.set_sigalgs_list(CHROME_SIGALGS)?;
@@ -321,7 +337,7 @@ pub fn configure_client_chrome_ssl(ssl: &mut SslRef) -> Result<(), ErrorStack> {
 /// Returns the boring [`ErrorStack`] if `SSL_export_keying_material` fails.
 pub fn export_auth_challenge(ssl: &SslRef) -> Result<[u8; AUTH_CHALLENGE_LEN], ErrorStack> {
     let mut challenge = [0u8; AUTH_CHALLENGE_LEN];
-    ssl.export_keying_material(&mut challenge, AUTH_CHALLENGE_LABEL, None)?;
+    ssl.export_keying_material(&mut challenge, AUTH_CHALLENGE_LABEL, Some(&[]))?;
     Ok(challenge)
 }
 
@@ -420,6 +436,14 @@ mod tests {
     use std::io;
 
     use super::*;
+
+    #[test]
+    fn tcp_client_context_preserves_browser_version_offer() {
+        let mut ctx = tcp_client_chrome_ctx_builder().unwrap();
+
+        assert_eq!(ctx.min_proto_version(), Some(SslVersion::TLS1_2));
+        assert_eq!(ctx.max_proto_version(), Some(SslVersion::TLS1_3));
+    }
 
     /// `From<ErrorStack>` produces [`QuicConfigError::Setup`], and the boring
     /// `ErrorStack` survives as the `source()` of the typed error rather than

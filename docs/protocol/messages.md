@@ -67,7 +67,8 @@ Client authentication request sent after TLS handshake completion.
 - **client_id** (16 bytes): Unique client identifier. Must exist in server configuration.
 - **assigned_ipv4** (4 bytes): The IPv4 address assigned to this client. Must match server configuration for this client.
 - **tun_mtu** (2 bytes): Client TUN MTU. Must exactly match the server TUN MTU.
-- **challenge** (32 bytes): Challenge bytes derived from TLS handshake:
+- **challenge** (32 bytes): Challenge bytes derived from the TLS 1.3 handshake
+  using an explicit empty exporter context:
   ```
   challenge = TLS-Exporter("slt-auth-challenge", "", 32)
   ```
