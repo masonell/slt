@@ -311,8 +311,9 @@ This avoids shifting the entire bitmap on each packet.
 
 ## 8. Key Update (Key Phase)
 
-Key updates rotate all directional keys (HP, AEAD key, IV) in-band without
-re-transmitting `REGISTER_CID`.
+Key updates rotate the directional traffic secret, AEAD key, and IV in-band
+without re-transmitting `REGISTER_CID`. The initial directional HP key remains
+stable across key updates.
 
 ### Constants
 
