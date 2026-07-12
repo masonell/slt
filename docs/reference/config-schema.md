@@ -67,6 +67,10 @@ and refuses to start if any field mismatches.
 | `metrics_interval` | duration | No | `"5m"` | > 0, <= 1h |
 | `tcp_classification_timeout` | duration | No | `"60s"` | > 0, <= 1h |
 
+`tcp_classification_timeout` bounds classification from TCP acceptance. For
+connections classified as `CLAIM`, `auth_timeout` then bounds TLS completion and
+AUTH as a separate phase.
+
 ### `[transport.udp_qsp]` (Server)
 
 | Field | Type | Required | Default | Constraints |

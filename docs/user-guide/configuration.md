@@ -112,7 +112,7 @@ front-door cap until nginx closes them through settings such as
 |-------|------|----------|---------|-------------|
 | `ping_min` | duration | No | `10s` | Minimum ping interval. Must be >= 1ms and <= `ping_max`. |
 | `ping_max` | duration | No | `30s` | Maximum ping interval. Must be >= 1ms. |
-| `auth_timeout` | duration | No | `10s` | End-to-end server TLS and authentication deadline. Must be > 0 and <= 1 hour. |
+| `auth_timeout` | duration | No | `10s` | Server TLS and authentication deadline starting when TCP classification returns `CLAIM`. Must be > 0 and <= 1 hour. |
 | `tcp_write_timeout` | duration | No | `10s` | Maximum time for one established-session TCP message write. Must be > 0 and <= 1 hour. |
 | `udp_liveness_timeout` | duration | No | `90s` | Maximum time without authenticated UDP-QSP ingress before the server falls back to live TCP. Must be > 0 and <= 1 hour. |
 | `idle_timeout` | duration | No | `5m` | Idle connection timeout. Must be > 0 and <= 1 hour. |

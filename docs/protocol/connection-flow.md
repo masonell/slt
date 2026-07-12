@@ -67,7 +67,9 @@ signature = Ed25519.sign(client_private_key, context)
 Before `AUTH_OK` is received:
 - Only `AUTH`, `PING`, and `CLOSE` messages are valid from the client
 - Any `DATA` or `REGISTER_CID` received before authentication MUST be rejected
-- Server enforces `auth_timeout` from connection acceptance
+- TCP classification is bounded separately by `tcp_classification_timeout`
+- After the classifier returns `CLAIM`, the server enforces one `auth_timeout`
+  deadline across TLS completion and AUTH
 
 ### 1.4 Authentication Failure Codes
 
@@ -433,7 +435,7 @@ On session termination:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| auth_timeout | 10s | End-to-end server TLS and AUTH deadline |
+| auth_timeout | 10s | Server TLS and AUTH deadline starting when TCP classification returns `CLAIM` |
 | tcp_write_timeout | 10s | Maximum TCP message write time; clients also apply it during authentication and UDP upgrade |
 | udp_liveness_timeout | 90s | Server time without authenticated UDP-QSP ingress before TCP fallback |
 | idle_timeout | 300s | Max idle time before disconnect |
