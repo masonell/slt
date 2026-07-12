@@ -8,6 +8,10 @@ use crate::types::{
     ClientTransportConfig, TunConfig,
 };
 
+const fn default_enable_upgrade() -> bool {
+    true
+}
+
 /// Static client configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientConfig {
@@ -23,7 +27,7 @@ pub struct ClientConfig {
     #[serde(default)]
     pub transport: ClientTransportConfig,
     /// Enable QUIC DCID discovery and UDP-QSP upgrade.
-    #[serde(default)]
+    #[serde(default = "default_enable_upgrade")]
     pub enable_upgrade: bool,
     /// Require UDP upgrade success; if upgrade times out, fail the session.
     #[serde(default)]
@@ -230,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn serde_defaults_transport_cipher_to_auto_when_omitted() {
+    fn serde_applies_optional_defaults_when_omitted() {
         let raw = r#"
             [network]
             hostname = "example.com"
@@ -254,6 +258,8 @@ mod tests {
 
         let config = ClientConfig::from_toml_str(raw).unwrap();
         assert_eq!(config.transport.udp_qsp.cipher, ClientUdpQspCipher::Auto);
+        assert!(config.enable_upgrade);
+        assert!(!config.require_udp);
     }
 
     #[test]

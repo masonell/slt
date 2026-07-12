@@ -5,7 +5,10 @@ use std::thread;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ConfigError, ConfigLoadError};
+use super::{
+    ConfigError, ConfigLoadError, DEFAULT_MAX_AUTH_INFLIGHT, DEFAULT_SESSION_QUEUE_SIZE,
+    DEFAULT_UDP_NAT_MAX_ENTRIES,
+};
 use crate::types::{
     ServerClient, ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, ServerTransportConfig,
     SharedSecret, TunConfig,
@@ -13,17 +16,17 @@ use crate::types::{
 
 /// Default UDP NAT max entries.
 const fn default_udp_nat_max_entries() -> usize {
-    1024
+    DEFAULT_UDP_NAT_MAX_ENTRIES
 }
 
 /// Default session queue size.
 const fn default_session_queue_size() -> usize {
-    256
+    DEFAULT_SESSION_QUEUE_SIZE
 }
 
 /// Default concurrent TLS/AUTH handshakes for VPN-claimed TCP connections.
 const fn default_max_auth_inflight() -> usize {
-    128
+    DEFAULT_MAX_AUTH_INFLIGHT
 }
 
 /// Default per-worker connection budget for the TCP front door.

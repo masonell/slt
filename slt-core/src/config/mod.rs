@@ -9,13 +9,15 @@ use std::time::Duration;
 
 pub use client::ClientConfig;
 pub use defaults::{
-    DEFAULT_AUTH_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_METRICS_INTERVAL, DEFAULT_PING_MAX,
-    DEFAULT_PING_MIN, DEFAULT_QUIC_DISCOVERY_TIMEOUT, DEFAULT_RECONNECT_MAX, DEFAULT_RECONNECT_MIN,
-    DEFAULT_REGISTER_TIMEOUT, DEFAULT_TCP_CLASSIFICATION_TIMEOUT, DEFAULT_TCP_WRITE_TIMEOUT,
-    DEFAULT_UDP_LIVENESS_TIMEOUT, default_auth_timeout, default_idle_timeout,
-    default_metrics_interval, default_ping_max, default_ping_min, default_quic_discovery_timeout,
-    default_reconnect_max, default_reconnect_min, default_register_timeout,
-    default_tcp_classification_timeout, default_tcp_write_timeout, default_udp_liveness_timeout,
+    DEFAULT_AUTH_TIMEOUT, DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_AUTH_INFLIGHT,
+    DEFAULT_METRICS_INTERVAL, DEFAULT_PING_MAX, DEFAULT_PING_MIN, DEFAULT_QUIC_DISCOVERY_TIMEOUT,
+    DEFAULT_RECONNECT_MAX, DEFAULT_RECONNECT_MIN, DEFAULT_REGISTER_TIMEOUT,
+    DEFAULT_SESSION_QUEUE_SIZE, DEFAULT_TCP_CLASSIFICATION_TIMEOUT, DEFAULT_TCP_WRITE_TIMEOUT,
+    DEFAULT_TUN_MTU, DEFAULT_UDP_LIVENESS_TIMEOUT, DEFAULT_UDP_NAT_MAX_ENTRIES,
+    default_auth_timeout, default_idle_timeout, default_metrics_interval, default_ping_max,
+    default_ping_min, default_quic_discovery_timeout, default_reconnect_max, default_reconnect_min,
+    default_register_timeout, default_tcp_classification_timeout, default_tcp_write_timeout,
+    default_udp_liveness_timeout,
 };
 pub use server::{DEFAULT_TCP_CONNECTIONS_PER_WORKER, ServerConfig, default_tcp_connection_cap};
 use thiserror::Error;
@@ -179,24 +181,38 @@ pub enum ConfigLoadError {
 mod tests {
     use std::time::Duration;
 
-    use super::{ConfigError, ConfigLoadError, ETHERNET_IP_MTU, MAX_TUN_MTU, MIN_INTERVAL};
+    use super::{
+        ConfigError, ConfigLoadError, DEFAULT_TUN_MTU, ETHERNET_IP_MTU, MAX_TUN_MTU, MIN_INTERVAL,
+    };
     use crate::crypto::udp_qsp::AEAD_TAG_LEN;
     use crate::proto::HEADER_LEN;
     use crate::types::{ClientId, MAX_DCID_LEN};
 
+    const OUTER_IPV6_UDP_HEADER_LEN: usize = 40 + 8;
+    const QSP_PACKET_HEADER_MAX_LEN: usize = 1 + MAX_DCID_LEN + 4;
+    const UDP_QSP_WRAPPER_OVERHEAD: usize = QSP_PACKET_HEADER_MAX_LEN + AEAD_TAG_LEN + HEADER_LEN;
+
+    #[test]
+    fn default_tun_mtu_budget_is_stable() {
+        assert_eq!(DEFAULT_TUN_MTU, 1186);
+        assert_eq!(UDP_QSP_WRAPPER_OVERHEAD, 46);
+        assert_eq!(OUTER_IPV6_UDP_HEADER_LEN, 48);
+        assert_eq!(
+            usize::from(DEFAULT_TUN_MTU) + UDP_QSP_WRAPPER_OVERHEAD + OUTER_IPV6_UDP_HEADER_LEN,
+            1280
+        );
+    }
+
     #[test]
     fn max_tun_mtu_budget_is_stable() {
-        const IPV6_HEADER_LEN: usize = 40;
-        const UDP_HEADER_LEN: usize = 8;
-        const QSP_PACKET_HEADER_MAX_LEN: usize = 1 + MAX_DCID_LEN + 4;
-        const UDP_QSP_WRAPPER_OVERHEAD: usize =
-            QSP_PACKET_HEADER_MAX_LEN + AEAD_TAG_LEN + HEADER_LEN;
-        let calculated = ETHERNET_IP_MTU as usize
-            - (IPV6_HEADER_LEN + UDP_HEADER_LEN)
-            - UDP_QSP_WRAPPER_OVERHEAD;
-
         assert_eq!(MAX_TUN_MTU, 1406);
-        assert_eq!(usize::from(MAX_TUN_MTU), calculated);
+        assert_eq!(UDP_QSP_WRAPPER_OVERHEAD, 46);
+        assert_eq!(OUTER_IPV6_UDP_HEADER_LEN, 48);
+        assert_eq!(
+            usize::from(MAX_TUN_MTU) + UDP_QSP_WRAPPER_OVERHEAD + OUTER_IPV6_UDP_HEADER_LEN,
+            usize::from(ETHERNET_IP_MTU)
+        );
+        assert_eq!(ETHERNET_IP_MTU, 1500);
     }
 
     // === ConfigError display tests ===

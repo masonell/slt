@@ -16,7 +16,7 @@ fn from_toml_accepts_empty_client_list() {
 }
 
 #[test]
-fn serde_defaults_transport_allowed_ciphers_when_omitted() {
+fn serde_applies_server_defaults_when_omitted() {
     let raw = r#"
         server_secret = { hex = "0000000000000000000000000000000000000000000000000000000000000000" }
 
@@ -43,6 +43,8 @@ fn serde_defaults_transport_allowed_ciphers_when_omitted() {
     "#;
 
     let config = ServerConfig::from_toml_str(raw).unwrap();
+    assert_eq!(config.udp_nat_max_entries, 1024);
+    assert_eq!(config.session_queue_size, 1024);
     assert_eq!(config.max_auth_inflight, 128);
     assert_eq!(config.tcp_connection_cap, default_tcp_connection_cap());
     assert!(config.transport.udp_qsp.allows(CipherSuite::Aes128Gcm));

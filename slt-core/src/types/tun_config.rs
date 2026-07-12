@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ConfigError, MAX_TUN_MTU};
+use crate::config::{ConfigError, DEFAULT_TUN_MTU, MAX_TUN_MTU};
 
 /// TUN interface configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ fn default_tun_name() -> String {
 }
 
 const fn default_tun_mtu() -> u16 {
-    1280
+    DEFAULT_TUN_MTU
 }
 
 const fn default_tun_ipv4() -> Ipv4Addr {
@@ -43,7 +43,7 @@ impl Default for TunConfig {
     fn default() -> Self {
         Self {
             tun_name: default_tun_name(),
-            tun_mtu: default_tun_mtu(),
+            tun_mtu: DEFAULT_TUN_MTU,
             tun_ipv4: default_tun_ipv4(),
             tun_prefix: default_tun_prefix(),
         }
@@ -154,10 +154,15 @@ mod tests {
     }
 
     #[test]
-    fn default_tun_mtu_is_valid() {
+    fn default_tun_mtu_is_canonical() {
         let config = TunConfig::default();
-        assert!(config.tun_mtu > 0);
-        assert!(config.tun_mtu <= MAX_TUN_MTU);
+        assert_eq!(config.tun_mtu, 1186);
+    }
+
+    #[test]
+    fn serde_defaults_tun_mtu_when_omitted() {
+        let config: TunConfig = toml::from_str(r#"tun_ipv4 = "10.10.0.1""#).unwrap();
+        assert_eq!(config.tun_mtu, DEFAULT_TUN_MTU);
     }
 
     #[test]

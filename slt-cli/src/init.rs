@@ -7,7 +7,10 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use slt_core::config::{ServerConfig, default_tcp_connection_cap};
+use slt_core::config::{
+    DEFAULT_MAX_AUTH_INFLIGHT, DEFAULT_SESSION_QUEUE_SIZE, DEFAULT_TUN_MTU,
+    DEFAULT_UDP_NAT_MAX_ENTRIES, ServerConfig, default_tcp_connection_cap,
+};
 use slt_core::types::{
     ServerNetworkConfig, ServerTimingConfig, ServerTlsConfig, ServerTransportConfig, SharedSecret,
     TlsMaterial, TunConfig,
@@ -25,18 +28,11 @@ const DEFAULT_NGINX_PORT: u16 = 8080;
 /// Default TUN interface name.
 const DEFAULT_TUN_NAME: &str = "tun0";
 
-/// Default TUN MTU.
-const DEFAULT_TUN_MTU: u16 = 1406;
-
 /// Default server TUN IPv4 address.
 const DEFAULT_TUN_IPV4: Ipv4Addr = Ipv4Addr::new(10, 10, 0, 1);
 
 /// Default TUN overlay prefix length.
 const DEFAULT_TUN_PREFIX: u8 = 24;
-
-/// Default session queue size.
-const DEFAULT_SESSION_QUEUE_SIZE: usize = 1024;
-const DEFAULT_MAX_AUTH_INFLIGHT: usize = 128;
 
 /// Initialize server configuration.
 ///
@@ -123,7 +119,7 @@ pub fn init(
         },
         timing: ServerTimingConfig::default(),
         transport: ServerTransportConfig::default(),
-        udp_nat_max_entries: 1024,
+        udp_nat_max_entries: DEFAULT_UDP_NAT_MAX_ENTRIES,
         session_queue_size: DEFAULT_SESSION_QUEUE_SIZE,
         max_auth_inflight: DEFAULT_MAX_AUTH_INFLIGHT,
         tcp_connection_cap: default_tcp_connection_cap(),
@@ -218,6 +214,8 @@ mod tests {
         assert!(config.validate().is_ok());
         assert!(config.clients.is_empty());
         assert_eq!(config.tun.tun_name, "tun0");
+        assert_eq!(config.tun.tun_mtu, 1186);
+        assert_eq!(config.session_queue_size, 1024);
     }
 
     #[test]

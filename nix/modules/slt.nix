@@ -143,7 +143,7 @@ let
 
         mtu = mkOption {
           type = tunMtuType;
-          default = 1280;
+          default = 1186;
           example = 1406;
           description = "TUN interface MTU. SLT supports values from 1 through 1406.";
         };
@@ -276,8 +276,7 @@ let
               udpLivenessTimeout =
                 durationOption "90s" "90s"
                   "Maximum time without authenticated UDP-QSP ingress before TCP fallback.";
-              idleTimeout =
-                durationOption "5m" "5m" "Maximum time without accepted session ingress.";
+              idleTimeout = durationOption "5m" "5m" "Maximum time without accepted session ingress.";
               metricsInterval = durationOption "5m" "5m" "Metrics logging interval.";
               tcpClassificationTimeout = durationOption "60s" "60s" "TCP ClientHello classification timeout.";
             };
@@ -309,7 +308,7 @@ let
         };
 
         udpNatMaxEntries = positiveIntOption 1024 "Maximum UDP NAT entries for nginx forwarding.";
-        sessionQueueSize = positiveIntOption 256 "Bounded queue size for per-session events.";
+        sessionQueueSize = positiveIntOption 1024 "Bounded queue size for per-session events.";
         maxAuthInflight = positiveIntOption 128 "Maximum concurrent TLS/AUTH handshakes.";
         tcpConnectionCap = nullablePositiveIntOption "Maximum classifying and nginx-proxied TCP connections.";
 
@@ -445,7 +444,7 @@ let
 
         enableUpgrade = mkOption {
           type = types.bool;
-          default = false;
+          default = true;
           description = "Whether to enable QUIC discovery and UDP-QSP upgrade.";
         };
 
@@ -482,14 +481,11 @@ let
               pingMin = durationOption "10s" "10s" "Minimum ping interval.";
               pingMax = durationOption "30s" "30s" "Maximum ping interval.";
               authTimeout = durationOption "10s" "10s" "TLS/AUTH timeout.";
-              tcpWriteTimeout =
-                durationOption "10s" "10s" "Maximum time for one TCP message write.";
+              tcpWriteTimeout = durationOption "10s" "10s" "Maximum time for one TCP message write.";
               registerTimeout = durationOption "10s" "10s" "UDP-QSP registration timeout.";
               quicDiscoveryTimeout = durationOption "15s" "15s" "QUIC discovery timeout.";
-              udpLivenessTimeout =
-                durationOption "90s" "90s" "Authenticated UDP-QSP ingress timeout.";
-              idleTimeout =
-                durationOption "5m" "5m" "Maximum time without accepted session ingress.";
+              udpLivenessTimeout = durationOption "90s" "90s" "Authenticated UDP-QSP ingress timeout.";
+              idleTimeout = durationOption "5m" "5m" "Maximum time without accepted session ingress.";
               metricsInterval = durationOption "5m" "5m" "Metrics logging interval.";
               reconnectMin = durationOption "200ms" "200ms" "Minimum reconnect backoff.";
               reconnectMax = durationOption "5s" "5s" "Maximum reconnect backoff.";

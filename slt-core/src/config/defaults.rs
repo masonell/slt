@@ -2,6 +2,18 @@
 
 use std::time::Duration;
 
+/// Conservative default TUN MTU for an outer IPv6 path MTU of 1280 bytes.
+pub const DEFAULT_TUN_MTU: u16 = 1186;
+
+/// Default bounded queue size for per-session events.
+pub const DEFAULT_SESSION_QUEUE_SIZE: usize = 1024;
+
+/// Default concurrent TLS/AUTH handshakes for VPN-claimed TCP connections.
+pub const DEFAULT_MAX_AUTH_INFLIGHT: usize = 128;
+
+/// Default maximum number of UDP NAT peers retained for nginx forwarding.
+pub const DEFAULT_UDP_NAT_MAX_ENTRIES: usize = 1024;
+
 /// Default minimum ping interval.
 pub const DEFAULT_PING_MIN: Duration = Duration::from_secs(10);
 

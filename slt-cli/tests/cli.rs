@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-use slt_core::config::ClientConfig;
+use slt_core::config::{ClientConfig, DEFAULT_TUN_MTU};
 use tempfile::TempDir;
 
 fn slt() -> Command {
@@ -31,7 +31,7 @@ file = "server-key.pem"
 
 [tun]
 tun_name = "tun0"
-tun_mtu = 1280
+tun_mtu = {DEFAULT_TUN_MTU}
 tun_ipv4 = "10.10.0.1"
 tun_prefix = 24
 
@@ -48,7 +48,7 @@ metrics_interval = "5m"
 }
 
 #[test]
-fn add_client_command_writes_server_listen_port_to_client_config() {
+fn add_client_command_copies_server_settings_to_client_config() {
     let config_dir = TempDir::new().unwrap();
     let output_dir = TempDir::new().unwrap();
     let server_config = write_server_config(&config_dir, 8443);
@@ -85,6 +85,8 @@ fn add_client_command_writes_server_listen_port_to_client_config() {
     let client_config = ClientConfig::from_toml_str(&client_toml).unwrap();
 
     assert_eq!(client_config.network.port, 8443);
+    assert_eq!(client_config.tun.tun_mtu, 1186);
+    assert!(client_config.enable_upgrade);
 }
 
 #[cfg(target_os = "linux")]
