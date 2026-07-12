@@ -1,15 +1,17 @@
 //! Server configuration display command.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Result;
-use slt_core::types::ServerTimingConfig;
+use slt_core::config::ServerConfig;
+use slt_core::types::{ServerTimingConfig, ServerTransportConfig, ServerUdpQspCipher, TlsMaterial};
 
 use crate::config_io::load_server_config;
 
 /// Display server configuration summary.
 ///
-/// Shows network settings, TLS configuration, TUN settings, timing, and client list.
+/// Shows network, TLS, TUN, timing, transport, capacity, and client settings.
 /// Secrets (`server_secret`, TLS key content) are hidden by default unless
 /// `reveal_secrets` is true.
 ///
@@ -19,81 +21,30 @@ use crate::config_io::load_server_config;
 pub fn show_server(config_path: &Path, reveal_secrets: bool) -> Result<()> {
     let config = load_server_config(config_path)?;
 
-    println!("Server Configuration");
-    println!("====================");
-    println!();
+    print!("{}", server_summary(&config, reveal_secrets));
 
-    // Server secret
-    if reveal_secrets {
-        println!(
-            "Server Secret: {}",
-            hex::encode(config.server_secret.as_bytes())
-        );
+    Ok(())
+}
+
+fn server_summary(config: &ServerConfig, reveal_secrets: bool) -> String {
+    let server_secret = if reveal_secrets {
+        hex::encode(config.server_secret.as_bytes())
     } else {
-        println!("Server Secret: <hidden>");
-    }
-    println!();
-
-    // Network settings
-    println!("Network:");
-    println!("  Listen TCP:    {}", config.network.listen_tcp);
-    println!("  Listen UDP:    {}", config.network.listen_udp);
-    println!("  Nginx TCP Up:  {}", config.network.nginx_tcp_upstream);
-    println!("  Nginx UDP Up:  {}", config.network.nginx_udp_upstream);
-    println!();
-
-    // TLS settings
-    println!("TLS:");
-    match &config.tls.tls_cert {
-        slt_core::types::TlsMaterial::Pem(pem) => {
-            println!("  Certificate: <inline, {} bytes>", pem.len());
-        }
-        slt_core::types::TlsMaterial::File { file } => {
-            println!("  Certificate: {}", file.display());
-        }
-    }
-    match &config.tls.tls_key {
-        slt_core::types::TlsMaterial::Pem(pem) => {
-            if reveal_secrets {
-                println!("  Private Key:  <inline, {} bytes>", pem.len());
-            } else {
-                println!("  Private Key:  <hidden>");
-            }
-        }
-        slt_core::types::TlsMaterial::File { file } => {
-            if reveal_secrets {
-                println!("  Private Key:  {}", file.display());
-            } else {
-                println!("  Private Key:  {} <hidden>", file.display());
-            }
-        }
-    }
-    println!();
-
-    // TUN settings
-    println!("TUN:");
-    println!("  Interface: {}", config.tun.tun_name);
-    println!("  MTU:       {}", config.tun.tun_mtu);
-    println!(
-        "  IPv4:      {}/{}",
-        config.tun.tun_ipv4, config.tun.tun_prefix
-    );
-    println!();
-
-    print!("{}", timing_summary(&config.timing));
-    println!();
-
-    // Advanced settings
-    println!("Advanced:");
-    println!("  UDP NAT Entries:  {}", config.udp_nat_max_entries);
-    println!("  Session Queue:    {}", config.session_queue_size);
-    println!("  TCP Conn Cap:     {}", config.tcp_connection_cap);
-    println!();
-
-    // Clients
-    println!("Clients ({}):", config.clients.len());
+        "<hidden>".to_owned()
+    };
+    let certificate = match &config.tls.tls_cert {
+        TlsMaterial::Pem(pem) => format!("<inline, {} bytes>", pem.len()),
+        TlsMaterial::File { file } => file.display().to_string(),
+    };
+    let private_key = match &config.tls.tls_key {
+        TlsMaterial::Pem(pem) if reveal_secrets => format!("<inline, {} bytes>", pem.len()),
+        TlsMaterial::Pem(_) => "<hidden>".to_owned(),
+        TlsMaterial::File { file } if reveal_secrets => file.display().to_string(),
+        TlsMaterial::File { file } => format!("{} <hidden>", file.display()),
+    };
+    let mut clients = String::new();
     if config.clients.is_empty() {
-        println!("  (none)");
+        clients.push_str("  (none)\n");
     } else {
         for client in &config.clients {
             let status = if client.enabled {
@@ -101,14 +52,60 @@ pub fn show_server(config_path: &Path, reveal_secrets: bool) -> Result<()> {
             } else {
                 "disabled"
             };
-            println!(
+            writeln!(
+                &mut clients,
                 "  {} -> {} [{}]",
                 client.client_id, client.assigned_ipv4, status
-            );
+            )
+            .expect("writing to a String cannot fail");
         }
     }
 
-    Ok(())
+    format!(
+        concat!(
+            "Server Configuration\n",
+            "====================\n",
+            "\n",
+            "Server Secret: {}\n",
+            "\n",
+            "Network:\n",
+            "  Listen TCP:    {}\n",
+            "  Listen UDP:    {}\n",
+            "  Nginx TCP Up:  {}\n",
+            "  Nginx UDP Up:  {}\n",
+            "\n",
+            "TLS:\n",
+            "  Certificate: {}\n",
+            "  Private Key:  {}\n",
+            "\n",
+            "TUN:\n",
+            "  Interface: {}\n",
+            "  MTU:       {}\n",
+            "  IPv4:      {}/{}\n",
+            "\n",
+            "{}\n",
+            "{}\n",
+            "{}\n",
+            "Clients ({}):\n",
+            "{}",
+        ),
+        server_secret,
+        config.network.listen_tcp,
+        config.network.listen_udp,
+        config.network.nginx_tcp_upstream,
+        config.network.nginx_udp_upstream,
+        certificate,
+        private_key,
+        config.tun.tun_name,
+        config.tun.tun_mtu,
+        config.tun.tun_ipv4,
+        config.tun.tun_prefix,
+        timing_summary(&config.timing),
+        transport_summary(&config.transport),
+        advanced_summary(config),
+        config.clients.len(),
+        clients,
+    )
 }
 
 fn timing_summary(timing: &ServerTimingConfig) -> String {
@@ -135,10 +132,50 @@ fn timing_summary(timing: &ServerTimingConfig) -> String {
     )
 }
 
+fn transport_summary(transport: &ServerTransportConfig) -> String {
+    let allowed_ciphers = transport
+        .udp_qsp
+        .allowed_ciphers
+        .iter()
+        .copied()
+        .map(cipher_config_name)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!("Transport:\n  UDP-QSP Allowed Ciphers: {allowed_ciphers}\n")
+}
+
+const fn cipher_config_name(cipher: ServerUdpQspCipher) -> &'static str {
+    match cipher {
+        ServerUdpQspCipher::Aes128Gcm => "aes-128-gcm",
+        ServerUdpQspCipher::ChaCha20Poly1305 => "chacha20-poly1305",
+    }
+}
+
+fn advanced_summary(config: &ServerConfig) -> String {
+    format!(
+        concat!(
+            "Advanced:\n",
+            "  UDP NAT Entries:    {}\n",
+            "  Session Queue:      {}\n",
+            "  Max Auth Inflight:  {}\n",
+            "  TCP Conn Cap:       {}\n",
+        ),
+        config.udp_nat_max_entries,
+        config.session_queue_size,
+        config.max_auth_inflight,
+        config.tcp_connection_cap,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
 
+    use slt_core::config::{
+        DEFAULT_MAX_AUTH_INFLIGHT, DEFAULT_SESSION_QUEUE_SIZE, DEFAULT_UDP_NAT_MAX_ENTRIES,
+        default_tcp_connection_cap,
+    };
     use tempfile::NamedTempFile;
 
     use super::*;
@@ -194,10 +231,28 @@ enabled = true
     }
 
     #[test]
-    fn show_server_reveals_secrets_when_requested() {
+    fn server_summary_hides_secrets_by_default() {
         let file = write_test_config();
-        let result = show_server(file.path(), true);
-        assert!(result.is_ok());
+        let config = load_server_config(file.path()).unwrap();
+        let summary = server_summary(&config, false);
+
+        assert!(summary.contains("Server Secret: <hidden>"));
+        assert!(summary.contains("Private Key:  server-key.pem <hidden>"));
+        assert!(!summary.contains(&hex::encode(config.server_secret.as_bytes())));
+    }
+
+    #[test]
+    fn server_summary_reveals_secrets_when_requested() {
+        let file = write_test_config();
+        let config = load_server_config(file.path()).unwrap();
+        let summary = server_summary(&config, true);
+
+        assert!(summary.contains(&format!(
+            "Server Secret: {}",
+            hex::encode(config.server_secret.as_bytes())
+        )));
+        assert!(summary.contains("Private Key:  server-key.pem\n"));
+        assert!(!summary.contains("server-key.pem <hidden>"));
     }
 
     #[test]
@@ -208,6 +263,58 @@ enabled = true
         assert!(
             timing_summary(&config.timing).contains("  UDP Liveness:   47s\n"),
             "timing summary should show the effective UDP liveness timeout"
+        );
+    }
+
+    #[test]
+    fn advanced_summary_includes_all_effective_capacity_settings() {
+        let file = write_test_config();
+        let config = load_server_config(file.path()).unwrap();
+
+        assert_eq!(
+            advanced_summary(&config),
+            format!(
+                concat!(
+                    "Advanced:\n",
+                    "  UDP NAT Entries:    {}\n",
+                    "  Session Queue:      {}\n",
+                    "  Max Auth Inflight:  {}\n",
+                    "  TCP Conn Cap:       {}\n",
+                ),
+                DEFAULT_UDP_NAT_MAX_ENTRIES,
+                DEFAULT_SESSION_QUEUE_SIZE,
+                DEFAULT_MAX_AUTH_INFLIGHT,
+                default_tcp_connection_cap(),
+            )
+        );
+    }
+
+    #[test]
+    fn transport_summary_includes_default_cipher_allowlist() {
+        let file = write_test_config();
+        let config = load_server_config(file.path()).unwrap();
+
+        assert_eq!(
+            transport_summary(&config.transport),
+            concat!(
+                "Transport:\n",
+                "  UDP-QSP Allowed Ciphers: aes-128-gcm, chacha20-poly1305\n",
+            )
+        );
+    }
+
+    #[test]
+    fn transport_summary_includes_restricted_cipher_allowlist() {
+        let file = write_test_config();
+        let mut config = load_server_config(file.path()).unwrap();
+        config.transport.udp_qsp.allowed_ciphers = vec![ServerUdpQspCipher::ChaCha20Poly1305];
+
+        assert_eq!(
+            transport_summary(&config.transport),
+            concat!(
+                "Transport:\n",
+                "  UDP-QSP Allowed Ciphers: chacha20-poly1305\n",
+            )
         );
     }
 
