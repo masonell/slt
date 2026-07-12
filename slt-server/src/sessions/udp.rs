@@ -10,9 +10,10 @@ use slt_core::proto::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, trace};
 
+use super::egress::UdpFailureRecovery;
 use super::error::SessionError;
 use super::types::SessionControl;
-use super::{ClientSessionBase, UdpFailureRecovery, UdpSessionIo};
+use super::{ClientSessionBase, UdpSessionIo};
 use crate::quic::UdpClaim;
 use crate::tun::TunDeviceIo;
 

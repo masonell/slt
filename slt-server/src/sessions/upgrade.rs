@@ -7,8 +7,9 @@ use slt_core::proto::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 
+use super::egress::UdpFailureRecovery;
 use super::error::SessionError;
-use super::{ClientSessionBase, SessionControl, UdpFailureRecovery, UdpSessionIo};
+use super::{ClientSessionBase, SessionControl, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
 const MAX_STALE_UPGRADE_IDS: usize = 16;

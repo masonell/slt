@@ -28,7 +28,7 @@ use slt_core::proto::{FrameError, MessageError, MessageValidationError, PayloadE
 ///   errors (`Replay`/`TooOld`/`Crypto`/garbage) with metrics. Those conditions
 ///   never produce a `UdpQspError`.
 /// - The **send/flush path** (`send_udp_message` and
-///   `recover_from_udp_flush_error` in `sessions/mod.rs`) retires UDP state and
+///   `recover_from_udp_flush_error` in `sessions/egress.rs`) retires UDP state and
 ///   uses TCP for UDP transport failures when the TCP channel is alive.
 ///
 /// `UdpQspError` reaches `SessionError::UdpQsp` when no local TCP recovery is

@@ -9,11 +9,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time;
 use tracing::{debug, error, info};
 
+use super::egress::{BEST_EFFORT_IO_TIMEOUT, UdpFailureRecovery};
 use super::error::SessionError;
 use super::types::{SessionControl, SessionEvent, SessionShutdownReason};
-use super::{
-    ActiveTransport, BEST_EFFORT_IO_TIMEOUT, ClientSessionBase, UdpFailureRecovery, UdpSessionIo,
-};
+use super::{ActiveTransport, ClientSessionBase, UdpSessionIo};
 use crate::tun::TunDeviceIo;
 
 #[derive(Clone, Copy)]
