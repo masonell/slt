@@ -28,9 +28,9 @@ embed a cryptographic token in the TLS ClientHello `legacy_session_id` field.
 
 This requires a custom TLS hook that:
 
-1. Fires after the `random` and `key_share` values are generated
-2. Fires before the ClientHello transcript hash is computed
-3. Allows overwriting the `legacy_session_id` with a computed value
+1. Receives the serialized ClientHello before its transcript hash is computed
+2. Allows overwriting the `legacy_session_id` with a computed value
+3. Keeps BoringSSL's internal session ID synchronized with the wire value
 
 BoringSSL provides the necessary low-level hooks to implement this callback.
 See `slt-core/src/crypto/client_hello.rs` for the implementation.
@@ -41,18 +41,38 @@ The classifier token allows the server to identify VPN clients without
 terminating TLS for unknown traffic. The token is constructed as:
 
 ```
-session_id = part1 || part2
+session_id = candidate_tag || claim_tag
 
-part1 = HMAC-SHA256(server_secret, random[0:16])[:16]
-part2 = HMAC-SHA256(server_secret, key_share)[:16]
+candidate_tag = HMAC-SHA256(server_secret,
+                            "slt-tcp-candidate-v2" || random[0:16])[:16]
+claim_tag = HMAC-SHA256(server_secret,
+                        "slt-tcp-claim-v2" || normalized_client_hello)[:16]
 ```
 
 Where:
 
 - `random` is the ClientHello's 32-byte random field (first 16 bytes used)
-- `key_share` is the X25519 key share (32 bytes)
+- `normalized_client_hello` is the complete serialized ClientHello handshake
+  message with the 32 `legacy_session_id` bytes replaced by zeroes
 - Both HMAC outputs are truncated to 16 bytes
 - Total `legacy_session_id` length is exactly 32 bytes
+
+The first half is a candidate tag. It lets the front door pass ordinary TLS
+traffic as soon as the ClientHello prefix is available. A matching candidate
+remains in classification until the complete ClientHello verifies the second
+half, which binds its TLS versions, cipher suites, extensions, and every other
+serialized ClientHello byte.
+
+An SLT `ClientHello1` must end within the first 8,192 TLS-framed bytes of the
+TCP stream. The ceiling includes TLS record headers and permits record
+fragmentation within the limit. Over-ceiling hellos are forwarded to nginx as
+ordinary HTTPS traffic even when their candidate tag matches. This bounds
+front-door buffering without constraining `ClientHello2`, which is processed
+after the connection has been claimed.
+
+TCP client contexts do not retain resumable TLS sessions. TLS 1.3 PSK binders
+are populated after the session-ID callback, so the claim-token format uses
+non-resumption ClientHellos.
 
 ### 2.3 TLS Termination
 

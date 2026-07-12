@@ -17,11 +17,12 @@ Client                                    Server
   |                                         |
   |  2. TLS ClientHello with token          |
   |    (legacy_session_id = 32-byte HMAC)   |
+  |    (ends within first 8 KiB of stream)  |
   |---------------------------------------->|
   |                                         |  3. Validate token
   |                                         |     - Check legacy_session_id length
-  |                                         |     - Verify part1 (random-based HMAC)
-  |                                         |     - Verify part2 (key_share-based HMAC)
+  |                                         |     - Verify candidate tag (random-based HMAC)
+  |                                         |     - Verify full ClientHello tag
   |                                         |     - CLAIM or PASS decision
   |                                         |
   |                                         |  4. If CLAIM, acquire auth slot
@@ -70,6 +71,8 @@ context value.
 Before `AUTH_OK` is received:
 - Only `AUTH`, `PING`, `PONG`, and `CLOSE` messages are valid from the client
 - Any `DATA` or `REGISTER_CID` received before authentication MUST be rejected
+- `ClientHello1` MUST end within the first 8,192 TLS-framed bytes of the TCP
+  stream; an over-ceiling hello is `PASS` traffic and is forwarded to nginx
 - TCP classification is bounded separately by `tcp_classification_timeout`
 - After the classifier returns `CLAIM`, the server enforces one `auth_timeout`
   deadline across TLS completion and AUTH

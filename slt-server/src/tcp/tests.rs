@@ -5,13 +5,16 @@ use std::time::Duration;
 
 use slt_core::classifier::{Verdict, classify_tcp_client_hello};
 use slt_core::config::ServerConfig;
-use slt_core::crypto::client_hello::LEGACY_SESSION_ID_LEN;
-use slt_core::testing::{TLS_RECORD_HEADER_LEN, generate_client_hello_tls_record};
+use slt_core::crypto::client_hello::{LEGACY_SESSION_ID_LEN, MAX_TCP_CLIENT_HELLO_WIRE_LEN};
+use slt_core::testing::{
+    TLS_RECORD_HEADER_LEN, fragment_client_hello_tls_record, generate_client_hello_tls_record,
+    generate_sized_client_hello_tls_record,
+};
 use slt_core::types::{
     ClientId, PubKeyEd25519, ServerClient, ServerNetworkConfig, ServerTimingConfig,
     ServerTlsConfig, ServerTransportConfig, SharedSecret, TlsMaterial, TunConfig,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -80,6 +83,52 @@ fn test_config_with_tcp_limits(
     config.tcp_connection_cap = tcp_connection_cap;
     config.timing.tcp_classification_timeout = tcp_classification_timeout;
     config
+}
+
+fn downgrade_supported_versions_to_tls12(client_hello: &mut [u8]) {
+    const EXT_SUPPORTED_VERSIONS: u16 = 0x002b;
+
+    let handshake = &mut client_hello[TLS_RECORD_HEADER_LEN..];
+    assert_eq!(handshake[0], 0x01, "expected a ClientHello handshake");
+
+    let mut pos = 4 + 2 + 32;
+    let session_id_len = handshake[pos] as usize;
+    pos += 1 + session_id_len;
+
+    let cipher_suites_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    pos += 2 + cipher_suites_len;
+
+    let compression_methods_len = handshake[pos] as usize;
+    pos += 1 + compression_methods_len;
+
+    let extensions_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    pos += 2;
+    let extensions_end = pos + extensions_len;
+
+    while pos < extensions_end {
+        let extension_type = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]);
+        let extension_len = u16::from_be_bytes([handshake[pos + 2], handshake[pos + 3]]) as usize;
+        let value_start = pos + 4;
+        let value_end = value_start + extension_len;
+        assert!(value_end <= extensions_end, "invalid ClientHello extension");
+
+        if extension_type == EXT_SUPPORTED_VERSIONS {
+            let versions = &mut handshake[value_start..value_end];
+            let mut replaced = false;
+            for version in versions[1..].chunks_exact_mut(2) {
+                if version == [0x03, 0x04] {
+                    version.copy_from_slice(&[0x03, 0x03]);
+                    replaced = true;
+                }
+            }
+            assert!(replaced, "ClientHello must offer TLS 1.3");
+            return;
+        }
+
+        pos = value_end;
+    }
+
+    panic!("ClientHello must contain supported_versions");
 }
 
 #[test]
@@ -488,7 +537,6 @@ async fn run_proxies_to_upstream_for_non_matching_client_hello() {
     // Accept on upstream
     let upstream_task = tokio::spawn(async move {
         let (mut upstream_stream, _) = upstream_listener.accept().await.unwrap();
-        use tokio::io::AsyncReadExt;
         let mut buf = [0u8; 1024];
         let n = upstream_stream.read(&mut buf).await.unwrap();
         upstream_stream.write_all(&buf[..n]).await.unwrap();
@@ -511,6 +559,113 @@ async fn run_proxies_to_upstream_for_non_matching_client_hello() {
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.tcp_accepted, 1);
     assert_eq!(snapshot.passed, 1);
+}
+
+#[tokio::test]
+async fn run_proxies_supported_versions_downgrade_without_claiming() {
+    let secret = SharedSecret([0x42u8; 32]);
+    let metrics = Arc::new(Metrics::default());
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    let config = test_config(upstream_addr);
+
+    let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let listen_addr = front_door.listener().local_addr().unwrap();
+    let claims = Arc::new(AtomicUsize::new(0));
+    let claims_for_handler = claims.clone();
+    let cancel_for_run = cancel.clone();
+    let run_task = tokio::spawn(async move {
+        front_door
+            .run(cancel_for_run, move |_, _| {
+                claims_for_handler.fetch_add(1, Ordering::SeqCst);
+            })
+            .await
+    });
+
+    let mut client_hello = generate_client_hello_tls_record(secret);
+    downgrade_supported_versions_to_tls12(&mut client_hello);
+    let expected = client_hello.clone();
+    let upstream_task = tokio::spawn(async move {
+        let (mut upstream_stream, _) = upstream_listener.accept().await.unwrap();
+        let mut received = vec![0u8; expected.len()];
+        upstream_stream.read_exact(&mut received).await.unwrap();
+        (expected, received)
+    });
+
+    let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+    stream.write_all(&client_hello).await.unwrap();
+
+    let (expected, received) = timeout(Duration::from_secs(2), upstream_task)
+        .await
+        .expect("downgraded ClientHello should reach nginx")
+        .expect("upstream task should not panic");
+    assert_eq!(received, expected);
+
+    cancel.cancel();
+    let _ = timeout(Duration::from_millis(500), run_task).await;
+
+    assert_eq!(claims.load(Ordering::SeqCst), 0);
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.tcp_accepted, 1);
+    assert_eq!(snapshot.claimed, 0);
+    assert_eq!(snapshot.passed, 1);
+}
+
+#[tokio::test]
+async fn run_proxies_client_hello_beyond_wire_ceiling_to_upstream() {
+    let secret = SharedSecret([0x42u8; 32]);
+    let metrics = Arc::new(Metrics::default());
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    let config = test_config(upstream_addr);
+
+    let front_door = TcpFrontDoor::bind(&config, metrics.clone()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let listen_addr = front_door.listener().local_addr().unwrap();
+    let claims = Arc::new(AtomicUsize::new(0));
+    let claims_for_handler = claims.clone();
+    let cancel_for_run = cancel.clone();
+    let run_task = tokio::spawn(async move {
+        front_door
+            .run(cancel_for_run, move |_, _| {
+                claims_for_handler.fetch_add(1, Ordering::SeqCst);
+            })
+            .await
+    });
+
+    let client_hello = generate_sized_client_hello_tls_record(
+        secret,
+        MAX_TCP_CLIENT_HELLO_WIRE_LEN - TLS_RECORD_HEADER_LEN,
+    );
+    let client_hello = fragment_client_hello_tls_record(&client_hello, 3);
+    assert!(client_hello.len() > MAX_TCP_CLIENT_HELLO_WIRE_LEN);
+    let expected = client_hello.clone();
+    let upstream_task = tokio::spawn(async move {
+        let (mut upstream_stream, _) = upstream_listener.accept().await.unwrap();
+        let mut received = vec![0u8; expected.len()];
+        upstream_stream.read_exact(&mut received).await.unwrap();
+        (expected, received)
+    });
+
+    let mut stream = TcpStream::connect(listen_addr).await.unwrap();
+    stream.write_all(&client_hello).await.unwrap();
+
+    let (expected, received) = timeout(Duration::from_secs(2), upstream_task)
+        .await
+        .expect("over-ceiling ClientHello should reach nginx")
+        .expect("upstream task should not panic");
+    assert_eq!(received, expected);
+
+    cancel.cancel();
+    let _ = timeout(Duration::from_millis(500), run_task).await;
+
+    assert_eq!(claims.load(Ordering::SeqCst), 0);
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.tcp_accepted, 1);
+    assert_eq!(snapshot.claimed, 0);
+    assert_eq!(snapshot.passed, 1);
+    assert_eq!(snapshot.tcp_classification_timeouts, 0);
 }
 
 #[tokio::test]

@@ -30,39 +30,63 @@ embeds a 32-byte authentication token in the `legacy_session_id` field.
 The `legacy_session_id` field contains exactly 32 bytes:
 
 ```
-session_id = part1 || part2
+session_id = candidate_tag || claim_tag
 ```
 
 Where:
-- `part1` = 16 bytes
-- `part2` = 16 bytes
+- `candidate_tag` = 16 bytes
+- `claim_tag` = 16 bytes
 
 ### 2.2 Token Computation
 
-#### Part 1: Random-based HMAC
+#### Candidate Tag: Random-based HMAC
 
 ```
-part1 = HMAC-SHA256(server_secret, random[0:16])[:16]
+candidate_tag = HMAC-SHA256(
+    server_secret,
+    "slt-tcp-candidate-v2" || random[0:16]
+)[:16]
 ```
 
 - `server_secret`: 32-byte shared secret configured on both client and server.
 - `random`: The 32-byte random field from the ClientHello.
 - Only the first 16 bytes of the random field are used.
-- The HMAC output is truncated to 16 bytes.
+- A mismatch lets ordinary TLS traffic pass immediately.
 
-#### Part 2: Key Share-based HMAC
+#### Claim Tag: Complete ClientHello HMAC
 
 ```
-part2 = HMAC-SHA256(server_secret, key_share)[:16]
+claim_tag = HMAC-SHA256(
+    server_secret,
+    "slt-tcp-claim-v2" || normalized_client_hello
+)[:16]
 ```
 
-- `key_share`: The 32-byte X25519 public key from the `key_share` extension.
+- `normalized_client_hello` is the full serialized ClientHello handshake
+  message with the 32 `legacy_session_id` bytes replaced by zeroes.
 - The HMAC output is truncated to 16 bytes.
 
-**Note**: Only X25519 key shares are supported. If the ClientHello contains a
-different key exchange group, the token cannot be validated.
+The normalized session ID avoids a circular token definition. The claim tag
+binds every other serialized ClientHello handshake byte, including TLS
+versions, cipher suites, and extension contents.
 
-### 2.3 Classification Algorithm
+### 2.3 ClientHello1 Wire-Size Ceiling
+
+An SLT `ClientHello1` MUST end within the first 8,192 bytes of the TCP stream.
+The limit counts every TLS record header and every handshake byte from the
+start of the stream through the final `ClientHello1` byte. The message MAY span
+multiple TLS handshake records as long as its end offset does not exceed the
+ceiling.
+
+A `ClientHello1` that ends beyond this ceiling is not eligible for an SLT claim,
+even if its candidate tag matches. The server returns `PASS` and forwards the
+connection to nginx without modifying or consuming the stream. This rule bounds
+classification memory and prevents a candidate-looking connection from holding
+the classifier indefinitely. It applies only to the first ClientHello used for
+front-door classification; a TLS 1.3 `ClientHello2` follows after the connection
+has already been claimed.
+
+### 2.4 Classification Algorithm
 
 The classifier processes the TLS record layer and handshake message step by step:
 
@@ -74,6 +98,7 @@ The classifier processes the TLS record layer and handshake message step by step
 2. Read handshake message header (type, length)
    - If type != 0x01 (ClientHello) -> PASS
    - If incomplete -> INCOMPLETE
+   - If the minimum TLS-framed end offset exceeds 8,192 bytes -> PASS
 
 3. Parse ClientHello body:
    a. Skip legacy_version (2 bytes)
@@ -83,43 +108,41 @@ The classifier processes the TLS record layer and handshake message step by step
 
 4. Read session_id (32 bytes)
 
-5. Compute expected_part1 = HMAC-SHA256(secret, random[0:16])[:16]
+5. Compute expected_candidate_tag using `random[0:16]`
    - Compare with session_id[0:16] using constant-time comparison
    - If mismatch -> PASS immediately; the classifier does not wait for the
-     full TLS record or `key_share` extension once this early check proves the
+     complete ClientHello once this early check proves the
      connection is not a VPN candidate
 
-6. Skip cipher_suites (variable length)
-7. Skip compression_methods (variable length)
+6. Collect the complete ClientHello handshake message across TLS records
+   - If its TLS-framed end offset exceeds 8,192 bytes -> PASS
 
-8. Parse extensions:
-   - Find key_share extension (type 0x0033)
-   - Extract X25519 key share (group 0x001d, 32 bytes)
-   - If no X25519 key share found -> PASS
-
-9. Compute expected_part2 = HMAC-SHA256(secret, key_share)[:16]
+7. Replace the 32 session ID bytes with zeroes and compute expected_claim_tag
    - Compare with session_id[16:32] using constant-time comparison
    - If mismatch -> PASS
 
-10. Both parts valid -> CLAIM
+8. Both tags valid -> CLAIM
 ```
 
-### 2.4 Implementation Notes
+### 2.5 Implementation Notes
 
 The implementation in `slt-core/src/classifier.rs` uses a streaming parser that:
 
 - Handles multiple TLS records (a ClientHello may span records).
-- Can inspect the `ClientHello` prefix before the full TLS record body has
+- Uses an 8 KiB peek buffer matching the protocol wire-size ceiling.
+- Can inspect the `ClientHello` prefix before the complete handshake message has
   arrived, allowing normal non-VPN TLS traffic to pass to nginx after the first
   HMAC half fails.
-- Uses a fixed-size scratch buffer (256 bytes) for skipping data.
+- Buffers the complete handshake message only after the candidate tag matches.
 - Performs constant-time HMAC comparisons using `boring::memcmp::eq`.
 - Returns early on any parse error with `PASS` verdict.
 
 TCP sockets that have not reached a definite verdict stay in the front-door
 classifier until more data arrives or `tcp_classification_timeout` expires.
-They are not forwarded to nginx as ordinary `PASS` traffic. The front door
-counts classifying sockets and nginx-proxied sockets against
+They are not forwarded to nginx as ordinary `PASS` traffic, except when an
+incomplete candidate fills the 8 KiB classification buffer and therefore
+cannot finish within the protocol ceiling. The front door counts classifying
+sockets and nginx-proxied sockets against
 `tcp_connection_cap`; definite `CLAIM` connections leave this cap before VPN
 TLS/AUTH admission. When the cap is full, the server first evicts the oldest
 classifier socket that has not received any bytes. If no empty classifier socket
@@ -147,10 +170,9 @@ sessions after authentication completes.
 
 **Constants** (from `slt-core/src/crypto/client_hello.rs`):
 - `LEGACY_SESSION_ID_LEN = 32`
-- `PART_LEN = 16`
+- `TOKEN_PART_LEN = 16`
 - `RANDOM_PREFIX_LEN = 16`
-- `EXT_KEY_SHARE = 0x0033`
-- `GROUP_X25519 = 0x001d`
+- `MAX_TCP_CLIENT_HELLO_WIRE_LEN = 8192`
 
 ## 3. UDP Classification (QUIC-shaped)
 

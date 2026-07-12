@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use slt_core::classifier::{Verdict, classify_tcp_client_hello};
+use slt_core::crypto::client_hello::MAX_TCP_CLIENT_HELLO_WIRE_LEN;
 use slt_core::types::SharedSecret;
 use tokio::net::TcpStream;
 use tracing::{debug, trace};
@@ -10,7 +11,7 @@ use tracing::{debug, trace};
 use super::admission::TcpAdmissionPermit;
 use super::stream_io::peek_stream_now;
 
-const PEEK_LEN: usize = 16 * 1024;
+const PEEK_LEN: usize = MAX_TCP_CLIENT_HELLO_WIRE_LEN;
 pub(super) const CLASSIFY_RETRY_DELAY: Duration = Duration::from_millis(5);
 pub(super) const CLASSIFY_STABLE_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 

@@ -1,9 +1,8 @@
-use boring::hash::hmac_sha256;
 use boring::memcmp;
 
 use crate::crypto::client_hello::{
-    EXT_KEY_SHARE, GROUP_X25519, HANDSHAKE_TYPE_CLIENT_HELLO, LEGACY_SESSION_ID_LEN, PART_LEN,
-    RANDOM_PREFIX_LEN,
+    HANDSHAKE_TYPE_CLIENT_HELLO, LEGACY_SESSION_ID_LEN, MAX_TCP_CLIENT_HELLO_WIRE_LEN,
+    TOKEN_PART_LEN, candidate_session_id_tag, verify_legacy_session_id,
 };
 use crate::types::{CidPrefix, QUIC_DCID_PREFIX_LEN, SharedSecret};
 
@@ -32,6 +31,7 @@ pub enum QuicVerdict {
 }
 
 const TLS_HANDSHAKE_CONTENT_TYPE: u8 = 0x16;
+const TLS_RECORD_HEADER_LEN: usize = 5;
 
 /// Classify a UDP datagram and extract the DCID from a QUIC short header.
 ///
@@ -69,33 +69,45 @@ pub fn classify_quic_datagram(input: &[u8]) -> QuicVerdict {
 
 /// Classify a TCP stream buffer that starts with TLS records.
 ///
-/// The classifier reads the first `ClientHello` from the stream and validates
-/// the `legacy_session_id` using `shared_secret`.
-///
-/// Selection contract: applies the same `X25519` `key_share` selection rule as
-/// the client-side [`crate::crypto::client_hello::parse_client_hello`], so the
-/// session id it validates matches the one the client derived.
+/// The classifier verifies the candidate half of `legacy_session_id` as soon
+/// as the random and session ID are available. A matching candidate remains
+/// incomplete until the complete first `ClientHello` verifies its full-message
+/// claim tag, so no mutable suffix can reach the VPN TLS acceptor unchecked. A
+/// `ClientHello` that ends beyond [`MAX_TCP_CLIENT_HELLO_WIRE_LEN`] is passed as
+/// ordinary HTTPS traffic.
 #[must_use]
 pub fn classify_tcp_client_hello(input: &[u8], shared_secret: &SharedSecret) -> Verdict {
+    let verdict = classify_tcp_client_hello_within_limit(input, shared_secret);
+    if verdict == Verdict::Incomplete && input.len() >= MAX_TCP_CLIENT_HELLO_WIRE_LEN {
+        Verdict::Pass
+    } else {
+        verdict
+    }
+}
+
+fn classify_tcp_client_hello_within_limit(input: &[u8], shared_secret: &SharedSecret) -> Verdict {
     let mut record = RecordReader::new(input);
 
-    let hs_type = match record.read_u8() {
-        Ok(v) => v,
-        Err(v) => return v,
-    };
+    let mut handshake_header = [0u8; 4];
+    if let Err(v) = record.read_exact(&mut handshake_header) {
+        return v;
+    }
 
-    if hs_type != HANDSHAKE_TYPE_CLIENT_HELLO {
+    if handshake_header[0] != HANDSHAKE_TYPE_CLIENT_HELLO {
         return Verdict::Pass;
     }
 
-    let hs_len = match record.read_u24() {
-        Ok(v) => v,
-        Err(v) => return v,
-    };
-
+    let hs_len = ((handshake_header[1] as usize) << 16)
+        | ((handshake_header[2] as usize) << 8)
+        | handshake_header[3] as usize;
+    let minimum_wire_len = TLS_RECORD_HEADER_LEN + handshake_header.len() + hs_len;
+    if minimum_wire_len > MAX_TCP_CLIENT_HELLO_WIRE_LEN {
+        return Verdict::Pass;
+    }
     let mut hs = HandshakeReader::new(record, hs_len);
 
-    if let Err(v) = hs.skip(2) {
+    let mut legacy_version = [0u8; 2];
+    if let Err(v) = hs.read_exact(&mut legacy_version) {
         return v;
     }
 
@@ -104,12 +116,12 @@ pub fn classify_tcp_client_hello(input: &[u8], shared_secret: &SharedSecret) -> 
         return v;
     }
 
-    let session_id_len = match hs.read_u8() {
-        Ok(v) => v as usize,
-        Err(v) => return v,
-    };
+    let mut session_id_len = [0u8; 1];
+    if let Err(v) = hs.read_exact(&mut session_id_len) {
+        return v;
+    }
 
-    if session_id_len != LEGACY_SESSION_ID_LEN {
+    if usize::from(session_id_len[0]) != LEGACY_SESSION_ID_LEN {
         return Verdict::Pass;
     }
 
@@ -118,148 +130,31 @@ pub fn classify_tcp_client_hello(input: &[u8], shared_secret: &SharedSecret) -> 
         return v;
     }
 
-    let Ok(part1) = hmac_sha256(shared_secret.as_bytes(), &random[..RANDOM_PREFIX_LEN]) else {
+    let Ok(candidate) = candidate_session_id_tag(&random, shared_secret) else {
         return Verdict::Pass;
     };
 
-    if !memcmp::eq(&session_id[..PART_LEN], &part1[..PART_LEN]) {
+    if !memcmp::eq(&session_id[..TOKEN_PART_LEN], &candidate) {
         return Verdict::Pass;
     }
 
-    let cipher_suites_len = match hs.read_u16() {
-        Ok(v) => v as usize,
-        Err(v) => return v,
-    };
-
-    if let Err(v) = hs.skip(cipher_suites_len) {
+    let mut client_hello = Vec::with_capacity(input.len().min(4usize.saturating_add(hs_len)));
+    client_hello.extend_from_slice(&handshake_header);
+    client_hello.extend_from_slice(&legacy_version);
+    client_hello.extend_from_slice(&random);
+    client_hello.extend_from_slice(&session_id_len);
+    client_hello.extend_from_slice(&session_id);
+    if let Err(v) = hs.read_remaining_into(&mut client_hello) {
         return v;
     }
-
-    let compression_len = match hs.read_u8() {
-        Ok(v) => v as usize,
-        Err(v) => return v,
-    };
-
-    if let Err(v) = hs.skip(compression_len) {
-        return v;
+    if hs.wire_bytes_read() > MAX_TCP_CLIENT_HELLO_WIRE_LEN {
+        return Verdict::Pass;
     }
 
-    let extensions_len = match hs.read_u16() {
-        Ok(v) => v as usize,
-        Err(v) => return v,
-    };
-
-    let mut exts_remaining = extensions_len;
-    while exts_remaining >= 4 {
-        let ext_type = match hs.read_u16() {
-            Ok(v) => v,
-            Err(v) => return v,
-        };
-        let ext_len = match hs.read_u16() {
-            Ok(v) => v as usize,
-            Err(v) => return v,
-        };
-
-        exts_remaining = exts_remaining.saturating_sub(4);
-
-        if ext_len > exts_remaining {
-            return Verdict::Pass;
-        }
-
-        if ext_type == EXT_KEY_SHARE {
-            let key_share = match parse_key_share(&mut hs, ext_len) {
-                Ok(v) => v,
-                Err(v) => return v,
-            };
-
-            if let Some(key_share) = key_share {
-                let Ok(part2) = hmac_sha256(shared_secret.as_bytes(), &key_share) else {
-                    return Verdict::Pass;
-                };
-
-                return if memcmp::eq(&session_id[PART_LEN..], &part2[..PART_LEN]) {
-                    Verdict::Claim
-                } else {
-                    Verdict::Pass
-                };
-            }
-
-            exts_remaining -= ext_len;
-            continue;
-        }
-
-        if let Err(v) = hs.skip(ext_len) {
-            return v;
-        }
-
-        exts_remaining -= ext_len;
+    match verify_legacy_session_id(&client_hello, shared_secret) {
+        Ok(true) => Verdict::Claim,
+        Ok(false) | Err(_) => Verdict::Pass,
     }
-
-    Verdict::Pass
-}
-
-fn parse_key_share(hs: &mut HandshakeReader, ext_len: usize) -> Result<Option<[u8; 32]>, Verdict> {
-    if ext_len < 2 {
-        hs.skip(ext_len)?;
-        return Ok(None);
-    }
-
-    let list_len = hs.read_u16()? as usize;
-    let mut remaining = ext_len - 2;
-
-    if list_len > remaining {
-        hs.skip(remaining)?;
-        return Ok(None);
-    }
-
-    let mut list_remaining = list_len;
-
-    while list_remaining >= 4 {
-        let group = hs.read_u16()?;
-        let ks_len = hs.read_u16()? as usize;
-        list_remaining -= 4;
-        remaining -= 4;
-
-        if ks_len > list_remaining {
-            hs.skip(list_remaining)?;
-            remaining -= list_remaining;
-            list_remaining = 0;
-            break;
-        }
-
-        if group == GROUP_X25519 && ks_len == 32 {
-            let mut key_share = [0u8; 32];
-            hs.read_exact(&mut key_share)?;
-            list_remaining -= 32;
-            remaining -= 32;
-
-            if list_remaining > 0 {
-                hs.skip(list_remaining)?;
-                remaining -= list_remaining;
-            }
-
-            if remaining > 0 {
-                hs.skip(remaining)?;
-            }
-
-            return Ok(Some(key_share));
-        }
-
-        hs.skip(ks_len)?;
-        list_remaining -= ks_len;
-        remaining -= ks_len;
-    }
-
-    if list_remaining > 0 {
-        hs.skip(list_remaining)?;
-        remaining -= list_remaining;
-    }
-
-    if remaining > 0 {
-        hs.skip(remaining)?;
-    }
-
-    Ok(None)
 }
 
 struct RecordReader<'a> {
@@ -275,18 +170,6 @@ impl<'a> RecordReader<'a> {
             pos: 0,
             record_remaining: 0,
         }
-    }
-
-    fn read_u8(&mut self) -> Result<u8, Verdict> {
-        let mut out = [0u8; 1];
-        self.read_exact(&mut out)?;
-        Ok(out[0])
-    }
-
-    fn read_u24(&mut self) -> Result<usize, Verdict> {
-        let mut out = [0u8; 3];
-        self.read_exact(&mut out)?;
-        Ok(((out[0] as usize) << 16) | ((out[1] as usize) << 8) | out[2] as usize)
     }
 
     fn read_exact(&mut self, out: &mut [u8]) -> Result<(), Verdict> {
@@ -314,16 +197,6 @@ impl<'a> RecordReader<'a> {
             filled += take;
         }
 
-        Ok(())
-    }
-
-    fn discard(&mut self, mut len: usize) -> Result<(), Verdict> {
-        let mut scratch = [0u8; 256];
-        while len > 0 {
-            let take = core::cmp::min(len, scratch.len());
-            self.read_exact(&mut scratch[..take])?;
-            len -= take;
-        }
         Ok(())
     }
 
@@ -364,35 +237,34 @@ impl<'a> HandshakeReader<'a> {
         Ok(())
     }
 
-    fn read_u8(&mut self) -> Result<u8, Verdict> {
-        let mut out = [0u8; 1];
-        self.read_exact(&mut out)?;
-        Ok(out[0])
-    }
-
-    fn read_u16(&mut self) -> Result<u16, Verdict> {
-        let mut out = [0u8; 2];
-        self.read_exact(&mut out)?;
-        Ok(u16::from_be_bytes(out))
-    }
-
-    fn skip(&mut self, len: usize) -> Result<(), Verdict> {
-        if len > self.remaining {
-            return Err(Verdict::Pass);
+    fn read_remaining_into(&mut self, output: &mut Vec<u8>) -> Result<(), Verdict> {
+        let mut chunk = [0u8; 256];
+        while self.remaining > 0 {
+            let len = self.remaining.min(chunk.len());
+            self.read_exact(&mut chunk[..len])?;
+            output.extend_from_slice(&chunk[..len]);
         }
-        self.record.discard(len)?;
-        self.remaining -= len;
         Ok(())
+    }
+
+    const fn wire_bytes_read(&self) -> usize {
+        self.record.pos
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
     use quiche::Header;
 
     use super::*;
-    use crate::crypto::client_hello::{fill_legacy_session_id, parse_client_hello};
-    use crate::test_support::generate_client_hello_tls_record;
+    use crate::test_support::{
+        fragment_client_hello_tls_record, generate_client_hello_tls_record,
+        generate_sized_client_hello_tls_record,
+    };
+
+    const EXT_SUPPORTED_VERSIONS: u16 = 0x002b;
 
     #[test]
     fn classifier_claims_boring_client_hello() {
@@ -406,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn classifier_waits_for_decisive_boring_client_hello_prefix() {
+    fn classifier_waits_for_complete_boring_client_hello() {
         let secret = SharedSecret([0x42u8; 32]);
         let client_hello = generate_client_hello_tls_record(secret);
         let first_claim_len = (0..=client_hello.len())
@@ -425,7 +297,7 @@ mod tests {
             assert_eq!(
                 classify_tcp_client_hello(&client_hello[..prefix_len], &secret),
                 Verdict::Claim,
-                "ClientHello prefix of {prefix_len} bytes contains the decisive key share"
+                "ClientHello prefix of {prefix_len} bytes contains the complete claim token input"
             );
         }
     }
@@ -455,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn classifier_waits_for_key_share_when_session_id_hmac_matches() {
+    fn classifier_waits_for_full_claim_tag_when_candidate_matches() {
         let secret = SharedSecret([0x11u8; 32]);
         let client_hello = generate_client_hello_tls_record(secret);
         let through_session_id = 5 + 4 + 2 + 32 + 1 + LEGACY_SESSION_ID_LEN;
@@ -463,6 +335,92 @@ mod tests {
         assert_eq!(
             classify_tcp_client_hello(&client_hello[..through_session_id], &secret),
             Verdict::Incomplete
+        );
+    }
+
+    #[test]
+    fn classifier_passes_supported_versions_downgrade_after_full_verification() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let mut client_hello = generate_client_hello_tls_record(secret);
+        let version_range = supported_versions_range(&client_hello);
+        let versions = &mut client_hello[version_range];
+
+        let mut replaced = false;
+        for version in versions[1..].chunks_exact_mut(2) {
+            if version == [0x03, 0x04] {
+                version.copy_from_slice(&[0x03, 0x03]);
+                replaced = true;
+            }
+        }
+        assert!(replaced, "generated ClientHello must offer TLS 1.3");
+
+        assert_eq!(
+            classify_tcp_client_hello(&client_hello, &secret),
+            Verdict::Pass
+        );
+    }
+
+    #[test]
+    fn classifier_claims_client_hello_spanning_tls_records() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let client_hello = generate_client_hello_tls_record(secret);
+        let handshake = &client_hello[TLS_RECORD_HEADER_LEN..];
+        let split = handshake.len() / 2;
+        let mut fragmented = Vec::with_capacity(client_hello.len() + TLS_RECORD_HEADER_LEN);
+
+        append_tls_record(&mut fragmented, &handshake[..split]);
+        append_tls_record(&mut fragmented, &handshake[split..]);
+
+        assert_eq!(
+            classify_tcp_client_hello(&fragmented, &secret),
+            Verdict::Claim
+        );
+    }
+
+    #[test]
+    fn classifier_claims_client_hello_ending_at_wire_ceiling() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let client_hello =
+            generate_sized_client_hello_tls_record(secret, MAX_TCP_CLIENT_HELLO_WIRE_LEN);
+
+        assert_eq!(client_hello.len(), MAX_TCP_CLIENT_HELLO_WIRE_LEN);
+        assert_eq!(
+            classify_tcp_client_hello(&client_hello, &secret),
+            Verdict::Claim
+        );
+    }
+
+    #[test]
+    fn classifier_passes_client_hello_message_beyond_wire_ceiling() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let client_hello =
+            generate_sized_client_hello_tls_record(secret, MAX_TCP_CLIENT_HELLO_WIRE_LEN + 1);
+
+        assert_eq!(
+            classify_tcp_client_hello(&client_hello, &secret),
+            Verdict::Pass
+        );
+    }
+
+    #[test]
+    fn classifier_counts_tls_record_headers_toward_wire_ceiling() {
+        let secret = SharedSecret([0x42u8; 32]);
+        let client_hello = generate_sized_client_hello_tls_record(
+            secret,
+            MAX_TCP_CLIENT_HELLO_WIRE_LEN - TLS_RECORD_HEADER_LEN,
+        );
+        let at_ceiling = fragment_client_hello_tls_record(&client_hello, 2);
+        let beyond_ceiling = fragment_client_hello_tls_record(&client_hello, 3);
+
+        assert_eq!(at_ceiling.len(), MAX_TCP_CLIENT_HELLO_WIRE_LEN);
+        assert_eq!(
+            classify_tcp_client_hello(&at_ceiling, &secret),
+            Verdict::Claim
+        );
+        assert!(beyond_ceiling.len() > MAX_TCP_CLIENT_HELLO_WIRE_LEN);
+        assert_eq!(
+            classify_tcp_client_hello(&beyond_ceiling, &secret),
+            Verdict::Pass
         );
     }
 
@@ -518,104 +476,45 @@ mod tests {
         assert_eq!(classify_quic_datagram(&buf), QuicVerdict::Drop);
     }
 
-    /// Build a `ClientHello` handshake message (4-byte handshake header included).
-    fn build_client_hello_handshake(
-        random: &[u8; 32],
-        session_id: &[u8],
-        extensions: &[u8],
-    ) -> Vec<u8> {
-        let cipher_suites: &[u8] = &[0x00, 0x02, 0x13, 0x01]; // len=2 + TLS_AES_128_GCM_SHA256
-        let compression: &[u8] = &[0x01, 0x00]; // len=1 + null
-
-        let body_len = 2 // legacy_version
-            + 32 // random
-            + 1 + session_id.len()
-            + cipher_suites.len()
-            + compression.len()
-            + 2 + extensions.len();
-
-        let mut buf = Vec::with_capacity(4 + body_len);
-        buf.push(HANDSHAKE_TYPE_CLIENT_HELLO);
-        buf.extend_from_slice(&(body_len as u32).to_be_bytes()[1..]); // u24 length
-        buf.extend_from_slice(&[0x03, 0x03]); // legacy_version
-        buf.extend_from_slice(random);
-        buf.push(session_id.len() as u8);
-        buf.extend_from_slice(session_id);
-        buf.extend_from_slice(cipher_suites);
-        buf.extend_from_slice(compression);
-        buf.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
-        buf.extend_from_slice(extensions);
-        buf
+    fn append_tls_record(output: &mut Vec<u8>, payload: &[u8]) {
+        output.push(TLS_HANDSHAKE_CONTENT_TYPE);
+        output.extend_from_slice(&[0x03, 0x03]);
+        output.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        output.extend_from_slice(payload);
     }
 
-    /// Build a `key_share` extension (type + length + list) from ordered entries.
-    fn build_key_share_extension(entries: &[(u16, &[u8])]) -> Vec<u8> {
-        let mut list = Vec::new();
-        for (group, key) in entries {
-            list.extend_from_slice(&group.to_be_bytes());
-            list.extend_from_slice(&(key.len() as u16).to_be_bytes());
-            list.extend_from_slice(key);
+    fn supported_versions_range(client_hello: &[u8]) -> Range<usize> {
+        let handshake = &client_hello[TLS_RECORD_HEADER_LEN..];
+        assert_eq!(handshake[0], HANDSHAKE_TYPE_CLIENT_HELLO);
+
+        let mut pos = 4 + 2 + 32;
+        let session_id_len = handshake[pos] as usize;
+        pos += 1 + session_id_len;
+
+        let cipher_suites_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+        pos += 2 + cipher_suites_len;
+
+        let compression_methods_len = handshake[pos] as usize;
+        pos += 1 + compression_methods_len;
+
+        let extensions_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+        pos += 2;
+        let extensions_end = pos + extensions_len;
+
+        while pos < extensions_end {
+            let extension_type = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]);
+            let extension_len =
+                u16::from_be_bytes([handshake[pos + 2], handshake[pos + 3]]) as usize;
+            let value_start = pos + 4;
+            let value_end = value_start + extension_len;
+            assert!(value_end <= extensions_end);
+
+            if extension_type == EXT_SUPPORTED_VERSIONS {
+                return (TLS_RECORD_HEADER_LEN + value_start)..(TLS_RECORD_HEADER_LEN + value_end);
+            }
+            pos = value_end;
         }
 
-        let mut ext = Vec::new();
-        ext.extend_from_slice(&EXT_KEY_SHARE.to_be_bytes());
-        ext.extend_from_slice(&((2 + list.len()) as u16).to_be_bytes()); // ext_len = list_len field + list
-        ext.extend_from_slice(&(list.len() as u16).to_be_bytes()); // list_len
-        ext.extend_from_slice(&list);
-        ext
-    }
-
-    /// Wrap a handshake message in a single TLS handshake record.
-    fn wrap_in_tls_record(handshake: &[u8]) -> Vec<u8> {
-        let mut record = Vec::with_capacity(5 + handshake.len());
-        record.push(0x16); // content_type = handshake
-        record.extend_from_slice(&[0x03, 0x03]); // legacy_record_version
-        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
-        record.extend_from_slice(handshake);
-        record
-    }
-
-    #[test]
-    fn both_parsers_select_x25519_among_multiple_key_share_entries() {
-        // The key_share extension lists a non-X25519 group both before and after
-        // the X25519 entry, exercising the selection rule (first X25519 with a
-        // 32-byte key) that the client-side extractor and the streaming
-        // classifier must apply identically for the session id to round-trip.
-        const SECP256R1: u16 = 0x0017;
-
-        let secret = SharedSecret([0x42u8; 32]);
-        let random = [0xABu8; 32];
-        let x25519_key = [0x55u8; 32];
-        let leading_key = [0x11u8; 65]; // secp256r1 point length; must be ignored
-        let trailing_key = [0x77u8; 65];
-
-        let entries: &[(u16, &[u8])] = &[
-            (SECP256R1, &leading_key),
-            (GROUP_X25519, &x25519_key),
-            (SECP256R1, &trailing_key),
-        ];
-        let extensions = build_key_share_extension(entries);
-
-        // Derive the authoritative session id via the client-side path
-        // (parse_client_hello + fill_legacy_session_id), then bake it in.
-        let placeholder = build_client_hello_handshake(&random, &[0u8; 32], &extensions);
-        let mut session_id = [0u8; 32];
-        fill_legacy_session_id(&placeholder, &mut session_id, &secret).unwrap();
-        let handshake = build_client_hello_handshake(&random, &session_id, &extensions);
-
-        // Parser 1 (random access, client side) selects the X25519 entry.
-        assert_eq!(
-            parse_client_hello(&handshake),
-            Some((random, x25519_key)),
-            "parse_client_hello must select the X25519 entry, not a neighboring group"
-        );
-
-        // Parser 2 (streaming, server side) derives the same inputs and accepts.
-        let record = wrap_in_tls_record(&handshake);
-        assert_eq!(
-            classify_tcp_client_hello(&record, &secret),
-            Verdict::Claim,
-            "classifier must agree with parse_client_hello on the selected key share"
-        );
+        panic!("generated ClientHello must contain supported_versions");
     }
 }

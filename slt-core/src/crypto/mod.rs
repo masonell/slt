@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use boring::error::ErrorStack;
 use boring::ssl::{
     CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder, SslMethod, SslRef,
-    SslVersion,
+    SslSessionCacheMode, SslVersion,
 };
 use boring::x509::X509;
 use boring::x509::verify::{X509CheckFlags, X509VerifyFlags};
@@ -295,7 +295,8 @@ fn quic_config_from_ctx(tls_ctx: SslContextBuilder) -> Result<quiche::Config, Qu
 ///
 /// The client retains `BoringSSL`'s TLS 1.2 and 1.3 offer so its `ClientHello`
 /// keeps the browser-like version and cipher-suite shape. Claimed connections
-/// are restricted to TLS 1.3 by the server acceptor.
+/// are restricted to TLS 1.3 by the server acceptor. Client session caching is
+/// disabled because the claim token is created before TLS 1.3 PSK binders.
 ///
 /// # Errors
 ///
@@ -303,6 +304,7 @@ fn quic_config_from_ctx(tls_ctx: SslContextBuilder) -> Result<quiche::Config, Qu
 /// suites, signature algorithms, or compression algorithms fails.
 pub fn tcp_client_chrome_ctx_builder() -> Result<SslContextBuilder, ErrorStack> {
     let mut builder = SslContextBuilder::new(SslMethod::tls())?;
+    builder.set_session_cache_mode(SslSessionCacheMode::OFF);
     builder.set_sigalgs_list(CHROME_SIGALGS)?;
     builder.set_cipher_list(CHROME_CIPHERS)?;
     builder.set_grease_enabled(true);
@@ -435,7 +437,14 @@ impl CertificateCompressor for BrotliCertificateCompressor {
 mod tests {
     use std::io;
 
+    use boring::ssl::{HandshakeError, Ssl, SslVerifyMode};
+
     use super::*;
+    use crate::crypto::client_hello::{
+        MAX_TCP_CLIENT_HELLO_WIRE_LEN, client_hello_session_id_callback, verify_legacy_session_id,
+    };
+    use crate::test_support::CaptureStream;
+    use crate::types::SharedSecret;
 
     #[test]
     fn tcp_client_context_preserves_browser_version_offer() {
@@ -443,6 +452,41 @@ mod tests {
 
         assert_eq!(ctx.min_proto_version(), Some(SslVersion::TLS1_2));
         assert_eq!(ctx.max_proto_version(), Some(SslVersion::TLS1_3));
+        assert_eq!(
+            ctx.set_session_cache_mode(SslSessionCacheMode::OFF),
+            SslSessionCacheMode::OFF
+        );
+    }
+
+    #[test]
+    fn chrome_client_hello_uses_a_verifiable_claim_token() {
+        let secret = SharedSecret([0x42; 32]);
+        let mut ctx = tcp_client_chrome_ctx_builder().unwrap();
+        ctx.set_verify(SslVerifyMode::NONE);
+        ctx.set_client_hello_session_id_callback(client_hello_session_id_callback(secret));
+
+        let ctx = ctx.build();
+        let mut ssl = Ssl::new(&ctx).unwrap();
+        configure_client_chrome_ssl(&mut ssl).unwrap();
+        ssl.set_hostname("example.com").unwrap();
+
+        let mid = ssl.setup_connect(CaptureStream::default());
+        let mid = match mid.handshake() {
+            Err(HandshakeError::WouldBlock(mid)) => mid,
+            Err(err) => panic!("handshake failed: {err:?}"),
+            Ok(_) => panic!("handshake unexpectedly completed"),
+        };
+        let written = mid.into_source_stream().written;
+        let record_len = usize::from(u16::from_be_bytes([written[3], written[4]]));
+        let handshake_end = 5 + record_len;
+
+        assert!(verify_legacy_session_id(&written[5..handshake_end], &secret).unwrap());
+        assert!(
+            written.len() <= MAX_TCP_CLIENT_HELLO_WIRE_LEN,
+            "generated ClientHello uses {} TLS-framed bytes, protocol ceiling is {}",
+            written.len(),
+            MAX_TCP_CLIENT_HELLO_WIRE_LEN
+        );
     }
 
     /// `From<ErrorStack>` produces [`QuicConfigError::Setup`], and the boring
