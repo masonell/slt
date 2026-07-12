@@ -17,9 +17,11 @@ use tokio::time;
 use tokio_boring::SslStream;
 use tokio_util::sync::CancellationToken;
 
+use super::driver::TunScheduling;
+use super::event::SessionEvent;
 use super::{
-    ActiveTransport, ClientSession, SessionControl, SessionError, SessionEvent, SessionExit,
-    TunScheduling, UdpState, UdpUpgradeState,
+    ActiveTransport, ClientSession, SessionControl, SessionError, SessionExit, UdpState,
+    UdpUpgradeState,
 };
 use crate::metrics::Metrics;
 use crate::runtime::ReconnectBackoff;
