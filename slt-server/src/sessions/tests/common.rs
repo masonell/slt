@@ -1,6 +1,9 @@
+use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use slt_core::crypto::udp_qsp::UdpQspKeys;
@@ -22,8 +25,46 @@ use crate::test_support::{
     tls_pair_with_parkable_server_writes,
 };
 
+pub(super) struct SessionTask {
+    join: tokio::task::JoinHandle<Result<(), SessionError>>,
+    shutdown: Option<oneshot::Sender<SessionShutdownReason>>,
+}
+
+impl SessionTask {
+    pub(super) const fn new(
+        join: tokio::task::JoinHandle<Result<(), SessionError>>,
+        shutdown: oneshot::Sender<SessionShutdownReason>,
+    ) -> Self {
+        Self {
+            join,
+            shutdown: Some(shutdown),
+        }
+    }
+
+    pub(super) async fn shutdown(
+        mut self,
+    ) -> Result<Result<(), SessionError>, tokio::task::JoinError> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(SessionShutdownReason::Takeover);
+        }
+        self.join.await
+    }
+
+    pub(super) fn is_finished(&self) -> bool {
+        self.join.is_finished()
+    }
+}
+
+impl Future for SessionTask {
+    type Output = Result<Result<(), SessionError>, tokio::task::JoinError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().join).poll(cx)
+    }
+}
+
 pub(super) type SpawnSessionResult = (
-    tokio::task::JoinHandle<Result<(), SessionError>>,
+    SessionTask,
     TlsDuplexStream,
     SessionTx,
     mpsc::Receiver<Vec<u8>>,
@@ -46,7 +87,7 @@ pub(super) type SpawnSessionWithShutdownResult = (
 );
 
 pub(super) type SpawnSessionWithPeerCaptureResult = (
-    tokio::task::JoinHandle<Result<(), SessionError>>,
+    SessionTask,
     TlsDuplexStream,
     SessionTx,
     mpsc::Receiver<Vec<u8>>,
@@ -58,7 +99,7 @@ pub(super) type SpawnSessionWithPeerCaptureResult = (
 );
 
 pub(super) type SpawnSessionWithUdpSocketResult = (
-    tokio::task::JoinHandle<Result<(), SessionError>>,
+    SessionTask,
     TlsDuplexStream,
     SessionTx,
     mpsc::Receiver<Vec<u8>>,
@@ -127,13 +168,10 @@ pub(super) async fn spawn_session_with_expired_idle_and_ready_packet(
     session.last_activity = Instant::now() - timeouts.idle_timeout - Duration::from_millis(1);
     tx.try_send(SessionEvent::TunPacket(vec![0x45; 20]))
         .unwrap();
-    let join = tokio::spawn(async move {
-        let result = session.run().await;
-        drop(shutdown_tx);
-        result
-    });
+    let join = tokio::spawn(async move { session.run().await });
+    let task = SessionTask::new(join, shutdown_tx);
     (
-        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
+        task, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
     )
 }
 
@@ -180,13 +218,10 @@ pub(super) async fn spawn_session_with_udp_socket() -> SpawnSessionWithUdpSocket
         default_session_timeouts(),
         ServerUdpQspConfig::default(),
     );
-    let join = tokio::spawn(async move {
-        let result = session.run().await;
-        drop(shutdown_tx);
-        result
-    });
+    let join = tokio::spawn(async move { session.run().await });
+    let task = SessionTask::new(join, shutdown_tx);
     (
-        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, udp,
+        task, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry, udp,
     )
 }
 
@@ -267,13 +302,10 @@ async fn spawn_session_with_timeouts_and_udp_qsp_config(
         timeouts,
         udp_qsp_config,
     );
-    let join = tokio::spawn(async move {
-        let result = session.run().await;
-        drop(shutdown_tx);
-        result
-    });
+    let join = tokio::spawn(async move { session.run().await });
+    let task = SessionTask::new(join, shutdown_tx);
     (
-        join, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
+        task, client_tls, tx, tun_rx, udp_rx, limits, assigned, registry,
     )
 }
 
@@ -352,13 +384,10 @@ pub(super) async fn spawn_session_with_peer_capture() -> SpawnSessionWithPeerCap
         default_session_timeouts(),
         ServerUdpQspConfig::default(),
     );
-    let join = tokio::spawn(async move {
-        let result = session.run().await;
-        drop(shutdown_tx);
-        result
-    });
+    let join = tokio::spawn(async move { session.run().await });
+    let task = SessionTask::new(join, shutdown_tx);
     (
-        join,
+        task,
         client_tls,
         tx,
         tun_rx,

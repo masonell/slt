@@ -67,8 +67,6 @@ pub enum SessionEvent {
     Udp(UdpClaim),
     /// IP packet read from TUN destined for the client.
     TunPacket(Vec<u8>),
-    /// Request that the session shut down.
-    Shutdown,
 }
 
 /// Channel sender for delivering events to a session.

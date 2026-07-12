@@ -177,13 +177,12 @@ async fn session_registers_udp_and_forwards_data() {
         panic!("expected data message");
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn session_register_rejects_invalid_cid() {
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
     let payload = vec![1, 0xAA, 0x00];
@@ -207,13 +206,12 @@ async fn session_register_rejects_invalid_cid() {
         _ => panic!("expected register fail"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn session_register_accepts_chacha20_poly1305() {
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
     let dcid = Cid::from([0xAB; MAX_DCID_LEN]);
@@ -235,8 +233,7 @@ async fn session_register_accepts_chacha20_poly1305() {
     let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
     assert!(matches!(message, Message::RegisterOk { .. }));
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -244,7 +241,7 @@ async fn session_register_rejects_disallowed_cipher() {
     let udp_qsp_config = ServerUdpQspConfig {
         allowed_ciphers: vec![ServerUdpQspCipher::Aes128Gcm],
     };
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session_with_udp_qsp_config(udp_qsp_config).await;
 
     let dcid = Cid::from([0xAB; MAX_DCID_LEN]);
@@ -261,13 +258,12 @@ async fn session_register_rejects_disallowed_cipher() {
     )
     .await;
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn session_register_rejects_unknown_cipher_as_invalid_cipher() {
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
     let dcid = Cid::from([0xAB; MAX_DCID_LEN]);
@@ -286,13 +282,12 @@ async fn session_register_rejects_unknown_cipher_as_invalid_cipher() {
     )
     .await;
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn session_register_rejects_malformed_key_material_as_invalid_keys() {
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
 
     let dcid = Cid::from([0xAB; MAX_DCID_LEN]);
@@ -305,13 +300,12 @@ async fn session_register_rejects_malformed_key_material_as_invalid_keys() {
     assert_register_response_fail(&mut client, limits, &reg_buf, RegisterFailCode::InvalidKeys)
         .await;
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn session_register_rejects_prefix_collision() {
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, registry) =
         spawn_session().await;
 
     let dcid = Cid::from([0xCD; MAX_DCID_LEN]);
@@ -354,8 +348,7 @@ async fn session_register_rejects_prefix_collision() {
         _ => panic!("expected register fail"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -574,8 +567,7 @@ async fn session_registers_replacement_after_ordered_tcp_fallback() {
         other => panic!("expected UDP data after duplicate fallback, got {other:?}"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    join.await.unwrap().unwrap();
+    join.shutdown().await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -658,6 +650,5 @@ async fn session_sends_malformed_register_failure_on_tcp_after_fallback() {
         "registration response was sent over udp"
     );
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    join.await.unwrap().unwrap();
+    join.shutdown().await.unwrap().unwrap();
 }

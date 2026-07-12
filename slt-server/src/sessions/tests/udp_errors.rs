@@ -90,8 +90,7 @@ async fn session_ignores_trailing_data_after_udp_message() {
         .unwrap();
     assert_eq!(received, uplink_packet);
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 // =========================================================================
@@ -254,8 +253,7 @@ async fn session_drops_udp_replay_packet() {
         panic!("replayed UDP packet should be dropped")
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -375,8 +373,7 @@ async fn session_drops_udp_packet_with_bad_crypto() {
         .unwrap();
     assert_eq!(received, uplink_packet2);
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -497,8 +494,7 @@ async fn decrypt_garbage_from_any_peer_does_not_retire_udp() {
         .unwrap();
     assert_eq!(received, later_packet);
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -586,8 +582,7 @@ async fn session_retries_downlink_over_tcp_after_udp_send_failure() {
         .unwrap();
     assert_eq!(received, tcp_packet);
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -683,6 +678,5 @@ async fn decrypt_garbage_does_not_close_udp_only_session() {
         .unwrap();
     assert_eq!(received, uplink_packet);
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    assert!(join.await.unwrap().is_ok());
+    assert!(join.shutdown().await.unwrap().is_ok());
 }

@@ -128,8 +128,7 @@ async fn session_keeps_tcp_when_udp_blackholed() {
         "unexpected udp datagram without upgrade commit"
     );
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -203,8 +202,7 @@ async fn session_accepts_udp_data_before_switch_commit() {
         "unexpected udp datagram before switch commit"
     );
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -345,8 +343,7 @@ async fn session_handles_udp_probe_reordering_before_ready() {
         _ => panic!("expected udp data after switch commit"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -543,8 +540,7 @@ async fn session_is_idempotent_for_duplicate_upgrade_controls() {
         _ => panic!("expected udp data after duplicate controls"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -746,8 +742,7 @@ async fn session_allows_new_upgrade_id_after_uncommitted_switch() {
         _ => panic!("expected udp data after second upgrade commit"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -974,6 +969,5 @@ async fn session_ignores_delayed_probe_for_superseded_upgrade_id() {
         _ => panic!("expected udp data after second upgrade commit"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }

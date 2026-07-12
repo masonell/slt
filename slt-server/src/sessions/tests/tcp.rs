@@ -16,7 +16,7 @@ use super::common::{
 
 #[tokio::test]
 async fn session_responds_to_tcp_ping() {
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session().await;
     let nonce = 0xA1B2_C3D4_E5F6_0708;
     let ping_payload = PingPayload { nonce };
@@ -48,13 +48,12 @@ async fn session_responds_to_tcp_ping() {
         _ => panic!("expected pong"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn session_forwards_tcp_data_to_tun() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, _limits, assigned, _registry) =
+    let (join, mut client, _tx, mut tun_rx, _udp_rx, _limits, assigned, _registry) =
         spawn_session().await;
     let packet = ipv4_packet(assigned.addr(), Ipv4Addr::new(192, 0, 2, 1), 8);
     let mut frame = Vec::new();
@@ -67,13 +66,12 @@ async fn session_forwards_tcp_data_to_tun() {
         .unwrap();
     assert_eq!(received, packet);
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn session_drops_spoofed_tcp_data() {
-    let (join, mut client, tx, mut tun_rx, _udp_rx, _limits, _assigned, _registry) =
+    let (join, mut client, _tx, mut tun_rx, _udp_rx, _limits, _assigned, _registry) =
         spawn_session().await;
     let packet = ipv4_packet(Ipv4Addr::new(10, 0, 0, 99), Ipv4Addr::new(192, 0, 2, 1), 8);
     let mut frame = Vec::new();
@@ -86,8 +84,7 @@ async fn session_drops_spoofed_tcp_data() {
         Err(_) => {}
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -260,8 +257,7 @@ async fn session_drops_oversized_tun_packet() {
         panic!("oversized packet should not be forwarded to client")
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -315,8 +311,7 @@ async fn session_accepts_tcp_data_when_udp_is_preferred() {
         .unwrap();
     assert_eq!(received, tcp_data);
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -422,6 +417,5 @@ async fn tcp_fallback_precedes_data_and_changes_server_egress() {
         "server kept using udp after acknowledged tcp fallback"
     );
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }

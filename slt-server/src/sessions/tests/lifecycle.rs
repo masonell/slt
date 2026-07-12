@@ -161,7 +161,7 @@ async fn session_sends_tcp_ping_on_schedule() {
     timeouts.ping_max = Duration::from_millis(50);
     timeouts.idle_timeout = Duration::from_secs(5);
 
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session_with_timeouts(timeouts).await;
 
     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -176,8 +176,7 @@ async fn session_sends_tcp_ping_on_schedule() {
     let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
     assert!(matches!(message, Message::Ping { .. }));
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 async fn read_until_close_code(
@@ -319,8 +318,7 @@ async fn session_sends_udp_ping_on_schedule() {
     assert_eq!(consumed, opened.payload.len());
     assert!(matches!(message, Message::Ping { .. }));
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -380,8 +378,7 @@ async fn udp_authenticated_liveness_timeout_falls_back_to_tcp() {
     ));
     assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    assert!(join.await.unwrap().is_ok());
+    assert!(join.shutdown().await.unwrap().is_ok());
 }
 
 #[tokio::test]
@@ -524,13 +521,12 @@ async fn unauthenticated_udp_noise_does_not_delay_liveness_fallback() {
         "retired UDP transport emitted a packet"
     );
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    assert!(join.await.unwrap().is_ok());
+    assert!(join.shutdown().await.unwrap().is_ok());
 }
 
 #[tokio::test]
 async fn session_cleans_registry_on_shutdown() {
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, assigned, registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, assigned, registry) =
         spawn_session().await;
 
     let dcid = Cid::from([0x51; MAX_DCID_LEN]);
@@ -554,8 +550,7 @@ async fn session_cleans_registry_on_shutdown() {
     assert!(registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
     assert!(registry.lookup_ip(assigned.addr()).is_some());
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 
     assert!(registry.lookup_ip(assigned.addr()).is_none());
     assert!(!registry.has_cid(register.client_to_server_cid.prefix().unwrap()));
@@ -1001,8 +996,7 @@ async fn session_continues_on_udp_after_tcp_close() {
     assert_eq!(received2, uplink_packet2);
 
     // Clean shutdown
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1153,7 +1147,7 @@ async fn session_ping_uses_jitter_when_range_nonzero() {
     timeouts.ping_max = Duration::from_millis(100); // 50ms jitter range
     timeouts.idle_timeout = Duration::from_secs(5);
 
-    let (join, mut client, tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
+    let (join, mut client, _tx, _tun_rx, _udp_rx, limits, _assigned, _registry) =
         spawn_session_with_timeouts(timeouts).await;
 
     // Wait for at least the minimum ping interval
@@ -1170,6 +1164,5 @@ async fn session_ping_uses_jitter_when_range_nonzero() {
     let (message, _) = decode_message(&buf, limits).unwrap().unwrap();
     assert!(matches!(message, Message::Ping { .. }));
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }

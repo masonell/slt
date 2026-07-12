@@ -29,6 +29,13 @@ enum SessionRunOutcome {
     ShutdownSignalUnavailable,
 }
 
+enum SessionWork {
+    TcpRead(io::Result<usize>),
+    Event(SessionEvent),
+    UdpFlush(io::Result<()>),
+    Timer,
+}
+
 impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpSessionIo>
     ClientSessionBase<T, S, I>
 {
@@ -99,6 +106,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
 
     async fn run_inner(&mut self) -> Result<(), SessionError> {
         let mut next_ping_at = self.schedule_next_ping();
+        let mut flush_before_next_event = false;
 
         loop {
             if self.tcp_alive
@@ -109,6 +117,7 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
             }
 
             let should_flush_udp = self.has_pending_udp_flush();
+            flush_before_next_event &= should_flush_udp;
             let (timer_at, timer) = self.next_session_timer(next_ping_at);
             let timer_due = time::Instant::from_std(timer_at) <= time::Instant::now();
 
@@ -121,59 +130,24 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 continue;
             }
 
-            // A future deadline stays below packet sources so the hot path does
-            // not register and drop a Tokio timer on every packet. The due check
-            // above bounds timer lateness to one packet. Keep UDP-QSP partial-
-            // batch flush last; full GSO slabs flush inline.
-            tokio::select! {
-                biased;
+            let work = self
+                .wait_for_work(!flush_before_next_event, should_flush_udp, timer_at)
+                .await;
+            let control = match work {
+                SessionWork::TcpRead(result) => self.handle_tcp_read_result(result).await?,
+                SessionWork::Event(event) => {
+                    let extends_udp_batch = self.event_extends_udp_batch(&event);
+                    let control = self.handle_event(event).await?;
 
-                res = self.tcp.read_more(), if self.tcp_alive => {
-                    let n = res.map_err(|source| SessionError::Connection { source })?;
-                    if n == 0 {
-                        if self.active_transport == ActiveTransport::UdpQsp {
-                            info!(
-                                session_id = self.session_id,
-                                client_id = %self.client_id,
-                                "tcp connection closed; continuing on udp"
-                            );
-                            self.tcp_alive = false;
-                            continue;
-                        }
-                        self.metrics.inc_disconnect_close();
-                        info!(
-                            session_id = self.session_id,
-                            client_id = %self.client_id,
-                            reason = "tcp_close",
-                            "session disconnect"
-                        );
-                        return Ok(());
-                    }
-                    if self.handle_tcp_read().await? == SessionControl::Close {
-                        return Ok(());
-                    }
+                    // One non-batching event may retarget the buffered batch;
+                    // gate further events until that batch drains.
+                    flush_before_next_event =
+                        should_flush_udp && !extends_udp_batch && self.has_pending_udp_flush();
+                    control
                 }
-                Some(event) = self.rx.recv() => {
-                    if self.handle_event(event).await? == SessionControl::Close {
-                        return Ok(());
-                    }
-                }
-                () = time::sleep_until(timer_at.into()) => {
-                    if self
-                        .handle_session_timer(timer, &mut next_ping_at)
-                        .await?
-                        == SessionControl::Close
-                    {
-                        return Ok(());
-                    }
-                }
-                res = async {
-                    if let Some(session) = self.udp_session.as_mut() {
-                        session.flush().await?;
-                    }
-                    Ok::<(), std::io::Error>(())
-                }, if should_flush_udp => {
-                    if let Err(source) = res {
+                SessionWork::UdpFlush(result) => {
+                    flush_before_next_event = false;
+                    if let Err(source) = result {
                         self.recover_from_udp_flush_error(
                             None,
                             UdpFailureRecovery::SignalTcpFallback,
@@ -181,9 +155,93 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                         )
                         .await?;
                     }
+                    SessionControl::Continue
                 }
+                SessionWork::Timer => self.handle_session_timer(timer, &mut next_ping_at).await?,
+            };
+            if control == SessionControl::Close {
+                return Ok(());
             }
         }
+    }
+
+    async fn wait_for_work(
+        &mut self,
+        can_receive_event: bool,
+        should_flush_udp: bool,
+        timer_at: Instant,
+    ) -> SessionWork {
+        let session_work = async {
+            // Ready TUN packets extend the batch, and one queued UDP claim may
+            // authenticate a migrated peer before the partial flush.
+            tokio::select! {
+                biased;
+
+                Some(event) = self.rx.recv(), if can_receive_event => {
+                    SessionWork::Event(event)
+                }
+                result = async {
+                    if let Some(session) = self.udp_session.as_mut() {
+                        session.flush().await?;
+                    }
+                    Ok::<(), io::Error>(())
+                }, if should_flush_udp => SessionWork::UdpFlush(result),
+                else => std::future::pending().await,
+            }
+        };
+        let io_work = async {
+            tokio::select! {
+                result = self.tcp.read_more(), if self.tcp_alive => {
+                    SessionWork::TcpRead(result)
+                }
+                work = session_work => work,
+            }
+        };
+
+        // Fair I/O selection is nested ahead of the future timer. Ready packet
+        // work completes without registering a timer, while idle I/O polls it
+        // once so the session wakes at its deadline.
+        tokio::select! {
+            biased;
+
+            work = io_work => work,
+            () = time::sleep_until(timer_at.into()) => SessionWork::Timer,
+        }
+    }
+
+    async fn handle_tcp_read_result(
+        &mut self,
+        result: io::Result<usize>,
+    ) -> Result<SessionControl, SessionError> {
+        let n = result.map_err(|source| SessionError::Connection { source })?;
+        if n != 0 {
+            return self.handle_tcp_read().await;
+        }
+        if self.active_transport == ActiveTransport::UdpQsp {
+            info!(
+                session_id = self.session_id,
+                client_id = %self.client_id,
+                "tcp connection closed; continuing on udp"
+            );
+            self.tcp_alive = false;
+            return Ok(SessionControl::Continue);
+        }
+        self.metrics.inc_disconnect_close();
+        info!(
+            session_id = self.session_id,
+            client_id = %self.client_id,
+            reason = "tcp_close",
+            "session disconnect"
+        );
+        Ok(SessionControl::Close)
+    }
+
+    fn event_extends_udp_batch(&self, event: &SessionEvent) -> bool {
+        self.active_transport == ActiveTransport::UdpQsp
+            && matches!(
+                event,
+                SessionEvent::TunPacket(packet) if packet.len() <= self.limits.max_data_len
+            )
     }
 
     fn next_session_timer(&self, next_ping_at: Instant) -> (Instant, SessionTimer) {
@@ -254,10 +312,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
         match event {
             SessionEvent::TunPacket(packet) => self.handle_tun_packet(packet).await,
             SessionEvent::Udp(claim) => self.handle_udp_claim(claim).await,
-            SessionEvent::Shutdown => {
-                self.handle_local_shutdown_request();
-                Ok(SessionControl::Close)
-            }
         }
     }
 
@@ -336,16 +390,6 @@ impl<T: TunDeviceIo, S: AsyncRead + AsyncWrite + Unpin + Send + 'static, I: UdpS
                 );
             }
         }
-    }
-
-    fn handle_local_shutdown_request(&self) {
-        self.metrics.inc_disconnect_shutdown();
-        info!(
-            session_id = self.session_id,
-            client_id = %self.client_id,
-            reason = "local_shutdown_request",
-            "session disconnect"
-        );
     }
 
     async fn handle_ping_tick(&mut self) -> Result<(), SessionError> {

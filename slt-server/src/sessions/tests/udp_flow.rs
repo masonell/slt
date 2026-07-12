@@ -109,8 +109,7 @@ async fn session_switches_to_udp_after_switch_ack() {
         _ => panic!("expected udp data after switch commit"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -208,8 +207,7 @@ async fn session_switches_to_udp_with_chacha20_poly1305() {
         _ => panic!("expected udp data over chacha20 transport"),
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -315,8 +313,7 @@ async fn session_handles_udp_pong() {
         .unwrap();
     assert_eq!(received, uplink_packet2);
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -594,8 +591,7 @@ async fn peer_changes_only_after_authenticated_udp_packet() {
         assert_eq!(PongPayload::decode(payload).unwrap().nonce, ping.nonce);
     }
 
-    let _ = tx.send(SessionEvent::Shutdown).await;
-    let _ = join.await.unwrap();
+    let _ = join.shutdown().await.unwrap();
 }
 
 #[tokio::test]
