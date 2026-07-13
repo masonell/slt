@@ -183,6 +183,7 @@ class SltVpnService : VpnService() {
         val builder = Builder()
             .setSession(profile.metadata.name)
             .setMtu(summary.tunMtu)
+            .setMetered(false)
             .addAddress(summary.assignedIpv4, CLIENT_ADDRESS_PREFIX)
         configureInitialUnderlyingNetwork(preEstablishUnderlyingNetwork) { networks ->
             builder.setUnderlyingNetworks(networks.toTypedArray())
